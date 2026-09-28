@@ -70,7 +70,7 @@ meaning.
 | 15 | `fail_streak` | uint32 | both | consecutive uplinks without confirmation (LoRaWAN: LinkCheck failures, P2P: unacked cycles); drives WARNING / RECONNECT |
 | 16 | `join_attempts` | uint32 | both | attempts in the current (re)join episode (backoff step) |
 | 17 | `duty_blocked_s` | uint32 | both | how long sends have been held by the duty cycle; absent = not held |
-| 18 | `airtime_hour_ms` | uint32 | P2P | airtime used in the sliding hour (duty ledger; EU868 budget 36 000 ms) |
+| 18 | `airtime_hour_ms` | uint32 | both | airtime used in the sliding hour (common duty ledger since #460 T2d; budget per EU868 sub-band, 36 000 ms at 1 %) |
 | 19 | `uptime_s` | uint32 | both | time base of the counters below (same as `Info.uptime_s`) |
 | 20 | `tx_count` | uint32 | both | since boot: uplink transmissions, retransmissions included, joins excluded |
 | 21 | `rx_count` | uint32 | both | … downlinks received (Acks, commands, MAC answers) |
@@ -111,8 +111,10 @@ report events through `app_radio_count(APP_RADIO_CNT_*)`:
   - `app_radio` owns the data (push model). Each backend reports the facts as they
     happen, through `app_radio_note_downlink()`, `app_radio_set_params()`,
     `app_radio_set_uplink_rssi()` / `_margin()`, `app_radio_set_session()`,
-    `app_radio_set_fail_streak()` / `_join_attempts()`, `app_radio_set_duty_held()`,
-    `app_radio_set_airtime()` and `app_radio_count()`.
+    `app_radio_set_fail_streak()` / `_join_attempts()`, `app_radio_set_duty_held()`
+    and `app_radio_count()`. The airtime comes from app_radio's own duty ledger
+    (`app_radio_duty_charge()`, #460 T2d; before that, `app_radio_set_airtime()`
+    from P2P only).
   - Readers take a spinlock-consistent snapshot with `app_radio_get_status()`, which
     adds the state, the ages, the downlink's wall-clock time and the counters. Nobody
     reads a backend directly.

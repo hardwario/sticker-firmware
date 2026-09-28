@@ -76,7 +76,7 @@ struct p2p_hdr {
  *
  * The window is a deadline, not a hint: the retry wait is capped against it
  * (p2p_join_retry_delay_ms), because the duty-cycle wait it competes with can
- * be as long as P2P_DUTY_WINDOW_MS. */
+ * be as long as APP_RADIO_DUTY_WINDOW_MS. */
 #define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
@@ -85,21 +85,6 @@ struct p2p_hdr {
  * likely answer, so it is worth a second shot at a lost frame before paying a
  * whole pass, but a third would just delay finding a Hub that really has moved. */
 #define P2P_JOIN_SF_ATTEMPTS 2
-
-/* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
-#define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
-#define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
-
-/* Ring capacity: one entry per transmission still inside the window. When
- * the ring is full the two OLDEST entries are folded into one (summed air,
- * the later end time) instead of making the frame wait for a slot, so the
- * air-time budget, not the entry count, is the only limit (F-P2P-1). The
- * folded entry leaves the window a little later than its older half would
- * have, which can only over-count air, never under-count it: every sliding
- * hour still stays within 1 %. Before the fold, 48 entries capped a node at
- * 48 frames/hour whatever their air-time -- a 60 s report cadence went silent
- * ~13 min of every hour. doc/p2p.md §6. */
-#define P2P_DUTY_LEDGER_ENTRIES 48
 
 /* Ack (0xFA) body layout, doc/p2p.md §6:
  *
@@ -153,28 +138,6 @@ struct p2p_ack_info {
 	 * node then falls back to the old worst case (doc/p2p.md §6). */
 	bool pending_len_present;
 	uint8_t pending_frame_len;
-};
-
-/* Exact sliding-hour duty ledger (B2, decision D1) -- one entry per
- * transmission that is still inside the window. Replaces the earlier token
- * bucket, which refilled at 1% of wall time and capped at the full hourly
- * allowance: that held the long-run average at 1% but let a node idle for an
- * hour and then burst 36 s of air in one go, so the worst-case SLIDING hour
- * reached ~2%. Summing the real window costs 384 B of RAM and makes the
- * bound exact instead of amortised.
- *
- * Defined here so tests/p2p_logic can declare one; the ledger functions are
- * internal to app_radio_p2p.c (given external linkage only under CONFIG_ZTEST --
- * see the block at the end of this header). */
-struct p2p_duty_entry {
-	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
-	uint16_t air_ms; /* its time-on-air; a 255 B SF12 frame is ~9.2 s, so u16 fits */
-};
-
-struct p2p_duty {
-	struct p2p_duty_entry entries[P2P_DUTY_LEDGER_ENTRIES];
-	uint8_t head;  /* index of the oldest entry */
-	uint8_t count; /* entries in use */
 };
 
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
@@ -251,12 +214,12 @@ enum p2p_link_state {
  * Returns 0 or a negative errno. */
 int app_radio_p2p_init(void);
 
-/* Boot-time bring-up. Refuses outright, and logs an error, if `lrw_appkey`
+/* Boot-time bring-up. Refuses outright, and logs an error, if `radio_appkey`
  * is all-zero: it is the root key for the whole transport, so an all-zero one
  * is a publicly known key and joining under it is forgeable by anyone in
  * range (doc/p2p.md §4). This is checked before the paired shortcut below, so
  * a device re-enabled into `radio-mode p2p` after a factory_reset -- which
- * wipes lrw_appkey but leaves the persisted pairing intact -- refuses rather
+ * wipes radio_appkey but leaves the persisted pairing intact -- refuses rather
  * than resuming a session it can never renew (doc/p2p.md §7).
  *
  * Otherwise: if already paired (persisted NVS state from a prior
@@ -287,26 +250,11 @@ bool app_radio_p2p_get_radio_params(uint8_t *sf, int8_t *tx_power_dbm);
  * this. */
 uint8_t app_radio_p2p_get_max_payload(void);
 
-/* Compose + send a telemetry snapshot (frame type TELEMETRY) via
- * app_compose_budget(). Triggered by app_report after it samples + captures
- * history, same as app_radio_lrw_send_telemetry(). */
-void app_radio_p2p_send_telemetry(void);
-
-/* Send a staged command response (frame type RESPONSE). */
-int app_radio_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len);
-
-/* Send an alarm-detail batch (frame type ALARM). */
-int app_radio_p2p_send_alarm(const uint8_t *buf, size_t len);
-
-/* Start a device-driven history replay over P2P (req_history, tag 11): stream
- * every stored record in [from_unix, to_unix] back as N HistoryFrame uplinks
- * (frame type RESPONSE / 0x55) sharing the command `seq`, on the P2P carrier.
- * The P2P counterpart of app_radio_lrw_start_history_replay(); same app_history /
- * app_cmd_build_history_frame engine, only the transmit path differs
- * (send_confirmed instead of lorawan_send). Returns true if a replay was
- * started (records matched), false on an empty window or P2P not ready (the
- * caller then answers HISTORY_UNAVAILABLE). */
-bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+/* The P2P TX backend of the common scheduler (app_radio, doc/plan/460 F4):
+ * sends one frame -- answers as 0x55 RESPONSE, alarms as 0x57 ALARM, both
+ * confirmed; telemetry as 0x52, confirmed on the N-th report -- under the duty
+ * ledger and the one-confirmed-uplink-in-flight rule (F-P1-1). */
+extern const struct app_radio_backend app_radio_p2p_backend;
 
 /* Register the link-ready kick fired by app_radio_p2p_start() so app_report can
  * begin the cadence. NULL clears it. */
@@ -335,14 +283,14 @@ struct app_radio_p2p_info {
 	int8_t tx_power_dbm;
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
-	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	uint32_t ack_retry_pending; /* 1: a confirmed frame awaits its Ack retry (app_radio) */
 	/* B1: RSSI/SNR the central reported in the last Ack (its measurement of
 	 * this device's uplink). last_ack_valid is false until the first Ack of
 	 * the current session. */
 	int8_t last_ack_rssi;
 	int8_t last_ack_snr;
 	bool last_ack_valid;
-	/* False means lrw_appkey is all-zero, i.e. the device has no root key
+	/* False means radio_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
 	 * indistinguishable from a plain UNPAIRED one on the bench. */
@@ -353,7 +301,7 @@ struct app_radio_p2p_info {
 void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
 
 /* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
- * to the same all-zero `lrw_appkey` refusal as app_radio_p2p_start() -- the shell
+ * to the same all-zero `radio_appkey` refusal as app_radio_p2p_start() -- the shell
  * is not a way around it --
  * unlike app_radio_p2p_start(), an existing pairing is not treated as sufficient.
  * A successful JoinAccept overwrites the old pairing via pairing_persist(),
@@ -366,22 +314,6 @@ void app_radio_p2p_rejoin(void);
  * of a reset-tier reboot; the dev_nonce and frame counter are kept (see
  * app_radio_p2p_unjoin()). */
 void app_radio_p2p_forget_pairing(void);
-
-/* app_radio_clock_sync() on P2P: once the next uplink's Ack has been processed
- * (its time tail sets the RTC), answer with an Info carrying `seq` -- like
- * LoRaWAN, whose DeviceTimeReq waits for the next uplink too; no uplink is
- * forced. A newer request before that Ack takes over the seq. */
-void app_radio_p2p_clock_sync(uint32_t seq);
-
-/* Hooks of the common boot/join announce (app_radio_announce_run(),
- * doc/plan/439 T3): run it on m_work_q, the response budget, queue an announce
- * frame (a 0x55 RESPONSE with seq 0), start the page stream. */
-void app_radio_p2p_announce_kick(void);
-/* Nothing is queued or parked for the radio (answers, alarms). */
-bool app_radio_p2p_tx_idle(void);
-size_t app_radio_p2p_response_cap(size_t buf_size);
-int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len);
-void app_radio_p2p_page_stream_kick(void);
 
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
@@ -439,50 +371,30 @@ void p2p_hdr_get(const uint8_t *frame, struct p2p_hdr *h);
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
 		      uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
 		      uint32_t counter, uint8_t *frame);
-void p2p_duty_init(struct p2p_duty *d);
-void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
-int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
-uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
 int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
-int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
-				uint32_t rand32);
-uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
+void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
-size_t p2p_history_frame_cap(void);
 int p2p_join_adopt_sf(uint8_t joined_sf);
-void p2p_test_replay_setup(void);
 void p2p_test_join_setup(int cfg_sf);
 void p2p_test_allow_join_sweep(void);
 void p2p_test_link_reset(void);
-void p2p_test_link_check_failed(void);
-void p2p_test_link_ok(void);
 void p2p_test_join_stop(void);
 void p2p_test_set_session_tx_power(bool assigned, int8_t dbm);
 void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
-void p2p_test_telemetry_send(void);
-bool p2p_test_frame_pending(void);
-uint32_t p2p_test_tx_waiting(void);
 void p2p_test_tx_reset(void);
-void p2p_test_put_ack_retry(uint32_t counter);
-void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter);
-uint32_t p2p_test_ack_retry_count(void);
 void p2p_test_drop_old_session(void);
-void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
-		       bool disabled);
+void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);
 void p2p_test_join_restart(void);
 int64_t p2p_test_join_pending_ms(void);
 void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
 		       enum p2p_link_state *state);
 void p2p_test_set_join_started_at(int64_t at_ms);
-struct p2p_duty *p2p_test_get_duty(void);
-void p2p_test_set_replay_active(bool active);
-void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t *idx);
 void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);

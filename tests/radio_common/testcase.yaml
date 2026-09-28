@@ -1,0 +1,5 @@
+common:
+  tags: sticker radio
+  platform_allow: native_sim
+tests:
+  sticker.radio_common: {}

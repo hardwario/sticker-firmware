@@ -46,6 +46,7 @@ static const struct app_config m_app_config_defaults = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 7,
@@ -81,6 +82,7 @@ static struct app_config m_app_config = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 7,
@@ -156,10 +158,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
 		     sizeof(m_app_config.lrw_activation));
-	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	SETTINGS_SET("lrw-deveui", m_app_config.radio_deveui, sizeof(m_app_config.radio_deveui));
 	SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	SETTINGS_SET("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	SETTINGS_SET("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	SETTINGS_SET("lrw-appkey", m_app_config.radio_appkey, sizeof(m_app_config.radio_appkey));
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
@@ -203,6 +205,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	SETTINGS_SET("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		     sizeof(m_app_config.alarm_buzzer_mode));
+	SETTINGS_SET("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		     sizeof(m_app_config.radio_alarm_ack));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -261,11 +265,13 @@ static int h_commit(void)
 		m_app_config.lrw_network = stored.lrw_network;
 		m_app_config.lrw_adr = stored.lrw_adr;
 		m_app_config.lrw_activation = stored.lrw_activation;
-		memcpy(m_app_config.lrw_deveui, stored.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+		memcpy(m_app_config.radio_deveui, stored.radio_deveui,
+		       sizeof(m_app_config.radio_deveui));
 		memcpy(m_app_config.lrw_joineui, stored.lrw_joineui,
 		       sizeof(m_app_config.lrw_joineui));
 		memcpy(m_app_config.lrw_nwkkey, stored.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-		memcpy(m_app_config.lrw_appkey, stored.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+		memcpy(m_app_config.radio_appkey, stored.radio_appkey,
+		       sizeof(m_app_config.radio_appkey));
 		memcpy(m_app_config.lrw_devaddr, stored.lrw_devaddr,
 		       sizeof(m_app_config.lrw_devaddr));
 		memcpy(m_app_config.lrw_nwkskey, stored.lrw_nwkskey,
@@ -405,10 +411,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
 		    sizeof(m_app_config.lrw_activation));
-	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	EXPORT_FUNC("lrw-deveui", m_app_config.radio_deveui, sizeof(m_app_config.radio_deveui));
 	EXPORT_FUNC("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	EXPORT_FUNC("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	EXPORT_FUNC("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	EXPORT_FUNC("lrw-appkey", m_app_config.radio_appkey, sizeof(m_app_config.radio_appkey));
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
@@ -452,6 +458,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	EXPORT_FUNC("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		    sizeof(m_app_config.alarm_buzzer_mode));
+	EXPORT_FUNC("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		    sizeof(m_app_config.radio_alarm_ack));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -782,9 +790,10 @@ static void print_lrw_activation(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-activation %s", str);
 }
 
-static void print_lrw_deveui(const struct shell *shell)
+static void print_radio_deveui(const struct shell *shell)
 {
-	print_bytes(shell, "lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	print_bytes(shell, "radio-deveui", m_app_config.radio_deveui,
+		    sizeof(m_app_config.radio_deveui));
 }
 
 static void print_lrw_joineui(const struct shell *shell)
@@ -798,9 +807,10 @@ static void print_lrw_nwkkey(const struct shell *shell)
 	print_bytes(shell, "lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
 }
 
-static void print_lrw_appkey(const struct shell *shell)
+static void print_radio_appkey(const struct shell *shell)
 {
-	print_bytes(shell, "lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	print_bytes(shell, "radio-appkey", m_app_config.radio_appkey,
+		    sizeof(m_app_config.radio_appkey));
 }
 
 static void print_lrw_devaddr(const struct shell *shell)
@@ -966,6 +976,12 @@ static void print_alarm_buzzer_mode(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " alarm-buzzer-mode %s", str);
 }
 
+static void print_radio_alarm_ack(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " radio-alarm-ack %s",
+		    m_app_config.radio_alarm_ack ? "true" : "false");
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -1074,10 +1090,10 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
 	print_lrw_activation(shell);
-	print_lrw_deveui(shell);
+	print_radio_deveui(shell);
 	print_lrw_joineui(shell);
 	print_lrw_nwkkey(shell);
-	print_lrw_appkey(shell);
+	print_radio_appkey(shell);
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
@@ -1095,6 +1111,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_alarm_buzzer_mode(shell);
+	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1451,10 +1468,10 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 	return 0;
 }
 
-static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_deveui(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_deveui,
-			 sizeof(m_app_config.lrw_deveui), false, print_lrw_deveui);
+	return cmd_bytes(shell, argc, argv, m_app_config.radio_deveui,
+			 sizeof(m_app_config.radio_deveui), false, print_radio_deveui);
 }
 
 static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
@@ -1469,10 +1486,10 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 			 sizeof(m_app_config.lrw_nwkkey), false, print_lrw_nwkkey);
 }
 
-static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_appkey(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appkey,
-			 sizeof(m_app_config.lrw_appkey), false, print_lrw_appkey);
+	return cmd_bytes(shell, argc, argv, m_app_config.radio_appkey,
+			 sizeof(m_app_config.radio_appkey), false, print_radio_appkey);
 }
 
 static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
@@ -1644,6 +1661,11 @@ static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **
 	}
 
 	return 0;
+}
+
+static int cmd_radio_alarm_ack(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.radio_alarm_ack, print_radio_alarm_ack);
 }
 
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
@@ -1842,9 +1864,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN activation (otaa/abp).",
 	              cmd_lrw_activation, 1, 1),
 
-	SHELL_CMD_ARG(lrw-deveui, NULL,
-	              "Get/Set LoRaWAN DevEUI (16 hex digits).",
-	              cmd_lrw_deveui, 1, 1),
+	SHELL_CMD_ARG(radio-deveui, NULL,
+	              "Get/Set DevEUI (16 hex digits), the node identity on LoRaWAN and P2P.",
+	              cmd_radio_deveui, 1, 1),
 
 	SHELL_CMD_ARG(lrw-joineui, NULL,
 	              "Get/Set LoRaWAN JoinEUI (16 hex digits).",
@@ -1854,9 +1876,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN NwkKey (32 hex digits).",
 	              cmd_lrw_nwkkey, 1, 1),
 
-	SHELL_CMD_ARG(lrw-appkey, NULL,
-	              "Get/Set LoRaWAN AppKey (32 hex digits).",
-	              cmd_lrw_appkey, 1, 1),
+	SHELL_CMD_ARG(radio-appkey, NULL,
+	              "Get/Set AppKey (32 hex digits): LoRaWAN OTAA root key, P2P join and session-key root.",
+	              cmd_radio_appkey, 1, 1),
 
 	SHELL_CMD_ARG(lrw-devaddr, NULL,
 	              "Get/Set LoRaWAN DevAddr (8 hex digits).",
@@ -1925,6 +1947,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
 	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
 	              cmd_alarm_buzzer_mode, 1, 1),
+
+	SHELL_CMD_ARG(radio-alarm-ack, NULL,
+	              "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times.",
+	              cmd_radio_alarm_ack, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
@@ -2020,10 +2046,12 @@ int app_config_device_reset(void)
 	m_app_config.lrw_network = preserved.lrw_network;
 	m_app_config.lrw_adr = preserved.lrw_adr;
 	m_app_config.lrw_activation = preserved.lrw_activation;
-	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.radio_deveui, preserved.radio_deveui,
+	       sizeof(m_app_config.radio_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	memcpy(m_app_config.lrw_nwkkey, preserved.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	memcpy(m_app_config.lrw_appkey, preserved.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	memcpy(m_app_config.radio_appkey, preserved.radio_appkey,
+	       sizeof(m_app_config.radio_appkey));
 	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
@@ -2070,7 +2098,8 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
 	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
-	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.radio_deveui, preserved.radio_deveui,
+	       sizeof(m_app_config.radio_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));

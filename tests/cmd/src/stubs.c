@@ -12,14 +12,19 @@
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_radio_lrw.h"
 #include "app_nfc.h"
+#include "app_radio.h"
 #include "app_sensor.h"
+#include "app_settings.h"
 
 #include "src/app_config.pb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/ztest.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -405,21 +410,87 @@ bool app_sensor_i2c_wedged(void)
 	return false;
 }
 
-/* ---- B8: the P2P history-replay entry point app_cmd_handle_req_history calls ---- */
+/* ---- The history-replay entry point app_cmd_handle_req_history calls ---- */
 
-int g_p2p_start_history_replay_calls;
-uint32_t g_p2p_start_history_replay_from;
-uint32_t g_p2p_start_history_replay_to;
-uint32_t g_p2p_start_history_replay_seq;
-/* What the stub reports: true = a stream was started and IS the answer, false =
- * nothing to replay, so the handler must emit HISTORY_UNAVAILABLE instead. */
-bool test_p2p_start_history_replay_ret;
+int g_history_replay_start_calls;
+uint32_t g_history_replay_start_from;
+uint32_t g_history_replay_start_to;
+uint32_t g_history_replay_start_seq;
+/* What the stub reports, as app_radio_history_replay_start(): 0 = a stream runs
+ * and IS the answer; -EMSGSIZE / -ENODATA / -EAGAIN = the handler answers an
+ * Error instead. */
+int test_history_replay_start_ret;
 
-bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
-	g_p2p_start_history_replay_calls++;
-	g_p2p_start_history_replay_from = from_unix;
-	g_p2p_start_history_replay_to = to_unix;
-	g_p2p_start_history_replay_seq = seq;
-	return test_p2p_start_history_replay_ret;
+	g_history_replay_start_calls++;
+	g_history_replay_start_from = from_unix;
+	g_history_replay_start_to = to_unix;
+	g_history_replay_start_seq = seq;
+	return test_history_replay_start_ret;
+}
+
+/* ---- #460 F3: what the one executor, app_cmd_run_action(), drives ---- */
+
+int test_run_settings_save_calls;
+int test_run_settings_save_ret;
+int test_run_device_reset_calls;
+int test_run_factory_reset_calls;
+int test_run_vendor_reset_calls;
+const uint8_t *test_run_vendor_reset_key;
+int test_run_counters_save_calls;
+int test_run_rejoin_calls;
+int test_run_reset_link_calls;
+
+int app_settings_save(bool reboot)
+{
+	ARG_UNUSED(reboot);
+	test_run_settings_save_calls++;
+	return test_run_settings_save_ret;
+}
+
+int app_settings_device_reset(void)
+{
+	test_run_device_reset_calls++;
+	return 0;
+}
+
+int app_settings_factory_reset(void)
+{
+	test_run_factory_reset_calls++;
+	return 0;
+}
+
+int app_settings_vendor_reset(const uint8_t *new_secret_key)
+{
+	test_run_vendor_reset_calls++;
+	test_run_vendor_reset_key = new_secret_key;
+	return 0;
+}
+
+int app_counters_save(bool force)
+{
+	ARG_UNUSED(force);
+	test_run_counters_save_calls++;
+	return 0;
+}
+
+void app_radio_rejoin(void)
+{
+	test_run_rejoin_calls++;
+}
+
+void app_radio_reset_link(void)
+{
+	test_run_reset_link_calls++;
+}
+
+/* The executor tests run only the actions that return; a reboot fails them. */
+FUNC_NORETURN void sys_reboot(int type)
+{
+	printk("unexpected sys_reboot(%d)\n", type);
+	ztest_test_fail();
+	for (;;) {
+		k_sleep(K_FOREVER);
+	}
 }

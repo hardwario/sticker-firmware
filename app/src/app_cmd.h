@@ -167,6 +167,15 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
 
+/* True for an action that ends in a reboot (save, reset, reboot), so a caller
+ * can finish what the operator must see first (NFC: the LED result). */
+bool app_cmd_action_reboots(enum app_cmd_action action);
+
+/* Run a deferred action returned by app_cmd_handle(). The one executor for
+ * every transport (#460 F3): the caller decides only when, after its reply was
+ * delivered. APP_CMD_ACTION_NONE and APP_CMD_ACTION_PAGE_STREAM do nothing. */
+void app_cmd_run_action(enum app_cmd_action action);
+
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
  * same payload a GetInfo command returns) into `out`. Used to send an autonomous
  * GetInfo uplink on join. When the full Info does not fit `out_cap` it is paged

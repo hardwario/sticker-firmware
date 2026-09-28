@@ -37,6 +37,10 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P | **Changed (wire, flag day)** — decision #22: a `FCtrl` byte in the header (11 → 12 B); telemetry is **unconfirmed and sent once**, except the link check (first report after link-up and every `radio-link-check-interval`-th, every report while WARNING); alarms / answers / history stay confirmed; the RX1 opens after every uplink for a `0x56` of up to 64 B; LoRaWAN-like link supervision (WARNING after 3 failed checks, TX-power step, re-join after `radio-link-check-fail-rejoin`); `p2p-spreading-factor` default 7, join without an SF sweep (last resort after 24 h). See §28. |
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
+| LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
+| LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. The M-2 watchdog waits out a ledger hold instead of rejoining. See §31. |
+| LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
+| LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 
 ---
 
@@ -281,18 +285,18 @@ builds the same protobuf snapshots and `app_report` owns the same
 over LoRaWAN. Full design in `doc/p2p.md`; the acceptance matrix is
 `doc/p2p-e2e-test-plan.md`.
 
-**Setup** is three commands and a save. `lrw_appkey` is the root of the whole
+**Setup** is three commands and a save. `radio_appkey` is the root of the whole
 transport (there is no separate P2P key — the central already has it from
 ordinary OTAA provisioning), and an all-zero one makes the radio refuse to
-start rather than join under a publicly known key. `lrw_deveui` is the node's
+start rather than join under a publicly known key. `radio_deveui` is the node's
 on-air identity (#417): an all-zero DevEUI refuses a new join likewise:
 
 ```
-config lrw-appkey <32 hex>
+config radio-appkey <32 hex>
 config radio-mode p2p
 settings save                    # persists + reboots
 ats radio status                 # kind: P2P, app_key: set, state: JOINING|PAIRED
-config show                      # lrw-deveui: the DevEUI the central registers
+config show                      # radio-deveui: the DevEUI the central registers
 ```
 
 The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
@@ -1298,7 +1302,7 @@ page }`), answered with **`Response.radio_state` = field 14**, on every transpor
 | Last downlink (node-measured) | 5 `dl_rssi`, 6 `dl_snr`, 7 `dl_age_s`, 8 `dl_unix_time` |
 | Last uplink as heard by the peer | 9 `ul_rssi`, 10 `ul_snr` (P2P Ack), 11 `ul_margin`, 12 `ul_gw_count` (LoRaWAN LinkCheckAns) |
 | Session | 13 `dev_addr`, 14 `fcnt_up` |
-| Link health | 15 `fail_streak`, 16 `join_attempts`, 17 `duty_blocked_s`, 18 `airtime_hour_ms` (P2P) |
+| Link health | 15 `fail_streak`, 16 `join_attempts`, 17 `duty_blocked_s`, 18 `airtime_hour_ms` (P2P; both radios since §31) |
 | Counters since boot | 19 `uptime_s`, 20 `tx_count`, 21 `rx_count`, 22 `retry_count`, 23 `fail_count`, 24 `tx_err_count`, 25 `join_count` |
 
 - **Not part of Info, never announced.** Info `lrw_state` (12) and
@@ -1457,6 +1461,75 @@ First step of moving the policy both radios share into `app_radio`
 - No behaviour change. The release image, which has both radios, needs 4352 B
   less RAM (60 296 → 55 944 B, 92.0 → 85.4 %). The debug and P2P bench images
   have only one radio each, so they stay the same.
+
+## 30. Confirmed uplinks on both radios, `radio-alarm-ack` (#460 T2c)
+
+Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.6.
+
+- **New config `radio-alarm-ack`** (bool, default `false`; proto group `alarms`, field 21; writable over shell, NFC and radio).
+  - `false` sends alarms unconfirmed, once, on both radios. LoRaWAN did so already. On P2P this amends decision #22 (§28), which confirmed every alarm.
+  - `true` sends alarms confirmed on both radios. On LoRaWAN that is a confirmed uplink, retried as below.
+- **One retry ladder** in `app_radio`:
+  - A confirmed frame without its Ack goes again after a random 1..2^n s (n = the retry), on top of any duty-cycle wait, at most 3 times. Nothing else is sent meanwhile.
+  - Given up, the frame counts as sent and as a failed link check (link supervision, §28).
+  - P2P resends the same counter (a byte-identical frame). LoRaWAN takes a new FCnt, with LoRaMac NbTrans left at 1.
+  - A deferred command action (reboot, settings save) waits for a pending retry on either radio.
+- Answers and history frames stay confirmed on P2P and unconfirmed on LoRaWAN; telemetry is unchanged.
+- The P2P bench image needs 820 B less RAM, because the P2P retry queue is gone.
+
+## 31. One duty-cycle ledger for both radios (#460 T2d)
+
+Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
+
+- **One exact sliding-hour ledger** in `app_radio` for both radios, the one P2P had (doc/p2p.md §6). A frame goes out only if the air of the trailing hour plus its own fits the budget; otherwise it waits exactly until it fits and goes then. The log line stays `TX duty-cycle blocked for N ms`.
+- **LoRaWAN** now checks the ledger before `lorawan_send()`.
+  - Before, a frame went to LoRaMac, which refused it ("Duty-cycle restricted") until its fixed hourly credits came back, and the send was retried every 15 s meanwhile.
+  - LoRaWAN EU868 gets 1 % over all channels, stricter than the MAC's 1 % per band, so a frame the ledger admits the MAC admits too. Other regions get no limit, but the airtime is still counted.
+  - Frames and OTAA JoinRequests are charged their air at the DR they go at: 13 B of LoRaWAN overhead plus pending MAC answers plus the payload.
+- **P2P** takes the budget of the EU868 sub-band of `p2p-frequency`: 1 % at 865–868.6 and 869.7–870 MHz (the 868.1 MHz default), 10 % at 869.4–869.65 MHz, 0.1 % anywhere else. **Changed:** 863–865 MHz and 868.6–869.4 MHz got 1 % before.
+- Time on air follows LoRaMac's formula, rounded up; some P2P values are 1 ms longer than before (SF12 42 B: 2139 ms).
+- `RadioState.airtime_hour_ms` (§24) is filled on both radios.
+- RAM: the LoRaWAN-only debug image needs 384 B more (the ledger); the images with P2P are unchanged.
+- **M-2 waits out a ledger hold** (fix from the HIL). A held frame waits for its hold in one go, up to the hour. The M-2 watchdog (§22) now takes the known end of that hold as its duty-cycle excuse, and no longer only the last held attempt plus one interval + 3 min. Without the fix, the DR0 bench run rejoined 4 min into a 41 min hold and then every ~5 min: fcnt restarted and nothing was sent for 45 min. The 75 min cap is unchanged.
+- The Info / settings-info announce no longer re-encodes into a full answer queue on its 5 s retry.
+- Hardware (0413, EU868 DR0, ADR off, 60 s, 2026-09-28): the ledger held at 34.9 s of 36 s. The MAC never refused a frame, M-2 did not rejoin, and the held frame went at the end of the hold on the same session.
+
+## 32. Alarm bursts and the post-command reboot (#462)
+
+Found in the Nodes test E6 (2026-09-28): six rules toggled by one `SetParam{…, save=true}` with `alarm-limit 0` gave six one-event batches at once, and the `SetParam`'s own reboot followed 8 s later.
+
+- **Problem 1, a full alarm queue.** `alarm-limit 0` sends every edge as its own batch. The radio's alarm queue holds 4 frames, so a burst of more edges than that dropped the rest (`Alarm queue full; dropped`).
+- **Problem 2, the reboot.** A deferred command action (doc/p2p.md, §30) waited only for the command's answer and a pending Ack retry. Alarm frames still queued, and a batch still collecting in its `alarm-limit` window, died in the reboot.
+- **Fix, back-pressure.** A batch whose pages do not fit the free alarm slots waits, held like a batch waiting for the link or the boot announce. Later edges join it, so the burst leaves in fewer, fuller frames. Each alarm frame the radio takes from the queue releases it to try again. An empty queue takes a batch of any size, because no queued frame is left to release it.
+- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged: 8 s steps, at most 6 deferrals, then the action runs anyway.
+- Not in scope: an unconfirmed alarm frame lost on the air (`radio-alarm-ack false`, §30) is still not repeated.
+- Tests: `tests/alarm_eval` (burst hold, all pages must fit, empty queue, the early send of a collecting window, a batch held for the link), `tests/radio_common` (the action waits for queued alarm frames and for a collecting batch; taking an alarm frame releases a held batch).
+
+Hardware (0413, P2P, Hub c60, E6 replay 2026-09-28 06:15Z, `alarm-limit 0`). Both phases went through a `SetParam{…, save=true}` from the Hub:
+- **Setup** (6 rules that fire at once, applied live): 4 frames queued, then the batch was held for room. Released on dequeue, it went as one frame of 2 events. That is 6 events in 5 frames, and the post-command reboot was deferred once, until they were out.
+- **Revert** (6 rules → 1): 6 clear edges in 5 frames, deferred once.
+- The Hub decoded all 18 events. Nothing was dropped (the unpatched run had lost 3 of 6).
+
+## 33. `radio-deveui` / `radio-appkey` (the DevEUI and the AppKey are shared)
+
+The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequest, its session-key KDF (#417) and its uplink phase from them. They are renamed like the link-check parameters (§26), but without losing the stored value:
+
+| v1.4 / before | v1.5 | NVS key | proto (`lorawan` group) |
+|---|---|---|---|
+| `lrw-deveui` | `radio-deveui` | `config/lrw-deveui` (unchanged) | `deveui = 6` (unchanged) |
+| `lrw-appkey` | `radio-appkey` | `config/lrw-appkey` (unchanged) | `appkey = 9` (unchanged) |
+
+- **What changes:** the shell command (`config radio-deveui`, `config radio-appkey`), the `config show` label, the C field (`g_app_config.radio_deveui` / `radio_appkey`) and the log texts.
+- **What does not change:**
+  - The wire: SetParam, GetParam, GetConfig and the settings-info dump use field numbers.
+  - The generated nanopb names (`deveui`, `appkey`), so the Manager-App and Hub code are unaffected.
+  - The NVS key. A v1.4 unit keeps its identity across the upgrade, and a downgrade still reads it.
+- **Why the NVS key stays:** §26 renamed the key itself. A value under an unknown key is ignored at boot and the default applies, which was harmless there (5 / 5). For the DevEUI and the AppKey it would leave an all-zero identity: P2P refuses to start, and LoRaWAN cannot join. The only way to fix that is a physical touch (NFC or shell) on every unit.
+- **configen `stored_as`:** a new parameter attribute naming the key the value is stored under. `filter_nvs_key()` feeds `h_set` / `h_export`. configen refuses two parameters on one key and a `stored_as` that repeats the name. The proto name is kept by the existing `proto_name` override.
+- **Other `lrw-*` keys** (region, sub-band, network, ADR, activation, JoinEUI, NwkKey, DevAddr, the ABP session keys, datarate) are read only by the LoRaWAN backend and keep their names.
+- **Breaking for scripts that type the shell name.** Production and bench scripts using `config lrw-deveui` / `config lrw-appkey` must switch to the new names. No alias is kept.
+- Tests: `scripts/west_commands/tests/test_configen.py` checks that the old key is kept, the shell takes the new name and the proto names stay, plus the `stored_as` validation and clash checks.
+- HIL (2026-09-28, STICKER 2162190413, P2P, paired): flashed without an erase from the #462 image to this one and back. The DevEUI and the AppKey survived both ways, under `config radio-*` after the upgrade and `config lrw-*` after the downgrade. The session resumed with no JoinRequest, and the Info and telemetry frames were acked.
 
 ---
 

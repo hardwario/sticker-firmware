@@ -7,6 +7,7 @@
 #include "app_alarm_rules.h"
 #include "app_config.h"
 #include "app_log.h"
+#include "app_radio.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -396,8 +397,11 @@ int app_alarm_rules_reload_from_config(void)
 
 int app_alarm_rules_save(void)
 {
-	/* Rules live in the app_config slots; persist the config (no reboot). */
+	/* Rules live in the app_config slots; persist the config (no reboot),
+	 * clear of any radio exchange. */
+	app_radio_flash_hold();
 	int ret = settings_save();
+	app_radio_flash_release();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save", ret);
 	}

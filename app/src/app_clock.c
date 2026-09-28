@@ -52,6 +52,8 @@ static const struct device *const m_rtc = DEVICE_DT_GET(DT_NODELABEL(rtc));
  * against re-requesting DeviceTimeReq, which would pile up MAC commands and
  * push the uplink over the payload limit (Length error). */
 static bool m_time_synced;
+/* Uptime (ms) the last network time landed (app_clock_set_network_time()), 0 = never. */
+static int64_t m_network_time_at_ms;
 
 /* Periodic re-sync (#96): the LSE drifts ~±20 ppm (~1.7 s/day, ~10 min/year),
  * which shows up in history timestamps and GetInfo unix_time. Re-request the
@@ -182,7 +184,13 @@ int app_clock_set_network_time(uint32_t unix_s)
 	}
 
 	m_time_synced = true;
+	m_network_time_at_ms = MAX(k_uptime_get(), 1);
 	return 0;
+}
+
+int64_t app_clock_network_time_at_ms(void)
+{
+	return m_network_time_at_ms;
 }
 
 int app_clock_get_unix(uint32_t *unix_s)

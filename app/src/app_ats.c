@@ -791,7 +791,6 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "messages: %d", info.message_count);
 	shell_print(shell, "healthy->warning: %d/%d", info.consecutive_lc_fail,
 		    info.thresh_warning);
-	shell_print(shell, "warning->healthy: %d/%d", info.consecutive_lc_ok, info.thresh_healthy);
 	shell_print(shell, "warning->reconnect: %d/%d", info.warning_lc_fail_total,
 		    info.thresh_reconnect);
 
@@ -804,7 +803,7 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 #if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_radio_lrw_force_link_check();
+	app_radio_force_link_check();
 	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;
@@ -968,12 +967,11 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 
 /* Clears the persisted pairing and reboots -- the P2P analogue of
  * cmd_lrw_reset(), named to match P2P's own join/JoinRequest/JoinAccept
- * vocabulary rather than "pairing". Fixes a real gap (#118): `factory_reset`
- * does NOT clear P2P pairing (doc/p2p.md's claim otherwise is wrong, the
- * pairing subtree is never wired into app_settings_factory_reset()), so
- * this was previously only reachable via a whole-NVS `settings erase` or a
- * live GDB call. For a LIVE re-join that doesn't need a reboot, see the
- * top-level `join` command (app_radio_rejoin()) instead. */
+ * vocabulary rather than "pairing". The reset tiers that drop the network
+ * session clear it too (factory_reset, vendor_reset, lrw_reset: all go through
+ * app_radio_reset_link()); device_reset keeps it, as it keeps the LoRaWAN
+ * session. For a LIVE re-join that doesn't need a reboot, see the top-level
+ * `join` command (app_radio_rejoin()) instead. */
 static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1119,7 +1117,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "doc/p2p.md §14). Usage: listen on|off",
 		      cmd_p2p_listen, 2, 0),
 	SHELL_CMD_ARG(unjoin, NULL,
-		      "Clear P2P pairing state (reboots); NOT covered by factory_reset.",
+		      "Clear P2P pairing state (reboots); factory_reset clears it too.",
 		      cmd_radio_unjoin, 1, 0),
 	SHELL_CMD_ARG(rx1_delay, NULL,
 		      "Debug: override rx1_delay, not persisted. Usage: rx1_delay <seconds>",
@@ -1210,7 +1208,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
-		ret = app_radio_lrw_queue_response(85, out, out_len);
+		ret = app_radio_queue_response(85, out, out_len);
 		if (ret) {
 			shell_warn(sh, "queue_response failed: %d", ret);
 		}

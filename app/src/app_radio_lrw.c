@@ -10,12 +10,8 @@
 #include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_counters.h"
-#include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
-#include "app_settings.h"
-#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -27,7 +23,6 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/reboot.h>
 
 /* LoRaMac includes */
 #include <LoRaMac.h>
@@ -60,12 +55,12 @@ LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
  *   - m_lc_timeout_timer  : link-check response timeout only
  *   - m_rejoin_timer      : rejoin backoff only
  *
- * The periodic report cadence lives in app_report (#126): it samples, captures
- * history and triggers app_radio_lrw_send_telemetry(). app_radio_lrw stays transport — it
- * composes the snapshot (app_compose), splits it into DR-budget frames, sends
- * them with the LinkCheckReq piggyback + duty-cycle retry, drains the
- * response/alarm queues and streams a history replay. On a link-ready edge (join
- * success / replay finish) app_radio_lrw kicks app_report via the registered callback.
+ * The periodic report cadence lives in app_report (#126). The uplink queues,
+ * the scheduler and the report split live in app_radio (doc/plan/460 F4); this
+ * backend sends the one frame app_radio asks for (lrw_tx_send(): DR budget,
+ * LinkCheckReq piggyback, MAC flush). On a link-ready edge (join success)
+ * app_radio_lrw kicks the TX scheduler and app_report via the registered
+ * callback.
  */
 
 /* Link check configuration constants.
@@ -76,79 +71,43 @@ LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
  * rename from lrw_link_check_*; the LoRaWAN proto_id/proto_group are unchanged). */
 #define LINK_CHECK_TIMEOUT_SEC 10 /* LC answer timeout, from lorawan_send() return */
 
-/* State machine thresholds  */
-#define FAIL_THRESHOLD_WARNING 3 /* LC failures to enter WARNING */
-#define OK_THRESHOLD_HEALTHY   1 /* LC successes in WARNING to return to HEALTHY */
-
-/* Join/Rejoin backoff configuration - easily adjustable */
-#define REJOIN_BACKOFF_BASE_SEC   60   /* Base backoff time in seconds */
-#define REJOIN_BACKOFF_MAX_SEC    3600 /* Maximum backoff time (1 hour) */
-#define REJOIN_BACKOFF_MULTIPLIER 2    /* Exponential multiplier per attempt */
-
-/* All work runs on the radio work queue, app_radio_work_q() (doc/plan/439 T2a). */
-
-#if defined(CONFIG_WATCHDOG)
-/* Liveness heartbeat (#182): a self-rearming work item proves the radio work queue is still
- * draining. If the queue wedges (lorawan_send's MAC-confirm wait is bounded since
- * #181, but any other stuck work item) this work can no longer run, the channel goes stale
- * and app_wdog stops feeding the IWDG → SoC reset + rejoin. The timeout is far
- * above the worst-case legitimate single-send blocking (~7 s on TTN with a 5 s
- * RX1 delay), so only a true wedge trips it. */
-#define LRW_HEARTBEAT_PERIOD_SEC 5
-#define LRW_HEARTBEAT_TIMEOUT_MS 30000
-/* M-2: the #182 heartbeat only proves the radio work queue drains, not that telemetry
- * actually leaves; see app_radio_stale_check() for the stale-uplink decision. */
-
-/* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
- * (#181) before the liveness channel goes stale and resets the SoC. */
-#if defined(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS)
-BUILD_ASSERT(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS > 0 &&
-		     CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS < LRW_HEARTBEAT_TIMEOUT_MS,
-	     "LoRaWAN confirm timeout must be bounded and below the work-queue heartbeat");
-#endif
-
-static int m_wdog_channel = -1;
-static struct k_work_delayable m_heartbeat_work;
-#endif
-
-/* M-2 stale-uplink watchdog (F29 duty-cycle hold, #437).
- *
- * The watchdog forces a MAC-reset rejoin when joined but no telemetry uplink has
- * left for APP_RADIO_STALE_FACTOR x interval_report: sends perpetually skipped
- * (budget == 0 loop, retries exhausted) leave the radio work queue live and the IWDG fed
- * while the station is mute.
- *
- * A send refused by the EU868 duty cycle (lorawan_send() -> -ECONNREFUSED,
- * LORAMAC_STATUS_DUTYCYCLE_RESTRICTED) is not a mute station: the MAC is alive
- * and throttled, and the band credits come back when the 1 h observation window
- * rolls over. A rejoin there only re-initialises the MAC, which resets the band
- * credits kept in RAM -- the device would bypass the 1 % limit (F29, HIL
- * 2026-09-25: DR0 at 60 s, two forced rejoins in 91 min). So the watchdog holds
- * while refusals keep coming, bounded by APP_RADIO_STALE_DC_HOLD_MAX_MS so a MAC
- * stuck in "restricted" still ends in a rejoin. The decision itself is the policy
- * shared with P2P (app_radio_stale_check(), app_radio.h). */
-
-/* Uptime (ms) of the last successful telemetry uplink; 0 = none since the last
- * (re)join. Drives the M-2 stale-uplink watchdog in heartbeat_work_handler. */
-static int64_t m_last_uplink_ms;
-/* Duty-cycle refusal streak (F29): lets M-2 wait out a throttled MAC instead of
- * rejoining, which would reset the band credits. Only touched on the radio work queue. */
-static struct app_radio_stale_dc m_dc;
-static bool m_dc_hold_logged;
+/* All work runs on the radio work queue, app_radio_work_q() (doc/plan/439 T2a).
+ * The link supervision (WARNING, the rejoin budget), the rejoin backoff, the
+ * liveness heartbeat and the M-2 stale-uplink watchdog are app_radio's, one
+ * implementation for both radios (doc/plan/460 F2); this backend reports the
+ * link-check outcomes and carries out a recovery rung or a rejoin. */
 
 static void publish_mac(void);
+static uint32_t lrw_tx_airtime_ms(size_t len);
 
-/* Every uplink goes through here, so the duty-cycle streak sees each result. */
+/* Every uplink goes through here, so the M-2 duty-cycle streak sees each result.
+ * A send refused by the EU868 duty cycle (-ECONNREFUSED,
+ * LORAMAC_STATUS_DUTYCYCLE_RESTRICTED) is a throttled MAC, not a mute node: a
+ * rejoin would only reset the band credits kept in RAM (F29). */
 static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_message_type type)
 {
+	/* Its air at the DR and FOpts it goes out with, taken before the send. */
+	uint32_t air = lrw_tx_airtime_ms(len);
+
+	/* lorawan_send() returns once the RX windows closed: the whole exchange
+	 * is clear of flash writes (app_radio_air_begin()). */
+	app_radio_air_begin();
 	int ret = lorawan_send(port, data, len, type);
 
-	app_radio_count(ret == 0 ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
-	/* -ECONNREFUSED: refused by the duty cycle (F29). */
-	app_radio_stale_note(&m_dc, ret == 0, ret == -ECONNREFUSED, k_uptime_get());
-	if (ret == 0) {
-		m_dc_hold_logged = false;
-		app_radio_set_duty_held(false);
+	app_radio_air_end();
+
+	/* A confirmed uplink whose RX windows closed without the Ack went out all
+	 * the same (McpsConfirm RX2_TIMEOUT -> -ETIMEDOUT): app_radio retries it. */
+	bool sent = ret == 0 || (type == LORAWAN_MSG_CONFIRMED && ret == -ETIMEDOUT);
+
+	app_radio_count(sent ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
+	app_radio_note_send(sent, ret == -ECONNREFUSED);
+	if (sent || ret == -ETIMEDOUT) {
+		/* -ETIMEDOUT unconfirmed: the confirm never came, the frame may
+		 * have gone. Over-counting only errs towards the limit. */
+		app_radio_duty_charge(air);
+	}
+	if (sent) {
 		publish_mac();
 	} else if (ret == -ECONNREFUSED) {
 		app_radio_set_duty_held(true);
@@ -161,111 +120,26 @@ static struct k_timer m_lc_timeout_timer;
 static struct k_timer m_rejoin_timer;
 
 /* --- Works --- */
-static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
-static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
-static struct k_work m_telemetry_work; /* compose request; the #267 jitter is taken in app_radio */
-
-/* #340 M5: m_send_work is shared between the response/alarm drain and the
- * telemetry-compose trigger. k_work_submit() coalesces a re-submit while the
- * item is already pending, so a telemetry trigger arriving mid-drain can
- * collapse into that same run and never reach tx_telemetry_frame(). This flag
- * survives the coalescing: telemetry_work_handler() sets it whenever it asks
- * for a compose, and send_work_handler() checks/clears it after a drain
- * leaves both queues empty, so the request is honored on this same pass
- * instead of being silently dropped. Plain bool is safe without atomics: both
- * the setter and the clearer run exclusively on the single-threaded radio
- * work queue, never concurrently with each other. */
-static bool m_telemetry_pending;
 static struct k_work m_join_work;
-static struct k_work m_link_check_work;         /* LC timeout (from m_lc_timeout_timer) */
-static struct k_work m_downlink_success_work;   /* deferred from downlink_callback */
-static struct k_work m_clock_sync_info_work;    /* deferred ClockSync Info uplink (#219) */
-static struct k_work_delayable m_announce_work; /* deferred full Info / settings-info (#409) */
-static struct k_work m_lc_response_work;        /* deferred from link_check_callback */
-static struct k_work m_force_lc_work;           /* arm a forced LC on the next telemetry */
-static struct k_work m_dl_request_work;         /* drains m_dl_msgq (port-85 commands) */
-static struct k_work_delayable m_post_cmd_work;
-static struct k_work_delayable m_page_stream_work; /* paged answers (#409 3d/3e, #425) */
-#define PAGE_STREAM_PACE_SEC 2
+static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
+static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
+static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
+static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_join_complete_work;
-static struct k_work_delayable m_hist_work;
-static struct k_work_delayable
-	m_tx_retry_work; /* re-drains response/alarm after a -EAGAIN backoff */
 
-/* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
- * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
+/* Gap before the next frame of a multi-frame uplink (covers the RX1/RX2 windows)
+ * and backoff when a send is refused (duty cycle / MAC busy). */
 #define FRAME_GAP_SEC   3
 #define FRAME_RETRY_SEC 15
 
-/* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
- * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
-#define FRAME_MAX_RETRIES 8
-
-/* Sized for the largest LoRaWAN application payload (EU868 DR4-6 / US915 DR4 =
- * 242 B). app_compose() caps each frame at MIN(this, live DR budget) - 1, so a
- * too-small buffer (was 64 B) needlessly fragmented a snapshot into extra uplinks
- * on the higher data rates the radio could carry in one frame — more TX + RX
- * windows + duty cycle + battery (#267 power). */
-#define FRAME_BUF_SIZE 242
-static uint8_t m_frame_buf[FRAME_BUF_SIZE];
-static size_t m_frame_len;
-static bool m_frame_more;
-static bool m_frame_first;
-static bool m_frame_resend;
-static int m_frame_retries;  /* consecutive lorawan_send failures on the current frame (#219) */
-static bool m_frame_with_lc; /* #188: link-check decision, computed once at compose,
-			      * reused on resend (should_request_link_check() has a side
-			      * effect — must not re-run on a duty-cycle retry) */
-
-static void tx_telemetry_frame(bool first_frame);
-
-/* History replay (#52): one ReqHistory streams all matching records back as N
- * HistoryFrame uplinks on the command port, ASAP. */
-/* Staging buffer for the raw sample bytes of one HistoryFrame before it is
- * protobuf-encoded into m_hist_tx_buf. history_frame_cap() bounds the export to
- * MIN(DR budget, sizeof(m_hist_tx_buf)), so this must be at least as large as
- * m_hist_tx_buf — a fixed 48 B (the pre-#260 nanopb bound) under-sized it and let
- * app_history_export_page() overrun the stack on any DR whose budget exceeds 48 B. */
-#define HISTORY_SAMPLES_MAX APP_CMD_HISTORY_FRAME_BUF_SIZE
-#define HISTORY_MAX_RETRIES 8 /* duty-cycle/MAC-busy retries before aborting a frame (#89) */
-
-static bool m_hist_active;
-static uint32_t m_hist_from, m_hist_to, m_hist_seq;
-static uint32_t m_hist_count;
-/* #409 3f: upper bound for frame_index/frame_count when sizing a frame (their
- * varint width). UINT32_MAX = worst case; tightened to the first frame count at
- * replay start, which buys ~8 B of samples per frame at low DRs. */
-static uint32_t m_hist_frame_bound = UINT32_MAX;
-static uint32_t m_hist_idx;
-/* Absolute record ordinals (app_history_span()): next record to send and the end
- * of the replay (exclusive), snapshot at start. Captures keep appending during a
- * replay and the RAM ring may evict under it, but an absolute cursor names the
- * same record throughout, so nothing is repeated or skipped; records captured
- * after the start are left for the next replay. */
-static uint32_t m_hist_cursor;
-static uint32_t m_hist_end;
-static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
-static uint32_t m_hist_interval;
-static int m_hist_retries; /* consecutive lorawan_send failures on the current frame (#89) */
-/* Full encoded HistoryFrame Response + version byte; the old 64 B overflowed
- * once samples filled (frame ~70-90 B) so replay silently died on DR3+ (#89). */
-static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
-
-static void m_hist_work_handler(struct k_work *work);
-
 /* --- State machine --- */
 static atomic_t m_state = ATOMIC_INIT(APP_RADIO_STATE_IDLE);
-static int m_consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
-static int m_consecutive_lc_ok;     /* LC successes in a row (WARNING) */
-static int m_warning_lc_fail_total; /* Total LC failures in WARNING */
-static int m_force_lc_remaining;    /* Remaining forced LC messages */
-static bool m_link_check_pending;   /* Waiting for LC response */
-static int m_message_count;         /* Message counter for N-th LC */
-static int m_rejoin_attempts;       /* Rejoin attempt counter for backoff */
-static uint32_t m_lc_fail_streak;   /* LC failures since the last success (RadioState) */
-static int m_join_busy_polls;       /* Counter for MAC busy polling */
-static bool m_init_join;            /* True for first join after boot */
-static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state is valid */
+static bool m_link_check_pending; /* Waiting for LC response */
+static int m_rejoin_attempts;     /* Rejoin attempt counter for backoff */
+static int m_join_busy_polls;     /* Counter for MAC busy polling */
+static bool m_init_join;          /* True for first join after boot */
+static bool m_mac_started;        /* lorawan_start() succeeded; LoRaMac state is valid */
+static enum lorawan_region m_region = LORAWAN_REGION_EU868; /* set in app_radio_lrw_init() */
 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
@@ -279,8 +153,7 @@ static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 static uint8_t m_lc_response_gw_count;
 
-/* --- TX queues (MED-7/8: were single overwrite-able slots) --- */
-#define APP_RADIO_LRW_RESPONSE_BUF_SIZE 64
+/* --- Downlink command queue (MED-7: was a single overwrite-able slot) --- */
 /* Incoming command buffer. The network can deliver up to the LoRaWAN MTU
  * (~222 B at the highest DR) on a single downlink; a realistic SetParam with
  * deveui+joineui+appkey encodes to ~90 B. 224 covers the full MTU so large
@@ -289,7 +162,7 @@ static uint8_t m_lc_response_gw_count;
 #define APP_RADIO_LRW_REQUEST_BUF_SIZE  224
 #define APP_RADIO_LRW_DOWNLINK_CMD_PORT 85
 #define APP_RADIO_LRW_ALARM_PORT        3
-#define APP_RADIO_LRW_TX_QUEUE_DEPTH    4
+#define APP_RADIO_LRW_TELEMETRY_PORT    2
 /* Downlink-command FIFO. Each slot is a full-MTU lrw_dl_msg (~228 B), and the
  * network delivers at most one port-85 command per RX window, drained promptly by
  * m_dl_request_work. Depth 2 absorbs a back-to-back pair while halving the buffer
@@ -303,50 +176,14 @@ static uint8_t m_lc_response_gw_count;
  * size is always far below the protobuf worst case. */
 BUILD_ASSERT(APP_RADIO_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
 
-/* What a queued frame is, so tx_send_queued() can recover it instead of just
- * dropping it when a DR drop between queueing and sending leaves it over budget
- * (#409 3g). Fits the padding byte after `port`, so the msgq slots do not grow. */
-enum lrw_tx_kind {
-	LRW_TX_OTHER = 0,    /* no recovery (shell-injected, error frames) */
-	LRW_TX_CMD_RESPONSE, /* answer to a downlink command: carries its seq */
-	LRW_TX_INFO,         /* autonomous Info (join / clock-sync / deferred) */
-	LRW_TX_SETTINGS,     /* autonomous settings-info (#412) */
-	LRW_TX_ALARM,        /* fPort 3 AlarmReport */
-};
-
-struct lrw_tx_msg {
-	uint8_t port;
-	uint8_t kind; /* enum lrw_tx_kind */
-	uint16_t len;
-	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
-};
-BUILD_ASSERT(sizeof(struct lrw_tx_msg) == 4 + APP_RADIO_LRW_RESPONSE_BUF_SIZE,
-	     "lrw_tx_msg grew: kind must stay in the padding byte");
 struct lrw_dl_msg {
 	uint16_t len;
 	uint8_t buf[APP_RADIO_LRW_REQUEST_BUF_SIZE];
 };
 
-K_MSGQ_DEFINE(m_response_msgq, sizeof(struct lrw_tx_msg), APP_RADIO_LRW_TX_QUEUE_DEPTH, 4);
-K_MSGQ_DEFINE(m_alarm_msgq, sizeof(struct lrw_tx_msg), APP_RADIO_LRW_TX_QUEUE_DEPTH, 4);
 K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_RADIO_LRW_DL_QUEUE_DEPTH, 4);
 
-static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind);
-
-/* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
-static enum app_cmd_action m_post_cmd_action;
-
-/* Set by a ClockSync command; the next network time-update sends an Info uplink
- * (with the synced unix_time) instead of the command acking immediately. */
-/* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
- * downlink callback (another context) — an atomic bit closes the lost-update race. */
-static atomic_t m_clock_sync_info_pending;
-/* seq of the ClockSync command the deferred Info answers (F13: without it the
- * answer went out with seq 0 and the host could not pair it). Written by the
- * command handler before the pending bit is set, read by the Info work item. */
-static atomic_t m_clock_sync_info_seq;
-
-/* Kicked on a link-ready edge (join success / history-replay finish) so
+/* Kicked on a link-ready edge (join success) so
  * app_report can resume the report cadence with an immediate uplink. */
 static void (*m_ready_cb)(void);
 
@@ -358,8 +195,6 @@ static void on_lc_failure(void);
 static void on_lc_timeout(void);
 static void on_downlink_received(void);
 static void state_transition(enum app_radio_state new_state);
-static bool should_request_link_check(void);
-static void force_lc_work_handler(struct k_work *work);
 static int apply_channel_plan(void);
 
 static void fire_ready_cb(void)
@@ -369,28 +204,12 @@ static void fire_ready_cb(void)
 	}
 }
 
-static uint32_t calculate_rejoin_backoff(int attempt)
+/* The common rejoin backoff (60 s doubling to 1 h, +/-25 % jitter: M-1). */
+static uint32_t calculate_rejoin_backoff_ms(int attempt)
 {
-	uint32_t backoff = REJOIN_BACKOFF_BASE_SEC;
+	uint32_t base = app_radio_rejoin_backoff_ms((uint32_t)attempt);
 
-	for (int i = 0; i < attempt; i++) {
-		backoff *= REJOIN_BACKOFF_MULTIPLIER;
-		if (backoff >= REJOIN_BACKOFF_MAX_SEC) {
-			backoff = REJOIN_BACKOFF_MAX_SEC;
-			break;
-		}
-	}
-
-	/* ±25% jitter (M-1): a purely deterministic backoff makes a whole fleet that
-	 * entered RECONNECT together (shared gateway/LNS outage) rejoin in lockstep —
-	 * a thundering herd that collides in the join windows and saturates the duty
-	 * cycle on recovery. Spread the slots (app_report.c jitters its cadence the
-	 * same way). */
-	uint32_t spread = backoff / 4;
-	if (spread) {
-		backoff = backoff - spread + (sys_rand32_get() % (2 * spread + 1));
-	}
-	return backoff;
+	return (uint32_t)app_radio_backoff_jitter_ms(base, 0, base, sys_rand32_get());
 }
 
 static uint8_t refresh_payload_budget(void)
@@ -405,6 +224,93 @@ static uint8_t refresh_payload_budget(void)
 uint8_t app_radio_lrw_get_max_payload(void)
 {
 	return m_max_next_payload;
+}
+
+/* PHY payload around the application bytes: MHDR 1, FHDR 7 (+ FOpts), FPort 1,
+ * MIC 4. A JoinRequest is 23 B. */
+#define LRW_PHY_OVERHEAD     13
+#define LRW_JOIN_REQUEST_LEN 23
+
+/* The FSK DR7 of EU868/AS923: 50 kbit/s, preamble 5 B, sync word 3 B, length
+ * 1 B and CRC 2 B around the PHY payload -- LoRaMac's own GFSK formula. */
+#define LRW_FSK_BPS      50000U
+#define LRW_FSK_OVERHEAD (5 + 3 + 1 + 2)
+
+/* Time on air (ms) of a `phy_len`-byte PHY payload at uplink `dr` in
+ * m_region, by LoRaMac's own formula. */
+static uint32_t lrw_toa_ms(int dr, size_t phy_len)
+{
+	uint32_t bw = 125000U;
+	uint32_t sf;
+
+	switch (m_region) {
+	case LORAWAN_REGION_US915:
+		/* DR0-3 SF10..7/125 kHz, DR4 SF8/500 kHz. */
+		if (dr == 4) {
+			sf = 8;
+			bw = 500000U;
+		} else {
+			sf = 10 - CLAMP(dr, 0, 3);
+		}
+		break;
+	case LORAWAN_REGION_AU915:
+		/* DR0-5 SF12..7/125 kHz, DR6 SF8/500 kHz. */
+		if (dr == 6) {
+			sf = 8;
+			bw = 500000U;
+		} else {
+			sf = 12 - CLAMP(dr, 0, 5);
+		}
+		break;
+	default:
+		/* EU868, AS923: DR0-5 SF12..7/125 kHz, DR6 SF7/250 kHz, DR7 FSK. */
+		if (dr == 7) {
+			return DIV_ROUND_UP(8U * (LRW_FSK_OVERHEAD + phy_len) * MSEC_PER_SEC,
+					    LRW_FSK_BPS);
+		}
+		if (dr == 6) {
+			sf = 7;
+			bw = 250000U;
+		} else {
+			sf = 12 - CLAMP(dr, 0, 5);
+		}
+		break;
+	}
+	return app_radio_lora_toa_ms(sf, bw, phy_len);
+}
+
+static int lrw_mib_datarate(void)
+{
+	MibRequestConfirm_t mib = {.Type = MIB_CHANNELS_DATARATE};
+
+	lorawan_mac_lock();
+	LoRaMacMibGetRequestConfirm(&mib);
+	lorawan_mac_unlock();
+	return mib.Param.ChannelsDatarate;
+}
+
+/* struct app_radio_backend.airtime_ms: a `len`-byte payload on air as the next
+ * uplink, the pending MAC answers in its FOpts included. The DR is the MAC's
+ * (ADR's, or the configured one, which lorawan_send() also writes there). An
+ * ADR backoff step taken inside the send itself is not seen: that one frame is
+ * charged at the DR before the step, and the MAC's own duty cycle still guards
+ * it. 0 before lorawan_start(). */
+static uint32_t lrw_tx_airtime_ms(size_t len)
+{
+	if (!m_mac_started) {
+		return 0;
+	}
+
+	uint8_t max_next = 0, max_now = 0;
+	int dr = lrw_mib_datarate();
+
+	lorawan_get_payload_sizes(&max_next, &max_now);
+	if (max_next == 0) {
+		/* MAC answers fill the frame: Zephyr's flush may go at the lowest
+		 * DR, so charge that. */
+		dr = lorawan_get_min_datarate();
+	}
+	return lrw_toa_ms(dr, LRW_PHY_OVERHEAD + (max_now - max_next) + len);
 }
 
 /* Link-recovery ladder, one rung per failed link check in WARNING. LoRaMac's own
@@ -484,24 +390,6 @@ static bool lrw_backoff_step(void)
 	return stepped;
 }
 
-size_t app_radio_lrw_payload_cap(size_t buf_size)
-{
-	uint8_t budget = m_max_next_payload;
-
-	/* 0 = no budget known right now (before join, or pending MAC answers fill
-	 * the frame): encode against the buffer and let tx_send_queued() flush the
-	 * MAC and retry, instead of pretending the frame has no room at all. */
-	return (budget > 0 && budget < buf_size) ? budget : buf_size;
-}
-
-/* Same as app_radio_lrw_payload_cap() but re-queries the stack first (MED-6). Only on
- * the radio work queue: lorawan_get_payload_sizes() calls into the non-thread-safe LoRaMac. */
-static size_t refresh_payload_cap(size_t buf_size)
-{
-	refresh_payload_budget();
-	return app_radio_lrw_payload_cap(buf_size);
-}
-
 /* ======================================================================== */
 /* State machine                                                            */
 /* ======================================================================== */
@@ -536,9 +424,9 @@ static void state_transition(enum app_radio_state new_state)
 	switch (old) {
 	case APP_RADIO_STATE_JOINING:
 		k_work_cancel_delayable(&m_join_complete_work);
+		app_radio_air_end(); /* the join exchange join_work_handler() began */
 		break;
 	case APP_RADIO_STATE_HEALTHY:
-	case APP_RADIO_STATE_WARNING:
 		k_timer_stop(&m_lc_timeout_timer);
 		m_link_check_pending = false;
 		break;
@@ -562,44 +450,24 @@ static void state_transition(enum app_radio_state new_state)
 		k_timer_stop(&m_rejoin_timer);
 		break;
 
-	case APP_RADIO_STATE_JOINING:
-		/* Drop any in-flight history replay across (re)join. */
-		m_hist_active = false;
-		app_history_set_replay_active(false);
-		break;
-
 	case APP_RADIO_STATE_HEALTHY:
-		/* Link confirmed: clear all LC/recovery state. */
-		m_consecutive_lc_fail = 0;
-		m_lc_fail_streak = 0;
-		app_radio_set_fail_streak(0);
-		m_consecutive_lc_ok = 0;
-		m_warning_lc_fail_total = 0;
-		m_force_lc_remaining = 0;
+		/* Joined: the rejoin episode is over. The link supervision starts
+		 * afresh in app_radio_link_up(). */
 		m_rejoin_attempts = 0;
 		app_radio_set_join_attempts(0);
 		publish_mac();
 		m_link_check_pending = false;
-		m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
-		m_dc = (struct app_radio_stale_dc){0};
-		m_dc_hold_logged = false;
-		break;
-
-	case APP_RADIO_STATE_WARNING:
-		m_consecutive_lc_ok = 0;
-		m_warning_lc_fail_total = 0;
-		m_force_lc_remaining = 0;
 		break;
 
 	case APP_RADIO_STATE_RECONNECT: {
 		/* Single, consistent rejoin policy (HIGH-4): always escalate the
 		 * backoff and arm the rejoin timer here — never reset attempts. */
-		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
+		uint32_t backoff_ms = calculate_rejoin_backoff_ms(m_rejoin_attempts);
 
 		m_rejoin_attempts++;
 		app_radio_set_join_attempts((uint32_t)m_rejoin_attempts);
-		LOG_WRN("Rejoin in %u s (attempt %d)", backoff, m_rejoin_attempts);
-		k_timer_start(&m_rejoin_timer, K_SECONDS(backoff), K_FOREVER);
+		LOG_WRN("Rejoin in %u s (attempt %d)", backoff_ms / 1000, m_rejoin_attempts);
+		k_timer_start(&m_rejoin_timer, K_MSEC(backoff_ms), K_FOREVER);
 		break;
 	}
 
@@ -611,24 +479,6 @@ static void state_transition(enum app_radio_state new_state)
 /* ======================================================================== */
 /* Event handlers (run on the radio work queue)                             */
 /* ======================================================================== */
-
-/* Retry pace while the announce stays pending (review of #400): with ADR off or
- * a pinned DR no DR change comes to retry a frame the response queue or the
- * budget refused, and the held alarms and first report wait for the announce. */
-#define LRW_ANNOUNCE_RETRY_SEC 15
-
-/* The boot/join announce itself lives in app_radio (one path for both radios,
- * doc/plan/439 T3); this runs its pending frames on the radio work queue whenever room may
- * have appeared: after the join, on a DR rise, when a page stream ends, and
- * every LRW_ANNOUNCE_RETRY_SEC while something stays pending. */
-static void announce_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (app_radio_announce_run()) {
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-					    K_SECONDS(LRW_ANNOUNCE_RETRY_SEC));
-	}
-}
 
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
  * after every (re)join, after ADR is configured and before the payload budget is
@@ -670,23 +520,24 @@ static void on_join_success(void)
 	 * fire on join. */
 	refresh_payload_budget();
 
-	state_transition(APP_RADIO_STATE_HEALTHY); /* resets all counters + attempts */
-	m_message_count = 0;
+	state_transition(APP_RADIO_STATE_HEALTHY); /* resets the rejoin attempts */
+	app_radio_link_up(); /* link supervision and the M-2 clock start afresh */
 
 	/* Request network time once joined; the answer sets the RTC asynchronously. */
 	app_clock_request_sync();
 
 	/* Autonomous Info + settings-info ConfigDump (#412) on join, through the
 	 * common announce (app_radio): identity/firmware and the effective config on
-	 * fPort 85 before the first telemetry. m_announce_work is queued on the radio work queue
-	 * ahead of the telemetry kicked below, and send_work drains queued
-	 * responses first. */
+	 * fPort 85 before the first telemetry. The app_radio scheduler sends queued
+	 * answers ahead of alarms and telemetry. */
 	app_radio_announce();
 
+	/* Frames queued while the link was down leave now. */
+	app_radio_tx_kick();
+
 	/* Kick app_report to start the report cadence with an immediate uplink (its
-	 * cycle samples, captures and triggers app_radio_lrw_send_telemetry; the first
-	 * telemetry frame carries LC, msg #1). The queued GetInfo above drains first
-	 * via m_send_work. */
+	 * cycle samples, captures and requests telemetry; the first frame carries
+	 * LC, msg #1). */
 	fire_ready_cb();
 }
 
@@ -698,98 +549,27 @@ static void on_join_failure(void)
 	state_transition(APP_RADIO_STATE_RECONNECT);
 }
 
+/* A link-check outcome: this backend resolves its pending LinkCheckReq, the
+ * common supervision (app_radio_link_result()) decides what follows. */
 static void on_lc_failure(void)
 {
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	app_radio_count(APP_RADIO_CNT_FAIL);
-	app_radio_set_fail_streak(++m_lc_fail_streak);
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
-	m_consecutive_lc_ok = 0;
-
-	switch (state) {
-	case APP_RADIO_STATE_HEALTHY:
-		m_consecutive_lc_fail++;
-		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)", m_consecutive_lc_fail,
-			FAIL_THRESHOLD_WARNING);
-		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
-			state_transition(APP_RADIO_STATE_WARNING);
-			/* The failures that got us here already show the current TX
-			 * power / DR no longer reach a gateway: take the first rung now. */
-			(void)lrw_backoff_step();
-		}
-		break;
-
-	case APP_RADIO_STATE_WARNING: {
-		/* Try the next rung before the rejoin budget is consulted: a rejoin
-		 * only fires once the ladder is exhausted, so it is never spent while a
-		 * lower DR is still untried (it would reset the MAC to the join DR
-		 * anyway, but at the cost of the session, a DevNonce and the backoff). */
-		bool stepped = lrw_backoff_step();
-
-		m_warning_lc_fail_total++;
-		LOG_WRN("LC FAIL in WARNING (total: %d/%d%s)", m_warning_lc_fail_total,
-			g_app_config.radio_link_check_fail_rejoin, stepped ? ", ladder step" : "");
-		if (!stepped &&
-		    m_warning_lc_fail_total >= g_app_config.radio_link_check_fail_rejoin) {
-			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
-				state_transition(APP_RADIO_STATE_RECONNECT);
-			} else {
-				/* ABP cannot rejoin (no OTA). Stay in WARNING and keep
-				 * trying the per-report link check; recover if the link
-				 * returns. */
-				LOG_WRN("ABP mode - cannot rejoin, staying in WARNING");
-				m_warning_lc_fail_total = 0;
-			}
-		}
-		break;
-	}
-
-	default:
-		LOG_DBG("LC FAIL in %s (ignored)", state_name(state));
-		break;
-	}
+	app_radio_link_result(false);
 }
 
 static void on_lc_success(void)
 {
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
-	m_consecutive_lc_fail = 0;
-	m_lc_fail_streak = 0;
-	app_radio_set_fail_streak(0);
-
-	switch (state) {
-	case APP_RADIO_STATE_HEALTHY:
-		LOG_INF("LC OK in HEALTHY");
-		m_force_lc_remaining = 0;
-		break;
-
-	case APP_RADIO_STATE_WARNING:
-		m_consecutive_lc_ok++;
-		LOG_INF("LC OK in WARNING (streak: %d/%d)", m_consecutive_lc_ok,
-			OK_THRESHOLD_HEALTHY);
-		if (m_consecutive_lc_ok >= OK_THRESHOLD_HEALTHY) {
-			state_transition(APP_RADIO_STATE_HEALTHY);
-		} else {
-			m_force_lc_remaining = 1; /* force LC on next message */
-		}
-		break;
-
-	default:
-		LOG_DBG("LC OK in %s", state_name(state));
-		break;
-	}
+	app_radio_link_result(true);
 }
 
 static void on_lc_timeout(void)
 {
 	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY) {
 		return;
 	}
 	if (m_link_check_pending) {
@@ -804,7 +584,7 @@ static void on_downlink_received(void)
 {
 	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY) {
 		return;
 	}
 	/* Any authenticated downlink proves the link, as on P2P (decision #22
@@ -874,24 +654,15 @@ static void downlink_success_work_handler(struct k_work *work)
 	on_downlink_received();
 }
 
-/* Deferred from downlink_callback (#219): the nanopb Info encode + queue must not
- * run on the LoRaMac/system-WQ callback stack, whose depth is not ours to assume.
- * Runs on the radio work queue like every other TX-side work item. */
-static void clock_sync_info_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_info_seq));
-}
-
 static void lc_response_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	/* HIGH-3: ignore a stale/late LC answer outside HEALTHY/WARNING so it can
-	 * never cancel the rejoin timer or mutate counters in JOINING/RECONNECT. */
-	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
+	/* HIGH-3: ignore a stale/late LC answer outside HEALTHY so it can never
+	 * cancel the rejoin timer or mutate counters in JOINING/RECONNECT. */
+	if (state != APP_RADIO_STATE_HEALTHY) {
 		LOG_DBG("LC answer in %s ignored", state_name(state));
 		return;
 	}
@@ -901,8 +672,8 @@ static void lc_response_work_handler(struct k_work *work)
 	 * request via on_lc_success()/on_lc_failure() before the real LinkCheckAns
 	 * got here. Without this guard the genuine-but-late answer would run the
 	 * success/failure path a second time for one physical round-trip,
-	 * double-incrementing m_consecutive_lc_ok/m_consecutive_lc_fail and
-	 * potentially causing an unearned state transition. Mirrors the same
+	 * counting it twice in the link supervision and potentially causing an
+	 * unearned state transition. Mirrors the same
 	 * already-resolved check in on_lc_timeout() above. */
 	if (!m_link_check_pending) {
 		LOG_DBG("LC answer arrived but already resolved (implicit via downlink)");
@@ -916,140 +687,8 @@ static void lc_response_work_handler(struct k_work *work)
 	}
 }
 
-/* Bound on how long the post-command action defers to an undelivered Ack: the
- * initial 8 s covers the successful-send RX windows, but a duty-cycle/MAC-busy
- * lorawan_send() failure requeues the Ack with a FRAME_RETRY_SEC (15 s) backoff
- * — longer than the deferral itself — so without waiting for the drain the
- * reboot would drop the RAM-only queued Ack every time the first send attempt
- * fails. Cap the extra wait so a permanently failing TX cannot postpone the
- * commanded action forever. */
-#define POST_CMD_DRAIN_WAIT_SEC      8
-#define POST_CMD_DRAIN_MAX_DEFERRALS 6
-
-static uint8_t m_post_cmd_deferrals;
-
-static void post_cmd_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if ((k_msgq_num_used_get(&m_response_msgq) > 0 ||
-	     k_work_delayable_is_pending(&m_tx_retry_work)) &&
-	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
-		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
-			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
-			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-		return;
-	}
-
-	switch (m_post_cmd_action) {
-	case APP_CMD_ACTION_SETTINGS_SAVE:
-		LOG_INF("Command: saving settings + reboot");
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_DEVICE_RESET:
-		LOG_INF("Command: device reset (keep identity + LoRaWAN) + reboot");
-		app_settings_device_reset();
-		break;
-	case APP_CMD_ACTION_FACTORY_RESET:
-		/* #299, narrower than device_reset above: drops LoRaWAN too. */
-		LOG_INF("Command: factory reset (keep identity only) + reboot");
-		app_settings_factory_reset();
-		break;
-	case APP_CMD_ACTION_SECRET_KEY_SAVE:
-		/* #322: persist the staged new secret_key + reboot, so it goes live now
-		 * instead of at the next unrelated reboot. Unreachable over LoRaWAN today
-		 * (set_secret_key is transports: [nfc, shell]) — kept in lockstep with
-		 * main.c so the two dispatch tables cannot drift. */
-		LOG_INF("Command: saving new secret_key + reboot");
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_REBOOT:
-		LOG_WRN_REBOOTING("command");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_ENTER_CALIBRATION:
-		/* Persist calibration=true + reboot; main() enters calibration
-		 * mode on the next boot (app_calibration_init() clears the flag).
-		 * Write the staging config (app_config()) — that is what settings_save
-		 * persists; g_app_config is only the boot-time read copy. */
-		LOG_INF("Command: entering calibration mode + reboot");
-		app_config()->calibration = true;
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_LRW_RESET:
-		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
-		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
-		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
-		app_radio_reset_link();
-		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_LRW_JOIN:
-		/* Force a (re)join now instead of waiting for the next attempt (#109).
-		 * No reboot — app_radio_lrw_join() just queues a join work item. */
-		LOG_INF("Command: forced LoRaWAN join");
-		app_radio_rejoin();
-		break;
-	case APP_CMD_ACTION_COUNTERS_SAVE:
-		/* Persist the (reset) pulse totalizers, no reboot. Deferred for the
-		 * same stack reason as the alarm-rule save above. */
-		LOG_INF("Command: saving counters");
-		app_counters_save(true);
-		break;
-	default:
-		break;
-	}
-}
-
-/* #409 3d/3e, #425: queue the next page of a device-driven page stream (any
- * paged answer). One page per run, only while the response queue keeps a slot
- * free for other answers; paced by the send path (duty cycle permitting). */
-
-static void page_stream_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
-		app_cmd_stream_cancel(); /* a rejoin starts from scratch */
-		return;
-	}
-
-	if (k_msgq_num_free_get(&m_response_msgq) < 2) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-					  K_SECONDS(PAGE_STREAM_PACE_SEC));
-		return;
-	}
-
-	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
-	size_t len;
-	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
-
-	if (ret == -ENODATA) {
-		/* All pages queued; a boot announce frame may have waited for them. */
-		if (app_radio_announce_pending()) {
-			k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-						    K_NO_WAIT);
-		}
-		return;
-	}
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
-		if (app_radio_announce_pending()) {
-			k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-						    K_NO_WAIT);
-		}
-		return;
-	}
-	(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(PAGE_STREAM_PACE_SEC));
-}
-
+/* Commands arrive in the MAC's receive callback: dispatch them on the radio
+ * work queue through the common downlink path (doc/plan/460 §2.5). */
 static void dl_request_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -1058,58 +697,8 @@ static void dl_request_work_handler(struct k_work *work)
 
 	/* Drain every queued command (MED-7: was a single overwrite-able slot). */
 	while (k_msgq_get(&m_dl_msgq, &msg, K_NO_WAIT) == 0) {
-		static uint8_t resp[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
-		size_t resp_len = 0;
-		enum app_cmd_action action = APP_CMD_ACTION_NONE;
-
-		/* Cap to the current DR's payload budget, not just the software buffer,
-		 * so an explicit GetInfo command gets the same active_alarms trimming as
-		 * the autonomous join/clock-sync uplink (app_radio_send_info()) instead of
-		 * tx_send_queued() dropping the whole response later. */
-		size_t resp_cap = refresh_payload_cap(sizeof(resp));
-
-		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp, resp_cap,
-					 &resp_len, &action);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
-			continue;
-		}
-
-		if (resp_len) {
-			ret = queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, resp, resp_len,
-						LRW_TX_CMD_RESPONSE);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_radio_lrw_queue_response", ret);
-			}
-		}
-
-		if (action == APP_CMD_ACTION_PAGE_STREAM) {
-			/* #409: the remaining ConfigDump pages follow page 0 by themselves. */
-			k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-						  K_SECONDS(PAGE_STREAM_PACE_SEC));
-			action = APP_CMD_ACTION_NONE;
-		}
-
-		/* Defer reboot/save so the Ack uplink + its RX window finish first.
-		 * post_cmd_work_handler() extends the wait (bounded) while the Ack is
-		 * still queued/retrying, so a duty-cycle backoff cannot silently drop
-		 * it on reboot. */
-		if (action != APP_CMD_ACTION_NONE) {
-			m_post_cmd_action = action;
-			m_post_cmd_deferrals = 0;
-			k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-						  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-			LOG_INF("Post-command action %d scheduled in %ds", (int)action,
-				POST_CMD_DRAIN_WAIT_SEC);
-		}
+		app_radio_downlink(msg.buf, msg.len);
 	}
-
-#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
-	size_t unused;
-	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
-		LOG_INF("Radio work queue stack: %zu B unused after cmd handle", unused);
-	}
-#endif
 }
 
 static void join_complete_work_handler(struct k_work *work)
@@ -1211,7 +800,7 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
-	state_transition(APP_RADIO_STATE_JOINING); /* stops send timer, drops history */
+	state_transition(APP_RADIO_STATE_JOINING);
 
 	/* Discard any in-progress telemetry snapshot: a rejoin must not resume a
 	 * pre-outage snapshot with stale sensor data and no indication (#93.5). */
@@ -1248,7 +837,7 @@ static void join_work_handler(struct k_work *work)
 	static struct lorawan_join_config config;
 
 	memset(&config, 0, sizeof(config));
-	config.dev_eui = g_app_config.lrw_deveui;
+	config.dev_eui = g_app_config.radio_deveui;
 
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 		LOG_INF("Using OTAA activation");
@@ -1258,9 +847,9 @@ static void join_work_handler(struct k_work *work)
 		config.otaa.nwk_key = g_app_config.lrw_nwkkey;
 #else
 		/* LoRaWAN 1.0.x: NwkKey == AppKey (TTN/ChirpStack/Helium). */
-		config.otaa.nwk_key = g_app_config.lrw_appkey;
+		config.otaa.nwk_key = g_app_config.radio_appkey;
 #endif
-		config.otaa.app_key = g_app_config.lrw_appkey;
+		config.otaa.app_key = g_app_config.radio_appkey;
 	} else if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
 		LOG_INF("Using ABP activation");
 		config.mode = LORAWAN_ACT_ABP;
@@ -1276,7 +865,16 @@ static void join_work_handler(struct k_work *work)
 	m_join_busy_polls = 0;
 
 	app_radio_count(APP_RADIO_CNT_JOIN);
+	/* The join exchange ends when JOINING is left (state_transition()). */
+	app_radio_air_begin();
 	ret = lorawan_join(&config);
+	if (config.mode == LORAWAN_ACT_OTAA && ret != -EBUSY && ret != -ECONNREFUSED &&
+	    ret != -ENOTCONN) {
+		/* Unless the MAC refused it, the JoinRequest went out (a missing
+		 * JoinAccept is -EINVAL or -ETIMEDOUT), at the DR the MAC took for it.
+		 * The ledger does not hold a join; the MAC's join backoff does. */
+		app_radio_duty_charge(lrw_toa_ms(lrw_mib_datarate(), LRW_JOIN_REQUEST_LEN));
+	}
 	if (ret && ret != -ETIMEDOUT) {
 		LOG_ERR("Join failed: %d", ret);
 		on_join_failure();
@@ -1317,96 +915,54 @@ static void join_work_handler(struct k_work *work)
 				  K_MSEC(JOIN_BUSY_POLL_INTERVAL_MS));
 }
 
-static bool should_request_link_check(void)
+/* ======================================================================== */
+/* TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4)  */
+/* ======================================================================== */
+
+/* struct app_radio_backend.send. Radio work queue only. */
+static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_result *res)
 {
-	int interval = g_app_config.radio_link_check_interval;
-
-	if (m_force_lc_remaining > 0) {
-		m_force_lc_remaining--;
-		return true;
-	}
-	if (interval <= 0) {
-		return false;
-	}
-	/* WARNING: the link is suspect, so check on every report. Each failed check
-	 * takes one recovery-ladder rung (lrw_backoff_step) and counts towards the
-	 * rejoin budget; at the N-th-report cadence the default 900 s x 5 took
-	 * ~6 h to leave WARNING, all of it transmitting blind on the old DR. */
-	if ((enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_WARNING) {
-		return true;
-	}
-	int msg_num = m_message_count + 1;
-
-	if (msg_num == 1 || (msg_num % interval) == 0) {
-		return true;
-	}
-	return false;
-}
-
-/* Send one telemetry frame on fPort 2. */
-static void tx_telemetry_frame(bool first_frame)
-{
+	uint8_t budget = refresh_payload_budget(); /* MED-6: per-TX budget, not cached */
+	uint8_t port;
 	int ret;
 
-	if (!m_frame_resend) {
-		refresh_payload_budget(); /* MED-6: per-TX budget, not cached */
-		ret = app_compose(m_frame_buf, sizeof(m_frame_buf), &m_frame_len, &m_frame_more);
-		if (ret == -EAGAIN) {
-			/* Budget 0: pending MAC commands (an ADR/channel batch from the LNS)
-			 * exceed the DR payload room, so no telemetry fits. Returning here
-			 * DEADLOCKS (H-1): telemetry never sends -> the MAC command queue never
-			 * flushes -> the budget stays 0 forever, and the station goes mute with
-			 * only a LOG_DBG. Send an empty uplink instead so LoRaMac drains the
-			 * queued MAC answers (in FOpts, or on port 0 when they overflow); the
-			 * budget recovers for the next report cycle. Rate-limited by the report
-			 * cadence (this path runs once per cycle). */
-			LOG_WRN("Telemetry budget 0 (MAC-command flood): empty uplink to flush "
-				"MAC");
-			ret = lrw_send(2, m_frame_buf, 0, LORAWAN_MSG_UNCONFIRMED);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
-			}
-			return;
-		}
+	switch (f->kind) {
+	case APP_RADIO_FRAME_TELEMETRY:
+		port = APP_RADIO_LRW_TELEMETRY_PORT;
+		break;
+	case APP_RADIO_FRAME_ALARM:
+		port = APP_RADIO_LRW_ALARM_PORT;
+		break;
+	default:
+		port = f->port ? f->port : APP_RADIO_LRW_DOWNLINK_CMD_PORT;
+		break;
+	}
+
+	res->wait_ms = FRAME_RETRY_SEC * MSEC_PER_SEC;
+	res->budget = budget;
+
+	if (budget == 0 || f->len == 0) {
+		/* H-1 / #409 3a: pending MAC answers (an ADR / channel batch from the
+		 * LNS) fill the whole frame, so nothing fits. Waiting deadlocks: no
+		 * uplink -> the MAC answers never leave -> the budget stays 0 and the
+		 * node goes mute. Send an empty uplink so LoRaMac drains them (in
+		 * FOpts, or on port 0 when they overflow); the frame waits for the
+		 * budget to come back. */
+		LOG_WRN("TX budget 0 (MAC-command flood, port %u): empty uplink to flush MAC",
+			port);
+		ret = lrw_send(port, f->buf, 0, LORAWAN_MSG_UNCONFIRMED);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_compose", ret);
-			return;
+			LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
 		}
-		if (m_frame_len == 0) {
-			/* Nothing to report (e.g. all sensors NaN pre-sample); app_report
-			 * owns the cadence, so just return. */
-			return;
-		}
-		m_frame_retries = 0; /* fresh frame composed; reset the retry budget (#219) */
-		m_frame_first = first_frame;
-		/* #188: decide the link-check piggyback exactly once, here on the fresh
-		 * compose. should_request_link_check() decrements m_force_lc_remaining and
-		 * advances the modulo, so re-evaluating it on the resend path would
-		 * double-consume / lose a forced link check. */
-		m_frame_with_lc =
-			m_frame_first && !m_link_check_pending && should_request_link_check();
+		return -EAGAIN;
+	}
+	if (f->len > budget) {
+		/* Zephyr's lorawan_send would send an empty frame and drop the
+		 * payload; app_radio recovers the frame by its kind instead. */
+		return -EMSGSIZE;
 	}
 
-	/* M-10: app_compose force-emits a single group / w1 reading that is larger
-	 * than the DR budget "alone" (into the big compose buffer), so m_frame_len can
-	 * exceed the on-air budget — most acute on US915/AU915 DR0 (11 B) with a
-	 * machine-probe reading (~25-30 B). lorawan_send would reject it and we'd burn
-	 * ~120 s of retries every report cycle on data that can't fit at this DR. Drop
-	 * the over-budget frame explicitly (mirrors tx_send_queued) and keep draining
-	 * the rest of the snapshot; it recovers once the DR rises. */
-	if (m_frame_len > m_max_next_payload) {
-		LOG_ERR("Telemetry frame %u B over DR budget %u B; dropped (raise DR)",
-			(unsigned)m_frame_len, (unsigned)m_max_next_payload);
-		m_frame_resend = false;
-		m_frame_retries = 0;
-		if (m_frame_more) {
-			k_work_schedule_for_queue(app_radio_work_q(), &m_frame_work,
-						  K_SECONDS(FRAME_GAP_SEC));
-		}
-		return;
-	}
-
-	bool with_link_check = m_frame_with_lc;
+	bool with_link_check = (f->flags & APP_RADIO_FRAME_LINK_CHECK) != 0;
 
 	if (with_link_check) {
 		ret = lorawan_request_link_check(false);
@@ -1418,36 +974,48 @@ static void tx_telemetry_frame(bool first_frame)
 		}
 	}
 
-	LOG_INF("Sending data (msg #%u, %s)...", m_message_count + 1,
-		m_frame_more ? "more pending" : "last frame");
+	if (f->kind == APP_RADIO_FRAME_TELEMETRY) {
+		struct app_radio_link link;
 
-	ret = lrw_send(2, m_frame_buf, m_frame_len, LORAWAN_MSG_UNCONFIRMED);
+		app_radio_get_link(&link);
+		LOG_INF("Sending data (msg #%u, %s)...", link.reports + 1,
+			(f->flags & APP_RADIO_FRAME_MORE) ? "more pending" : "last frame");
+	}
+
+	bool confirmed = (f->flags & APP_RADIO_FRAME_CONFIRMED) != 0;
+
+	ret = lrw_send(port, f->buf, (uint8_t)f->len,
+		       confirmed ? LORAWAN_MSG_CONFIRMED : LORAWAN_MSG_UNCONFIRMED);
+	if (confirmed && ret == -ETIMEDOUT) {
+		/* Sent under a new FCnt on every attempt; the LC timer, if one
+		 * rode, runs as for any sent frame. */
+		LOG_WRN("Confirmed uplink on port %u unacknowledged (attempt %u)", port,
+			f->attempt);
+		if (with_link_check) {
+			k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC),
+				      K_FOREVER);
+		}
+		return -ETIMEDOUT;
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 		if (with_link_check) {
 			m_link_check_pending = false;
 		}
-		/* Likely duty-cycle / MAC busy — retry the same frame shortly, but bound
-		 * the attempts so a permanent TX error (e.g. misconfigured duty cycle)
-		 * can't be retried indefinitely. After the budget is spent, drop the
-		 * frame and let app_report re-arm the cadence cleanly (#219). */
-		if (++m_frame_retries > FRAME_MAX_RETRIES) {
-			LOG_ERR("Telemetry frame abandoned after %d retries", m_frame_retries - 1);
-			m_frame_resend = false;
-			m_frame_more = false;
-			m_frame_retries = 0;
-			/* #340 M6: drop the in-progress compose snapshot, same as the
-			 * rejoin path (#93.5) — otherwise the next report cycle resumes
-			 * packing this abandoned cycle's stale sensor data instead of
-			 * taking a fresh reading. */
-			app_compose_reset();
-			return;
+		switch (ret) {
+		case -EMSGSIZE:
+			/* The DR fell between the budget query and the send. */
+			res->budget = refresh_payload_budget();
+			return -EMSGSIZE;
+		case -ECONNREFUSED:
+			/* Refused by the duty cycle (F29): the MAC is throttled, the
+			 * frame is not failing. */
+			return -EAGAIN;
+		default:
+			/* MAC busy, no free channel, confirm timeout: retried after
+			 * the backoff, a bounded number of times (#219). */
+			return -EIO;
 		}
-		m_frame_resend = true;
-		app_radio_count(APP_RADIO_CNT_RETRY);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_frame_work,
-					  K_SECONDS(FRAME_RETRY_SEC));
-		return;
 	}
 
 	/* Start the LC timeout only now: lorawan_send() returns after the RX windows
@@ -1458,459 +1026,55 @@ static void tx_telemetry_frame(bool first_frame)
 	if (with_link_check) {
 		k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
 	}
-
-	m_frame_resend = false;
-	m_frame_retries = 0;
-	/* Count reports, not frames (#267): m_message_count drives the link-check
-	 * cadence (should_request_link_check: msg_num % radio_link_check_interval), which
-	 * is meant to be "every N reports". Advancing it on every frame made a
-	 * multi-frame snapshot count as N messages, so the LC cadence drifted with the
-	 * payload size. Advance once per report, on the final frame. */
-	if (!m_frame_more) {
-		m_message_count++;
+	if (f->kind != APP_RADIO_FRAME_TELEMETRY) {
+		LOG_INF("Sent on port %u (%u B)", port, f->len);
 	}
-	m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry actually went out */
-
-	if (m_frame_more) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_frame_work,
-					  K_SECONDS(FRAME_GAP_SEC));
-	} else {
-		/* Snapshot complete; app_report's timer schedules the next report. */
-		LOG_INF("Snapshot complete");
-	}
-}
-
-static void frame_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
-		LOG_WRN("Frame continuation aborted: %s", state_name(state));
-		return;
-	}
-	tx_telemetry_frame(false);
-}
-
-static void tx_retry_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-}
-
-/* A telemetry compose request (app_radio took the #267 pre-send jitter): kick
- * the normal send path. This is the sole trigger for a telemetry compose, so set
- * the pending flag
- * BEFORE submitting (#340 M5) — if m_send_work is already pending because of
- * an in-flight response/alarm drain, the submit below coalesces into that
- * run instead of scheduling a new one, and the flag is what lets that run
- * still honor the request. */
-static void telemetry_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	m_telemetry_pending = true;
-	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-}
-
-/* Send one queued response/alarm with a DR-budget guard and a bounded
- * duty-cycle retry (#93.1). Returns true if the message was consumed (sent or
- * dropped); false if it was requeued for a later retry (a backoff re-drain is
- * already scheduled, so the caller must not touch the timers). */
-/* seq of an encoded Response (version byte + protobuf): field 1 comes first
- * when non-zero (nanopb encodes in field order); absent means seq 0. */
-static uint32_t response_seq(const struct lrw_tx_msg *tx)
-{
-	uint32_t seq = 0;
-
-	if (tx->len < 2 || tx->buf[1] != 0x08) {
-		return 0;
-	}
-	for (uint16_t i = 2, shift = 0; i < tx->len && shift < 32; i++, shift += 7) {
-		seq |= (uint32_t)(tx->buf[i] & 0x7f) << shift;
-		if (!(tx->buf[i] & 0x80)) {
-			break;
-		}
-	}
-	return seq;
-}
-
-/* #409 3g: a queued frame no longer fits because the DR dropped after it was
- * encoded (ADR / LinkADRReq). Recover by kind instead of losing it silently:
- * autonomous Info / settings-info are re-armed for the deferred announce (sent
- * again once the DR rises); a command answer is replaced in place by
- * Error BUDGET_TOO_SMALL carrying the command's seq (retry at a higher DR);
- * an alarm is dropped, its state still rides in telemetry system_flags.
- * Returns true when `tx` now holds a frame to send. */
-static bool recover_over_budget(struct lrw_tx_msg *tx, uint8_t budget)
-{
-	LOG_WRN("TX %u B over DR budget %u B (port %u, kind %u)", tx->len, budget, tx->port,
-		tx->kind);
-
-	switch ((enum lrw_tx_kind)tx->kind) {
-	case LRW_TX_INFO:
-		app_radio_announce_rearm(false);
-		LOG_INF("Info re-armed for the deferred announce");
-		return false;
-	case LRW_TX_SETTINGS:
-		app_radio_announce_rearm(true);
-		LOG_INF("settings-info re-armed for the deferred announce");
-		return false;
-	case LRW_TX_CMD_RESPONSE: {
-		uint32_t seq = response_seq(tx);
-		size_t len;
-
-		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
-		    0) {
-			tx->len = len;
-			tx->kind = LRW_TX_OTHER; /* never recover the error itself */
-			LOG_INF("Command answer (seq %u) replaced by BUDGET_TOO_SMALL", seq);
-			return true;
-		}
-		LOG_ERR("Command answer (seq %u) dropped: not even the Error fits", seq);
-		return false;
-	}
-	case LRW_TX_ALARM:
-		LOG_INF("Alarm frame dropped; alarm state stays in telemetry system_flags");
-		return false;
-	default:
-		LOG_ERR("Frame dropped");
-		return false;
-	}
-}
-
-static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port)
-{
-	uint8_t budget = refresh_payload_budget();
-
-	if (budget == 0) {
-		/* #409 3a: pending MAC answers fill the whole frame (same H-1 condition
-		 * as the telemetry path). Dropping here lost responses/alarms during a
-		 * MAC-command flood. Flush the MAC with an empty uplink and keep the
-		 * payload for a retry once the budget recovers. */
-		LOG_WRN("TX budget 0 (MAC-command flood, port %u): empty uplink to flush MAC",
-			port);
-		int ret = lrw_send(port, tx->buf, 0, LORAWAN_MSG_UNCONFIRMED);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
-		}
-		if (k_msgq_put(q, tx, K_NO_WAIT) != 0) {
-			LOG_WRN("TX requeue failed (port %u); dropped", port);
-			return true;
-		}
-		k_work_schedule_for_queue(app_radio_work_q(), &m_tx_retry_work,
-					  K_SECONDS(FRAME_RETRY_SEC));
-		return false;
-	}
-
-	if (tx->len > budget && !recover_over_budget(tx, budget)) {
-		/* Won't fit at this DR — Zephyr's lorawan_send would transmit an empty
-		 * frame and drop the payload anyway, so drop it explicitly (logged in
-		 * recover_over_budget()) rather than burning airtime on an empty uplink. */
-		return true;
-	}
-
-	int ret = lrw_send(port, tx->buf, tx->len, LORAWAN_MSG_UNCONFIRMED);
-	if (ret == 0) {
-		LOG_INF("Sent on port %u (%u B)", port, tx->len);
-		return true;
-	}
-
-	/* Likely duty-cycle / MAC busy: keep the payload and retry after a backoff
-	 * instead of losing it (the slot was already consumed by k_msgq_get). */
-	LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
-	if (k_msgq_put(q, tx, K_NO_WAIT) != 0) {
-		LOG_WRN("TX requeue failed (port %u); dropped", port);
-		return true;
-	}
-	app_radio_count(APP_RADIO_CNT_RETRY);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_retry_work, K_SECONDS(FRAME_RETRY_SEC));
-	return false;
-}
-
-static void send_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	/* Calibration/disabled/joining below are hard transmit gates, not drain
-	 * bookkeeping: they return without touching m_telemetry_pending, so a
-	 * request that arrives while gated simply stays pending for whichever
-	 * later m_send_work run finds the radio usable again (#340 M5). */
-
-	/* Block normal transmissions during calibration mode (flag-based). */
-	if (g_app_config.calibration) {
-		return;
-	}
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	/* Radio-silent (#98/#175): the stack was never started, never transmit. */
-	if (state == APP_RADIO_STATE_DISABLED) {
-		return;
-	}
-
-	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
-		LOG_WRN("TX blocked: %s", state_name(state));
-		return;
-	}
-
-	struct lrw_tx_msg tx;
-
-	/* Priority drain: command response (port 85) first, then alarm (port 3). One
-	 * TX per call; if more are queued, re-submit. A drain falls through to
-	 * telemetry below only when it leaves both queues empty AND a telemetry
-	 * trigger got coalesced into this same run (m_telemetry_pending, #340 M5) —
-	 * otherwise telemetry is composed only when this handler runs with both
-	 * queues already empty from the start (i.e. when app_report triggered the
-	 * send with nothing else queued). */
-	if (k_msgq_get(&m_response_msgq, &tx, K_NO_WAIT) == 0) {
-		if (!tx_send_queued(&m_response_msgq, &tx, tx.port)) {
-			return; /* requeued; a backoff retry is scheduled */
-		}
-		if (k_msgq_num_used_get(&m_response_msgq) || k_msgq_num_used_get(&m_alarm_msgq)) {
-			k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-			return;
-		}
-		if (!m_telemetry_pending) {
-			return;
-		}
-		/* #340 M5: the response queue is now empty, but a telemetry trigger
-		 * coalesced into this run (its own m_send_work submit got merged
-		 * with this drain's) — fall through to the same gates/compose the
-		 * natural "queues empty" path below uses, instead of returning and
-		 * silently losing this interval's report. */
-	} else if (k_msgq_get(&m_alarm_msgq, &tx, K_NO_WAIT) == 0) {
-		if (!tx_send_queued(&m_alarm_msgq, &tx, APP_RADIO_LRW_ALARM_PORT)) {
-			return; /* requeued; a backoff retry is scheduled */
-		}
-		if (k_msgq_num_used_get(&m_alarm_msgq)) {
-			k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-			return;
-		}
-		if (!m_telemetry_pending) {
-			return;
-		}
-		/* #340 M5: same coalescing recovery as the response branch above. */
-	}
-
-	/* MED-9: history replay owns the radio; don't inject telemetry. Leave
-	 * m_telemetry_pending set if it was — the request isn't lost, it's honored
-	 * on whichever later m_send_work run finds the radio free. */
-	if (m_hist_active) {
-		return;
-	}
-
-	/* #189: a multi-frame snapshot continuation may still be in flight — a
-	 * frame_work fire is scheduled after a frame gap (m_frame_more) or a resend
-	 * backoff. Re-entering compose now would clobber the snapshot cursor flags
-	 * (m_frame_resend/m_frame_first/m_frame_with_lc) and the LC piggyback, yielding
-	 * a malformed multi-frame sequence. Let the in-flight snapshot finish; app_report
-	 * re-triggers the next one (m_telemetry_pending, if set, stays set until then). */
-	if (k_work_delayable_is_pending(&m_frame_work)) {
-		LOG_DBG("Snapshot continuation pending; skipping new telemetry compose");
-		return;
-	}
-
-	/* Both queues empty (from the start, or after a drain that recovered a
-	 * coalesced trigger above): compose + split the telemetry snapshot built
-	 * from the sensor data app_report just sampled/captured. */
-	m_telemetry_pending = false;
-	m_frame_resend = false; /* start a new snapshot */
-	tx_telemetry_frame(true);
-}
-
-/* ======================================================================== */
-/* History replay                                                           */
-/* ======================================================================== */
-
-/* Max samples that fit one frame at the current DR. Uses the exact protobuf
- * envelope overhead (app_cmd_history_sample_capacity) instead of a fixed guess
- * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). frame_index /
- * frame_count are sized with m_hist_frame_bound and t0 with the max varint, so
- * the cap is a stable per-replay lower bound. */
-static size_t history_frame_cap(void)
-{
-	size_t out_cap = MIN((size_t)refresh_payload_budget(), sizeof(m_hist_tx_buf)); /* MED-6 */
-
-	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
-					       UINT32_MAX, m_hist_present, m_hist_interval,
-					       out_cap);
-}
-
-static void history_replay_finish(void)
-{
-	m_hist_active = false;
-	app_history_set_replay_active(false);
-	/* Hand the report cadence back to app_report with an immediate uplink. */
-	fire_ready_cb();
-}
-
-static void m_hist_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (!m_hist_active) {
-		return;
-	}
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
-		LOG_WRN("History replay aborted: %s", state_name(state));
-		m_hist_active = false;
-		app_history_set_replay_active(false);
-		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
-	}
-
-	/* A DR drop mid-replay packs fewer records per frame, so frame_index can
-	 * outgrow the bound the cap was sized with: fall back to the worst case. */
-	if (m_hist_idx >= m_hist_frame_bound) {
-		m_hist_frame_bound = UINT32_MAX;
-	}
-
-	uint8_t samples[HISTORY_SAMPLES_MAX];
-	size_t cap = MIN(history_frame_cap(), sizeof(samples));
-	uint32_t t0 = 0;
-	bool synced = false;
-	uint16_t n = 0;
-	uint32_t next = m_hist_cursor;
-	size_t slen = 0;
-
-	if (cap > 0) {
-		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
-					      samples, cap, &t0, &synced, &n, &next);
-	}
-	if (n == 0) {
-		if (next >= m_hist_end) {
-			/* Nothing left in the window: the records were evicted or the
-			 * ring was reset since the previous frame. */
-			LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
-			history_replay_finish();
-			return;
-		}
-		/* #409 3f: records remain but the DR dropped below one record per
-		 * frame. Tell the host instead of going silent mid-stream. */
-		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
-			(unsigned)m_hist_count, (unsigned)cap);
-		uint8_t err[16];
-		size_t err_len;
-
-		if (app_cmd_build_budget_error(m_hist_seq, err, refresh_payload_cap(sizeof(err)),
-					       &err_len) == 0) {
-			(void)app_radio_lrw_queue_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, err,
-							   err_len);
-		}
-		history_replay_finish();
-		return;
-	}
-
-	size_t len;
-	/* time_synced is per frame: a frame never spans two history segments, and
-	 * each segment (flash page) knows whether its base is unix or uptime. */
-	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval, synced, samples,
-					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
-		history_replay_finish();
-		return;
-	}
-
-	ret = lrw_send(APP_RADIO_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len,
-		       LORAWAN_MSG_UNCONFIRMED);
-	if (ret) {
-		/* Duty-cycle / MAC busy — retry the same frame, don't advance. Bounded
-		 * so a persistently rejected frame cannot wedge the replay (and the
-		 * paused telemetry timer) forever (#89). */
-		LOG_ERR_CALL_FAILED_INT("lorawan_send(history)", ret);
-		if (++m_hist_retries > HISTORY_MAX_RETRIES) {
-			LOG_ERR("History frame %u/%u abandoned after %d retries",
-				(unsigned)m_hist_idx, (unsigned)m_hist_count, m_hist_retries - 1);
-			history_replay_finish();
-			return;
-		}
-		app_radio_count(APP_RADIO_CNT_RETRY);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(FRAME_RETRY_SEC));
-		return;
-	}
-	m_hist_retries = 0;
-	/* M-2: a history frame on air proves the channel is alive just as a telemetry
-	 * frame does. Without this, a long replay (which pauses telemetry) can trip the
-	 * stale-uplink watchdog and rejoin a perfectly healthy session mid-replay. */
-	m_last_uplink_ms = k_uptime_get();
-
-	LOG_INF("History frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
-		(unsigned)m_hist_count, (unsigned)n, len);
-	m_hist_cursor = next;
-	m_hist_idx++;
-
-	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
-	 * change mid-replay alters records-per-frame, so the up-front frame_count is
-	 * only an estimate. The host concatenates by frame_index. The export already
-	 * skips to the next record in the window, so the frame carrying the window's
-	 * last record ends the replay here — no trailing empty attempt (H-4). */
-	if (m_hist_cursor < m_hist_end) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(FRAME_GAP_SEC));
-	} else {
-		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
-		history_replay_finish();
-	}
-}
-
-int app_radio_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
-{
-	if (!app_radio_lrw_is_ready()) {
-		LOG_WRN("History replay requested but LRW not ready; ignoring");
-		return -EAGAIN;
-	}
-
-	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
-	 * sizing a frame, so counting and sending use an identical per-frame cap. */
-	m_hist_from = from_unix;
-	m_hist_to = to_unix;
-	m_hist_seq = seq;
-	m_hist_present = app_history_get_mask();
-	m_hist_interval = app_history_get_interval();
-
-	/* #409 3f: size with the worst-case frame_index/count first, then tighten
-	 * the bound to that frame count and recount. A bigger cap never needs more
-	 * frames, so the final count stays within the bound and counting and
-	 * sending keep using one identical per-frame cap. */
-	m_hist_frame_bound = UINT32_MAX;
-	size_t cap = history_frame_cap();
-	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
-
-	if (n > 0) {
-		m_hist_frame_bound = n;
-		n = app_history_count_frames(from_unix, to_unix, history_frame_cap());
-	}
-
-	if (n == 0) {
-		/* Empty window, or records exist but not one fits the current DR (the
-		 * 11 B budget tier)? Probe with the full frame buffer to tell apart. */
-		if (app_history_count_frames(from_unix, to_unix, sizeof(m_hist_tx_buf)) > 0) {
-			LOG_WRN("History replay: DR budget too small for one record");
-			return -EMSGSIZE;
-		}
-		LOG_INF("History replay: no records in window");
-		return -ENODATA;
-	}
-
-	m_hist_count = n;
-	m_hist_idx = 0;
-	app_history_span(&m_hist_cursor, &m_hist_end);
-	m_hist_retries = 0;
-	m_hist_active = true;
-	/* Capture goes on (absolute cursor); only the flash page rollover is held
-	 * off. app_report telemetry self-skips while the replay owns the radio. */
-	app_history_set_replay_active(true);
-
-	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
 	return 0;
 }
+
+static uint8_t lrw_tx_budget(void)
+{
+	return m_mac_started ? refresh_payload_budget() : 0;
+}
+
+/* Once per report, at its first frame: a due link check rides a LinkCheckReq,
+ * unless one is still unanswered. */
+static uint8_t lrw_tx_report_flags(bool due)
+{
+	return (due && !m_link_check_pending) ? APP_RADIO_FRAME_LINK_CHECK : 0;
+}
+
+/* The WARNING budget ran out (or M-2 found the node mute): rejoin with
+ * backoff. ABP cannot rejoin over the air: it stays in WARNING and keeps
+ * checking the link every report; M-2 still re-activates it (`forced`). */
+static int lrw_tx_rejoin(bool forced)
+{
+	if (!forced && g_app_config.lrw_activation != APP_CONFIG_LRW_ACTIVATION_OTAA) {
+		LOG_WRN("ABP mode - cannot rejoin");
+		return -ENOTSUP;
+	}
+	state_transition(APP_RADIO_STATE_RECONNECT);
+	return 0;
+}
+
+const struct app_radio_backend app_radio_lrw_backend = {
+	.send = lrw_tx_send,
+	.budget = lrw_tx_budget,
+	.tx_ready = app_radio_lrw_is_ready,
+	.report_flags = lrw_tx_report_flags,
+	.get_state = app_radio_lrw_get_state,
+	.warning_step = lrw_backoff_step,
+	.rejoin = lrw_tx_rejoin,
+	/* A DeviceTimeReq rides the next uplink; its answer raises
+	 * LORAWAN_TIME_UPDATED in downlink_callback(). */
+	.time_request = app_clock_force_resync,
+	.airtime_ms = lrw_tx_airtime_ms,
+	/* Unconfirmed: the link check is the liveness probe; alarms as
+	 * radio-alarm-ack says (app_radio). */
+	.confirm_kinds = 0,
+	.cmd_transport = APP_CMD_TRANSPORT_LRW,
+	.frame_gap_ms = FRAME_GAP_SEC * MSEC_PER_SEC,
+};
 
 /* ======================================================================== */
 /* Timer ISR handlers (thin: enqueue the right work, no state decisions)    */
@@ -1948,14 +1112,10 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
 	app_clock_handle_downlink(flags);
 
-	/* Deferred answer to a ClockSync command: once the network time actually
-	 * lands, send an Info uplink carrying the freshly-synced unix_time (the
-	 * command itself does not ack — saves an uplink, and a bare ack couldn't
-	 * carry the synced time yet). The Info encode is pushed to the radio work queue so it
-	 * never runs on the callback stack (#219). */
-	if ((flags & LORAWAN_TIME_UPDATED) &&
-	    atomic_test_and_clear_bit(&m_clock_sync_info_pending, 0)) {
-		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_info_work);
+	/* The time landed: app_radio answers a pending clock_sync, on its work
+	 * queue, never on this callback stack (#219). */
+	if (flags & LORAWAN_TIME_UPDATED) {
+		app_radio_time_event();
 	}
 
 	if (port == APP_RADIO_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
@@ -2016,9 +1176,7 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
 
 	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
-	if (app_radio_announce_pending()) {
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-	}
+	app_radio_announce_kick();
 }
 
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
@@ -2133,53 +1291,6 @@ void app_radio_lrw_suspend(void)
 	k_timer_stop(&m_rejoin_timer);
 }
 
-#if defined(CONFIG_WATCHDOG)
-static void heartbeat_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	app_wdog_ping(m_wdog_channel);
-
-	/* M-2: stale-uplink watchdog. The ping above only proves the radio work queue drains; if
-	 * telemetry is perpetually skipped (budget==0, retries exhausted) the station
-	 * is mute while the IWDG stays fed. When joined but no successful uplink has
-	 * left for APP_RADIO_STALE_FACTOR × interval_report, force a MAC-reset rejoin
-	 * (same escalation the link-check failure path uses) — unless the sends are
-	 * being refused by the duty cycle (F29): the MAC is alive then, and a rejoin
-	 * would only reset the band credits. Runs on the radio work queue, so state_transition()
-	 * and the duty-cycle streak are single-threaded here. */
-	enum app_radio_state st = (enum app_radio_state)atomic_get(&m_state);
-	if (st == APP_RADIO_STATE_HEALTHY || st == APP_RADIO_STATE_WARNING) {
-		int64_t now = k_uptime_get();
-
-		switch (app_radio_stale_check(now, m_last_uplink_ms, &m_dc,
-					      (uint32_t)g_app_config.interval_report)) {
-		case APP_RADIO_STALE_HOLD_DC:
-			if (!m_dc_hold_logged) {
-				LOG_WRN("No telemetry uplink for >%d report intervals, but the "
-					"duty cycle is refusing sends (%d s): no rejoin (M-2)",
-					APP_RADIO_STALE_FACTOR,
-					(int)((now - m_dc.since_ms) / 1000));
-				m_dc_hold_logged = true;
-			}
-			break;
-		case APP_RADIO_STALE_REJOIN:
-			LOG_WRN("No telemetry uplink for >%d report intervals - forcing rejoin "
-				"(M-2)",
-				APP_RADIO_STALE_FACTOR);
-			m_last_uplink_ms = now; /* don't re-trigger every tick */
-			state_transition(APP_RADIO_STATE_RECONNECT);
-			break;
-		default:
-			break;
-		}
-	}
-
-	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work,
-				  K_SECONDS(LRW_HEARTBEAT_PERIOD_SEC));
-}
-#endif /* defined(CONFIG_WATCHDOG) */
-
 /* Map the stored lrw-region to a Zephyr region, but only if that region is
  * compiled into this image (A1, #409). lorawan_set_region() returns -ENOTSUP for
  * a region whose CONFIG_LORAMAC_REGION_* is off; resolving it here lets the
@@ -2272,6 +1383,10 @@ int app_radio_lrw_init(void)
 			return ret;
 		}
 		m_mac_started = true;
+		m_region = region;
+		/* EU868: one 1 % allowance over all bands (the MAC's own duty cycle
+		 * still runs per band). Elsewhere no limit, the air is still shown. */
+		app_radio_duty_init(region == LORAWAN_REGION_EU868 ? APP_RADIO_DUTY_1PCT_MS : 0);
 
 		ret = apply_channel_plan();
 		if (ret) {
@@ -2293,21 +1408,11 @@ int app_radio_lrw_init(void)
 	}
 
 	k_work_init(&m_join_work, join_work_handler);
-	k_work_init(&m_send_work, send_work_handler);
-	k_work_init_delayable(&m_frame_work, frame_work_handler);
-	k_work_init(&m_telemetry_work, telemetry_work_handler);
-	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
-	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
-	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
-	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
-	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
-	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
-	k_work_init_delayable(&m_tx_retry_work, tx_retry_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
 #endif
@@ -2315,17 +1420,8 @@ int app_radio_lrw_init(void)
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
 	k_timer_init(&m_rejoin_timer, rejoin_timer_handler, NULL);
 
-#if defined(CONFIG_WATCHDOG)
-	/* Start the liveness heartbeat on the radio work queue so a wedged queue is detected and
-	 * the IWDG resets us (#181/#182). Registered even when radio-silent: the
-	 * queue still runs and a wedge there should still recover. */
-	m_wdog_channel = app_wdog_register(LRW_HEARTBEAT_TIMEOUT_MS);
-	if (m_wdog_channel < 0) {
-		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
-	}
-	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
-#endif /* defined(CONFIG_WATCHDOG) */
+	/* The radio work queue's liveness heartbeat and the M-2 watchdog (#182). */
+	app_radio_heartbeat_start();
 
 	atomic_set(&m_state, radio_silent ? APP_RADIO_STATE_DISABLED : APP_RADIO_STATE_IDLE);
 	m_init_join = true;
@@ -2338,32 +1434,9 @@ void app_radio_lrw_join(void)
 	k_work_submit_to_queue(app_radio_work_q(), &m_join_work);
 }
 
-void app_radio_lrw_send_telemetry(void)
-{
-	/* Compose + split + send a telemetry snapshot from the current sensor data,
-	 * now: app_radio already applied the fleet pre-send jitter (#267), or skipped
-	 * it for a host-requested uplink (F14). Runs on the radio work queue; send_work_handler
-	 * drains response/alarm first, then falls through to the telemetry compose
-	 * when both queues are empty. */
-	k_work_submit_to_queue(app_radio_work_q(), &m_telemetry_work);
-}
-
 void app_radio_lrw_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
-}
-
-/* Arm a forced LinkCheckReq on the next telemetry first-frame (shell/test path;
- * pair with app_report_trigger() to actually emit the uplink). */
-static void force_lc_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	m_force_lc_remaining = 1;
-}
-
-void app_radio_lrw_force_link_check(void)
-{
-	k_work_submit_to_queue(app_radio_work_q(), &m_force_lc_work);
 }
 
 enum app_radio_state app_radio_lrw_get_state(void)
@@ -2451,7 +1524,7 @@ bool app_radio_lrw_is_ready(void)
 {
 	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	return state == APP_RADIO_STATE_HEALTHY || state == APP_RADIO_STATE_WARNING;
+	return state == APP_RADIO_STATE_HEALTHY;
 }
 
 int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
@@ -2462,7 +1535,7 @@ int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
 		return -EINVAL;
 	}
 
-	info->state = (enum app_radio_state)atomic_get(&m_state);
+	info->state = app_radio_get_state(); /* with the common WARNING */
 
 	/* #340 L3: radio-mode OFF/P2P (#271) never calls lorawan_start(), so
 	 * LoRaMac's own state (incl. CryptoNvm) was never initialized -- querying
@@ -2518,111 +1591,17 @@ int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
 	info->snr = m_last_snr;
 	info->margin = m_last_margin;
 	info->gw_count = m_last_gw_count;
-	info->consecutive_lc_fail = m_consecutive_lc_fail;
-	info->consecutive_lc_ok = m_consecutive_lc_ok;
-	info->warning_lc_fail_total = m_warning_lc_fail_total;
-	info->message_count = m_message_count;
-	info->thresh_warning = FAIL_THRESHOLD_WARNING;
-	info->thresh_healthy = OK_THRESHOLD_HEALTHY;
+
+	struct app_radio_link link;
+
+	app_radio_get_link(&link);
+	info->consecutive_lc_fail = (int)link.fail_streak;
+	info->warning_lc_fail_total = (int)link.warning_fails;
+	info->message_count = (int)link.reports;
+	info->thresh_warning = APP_RADIO_LINK_WARNING_THRESHOLD;
 	info->thresh_reconnect = g_app_config.radio_link_check_fail_rejoin;
 	info->link_check_interval = g_app_config.radio_link_check_interval;
 
-	return 0;
-}
-
-int app_radio_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
-{
-	return queue_tx_response(port, buf, len, LRW_TX_OTHER);
-}
-
-static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind)
-{
-	if (!buf || len == 0) {
-		return -EINVAL;
-	}
-	if (len > APP_RADIO_LRW_RESPONSE_BUF_SIZE) {
-		LOG_ERR("Response too large: %zu B (max %d)", len, APP_RADIO_LRW_RESPONSE_BUF_SIZE);
-		return -EMSGSIZE;
-	}
-
-	struct lrw_tx_msg msg;
-
-	msg.port = port;
-	msg.kind = kind;
-	msg.len = len;
-	memcpy(msg.buf, buf, len);
-
-	if (k_msgq_put(&m_response_msgq, &msg, K_NO_WAIT) != 0) {
-		LOG_WRN("Response queue full (port %u); dropping", port);
-		return -ENOMEM;
-	}
-
-	/* Wake send path so the response leaves at the next jitter window. */
-	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-	return 0;
-}
-
-void app_radio_lrw_send_info_on_clock_sync(uint32_t seq)
-{
-	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
-	 * arrives (the ClockSync command answer). The seq is stored before the bit is
-	 * set, so the Info work item never pairs a new request with a stale seq. */
-	atomic_set(&m_clock_sync_info_seq, (atomic_val_t)seq);
-	atomic_set_bit(&m_clock_sync_info_pending, 0);
-}
-
-void app_radio_lrw_clock_sync(uint32_t seq)
-{
-	app_clock_force_resync();
-	app_radio_lrw_send_info_on_clock_sync(seq);
-}
-
-void app_radio_lrw_announce_kick(void)
-{
-	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-}
-
-size_t app_radio_lrw_response_cap(size_t buf_size)
-{
-	return refresh_payload_cap(buf_size);
-}
-
-int app_radio_lrw_queue_announce(bool settings, const uint8_t *buf, size_t len)
-{
-	return queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len,
-				 settings ? LRW_TX_SETTINGS : LRW_TX_INFO);
-}
-
-void app_radio_lrw_page_stream_kick(void)
-{
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(PAGE_STREAM_PACE_SEC));
-}
-
-int app_radio_lrw_send_alarm(const uint8_t *buf, size_t len)
-{
-	if (!buf || len == 0) {
-		return -EINVAL;
-	}
-	if (len > APP_RADIO_LRW_RESPONSE_BUF_SIZE) {
-		LOG_ERR("Alarm batch too large: %zu B (max %d)", len,
-			APP_RADIO_LRW_RESPONSE_BUF_SIZE);
-		return -EMSGSIZE;
-	}
-
-	struct lrw_tx_msg msg;
-
-	msg.port = APP_RADIO_LRW_ALARM_PORT;
-	msg.kind = LRW_TX_ALARM;
-	msg.len = len;
-	memcpy(msg.buf, buf, len);
-
-	if (k_msgq_put(&m_alarm_msgq, &msg, K_NO_WAIT) != 0) {
-		LOG_WRN("Alarm queue full; dropping batch");
-		return -ENOMEM;
-	}
-
-	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
 	return 0;
 }
 

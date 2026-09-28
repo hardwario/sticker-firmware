@@ -8,6 +8,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_led.h" /* NFC interaction LED signalling */
+#include "app_radio.h"
 #include "app_settings.h"
 #include "app_version.h"
 #include "app_log.h"
@@ -409,7 +410,9 @@ SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NUL
 
 static void clm_state_save(uint8_t state)
 {
+	app_radio_flash_hold();
 	int ret = settings_save_one("clm/state", &state, sizeof(state));
+	app_radio_flash_release();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
 	}

@@ -104,10 +104,23 @@ int32_t app_radio_data_hold_ms(void)
 	return test_radio_data_hold_ms;
 }
 
+/* Free alarm slots in app_radio's queue (#462); APP_RADIO_TX_QUEUE_DEPTH = the
+ * queue is empty. Cases set it; before() restores it. */
+uint32_t test_radio_alarm_free = APP_RADIO_TX_QUEUE_DEPTH;
+
+uint32_t app_radio_tx_alarm_free(void)
+{
+	return test_radio_alarm_free;
+}
+
+/* Frames handed to the radio. */
+size_t test_alarm_frames;
+
 int app_radio_send_alarm(const uint8_t *buf, size_t len)
 {
 	(void)buf;
 	(void)len;
+	test_alarm_frames++;
 	return 0;
 }
 
@@ -170,4 +183,13 @@ int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 	g_buzzer_play_last_kind = kind;
 	g_buzzer_play_last_repeat_s = repeat_s;
 	return 0;
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

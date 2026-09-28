@@ -14,8 +14,10 @@
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_led.h"
+#include "app_radio.h"
 #include "app_radio_lrw.h"
 #include "app_sensor.h"
 #include "app_settings.h"
@@ -23,6 +25,8 @@
 #include "src/app_config.pb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/ztest.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -99,6 +103,15 @@ void app_clock_force_resync(void)
 void app_radio_clock_sync(uint32_t seq)
 {
 	ARG_UNUSED(seq);
+}
+
+/* ReqHistory over a radio: never reached here (every request arrives over NFC). */
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+	ARG_UNUSED(seq);
+	return -EAGAIN;
 }
 
 void app_report_force(void)
@@ -309,4 +322,38 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 int app_settings_save_nonce_counter(void)
 {
 	return 0;
+}
+
+/* #460 F3: the rest of what app_cmd_run_action() (app_cmd.c) calls. This suite
+ * never runs a deferred action; a reboot would fail it. */
+int app_counters_save(bool force)
+{
+	ARG_UNUSED(force);
+	return 0;
+}
+
+void app_radio_rejoin(void)
+{
+}
+
+void app_radio_reset_link(void)
+{
+}
+
+FUNC_NORETURN void sys_reboot(int type)
+{
+	printk("unexpected sys_reboot(%d)\n", type);
+	ztest_test_fail();
+	for (;;) {
+		k_sleep(K_FOREVER);
+	}
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

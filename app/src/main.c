@@ -20,7 +20,6 @@
 #include "app_power.h"
 #include "app_report.h"
 #include "app_sensor.h"
-#include "app_settings.h"
 #include "app_radio.h"
 #include "app_wdog.h"
 
@@ -126,99 +125,10 @@ static void nfc_run_deferred_cmd_actions(void)
 {
 	enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
 	while (cmd_action != APP_CMD_ACTION_NONE) {
-		switch (cmd_action) {
-		case APP_CMD_ACTION_SETTINGS_SAVE:
+		if (app_cmd_action_reboots(cmd_action)) {
 			nfc_result_before_reboot();
-			app_settings_save(true);
-			break;
-		case APP_CMD_ACTION_REBOOT:
-			nfc_result_before_reboot();
-			LOG_WRN_REBOOTING("NFC command");
-			sys_reboot(SYS_REBOOT_COLD);
-			break;
-		case APP_CMD_ACTION_DEVICE_RESET:
-			nfc_result_before_reboot();
-			app_settings_device_reset();
-			break;
-		case APP_CMD_ACTION_FACTORY_RESET:
-			/* #299, narrower than device_reset above: drops LoRaWAN too. */
-			nfc_result_before_reboot();
-			app_settings_factory_reset();
-			break;
-		case APP_CMD_ACTION_VENDOR_RESET:
-			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
-			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
-			 * LoRaWAN. The replacement secret_key travelled in the same request. */
-			nfc_result_before_reboot();
-			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
-			break;
-		case APP_CMD_ACTION_SECRET_KEY_SAVE:
-			/* #322: persist the staged new secret_key (#299 set_secret_key) and
-			 * cold-reboot, so the rotated key is live right away via h_commit's
-			 * normal g_app_config sync. A bare persist left the device
-			 * authenticating with the OLD key until some later, unrelated
-			 * reboot. The Ack the phone already read was encrypted with that old
-			 * key — deliberately: this action only runs once the response has
-			 * been delivered (#242), so the reply is never cut off. */
-			nfc_result_before_reboot();
-			app_settings_save(true);
-			break;
-		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
-			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
-			 * together, always (both the same-token and new-token claim_active
-			 * cases run this action, see app_cmd_handle_claim_active) so the phone can
-			 * always assume "ack read -> reboot" regardless of which case it
-			 * took. When a new token was staged, this also ensures
-			 * g_app_config.claim_token becomes live (h_commit) in the same
-			 * breath the latch flips — no window where a poll could
-			 * re-expose the OLD token; when no new token was given this is a
-			 * same-value no-op re-persist.
-			 *
-			 * #340 M15: app_nfc_claim_active() already persisted clm/state=ACTIVE
-			 * to flash by the time app_settings_save() runs. If that save
-			 * then fails, don't keep running live with the latch reopened
-			 * but the (possibly new) claim_token never persisted - mirrors
-			 * app_settings.c's post-destructive-step convention (34a1ed8):
-			 * force a reboot so the device re-reads whatever DID actually
-			 * get persisted, instead of a silent, un-rebooted return leaving
-			 * flash and live state out of sync until some later, unrelated
-			 * reboot. */
-			nfc_result_before_reboot();
-			app_nfc_claim_active();
-			if (app_settings_save(true)) {
-				LOG_WRN_REBOOTING("claim-token save failed");
-				sys_reboot(SYS_REBOOT_COLD);
-			}
-			break;
-		case APP_CMD_ACTION_ENTER_CALIBRATION:
-			/* Persist calibration=true + reboot; next boot enters
-			 * calibration mode (app_calibration_init() clears it).
-			 * Write the staging config (settings_save persists that,
-			 * not the boot-time g_app_config copy). */
-			nfc_result_before_reboot();
-			app_config()->calibration = true;
-			app_settings_save(true);
-			break;
-		case APP_CMD_ACTION_LRW_RESET:
-			/* Forget the network session (#109) on every stack + reboot: the
-			 * LoRaWAN NVM (counters + DevNonce) and the P2P pairing. */
-			nfc_result_before_reboot();
-			app_radio_reset_link();
-			LOG_WRN_REBOOTING("radio session reset");
-			sys_reboot(SYS_REBOOT_COLD);
-			break;
-		case APP_CMD_ACTION_LRW_JOIN:
-			/* Force a (re)join now, no reboot (#109), on whichever radio runs:
-			 * a LoRaWAN join or a fresh P2P join handshake. */
-			app_radio_rejoin();
-			break;
-		case APP_CMD_ACTION_COUNTERS_SAVE:
-			/* Persist the (reset) pulse totalizers, no reboot. */
-			app_counters_save(true);
-			break;
-		default:
-			break;
 		}
+		app_cmd_run_action(cmd_action);
 		cmd_action = app_nfc_take_cmd_action();
 	}
 }
@@ -618,7 +528,7 @@ int main(void)
 		} else if (radio_state == APP_RADIO_STATE_DISABLED) {
 			/* Radio disabled (#271/#278): a single yellow blink — the lowest rung
 			 * of the yellow severity scale. LoRaWAN: DevEUI all-zero; P2P:
-			 * lrw_appkey or lrw_deveui all-zero (device not provisioned). */
+			 * radio_appkey or radio_deveui all-zero (device not provisioned). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,
