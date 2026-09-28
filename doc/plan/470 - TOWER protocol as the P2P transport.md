@@ -629,7 +629,9 @@ vs after: M2, M2b, M3 SF7.
 | M3 window | SF7 ACK window shrink, 50 frames each: 100/95/92/91 ms 50/50; 90 ms fails (3 TO / 53). Minimal window = turnaround + ToA(ACK) + 3.3 ms |
 | M5 | dropped ACKs: SF7 drop 1 ×100 → 100 OK (NB ok 100, dup 100); drop all 3 ×20 → 20 TO, NB delivered 20 once (dup 40); SF10 drop 1 ×30 → 30 OK. Resends byte-identical, counters strictly increasing, 0 replay / MIC fails |
 | ToA | ACK 28 B at SF7: 66.95 ms measured vs 66.82 ms calculated (+0.2 %) |
-| M6 | SF7 × 500, 96 B DL after `PENDING`: 500/500; ACK RxDone → DL RxDone 185.3 / 185.4 / 185.6 ms min/avg/max (DL ToA 164.1 ms); 0 MIC / replay / dup. SF10 × 200 pending |
+| M6 | SF7 × 500, 96 B DL after `PENDING`: 500/500; ACK RxDone → DL RxDone 185.3 / 185.4 / 185.6 ms min/avg/max (DL ToA 164.1 ms); 0 MIC / replay / dup. SF10 × 200: 200/200, ACK RxDone → DL RxDone 1006.3 ms avg (ToA 983.8 ms = turnaround + ToA + ~2.5 ms) |
+| M4 | SF7 7 lengths × 5 (23–255 B), SF12 6 lengths × 3 (23–96 B): 53/53 OK, counters strictly increasing. NB TX vs Semtech formula: SF7 +0.17/−0.01 ms, SF12 −2.2…−5.8 ms (−0.15 %, timebase). Node TX one CR block short at SF12 → **finding below** |
+| M7 / M8 | not run: no PPK2 on this host; duty not enforced in the lab |
 | NB (16:26–18:06Z) | RX 2688 frames: 2434 fresh + 254 dup (net-layer reps), 0 MIC / replay / CRC / header / overrun errors; RSSI −69…−56 dBm (mean −62.5), SNR 4…14 dB (mean 11.6) |
 | NB turnaround | 20.001–20.017 ms at the 20 ms setting; 25.0 / 30.0 ms at the M2b settings |
 | NB ToA (28 B) | measured − calculated: SF7 +0.16 ms (n = 1965), SF9 −0.08 ms (226.3 ms), SF10 −0.34 ms (411.6 ms), SF12 −2.26 ms (1.647 s) |
@@ -640,6 +642,16 @@ vs after: M2, M2b, M3 SF7.
 ~1.5 ms (RX-done latency on both sides): +3.9 ms at SF7, +8.8 at SF9, +15.9 at SF10, ~+64 at
 SF12. A fixed-ms margin (`20 + ToA + 60 ms`) misses at SF12 (0/37). §5 rule for P1: **ACK
 window = turnaround + ToA(ACK) + 3 symbols + fixed margin**, and the same for the DL window.
+
+**Finding — fast path sent without the payload CRC (fixed):** `lora_send_recv_async` in the
+fork (sticker-zephyr#2) called `SetRxConfig(crcOn = false)` before `Radio.Send()`; loramac-node
+sx126x shares `PacketParams` between TX and RX, so every node uplink of P0 went out without
+the LoRa payload CRC (node TX = ToA(no CRC) + ~6.8 ms + ~15 µs/B). The NB accepted them;
+a corrupted frame died only at the CCM tag, and `crc_err` could never fire. Fix: `crcOn = true`
+(one line, reception unchanged — the explicit header carries the CRC flag),
+hardwario/sticker-zephyr#3. P1 builds use the fixed driver; a short M4 re-run confirms it.
+
+**P0 verdict: GO** (M1–M6 pass; M7/M8 not run, moved to P2 HIL).
 
 **Go / no-go:** M1–M6 pass → P1. If M2 misses 20 ms, the `lora` constants just grow (timing
 is not on the wire); a no-go only if confirmed delivery cannot be made reliable within a
