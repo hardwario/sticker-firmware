@@ -187,14 +187,14 @@ sends `last_seen = 0` without the flag.
 | ID | Name | Body | Delivery | Note |
 |---|---|---|---|---|
 | `0x80` | `EVT_BOOT` | `fw_ver[3], git_sha[4], reset_cause` (8 B) | best-effort | the table, queue and block are empty; the host runs §6.2 |
-| `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | ring | `dest == 0` (JoinReq) or an unknown `src`; no ACK |
+| `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | best-effort | `dest == 0` (JoinReq) or an unknown `src`; no ACK |
 | `0x82` | `EVT_TX_DONE` | `tx_id, status, t_actual_ms` | best-effort | the `TX_SCHEDULE` outcome only |
-| `0x83` | `EVT_LOG` | ASCII | best-effort | debug builds only |
+| `0x83` | `EVT_LOG` | ASCII | best-effort | all builds, rate-limited |
 | `0x84` | `EVT_TWR_UPLINK` | `t_ms u64, rssi i16, snr i8, frame_flags u8, addr u32, counter u32, ack u8, len u8, plaintext` | ring | fresh frames only; `ack`: 0 none, 1 sent, 2 sent + `PENDING`, 3 late, 4 no counter, **5 suppressed (ring full, §4.1)** |
 | `0x85` | `EVT_TWR_TX` | `addr, item, outcome, gw_counter, node_ack_counter, ack_rssi` | ring | outcome `DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER` |
 | `0x86` | `EVT_TWR_CTR_LOW` | `next u32, last u32` | best-effort, repeated every 10 s until a new block | below 25 % left; fail-closed when the block is used up |
 
-SNR in whole dB (the Zephyr driver reports whole dB).
+`snr` is in quarter dB (SX126x native, `snr_q`).
 
 ## 6. State machine and sequences
 
@@ -259,7 +259,7 @@ central (proximos-v2 `p2p_tower_gateway.md` §3.2).
   inside the enclosure. Accepted, same class as the key in NB RAM (T3). The threat is
   physical access to the Hub, which leads to rejoin / new AppKeys (#470 §6.6).
 - No command reads a key back (`TWR_NODE_LIST` and `GET_INFO` have none). The
-  debug `EVT_LOG` must never print keys or plaintext.
+  `EVT_LOG` must never print keys or plaintext.
 - `/dev/ttyAMA3` only for `control-radio` (`DeviceAllow=`, opened after landlock, as
   today).
 - The NB never persists keys, counters or the queue (D15). RDP on in production.
