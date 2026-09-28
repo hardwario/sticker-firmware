@@ -218,16 +218,18 @@ Then:
 
 ### 6.4 Join
 
-`EVT_RX (dest 0)` → the central verifies it and derives the session → **persist the
-session** → `TWR_NODE_ADD{last_seen = 0}` (a new key, without `KEEP_NEWER`) →
-`TX_SCHEDULE` (JoinAccept at `t_rx + rx_delay`).
+`EVT_RX (dest 0)` → the central verifies it and derives the session → `TX_SCHEDULE`
+(JoinAccept at `t_rx + rx_delay`) → on `RSP OK` persist the session →
+`TWR_NODE_ADD{last_seen = 0}` (a new key, without `KEEP_NEWER`). This is decision D2 of the
+central (proximos-v2 `p2p_tower_gateway.md` §3.2).
 
-- Persisting first means a central crash cannot leave the node with a session the Hub lacks.
-- The cost: if the JoinAccept is refused or missed, the node stays on its old session
-  while the Hub already has the new one. At most one extra rejoin follows, since a new
-  `dev_nonce` replaces the session.
-- The NB has the key before the node can send its first uplink under it, so there is no
-  race.
+- The NB also transmits on its own (ACK, DL), so `TX_SCHEDULE` can come back `BUSY` or
+  `LATE`. A refused JoinAccept then leaves the node on the pairing it had. Persisting
+  first would swap the NB's key and cut off a node that never got the accept.
+- The crash window between `RSP OK` and the persist is a local file write of a few ms.
+  The worst case is one supervision rejoin.
+- No race with the first uplink: `TWR_NODE_ADD` follows `RSP OK` within ms, and the
+  accept goes on air at `t_rx + 1 s`.
 
 ### 6.5 Uplink and downlink
 
@@ -295,7 +297,7 @@ Everything in HC's frozen set holds. §4 adds:
   delivery `seq`.
 
 Reviewed by the Hub controller 2026-09-28: §4.1 and §4.2 are agreed with the fixes above,
-at ~2 h for the NB and the central in parallel, after the first E2E. The normative copy is
+the join order stays D2 (§6.4), at ~2 h for the NB and the central in parallel, after the first E2E. The normative copy is
 folded into proximos-v2 `plan/control/radio/p2p_tower_gateway.md`. Golden vectors
 `nb_link_golden.json` are generated from the central's Rust codec and consumed verbatim by
 the NB native_sim.
