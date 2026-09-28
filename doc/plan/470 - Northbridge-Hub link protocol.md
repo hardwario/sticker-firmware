@@ -61,6 +61,10 @@ the MCU, and everything durable is in the central.
   | 7 | `NOT_FOUND` |
   | 8 | `UNSUPPORTED` (unknown command) |
 
+- `BAD_PARAM` is strict: undefined flag bits set, a body of the wrong length, a value out of
+  range (e.g. `tx_power_dbm` outside the board PA range, no clamping), `TWR_QUEUE_PUSH` with
+  `item`, `ttl_s` or `len` = 0, `TX_CANCEL` after the transmission has started.
+
 - Command timeout on the host: 500 ms.
 - Retransmission of commands: only for idempotent commands (§5, *Idempotent* column).
 - Bad CRC: drop the frame, resync on the next `0x7E`, count `crc_err`.
@@ -173,7 +177,7 @@ sends `last_seen = 0` without the flag.
 | `0x11` | `TWR_NODE_ADD` | `addr u32, session_key[16], last_seen u32, flags u8` (b0 `HOME`, b1 `KEEP_NEWER` §4.2) | yes | upsert; a new key drops the node's queue; `BAD_PARAM` for addr `0` / `0xFFFFFFFF` / `net_id`; `NO_SPACE` |
 | `0x12` | `TWR_NODE_REMOVE` | `addr u32` | yes (`NOT_FOUND` = done) | drops the peer and its queue |
 | `0x13` | `TWR_CTR_BLOCK` | `first u32, last u32` | yes | replaces the block; the NB never goes below the old `next` (a block with `last < next` → `BAD_PARAM`) |
-| `0x14` | `TWR_QUEUE_PUSH` | `addr u32, item u16 ≠ 0, ttl_s u16, flags u8` (b0 `CONFIRMED`), `len u8, plaintext ≤ 78` | **yes, by `(addr, item)`**: the same item already queued → `OK` without a duplicate | plaintext = the whole `0x81…` / `0x91…` envelope; sealed at TX time |
+| `0x14` | `TWR_QUEUE_PUSH` | `addr u32, item u16 ≠ 0, ttl_s u16, flags u8` (b0 `CONFIRMED`), `len u8, plaintext ≤ 78` | **yes, by `(addr, item)`**: the same item already queued replaces it (`OK`, no duplicate); `BUSY` while it is on air | plaintext = the whole `0x81…` / `0x91…` envelope; sealed at TX time. P2: one TX attempt per item, also for `CONFIRMED` (retries are the central's) |
 | `0x15` | `TWR_QUEUE_DROP` | `addr u32, item u16` (0 = all) | yes | no `EVT_TWR_TX` for dropped items |
 | `0x17` | `TWR_NODE_LIST` | `start u16` | yes | paged `{addr, last_seen, flags}`, max 24 per RSP, **never keys** |
 | `0x18` | `TWR_EVT_ACK` | `seq u8` | yes | cumulative; no RSP (saves the link) |
