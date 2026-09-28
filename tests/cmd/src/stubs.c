@@ -12,14 +12,19 @@
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
+#include "app_radio.h"
 #include "app_sensor.h"
+#include "app_settings.h"
 
 #include "src/app_config.pb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/ztest.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -91,7 +96,12 @@ int app_clock_set_unix(uint32_t unix_s)
 	return 0;
 }
 
-void app_clock_force_resync(void)
+void app_radio_clock_sync(uint32_t seq)
+{
+	ARG_UNUSED(seq);
+}
+
+void app_report_force(void)
 {
 }
 
@@ -263,26 +273,56 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 	return APP_ALARM_KIND_THRESHOLD;
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_state app_radio_get_state(void)
 {
-	return APP_LRW_STATE_HEALTHY;
+	return APP_RADIO_STATE_HEALTHY;
 }
 
-/* Last-downlink link quality (#409 A2): tests set test_dl_valid + values. */
+/* RadioState source (#446): tests set test_dl_valid + values for the last
+ * downlink, and test_radio_full for every other group. */
 bool test_dl_valid;
 int16_t test_dl_rssi;
 int8_t test_dl_snr;
 uint32_t test_dl_age_s;
+bool test_radio_full;
 
-bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+void app_radio_get_status(struct app_radio_status *st)
 {
-	if (!test_dl_valid) {
-		return false;
+	*st = (struct app_radio_status){0};
+	st->state = app_radio_get_state();
+	st->uptime_s = 86400;
+	if (test_dl_valid) {
+		st->has_dl = true;
+		st->dl_rssi = test_dl_rssi;
+		st->dl_snr = test_dl_snr;
+		st->dl_age_s = test_dl_age_s;
 	}
-	*rssi = test_dl_rssi;
-	*snr = test_dl_snr;
-	*age_s = test_dl_age_s;
-	return true;
+	if (test_radio_full) {
+		st->sf = 7;
+		st->has_datarate = true;
+		st->datarate = 5;
+		st->has_tx_power = true;
+		st->tx_power_dbm = 14;
+		st->has_dl_unix = test_dl_valid;
+		st->dl_unix_time = 1790449436u;
+		st->has_ul_rssi = true;
+		st->ul_rssi = -58;
+		st->ul_snr = 12;
+		st->has_ul_margin = true;
+		st->ul_margin = 20;
+		st->ul_gw_count = 2;
+		st->has_session = true;
+		st->dev_addr = 0x260B1234u;
+		st->fcnt_up = 2334;
+		st->fail_streak = 3;
+		st->join_attempts = 1;
+		st->duty_blocked_s = 120;
+		st->has_airtime = true;
+		st->airtime_hour_ms = 3456;
+		for (size_t i = 0; i < APP_RADIO_CNT_COUNT; i++) {
+			st->cnt[i] = 100 + (uint32_t)i;
+		}
+	}
 }
 
 /* device_status inputs: app_cmd_get_info() aggregates these into the status
@@ -364,4 +404,89 @@ bool app_history_is_ready(void)
 bool app_sensor_i2c_wedged(void)
 {
 	return false;
+}
+
+/* ---- The history-replay entry point app_cmd_handle_req_history calls ---- */
+
+int g_history_replay_start_calls;
+uint32_t g_history_replay_start_from;
+uint32_t g_history_replay_start_to;
+uint32_t g_history_replay_start_seq;
+/* What the stub reports, as app_radio_history_replay_start(): 0 = a stream runs
+ * and IS the answer; -EMSGSIZE / -ENODATA / -EAGAIN = the handler answers an
+ * Error instead. */
+int test_history_replay_start_ret;
+
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	g_history_replay_start_calls++;
+	g_history_replay_start_from = from_unix;
+	g_history_replay_start_to = to_unix;
+	g_history_replay_start_seq = seq;
+	return test_history_replay_start_ret;
+}
+
+/* ---- #460 F3: what the one executor, app_cmd_run_action(), drives ---- */
+
+int test_run_settings_save_calls;
+int test_run_settings_save_ret;
+int test_run_device_reset_calls;
+int test_run_factory_reset_calls;
+int test_run_vendor_reset_calls;
+const uint8_t *test_run_vendor_reset_key;
+int test_run_counters_save_calls;
+int test_run_rejoin_calls;
+int test_run_reset_link_calls;
+
+int app_settings_save(bool reboot)
+{
+	ARG_UNUSED(reboot);
+	test_run_settings_save_calls++;
+	return test_run_settings_save_ret;
+}
+
+int app_settings_device_reset(void)
+{
+	test_run_device_reset_calls++;
+	return 0;
+}
+
+int app_settings_factory_reset(void)
+{
+	test_run_factory_reset_calls++;
+	return 0;
+}
+
+int app_settings_vendor_reset(const uint8_t *new_secret_key)
+{
+	test_run_vendor_reset_calls++;
+	test_run_vendor_reset_key = new_secret_key;
+	return 0;
+}
+
+int app_counters_save(bool force)
+{
+	ARG_UNUSED(force);
+	test_run_counters_save_calls++;
+	return 0;
+}
+
+void app_radio_rejoin(void)
+{
+	test_run_rejoin_calls++;
+}
+
+void app_radio_reset_link(void)
+{
+	test_run_reset_link_calls++;
+}
+
+/* The executor tests run only the actions that return; a reboot fails them. */
+FUNC_NORETURN void sys_reboot(int type)
+{
+	printk("unexpected sys_reboot(%d)\n", type);
+	ztest_test_fail();
+	for (;;) {
+		k_sleep(K_FOREVER);
+	}
 }

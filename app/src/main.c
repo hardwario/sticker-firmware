@@ -15,12 +15,11 @@
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
 #include "app_report.h"
 #include "app_sensor.h"
-#include "app_settings.h"
+#include "app_radio.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -84,6 +83,9 @@ static void die(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/* Boot self-test of all three LEDs, 3 s. It plays in the LED thread; main()
+ * goes on with the init chain meanwhile, and an NFC tap cuts it short
+ * (app_led_hold), so neither the phone nor the boot waits for it. */
 static void play_carousel_boot(void)
 {
 	struct app_led_play_req req = {
@@ -102,7 +104,6 @@ static void play_carousel_boot(void)
 		.repetitions = 1};
 
 	app_led_play(&req);
-	k_sleep(K_MSEC(5000));
 }
 
 /* #414: before an NFC-triggered reboot, let the mailbox session's result finish
@@ -122,96 +123,10 @@ static void nfc_run_deferred_cmd_actions(void)
 {
 	enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
 	while (cmd_action != APP_CMD_ACTION_NONE) {
-		switch (cmd_action) {
-		case APP_CMD_ACTION_SETTINGS_SAVE:
+		if (app_cmd_action_reboots(cmd_action)) {
 			nfc_result_before_reboot();
-			app_settings_save(true);
-			break;
-		case APP_CMD_ACTION_REBOOT:
-			nfc_result_before_reboot();
-			sys_reboot(SYS_REBOOT_COLD);
-			break;
-		case APP_CMD_ACTION_DEVICE_RESET:
-			nfc_result_before_reboot();
-			app_settings_device_reset();
-			break;
-		case APP_CMD_ACTION_FACTORY_RESET:
-			/* #299, narrower than device_reset above: drops LoRaWAN too. */
-			nfc_result_before_reboot();
-			app_settings_factory_reset();
-			break;
-		case APP_CMD_ACTION_VENDOR_RESET:
-			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
-			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
-			 * LoRaWAN. The replacement secret_key travelled in the same request. */
-			nfc_result_before_reboot();
-			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
-			break;
-		case APP_CMD_ACTION_SECRET_KEY_SAVE:
-			/* #322: persist the staged new secret_key (#299 set_secret_key) and
-			 * cold-reboot, so the rotated key is live right away via h_commit's
-			 * normal g_app_config sync. A bare persist left the device
-			 * authenticating with the OLD key until some later, unrelated
-			 * reboot. The Ack the phone already read was encrypted with that old
-			 * key — deliberately: this action only runs once the response has
-			 * been delivered (#242), so the reply is never cut off. */
-			nfc_result_before_reboot();
-			app_settings_save(true);
-			break;
-		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
-			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
-			 * together, always (both the same-token and new-token claim_active
-			 * cases run this action, see app_cmd_handle_claim_active) so the phone can
-			 * always assume "ack read -> reboot" regardless of which case it
-			 * took. When a new token was staged, this also ensures
-			 * g_app_config.claim_token becomes live (h_commit) in the same
-			 * breath the latch flips — no window where a poll could
-			 * re-expose the OLD token; when no new token was given this is a
-			 * same-value no-op re-persist.
-			 *
-			 * #340 M15: app_nfc_claim_active() already persisted clm/state=ACTIVE
-			 * to flash by the time app_settings_save() runs. If that save
-			 * then fails, don't keep running live with the latch reopened
-			 * but the (possibly new) claim_token never persisted - mirrors
-			 * app_settings.c's post-destructive-step convention (34a1ed8):
-			 * force a reboot so the device re-reads whatever DID actually
-			 * get persisted, instead of a silent, un-rebooted return leaving
-			 * flash and live state out of sync until some later, unrelated
-			 * reboot. */
-			nfc_result_before_reboot();
-			app_nfc_claim_active();
-			if (app_settings_save(true)) {
-				sys_reboot(SYS_REBOOT_COLD);
-			}
-			break;
-		case APP_CMD_ACTION_ENTER_CALIBRATION:
-			/* Persist calibration=true + reboot; next boot enters
-			 * calibration mode (app_calibration_init() clears it).
-			 * Write the staging config (settings_save persists that,
-			 * not the boot-time g_app_config copy). */
-			nfc_result_before_reboot();
-			app_config()->calibration = true;
-			app_settings_save(true);
-			break;
-#if defined(CONFIG_LORAWAN)
-		case APP_CMD_ACTION_LRW_RESET:
-			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
-			nfc_result_before_reboot();
-			app_lrw_reset_nvm();
-			sys_reboot(SYS_REBOOT_COLD);
-			break;
-		case APP_CMD_ACTION_LRW_JOIN:
-			/* Force a (re)join now, no reboot (#109). */
-			app_lrw_join();
-			break;
-#endif /* defined(CONFIG_LORAWAN) */
-		case APP_CMD_ACTION_COUNTERS_SAVE:
-			/* Persist the (reset) pulse totalizers, no reboot. */
-			app_counters_save(true);
-			break;
-		default:
-			break;
 		}
+		app_cmd_run_action(cmd_action);
 		cmd_action = app_nfc_take_cmd_action();
 	}
 }
@@ -419,12 +334,6 @@ int main(void)
 
 	play_carousel_boot();
 
-#if defined(CONFIG_WATCHDOG)
-	/* The carousel just blocked for 5 s of the 10 s IWDG window; feed again so
-	 * the init chain below gets the full budget rather than the remainder. */
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
@@ -440,22 +349,22 @@ int main(void)
 		LOG_WRN("app_alarm_rules_init failed: %d (alarms unavailable)", ret);
 	}
 
-#if defined(CONFIG_LORAWAN)
-	ret = app_lrw_init();
+	/* Radio (#118): bring up the stack selected by `radio_mode` (LoRaWAN or
+	 * raw-LoRa P2P). Both are linked; only the chosen one is started. */
+	ret = app_radio_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
+		LOG_ERR_CALL_FAILED_INT("app_radio_init", ret);
 		die();
 	}
 
 	/* Report orchestration (#126): owns the interval_report cadence and hands
-	 * telemetry frames to app_lrw. Register before the join so the link-ready
-	 * kick is wired when on_join_success fires. */
+	 * telemetry frames to the radio. Register before the start so the
+	 * link-ready kick is wired when the radio comes up. */
 	ret = app_report_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_report_init", ret);
 		die();
 	}
-#endif /* defined(CONFIG_LORAWAN) */
 
 	/* A failed battery monitor must not brick an otherwise-healthy device into a
 	 * die() reboot loop (#88): the radio and sensors work without it. Degrade
@@ -487,8 +396,8 @@ int main(void)
 	 * app_counters_init() / app_history_init() / app_sensor_init() / ... would act
 	 * on uninitialised state (#340 M8: a reset_counters saved before the counters
 	 * were restored wiped every totalizer). Until then the chip stays unpowered,
-	 * so a phone on the tag just waits for VCC_ON. Before app_lrw_join(): the
-	 * claim state loaded here feeds the join Info.
+	 * so a phone on the tag just waits for VCC_ON. Before app_radio_start()
+	 * (the LoRaWAN join): the claim state loaded here feeds the join Info.
 	 *
 	 * The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
@@ -506,9 +415,7 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-#if defined(CONFIG_LORAWAN)
-	app_lrw_join();
-#endif /* defined(CONFIG_LORAWAN) */
+	app_radio_start();
 
 	app_alarm_set_event_callback(event_led_handler, NULL);
 
@@ -569,13 +476,15 @@ int main(void)
 			led_handled = true;
 		}
 
-#if defined(CONFIG_LORAWAN)
-		enum app_lrw_state lrw_state = app_lrw_get_state();
+		/* Status LED reflects the active radio, LoRaWAN or P2P, through the
+		 * common app_radio state (a P2P join, self-heal or link-check-like
+		 * WARNING animates exactly like its LoRaWAN counterpart). */
+		enum app_radio_state radio_state = app_radio_get_state();
 
 		if (led_handled) {
 			/* NFC interaction (or a higher-priority indicator) owns the LED. */
-		} else if (lrw_state == APP_LRW_STATE_JOINING ||
-			   lrw_state == APP_LRW_STATE_RECONNECT) {
+		} else if (radio_state == APP_RADIO_STATE_JOINING ||
+			   radio_state == APP_RADIO_STATE_RECONNECT) {
 			/* Not on the network — initial join or a rejoin after the link was
 			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
 			 * which keeps its session), so it carries a red accent: one yellow
@@ -598,7 +507,7 @@ int main(void)
 				.repetitions = 1};
 			app_led_play(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_WARNING) {
+		} else if (radio_state == APP_RADIO_STATE_WARNING) {
 			/* Link-check streak failing but the session is still up (#278) — the
 			 * MILD network state. Two yellow blinks, no red (one step above
 			 * radio-off's single yellow, one below joining's yellow+red). */
@@ -608,10 +517,10 @@ int main(void)
 							.repetitions = 2};
 			app_led_blink(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
-			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (radio-mode off/p2p), not a network fault. */
+		} else if (radio_state == APP_RADIO_STATE_DISABLED) {
+			/* Radio disabled (#271/#278): a single yellow blink — the lowest rung
+			 * of the yellow severity scale. LoRaWAN: DevEUI all-zero; P2P:
+			 * radio_appkey or radio_deveui all-zero (device not provisioned). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,
@@ -619,7 +528,6 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		}
-#endif /* defined(CONFIG_LORAWAN) */
 
 		/* Always evaluate alarms — do NOT short-circuit on led_handled. The poll
 		 * is the only place thresholds/state/count rules, the no-data watchdog and
@@ -673,16 +581,20 @@ int main(void)
 	return 0;
 }
 
-#if defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN)
+#if defined(CONFIG_SHELL)
 
+/* Unlike app_radio_start() (boot-time bring-up), app_radio_rejoin() always forces
+ * a fresh join, even with a live session or pairing. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_join();
+	app_radio_rejoin();
 
 	shell_print(shell, "command succeeded");
 
 	return 0;
 }
+
+SHELL_CMD_REGISTER(join, NULL, "Force a fresh (re)join, even if already joined/paired.", cmd_join);
 
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
@@ -693,7 +605,6 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
-SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
+SHELL_CMD_REGISTER(send, NULL, "Trigger an ad-hoc report send.", cmd_send);
 
-#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
+#endif /* defined(CONFIG_SHELL) */

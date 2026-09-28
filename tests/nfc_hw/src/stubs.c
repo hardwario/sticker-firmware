@@ -14,15 +14,19 @@
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio.h"
+#include "app_radio_lrw.h"
 #include "app_sensor.h"
 #include "app_settings.h"
 
 #include "src/app_config.pb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/ztest.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -92,7 +96,21 @@ int app_clock_set_unix(uint32_t unix_s)
 	return 0;
 }
 
-void app_clock_force_resync(void)
+void app_radio_clock_sync(uint32_t seq)
+{
+	ARG_UNUSED(seq);
+}
+
+/* ReqHistory over a radio: never reached here (every request arrives over NFC). */
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+	ARG_UNUSED(seq);
+	return -EAGAIN;
+}
+
+void app_report_force(void)
 {
 }
 
@@ -218,17 +236,15 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 	return APP_ALARM_KIND_THRESHOLD;
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_state app_radio_get_state(void)
 {
-	return APP_LRW_STATE_HEALTHY;
+	return APP_RADIO_STATE_HEALTHY;
 }
 
-bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+void app_radio_get_status(struct app_radio_status *st)
 {
-	(void)rssi;
-	(void)snr;
-	(void)age_s;
-	return false;
+	*st = (struct app_radio_status){0};
+	st->state = app_radio_get_state();
 }
 
 uint32_t app_alarm_status_flags(void)
@@ -261,6 +277,14 @@ void app_led_set(enum app_led_channel ch, int state)
 		g_led_ch[ch] = state;
 	}
 	g_led_set_calls++;
+}
+
+/* Indicator hold (app_led_hold) as last set by app_nfc.c. */
+int g_led_hold;
+
+void app_led_hold(bool hold)
+{
+	g_led_hold = hold;
 }
 
 /* Reset/save ladder — app_nfc.c only reaches these via its deferred-action
@@ -302,4 +326,38 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 int app_settings_save_nonce_counter(void)
 {
 	return 0;
+}
+
+/* #460 F3: the rest of what app_cmd_run_action() (app_cmd.c) calls. This suite
+ * never runs a deferred action; a reboot would fail it. */
+int app_counters_save(bool force)
+{
+	ARG_UNUSED(force);
+	return 0;
+}
+
+void app_radio_rejoin(void)
+{
+}
+
+void app_radio_reset_link(void)
+{
+}
+
+FUNC_NORETURN void sys_reboot(int type)
+{
+	printk("unexpected sys_reboot(%d)\n", type);
+	ztest_test_fail();
+	for (;;) {
+		k_sleep(K_FOREVER);
+	}
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

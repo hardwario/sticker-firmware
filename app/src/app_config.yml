@@ -159,6 +159,11 @@ proto:
       # both timings are now the per-rule `dwell` field (alarm_0..15 bytes blob),
       # unified as a dwell/hold duration across THRESHOLD/STATE/RATE kinds.
       reserved: [2, 19]
+    - key: p2p
+      message: P2P
+      field: p2p
+      proto_id: 11
+      strip_prefix: p2p_
 
 # Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
 # for which commands exist, their wire id, dispatch routing and availability.
@@ -170,7 +175,9 @@ proto:
 #   body          : protobuf sub-message type (hand-written in the proto).
 #   kind          : handler (calls app_cmd_handle_<name>) | action (sets *action).
 #   action        : APP_CMD_ACTION_* to set (action kind, or a handler that defers).
-#   transports    : optional allow-list (lrw/nfc/shell/vendor); omitted = all.
+#   transports    : optional allow-list (radio/lrw/p2p/nfc/shell/vendor/plain_text);
+#                   omitted = all but plain_text. `radio` = both radios (LoRaWAN + P2P,
+#                   the usual case); `lrw` / `p2p` alone only for a one-radio command.
 #   response      : success body — ack | info | config_dump | none | info_deferred |
 #                   w1_scan (drives the decoder/docs; the FW emits it in the handler).
 commands:
@@ -196,11 +203,11 @@ commands:
     # downlink triggering a session-destroying reset could never confirm its
     # own delivery -- the same argument applies here, arguably more so).
     - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack, transports: [nfc, shell]}
-    - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
+    - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [radio]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
-    - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}
+    - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [radio]}
     - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
-    - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [lrw, nfc]}
+    - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [radio, nfc]}
     - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}
     # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
     # which reject the (re)join while unsaved LoRaWAN staging changes exist.
@@ -211,7 +218,7 @@ commands:
     # calibration mode isn't compiled in (CONFIG_APP_CALIBRATION=n) instead of
     # ACKing and persisting a calibration flag nothing would ever consume.
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: handler, response: ack, transports: [lrw, nfc]}
-    - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
+    - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [radio, nfc]}
     # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
     # session/keys — forces a re-join. NFC + shell only, never LoRaWAN: a LoRaWAN
@@ -256,7 +263,7 @@ commands:
     # app_buzzer.c's MELODY_TABLE. repeat_s, if non-zero (1-999), re-plays the
     # melody that many seconds after it finishes, until stopped (kind 0 or
     # `ats buzzer off`).
-    - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
+    - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [radio, nfc]}
     # #415: read the claim identity (serial_number + claim_token) without a key.
     # First command on the unauthenticated plain_text transport (also over nfc +
     # shell, never lrw). Read-only, identity-class disclosure only — the RULE for
@@ -284,6 +291,12 @@ commands:
     # proto_id 31 (not 29/30): those are claimed by get_claim_info/get_basic_info
     # in #414. 15 is also free on the wire but was req_alarm_rules — not reused.
     - {name: get_settings, proto_id: 31, body: GetSettings, kind: handler, response: config_dump}
+    # get_radio_state (#446): link state + diagnostics of the active radio
+    # (Response.radio_state). The only way to read them -- not part of Info, so
+    # never in the boot / join announce either. Paged like every answer (#425): streamed over LoRaWAN/P2P,
+    # GetRadioState.page over NFC/vendor/shell. Read-only, non-secret -- all
+    # transports.
+    - {name: get_radio_state, proto_id: 32, body: GetRadioState, kind: handler, response: radio_state}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
@@ -501,14 +514,23 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
-  - name: lrw_deveui
+  # 2026-09-28: radio_deveui / radio_appkey were lrw_deveui / lrw_appkey. Both
+  # radios use them: the LoRaWAN OTAA join, and P2P's JoinRequest, session-key
+  # KDF and uplink phase. Only the C and shell names change:
+  #   - `stored_as` keeps the NVS key config/lrw-deveui / config/lrw-appkey, so
+  #     a v1.4 identity survives the upgrade (and a downgrade) with no migration;
+  #   - `proto_name` keeps the proto field names deveui / appkey (same numbers).
+  # The other lrw_* keys are LoRaWAN-only and keep their names.
+  - name: radio_deveui
+    stored_as: lrw_deveui
     proto_group: lorawan
+    proto_name: deveui
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 6
     type: bytes
     size: 8
     persistent: [device_reset, factory_reset]
-    help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
+    help: "Get/Set DevEUI (16 hex digits), the node identity on LoRaWAN and P2P."
 
   - name: lrw_joineui
     proto_group: lorawan
@@ -529,15 +551,17 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
-  - name: lrw_appkey
+  - name: radio_appkey
+    stored_as: lrw_appkey
     proto_group: lorawan
+    proto_name: appkey
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 9
     readable: [shell, nfc]
     type: bytes
     size: 16
     persistent: [device_reset]
-    help: "Get/Set LoRaWAN AppKey (32 hex digits)."
+    help: "Get/Set AppKey (32 hex digits): LoRaWAN OTAA root key, P2P join and session-key root."
 
   - name: lrw_devaddr
     proto_group: lorawan
@@ -577,7 +601,14 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default."
 
-  - name: lrw_link_check_interval
+  # 2026-09-27: renamed from lrw_link_check_* -- carrier-neutral names for the
+  # link supervision both radios are to share through app_radio (decision #22).
+  # Both read them: LoRaWAN's link-check ladder and P2P's link supervision
+  # (decision #22 §3.4: N-th report confirmed, WARNING, re-join). proto_group/proto_id are UNCHANGED (wire-compatible with the
+  # deployed LoRaWAN fleet; Hub/Portal only use field numbers on the wire).
+  # No NVS migration: a value stored under the old name is not carried over
+  # (the defaults 5 / 5 apply).
+  - name: radio_link_check_interval
     proto_group: lorawan
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 13
@@ -585,9 +616,9 @@ parameters:
     default: 5
     min: 0
     max: 255
-    help: "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled)."
+    help: "Get/Set link-check cadence, both radios: every N-th report is the link check -- a LoRaWAN LinkCheckReq, a confirmed P2P telemetry (0 = disabled)."
 
-  - name: lrw_link_check_fail_rejoin
+  - name: radio_link_check_fail_rejoin
     proto_group: lorawan
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 14
@@ -595,7 +626,7 @@ parameters:
     default: 5
     min: 1
     max: 255
-    help: "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted."
+    help: "Get/Set link-check failures (while degraded) before the link is re-established: a LoRaWAN OTAA rejoin, a P2P re-join."
 
   - name: cap_hall_left
     proto_group: sensors
@@ -672,8 +703,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
 
   - name: alarm_1
@@ -682,8 +713,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
 
   - name: alarm_2
@@ -692,8 +723,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
 
   - name: alarm_3
@@ -702,8 +733,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
 
   - name: alarm_4
@@ -712,8 +743,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
 
   - name: alarm_5
@@ -722,8 +753,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
 
   - name: alarm_6
@@ -732,8 +763,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
 
   - name: alarm_7
@@ -742,8 +773,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
 
   - name: alarm_8
@@ -752,8 +783,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
 
   - name: alarm_9
@@ -762,8 +793,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
 
   - name: alarm_10
@@ -772,8 +803,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
 
   - name: alarm_11
@@ -782,8 +813,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
 
   - name: alarm_12
@@ -792,8 +823,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
 
   - name: alarm_13
@@ -802,8 +833,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
 
   - name: alarm_14
@@ -812,8 +843,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
 
   - name: alarm_15
@@ -822,8 +853,8 @@ parameters:
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
-    readable: [nfc, lrw]
-    writable: [nfc, lrw]
+    readable: [nfc, radio]
+    writable: [nfc, radio]
     help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
 
   - name: alarm_buzzer_mode
@@ -833,6 +864,16 @@ parameters:
     enum: alarm_buzzer_mode
     default: "off"
     help: "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer."
+
+  # doc/plan/460 §2.6 (T2c): one setting for both radios. false = LoRaWAN's
+  # behaviour so far, and P2P follows it (decision #22 §3.2 amended).
+  - name: radio_alarm_ack
+    proto_group: alarms
+    proto_id: 21
+    type: bool
+    default: false
+    writable: [shell, nfc, radio]
+    help: "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times."
 
   - name: accel_motion_sensitivity
     proto_group: sensors
@@ -854,28 +895,28 @@ parameters:
     size: 8
     # Not in a LoRaWAN get_config (only costs answer pages; the network has no
     # use for the ROM). get_param / NFC / shell still read it.
-    dump_lrw: false
+    dump_radio: false
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
   - name: sensor2_rom
     proto_group: sensors
     proto_id: 12
     type: bytes
     size: 8
-    dump_lrw: false
+    dump_radio: false
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
   - name: sensor3_rom
     proto_group: sensors
     proto_id: 13
     type: bytes
     size: 8
-    dump_lrw: false
+    dump_radio: false
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
   - name: sensor4_rom
     proto_group: sensors
     proto_id: 14
     type: bytes
     size: 8
-    dump_lrw: false
+    dump_radio: false
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
 
   # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
@@ -903,3 +944,49 @@ parameters:
     proto_id: 18
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
+
+  # Raw-LoRa P2P transport (#118, see doc/p2p.md). Radio tuning only —
+  # net_id/dev_addr/link key are NOT config parameters: net_id/dev_addr are
+  # join-assigned (phase 2) and the link key (session_key) derives from the
+  # device's existing AppKey (radio_appkey, §4, #118 phase 2
+  # revision) — never hand-typed, and there is no separate join_key/secret_key
+  # involved in P2P at all. LoRaWAN↔P2P parity (doc/plan/439):
+  # `readable` is omitted (default, same as lrw_region/lrw_adr/lrw_datarate) so
+  # these radio-tuning fields come back over GetConfig/GetParam on every
+  # transport, including a LoRaWAN/P2P ConfigDump. `writable: [shell]` stays:
+  # over a radio downlink a change would sever the very link carrying it (same
+  # #271 argument as radio_mode above), and over NFC it is a cross-project
+  # commitment (shared schema with the Manager-App, and the Hub must change in
+  # the same breath) that is still pending agreement -- doc/p2p.md §2.
+  - name: p2p_frequency
+    proto_group: p2p
+    writable: [shell]
+    proto_id: 1
+    type: int
+    default: 868100000
+    min: 863000000
+    max: 870000000
+    persistent: [device_reset]
+    help: "Get/Set P2P carrier frequency in Hz (EU868 band)."
+
+  - name: p2p_spreading_factor
+    proto_group: p2p
+    writable: [shell]
+    proto_id: 2
+    type: int
+    default: 7  # decision #22 §3.1: one network default on Node and Hub; no sweep on join
+    min: 6
+    max: 12
+    persistent: [device_reset]
+    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept)."
+
+  - name: p2p_tx_power
+    proto_group: p2p
+    writable: [shell]
+    proto_id: 3
+    type: int
+    default: 14
+    min: 2
+    max: 22
+    persistent: [device_reset]
+    help: "Get/Set P2P TX power in dBm."
