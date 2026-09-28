@@ -677,7 +677,9 @@ rollback to 0.2.2-rxsens when the node runs end.
 **H2 — Northbridge ↔ Hub link (D5, decided 2026-09-28).** Our own protocol, internal to
 the Hub: today's HDLC/CRC16 framing on ttyAMA3, extended with the TOWER gateway messages
 below. TOWER compatibility is required only on air, so this link has no upstream dependency
-and no planned switch to the tower console. The NB announces
+and no planned switch to the tower console. The whole link (framing, v1 + v2 messages,
+state machine, recovery, event delivery) is in
+[470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub%20link%20protocol.md). The NB announces
 `proto_version = 2` in `EVT_BOOT` / `GET_INFO`; the central picks the TOWER adapter by it.
 Frozen message set (full text: proximos-v2 `plan/control/radio/p2p_tower_gateway.md` §2),
 LE, response = `0x40 | cmd` + status (new: 6 `NO_SPACE`, 7 `NOT_FOUND`):
