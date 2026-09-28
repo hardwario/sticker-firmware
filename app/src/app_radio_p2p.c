@@ -2697,7 +2697,13 @@ static uint32_t twr_ack_window_ms(void)
 	if (m_twr.window_ms) {
 		return m_twr.window_ms;
 	}
-	return MAX(200U, TWR_TURNAROUND_MS + p2p_toa_ms(m_twr.sf, TWR_ACK_FRAME_LEN) + 60U);
+	/* RxDone lags the end of a frame: M3 measured TX-done to ACK RxDone at
+	 * turnaround + ToA + ~1.9 symbols + ~1.5 ms, so the margin scales with the
+	 * symbol time. A fixed 60 ms missed every ACK at SF12. */
+	uint32_t sym_ms = DIV_ROUND_UP(BIT(m_twr.sf) * 8U, 1000U); /* BW125: 2^SF / 125 kHz */
+
+	return MAX(200U,
+		   TWR_TURNAROUND_MS + p2p_toa_ms(m_twr.sf, TWR_ACK_FRAME_LEN) + 3U * sym_ms + 20U);
 }
 
 static uint32_t twr_dl_window_ms(void)
