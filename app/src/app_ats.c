@@ -609,8 +609,8 @@ static const char *p2p_state_to_str(enum p2p_link_state state)
 /* Universal across whichever stack radio_mode selected at boot (app_radio
  * facade, #118) -- the one status command a tester runs regardless of
  * build/config. LoRaWAN exposes rich link diagnostics (devaddr/fcnt/rssi/
- * margin/...); P2P only pairing/session state, since the raw-LoRa protocol
- * has no per-frame link-quality feedback (doc/p2p.md). */
+ * margin/...); P2P its TOWER session, the gateway's RSSI of the last ACKed
+ * uplink and the last LinkCheckAns (doc/p2p.md). */
 static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -626,21 +626,28 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
 		shell_print(shell, "app_key: %s",
 			    info.app_key_set ? "set" : "MISSING (radio refused to start)");
+		shell_print(shell, "addr: %08x", info.addr);
 		shell_print(shell, "net_id: %08x", info.net_id);
-		shell_print(shell, "dev_addr: %04x", info.dev_addr);
-		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
+		shell_print(shell, "rx_delay: %u s", info.rx_delay_s);
 		shell_print(shell, "sf: %u (config %d)", info.sf,
 			    g_app_config.p2p_spreading_factor);
 		shell_print(shell, "tx power: %d dBm (%s)", info.tx_power_dbm,
 			    info.tx_power_assigned ? "assigned" : "config");
 		shell_print(shell, "fcnt: %u", info.fcnt);
 		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
+		shell_print(shell, "gw_last: %u", info.gw_last);
 		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
 		if (info.last_ack_valid) {
-			shell_print(shell, "last ack rssi: %d dBm", info.last_ack_rssi);
-			shell_print(shell, "last ack snr: %d dB", info.last_ack_snr);
+			shell_print(shell, "last ack rssi (gateway): %d dBm", info.last_ack_rssi);
 		} else {
-			shell_print(shell, "last ack rssi/snr: n/a");
+			shell_print(shell, "last ack rssi (gateway): n/a");
+		}
+		if (info.lc_valid) {
+			shell_print(shell,
+				    "link check: rssi %d dBm, snr %d dB, margin %d dB, gw %u",
+				    info.lc_rssi, info.lc_snr, info.lc_margin, info.lc_gw_count);
+		} else {
+			shell_print(shell, "link check: n/a");
 		}
 		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
 		return 0;
@@ -865,30 +872,9 @@ static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-/* Debug: sweep rx1_delay on the bench without a full re-join (doc/p2p.md
- * §13's own proposal for this, "same idiom as the existing ats radio lc
- * debug helpers"). */
-static int cmd_radio_rx1_delay(const struct shell *shell, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	int s = atoi(argv[1]);
-
-	if (s < 0 || s > 255) {
-		shell_error(shell, "rx1_delay must be 0..255 s");
-		return -EINVAL;
-	}
-
-	app_radio_p2p_debug_set_rx1_delay((uint8_t)s);
-	shell_print(shell,
-		    "rx1_delay override -> %d s (not persisted; a real JoinAccept "
-		    "restores it)",
-		    s);
-	return 0;
-}
-
-/* Debug: exercise the confirmed-uplink retry path (doc/p2p.md §6) without a
- * real RF outage, same idea as `ats radio lc` for the LoRaWAN link-check FSM. */
+/* Debug: exercise the confirmed-uplink repetition and retry path (doc/p2p.md)
+ * without a real RF outage, same idea as `ats radio lc` for the LoRaWAN
+ * link-check FSM. */
 static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -901,7 +887,7 @@ static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **arg
 	}
 
 	app_radio_p2p_debug_drop_acks((uint32_t)n);
-	shell_print(shell, "Next %d confirmed-uplink Ack(s) will appear dropped", n);
+	shell_print(shell, "Next %d confirmed-uplink ACK(s) will appear dropped", n);
 	return 0;
 }
 
@@ -921,7 +907,7 @@ static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
 
 	shell_print(shell, "P2P TELEMETRY frame preview:");
 	while (more) {
-		uint8_t buf[APP_RADIO_P2P_FRAME_MAX_LEN];
+		uint8_t buf[P2P_FRAME_MAX];
 		size_t len = 0;
 
 		int ret = app_radio_p2p_debug_compose(buf, sizeof(buf), &len, &more);
@@ -996,11 +982,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(unjoin, NULL,
 		      "Clear P2P pairing state (reboots); factory_reset clears it too.",
 		      cmd_radio_unjoin, 1, 0),
-	SHELL_CMD_ARG(rx1_delay, NULL,
-		      "Debug: override rx1_delay, not persisted. Usage: rx1_delay <seconds>",
-		      cmd_radio_rx1_delay, 2, 0),
 	SHELL_CMD_ARG(ack_drop, NULL,
-		      "Debug: force the next N confirmed-uplink Acks to appear dropped. "
+		      "Debug: force the next N confirmed-uplink ACKs to appear dropped. "
 		      "Usage: ack_drop <count>",
 		      cmd_radio_ack_drop, 2, 0),
 #endif /* defined(CONFIG_RADIO_P2P) */
