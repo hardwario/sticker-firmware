@@ -328,6 +328,9 @@ report confirmed, TX power steps up); `radio-link-check-fail-rejoin` further fai
 **keyed re-join** (rediscovers the gateway). Last resort after 24 h: `lora` sweeps SF
 (as today), `fsk` sweeps the three TOWER channels.
 
+No ADR on P2P (decision 2026-09-28): TX power and SF are fixed per network, with no adaptive
+data rate or power control. LoRaWAN ADR via ChirpStack is unaffected.
+
 ### 7.5 Clock sync
 
 Stage 1 (T5): `TimeReq` / `TimeAns` in the `0x91` control envelope (§8.2), answered by the
