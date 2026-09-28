@@ -358,6 +358,37 @@ void app_radio_p2p_debug_drop_acks(uint32_t count);
 int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
 #endif
 
+#if defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST)
+/* TOWER-over-LoRa P0 bench (doc/plan "TOWER protocol as the P2P transport" §4,
+ * §13.1). Throw-away: the TOWER frame verbatim -- ver_type(1) flags(1) src(4)
+ * dest(4) counter(4), all little-endian and all CCM AAD, then the ciphertext
+ * and an 8 B tag. Nonce src(4) counter(4) bulk_idx(3) 0x0000. */
+#define TWR_VERSION         1
+#define TWR_HDR_LEN         14
+#define TWR_TAG_LEN         8
+#define TWR_NONCE_LEN       13
+#define TWR_FRAME_MAX       255 /* LoRa PHY max; the TOWER MTU is 96 B (D14 probe) */
+#define TWR_TYPE_DATA       0
+#define TWR_TYPE_ACK        1
+#define TWR_FLAG_CONFIRMED  0x01
+#define TWR_ACK_PENDING     0x01 /* ACK payload flags */
+#define TWR_ACK_PAYLOAD_LEN 6    /* acked(4) rssi(1) flags(1); receivers accept >= 4 */
+
+struct twr_hdr {
+	uint8_t type;
+	uint8_t flags;
+	uint32_t src;
+	uint32_t dest;
+	uint32_t counter;
+};
+
+struct twr_ack {
+	uint32_t acked;
+	int8_t rssi; /* the gateway's RSSI of the acked frame; 0 if absent */
+	bool pending;
+};
+#endif /* defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST) */
+
 #if defined(CONFIG_ZTEST)
 /* Pure decision-logic helpers, internal to app_radio_p2p.c (static in the firmware),
  * exposed with external linkage for tests/p2p_logic only. Not part of the
@@ -403,6 +434,14 @@ void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);
+void twr_hdr_put(uint8_t out[TWR_HDR_LEN], const struct twr_hdr *h);
+int twr_hdr_get(const uint8_t *frame, size_t frame_len, struct twr_hdr *h);
+void twr_nonce(uint8_t nonce[TWR_NONCE_LEN], uint32_t src, uint32_t counter);
+int twr_seal(const uint8_t key[16], const struct twr_hdr *h, const uint8_t *pt, size_t pt_len,
+	     uint8_t *frame, size_t frame_size, size_t *frame_len);
+int twr_open(const uint8_t key[16], const uint8_t *frame, size_t frame_len, struct twr_hdr *h,
+	     uint8_t *pt, size_t pt_size, size_t *pt_len);
+int twr_parse_ack(const uint8_t *pt, size_t pt_len, struct twr_ack *ack);
 #endif /* defined(CONFIG_ZTEST) */
 
 #ifdef __cplusplus

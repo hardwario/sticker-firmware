@@ -1795,4 +1795,173 @@ ZTEST(p2p_logic, test_warning_steps_tx_power_up_to_the_config)
 	p2p_test_link_reset();
 }
 
+/* ---- TOWER-over-LoRa frame codec (P0 bench, doc/plan "TOWER protocol as the
+ * P2P transport" §13.1 M1) --------------------------------------------- */
+
+#include "tower_kat.h"
+
+static const uint8_t tower_kat_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
+static void tower_kat_hdr(const struct tower_kat *v, struct twr_hdr *h)
+{
+	h->type = v->frame_type;
+	h->flags = v->flags;
+	h->src = v->src;
+	h->dest = v->dest;
+	h->counter = v->counter;
+}
+
+ZTEST(p2p_logic, test_tower_seal_matches_the_kat)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t nonce[TWR_NONCE_LEN];
+		uint8_t frame[TWR_FRAME_MAX];
+		size_t len = 0;
+
+		tower_kat_hdr(v, &h);
+		twr_nonce(nonce, v->src, v->counter);
+		zassert_mem_equal(nonce, v->nonce, TWR_NONCE_LEN, "%s: nonce", v->name);
+		zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				    sizeof(frame), &len),
+			   "%s: seal", v->name);
+		zassert_equal(len, v->frame_len, "%s: length %zu", v->name, len);
+		zassert_mem_equal(frame, v->frame, v->frame_len, "%s: frame bytes", v->name);
+	}
+}
+
+ZTEST(p2p_logic, test_tower_open_matches_the_kat)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t pt[TWR_FRAME_MAX];
+		size_t pt_len = 0xffff;
+
+		zassert_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, sizeof(pt),
+				    &pt_len),
+			   "%s: open", v->name);
+		zassert_equal(h.type, v->frame_type, "%s: type", v->name);
+		zassert_equal(h.flags, v->flags, "%s: flags", v->name);
+		zassert_equal(h.src, v->src, "%s: src", v->name);
+		zassert_equal(h.dest, v->dest, "%s: dest", v->name);
+		zassert_equal(h.counter, v->counter, "%s: counter", v->name);
+		zassert_equal(pt_len, v->plaintext_len, "%s: plaintext length", v->name);
+		if (pt_len > 0) {
+			zassert_mem_equal(pt, v->plaintext, pt_len, "%s: plaintext", v->name);
+		}
+	}
+}
+
+ZTEST(p2p_logic, test_tower_header_layout)
+{
+	/* ver_type = version << 5 | type; the other fields little-endian. */
+	const struct twr_hdr h = {.type = TWR_TYPE_ACK,
+				  .flags = 0x5a,
+				  .src = 0x04030201,
+				  .dest = 0x08070605,
+				  .counter = 0x0c0b0a09};
+	const uint8_t want[TWR_HDR_LEN] = {0x21, 0x5a, 0x01, 0x02, 0x03, 0x04, 0x05,
+					   0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c};
+	uint8_t out[TWR_HDR_LEN];
+
+	twr_hdr_put(out, &h);
+	zassert_mem_equal(out, want, TWR_HDR_LEN);
+	zassert_equal(tower_kat[0].frame[0], 0x20, "KAT data frame: ver 1, type 0");
+	zassert_equal(tower_kat[2].frame[0], 0x21, "KAT ack frame: ver 1, type 1");
+}
+
+ZTEST(p2p_logic, test_tower_open_rejects_a_bad_frame)
+{
+	const struct tower_kat *v = &tower_kat[1]; /* uplink_confirmed */
+	uint8_t frame[TWR_FRAME_MAX];
+	uint8_t pt[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
+
+	/* A flipped bit anywhere -- header (AAD), ciphertext or tag -- fails auth. */
+	const size_t spots[] = {0, 1, 5, 13, TWR_HDR_LEN, v->frame_len - 1};
+
+	for (size_t i = 0; i < ARRAY_SIZE(spots); i++) {
+		memcpy(frame, v->frame, v->frame_len);
+		frame[spots[i]] ^= (spots[i] == 0) ? 0x01 : 0x80;
+		zassert_equal(
+			twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+			-EBADMSG, "byte %zu", spots[i]);
+	}
+
+	/* Another version is not a TOWER v1 frame, whatever its tag. */
+	memcpy(frame, v->frame, v->frame_len);
+	frame[0] = (2 << 5) | TWR_TYPE_DATA;
+	zassert_equal(twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+		      -EPROTO);
+	zassert_equal(twr_hdr_get(frame, v->frame_len, &h), -EPROTO);
+
+	/* Shorter than header + tag, or truncated: never authentic. */
+	zassert_equal(twr_hdr_get(v->frame, TWR_HDR_LEN + TWR_TAG_LEN - 1, &h), -EMSGSIZE);
+	zassert_not_ok(
+		twr_open(tower_kat_key, v->frame, v->frame_len - 1, &h, pt, sizeof(pt), &pt_len));
+
+	/* A wrong key. */
+	uint8_t key[16];
+
+	memcpy(key, tower_kat_key, sizeof(key));
+	key[15] ^= 1;
+	zassert_equal(twr_open(key, v->frame, v->frame_len, &h, pt, sizeof(pt), &pt_len), -EBADMSG);
+
+	/* No room for the plaintext. */
+	zassert_not_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, v->plaintext_len - 1,
+				&pt_len));
+}
+
+ZTEST(p2p_logic, test_tower_seal_refuses_a_short_buffer)
+{
+	const struct tower_kat *v = &tower_kat[6]; /* uplink_max_payload */
+	uint8_t frame[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t len;
+
+	tower_kat_hdr(v, &h);
+	zassert_not_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				v->frame_len - 1, &len));
+	zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame, v->frame_len,
+			    &len));
+}
+
+ZTEST(p2p_logic, test_tower_ack_payload)
+{
+	struct twr_ack ack;
+	uint8_t pt[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
+
+	/* ack_no_pending: acked 2, rssi -57, no PENDING. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[2].frame, tower_kat[2].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_equal(h.type, TWR_TYPE_ACK);
+	zassert_equal(h.src, TOWER_KAT_GW_ADDR);
+	zassert_equal(h.dest, TOWER_KAT_NODE_ADDR);
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_equal(ack.rssi, -57);
+	zassert_false(ack.pending);
+
+	/* ack_pending: PENDING set, a downlink follows. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[3].frame, tower_kat[3].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_true(ack.pending);
+
+	/* The minimum ACK carries only the acked counter. */
+	const uint8_t bare[4] = {0x07, 0x00, 0x00, 0x80};
+
+	zassert_ok(twr_parse_ack(bare, sizeof(bare), &ack));
+	zassert_equal(ack.acked, 0x80000007);
+	zassert_false(ack.pending);
+	zassert_equal(twr_parse_ack(bare, 3, &ack), -EMSGSIZE);
+}
+
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);
