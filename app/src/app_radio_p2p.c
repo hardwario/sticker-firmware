@@ -23,11 +23,15 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
+#if defined(CONFIG_APP_P2P_TOWER_BENCH)
+#include <zephyr/shell/shell.h>
+#endif
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
 #include <errno.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -378,11 +382,12 @@ static void publish_link(void)
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
-/* Reports sent CONFIRMED for a pending clock_sync so far (PF-2): at most
- * P2P_CLOCK_SYNC_REPORTS_MAX, so a central that sends no time tail cannot keep
- * every report confirmed; the request then waits for the next link check. */
-#define P2P_CLOCK_SYNC_REPORTS_MAX 3
-static atomic_t m_clock_sync_reports;
+/* Reports sent CONFIRMED for a wanted network time so far (PF-2): at most
+ * P2P_TIME_REPORTS_MAX per request, so a central that sends no time tail cannot
+ * keep every report confirmed; TIME_REQ then rides the frames that are
+ * confirmed anyway (link checks, answers, acknowledged alarms). */
+#define P2P_TIME_REPORTS_MAX 3
+static atomic_t m_time_reports;
 static int8_t m_last_ack_rssi;
 static int8_t m_last_ack_snr;
 static bool m_last_ack_valid;
@@ -404,6 +409,7 @@ static uint8_t m_pending_frame_len;
  * (key, nonce) pair once m_fcnt reaches it (review of #400, H1). Radio work
  * queue only. */
 static uint32_t m_retry_counter;
+static uint8_t m_retry_fctrl;
 static bool m_retry_valid;
 
 #if defined(CONFIG_SHELL)
@@ -1426,8 +1432,9 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	app_radio_note_send(true, false);
 	publish_link();
 
-	LOG_INF("TX type %u%s, %zu B (counter %u, %u ms air)", frame_type,
-		(fctrl & P2P_FCTRL_CONFIRMED) ? " confirmed" : "", wire_len, counter, air);
+	LOG_INF("TX type %u%s%s, %zu B (counter %u, %u ms air)", frame_type,
+		(fctrl & P2P_FCTRL_CONFIRMED) ? " confirmed" : "",
+		(fctrl & P2P_FCTRL_TIME_REQ) ? " time-req" : "", wire_len, counter, air);
 
 	*tx_end_ms = end;
 	return 0;
@@ -1490,7 +1497,12 @@ P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter
 	 * LoRaWAN on LORAWAN_TIME_UPDATED). An Ack without the tail, or a 0x56 in
 	 * its place, leaves it pending for the next confirmed uplink. */
 	if (ack->time_present) {
-		(void)app_clock_set_network_time(ack->unix_time);
+		/* A central may send the tail on every Ack: log only an asked-for one. */
+		bool wanted = app_radio_time_wanted();
+
+		if (app_clock_set_network_time(ack->unix_time) == 0 && wanted) {
+			LOG_INF("RTC synced from network: unix=%u", ack->unix_time);
+		}
 		app_radio_time_event();
 	}
 
@@ -1701,6 +1713,17 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	return true;
 }
 
+/* FCtrl of a fresh uplink: CONFIRMED asks for an Ack in RX1, TIME_REQ for its
+ * Unix-time tail while a network time is wanted (a central that sends the tail
+ * on every Ack ignores it, §3). */
+P2P_TESTABLE uint8_t p2p_uplink_fctrl(bool confirmed)
+{
+	if (!confirmed) {
+		return 0;
+	}
+	return P2P_FCTRL_CONFIRMED | (app_radio_time_wanted() ? P2P_FCTRL_TIME_REQ : 0);
+}
+
 /* One uplink and its RX1 (§6). `attempt` > 0: app_radio's retry of the
  * confirmed frame that went out last without its Ack, resent under the same
  * counter (a byte-identical frame, so the central's strict high-water holds,
@@ -1716,13 +1739,15 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	int64_t tx_end;
 	int ret;
 
+	/* TIME_REQ asks the central for the Ack's time tail: only a confirmed
+	 * uplink gets an Ack. A retry keeps the first FCtrl (byte-identical). */
+	uint8_t fctrl = resend ? m_retry_fctrl : p2p_uplink_fctrl(confirmed);
+
 	if (resend) {
 		counter = m_retry_counter;
-		ret = tx_frame_at(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, counter,
-				  &tx_end);
+		ret = tx_frame_at(frame_type, fctrl, body, body_len, counter, &tx_end);
 	} else {
-		ret = tx_frame(frame_type, confirmed ? P2P_FCTRL_CONFIRMED : 0, body, body_len,
-			       &counter, &tx_end);
+		ret = tx_frame(frame_type, fctrl, body, body_len, &counter, &tx_end);
 	}
 	if (ret) {
 		return ret;
@@ -1744,6 +1769,7 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	}
 	if (confirmed) {
 		m_retry_counter = counter;
+		m_retry_fctrl = fctrl;
 		m_retry_valid = true;
 		return -ETIMEDOUT;
 	}
@@ -1758,20 +1784,21 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
  * their own. Decided once per snapshot, kept for all its frames. */
 static bool telemetry_report_confirmed(bool due)
 {
-	/* A pending clock_sync also rides a confirmed report: the time comes in the
-	 * Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
-	if (app_radio_clock_sync_pending() &&
-	    atomic_inc(&m_clock_sync_reports) < P2P_CLOCK_SYNC_REPORTS_MAX) {
+	/* A wanted network time also rides a confirmed report: the time comes in
+	 * the Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
+	if (app_radio_time_wanted() && atomic_inc(&m_time_reports) < P2P_TIME_REPORTS_MAX) {
 		return true;
 	}
 	return due;
 }
 
-/* struct app_radio_backend.time_request: a new clock_sync gets its own
- * P2P_CLOCK_SYNC_REPORTS_MAX confirmed reports. */
+/* struct app_radio_backend.time_request: TIME_REQ on the confirmed uplinks
+ * until the time lands (app_radio_time_wanted()), and a new request gets its
+ * own P2P_TIME_REPORTS_MAX confirmed reports. */
 static void p2p_time_request(void)
 {
-	atomic_clear(&m_clock_sync_reports);
+	atomic_clear(&m_time_reports);
+	LOG_INF("Network time requested (TIME_REQ)");
 }
 
 /* ---- TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4) ---- */
@@ -2357,10 +2384,10 @@ void p2p_test_join_setup(int cfg_sf)
 	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
 }
 
-/* A pending clock_sync forces confirmed reports (PF-2). */
+/* A wanted network time forces confirmed reports (PF-2). */
 void p2p_test_link_reset(void)
 {
-	atomic_clear(&m_clock_sync_reports);
+	atomic_clear(&m_time_reports);
 }
 
 /* Stop a join episode a case started, waiting out an attempt in progress. */
@@ -2481,6 +2508,759 @@ void p2p_test_set_join_started_at(int64_t at_ms)
 
 #endif /* defined(CONFIG_ZTEST) */
 
+#if defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST)
+/* ======================================================================== */
+/* TOWER-over-LoRa P0 bench: frame codec                                    */
+/* ======================================================================== */
+
+/* doc/plan "TOWER protocol as the P2P transport" §4; checked byte for byte
+ * against tests/ccm/tower_frame_kat.json (upstream tower-radio-core /
+ * tower-net-core) in tests/p2p_logic. */
+P2P_TESTABLE void twr_hdr_put(uint8_t out[TWR_HDR_LEN], const struct twr_hdr *h)
+{
+	out[0] = (uint8_t)((TWR_VERSION << 5) | (h->type & 0x1F));
+	out[1] = h->flags;
+	sys_put_le32(h->src, &out[2]);
+	sys_put_le32(h->dest, &out[6]);
+	sys_put_le32(h->counter, &out[10]);
+}
+
+P2P_TESTABLE int twr_hdr_get(const uint8_t *frame, size_t frame_len, struct twr_hdr *h)
+{
+	if (frame_len < TWR_HDR_LEN + TWR_TAG_LEN || frame_len > TWR_FRAME_MAX) {
+		return -EMSGSIZE;
+	}
+	if ((frame[0] >> 5) != TWR_VERSION) {
+		return -EPROTO;
+	}
+	h->type = frame[0] & 0x1F;
+	h->flags = frame[1];
+	h->src = sys_get_le32(&frame[2]);
+	h->dest = sys_get_le32(&frame[6]);
+	h->counter = sys_get_le32(&frame[10]);
+	return 0;
+}
+
+/* src(4 LE) | counter(4 LE) | bulk_idx(3 LE) | 0x0000. No direction byte: the
+ * two directions differ by src. P0 sends no bulk frames, so bulk_idx is 0. */
+P2P_TESTABLE void twr_nonce(uint8_t nonce[TWR_NONCE_LEN], uint32_t src, uint32_t counter)
+{
+	memset(nonce, 0, TWR_NONCE_LEN);
+	sys_put_le32(src, &nonce[0]);
+	sys_put_le32(counter, &nonce[4]);
+}
+
+P2P_TESTABLE int twr_seal(const uint8_t key[16], const struct twr_hdr *h, const uint8_t *pt,
+			  size_t pt_len, uint8_t *frame, size_t frame_size, size_t *frame_len)
+{
+	size_t len = TWR_HDR_LEN + pt_len + TWR_TAG_LEN;
+
+	if (len > frame_size || len > TWR_FRAME_MAX) {
+		return -EMSGSIZE;
+	}
+
+	uint8_t nonce[TWR_NONCE_LEN];
+
+	twr_hdr_put(frame, h);
+	twr_nonce(nonce, h->src, h->counter);
+
+	int ret = app_ccm_encrypt_and_tag(key, nonce, sizeof(nonce), frame, TWR_HDR_LEN, pt, pt_len,
+					  &frame[TWR_HDR_LEN], &frame[TWR_HDR_LEN + pt_len],
+					  TWR_TAG_LEN);
+
+	if (ret) {
+		return ret;
+	}
+	*frame_len = len;
+	return 0;
+}
+
+P2P_TESTABLE int twr_open(const uint8_t key[16], const uint8_t *frame, size_t frame_len,
+			  struct twr_hdr *h, uint8_t *pt, size_t pt_size, size_t *pt_len)
+{
+	int ret = twr_hdr_get(frame, frame_len, h);
+
+	if (ret) {
+		return ret;
+	}
+
+	size_t ct_len = frame_len - TWR_HDR_LEN - TWR_TAG_LEN;
+
+	if (ct_len > pt_size) {
+		return -EMSGSIZE;
+	}
+
+	uint8_t nonce[TWR_NONCE_LEN];
+
+	twr_nonce(nonce, h->src, h->counter);
+	ret = app_ccm_auth_decrypt(key, nonce, sizeof(nonce), frame, TWR_HDR_LEN,
+				   &frame[TWR_HDR_LEN], ct_len, &frame[frame_len - TWR_TAG_LEN],
+				   TWR_TAG_LEN, pt);
+	if (ret) {
+		return ret;
+	}
+	*pt_len = ct_len;
+	return 0;
+}
+
+/* acked(4 LE) | rssi(i8) | flags(PENDING bit 0). Any payload of at least 4 B is
+ * an ACK: the rule that keeps appended fields interop-safe. */
+P2P_TESTABLE int twr_parse_ack(const uint8_t *pt, size_t pt_len, struct twr_ack *ack)
+{
+	if (pt_len < 4) {
+		return -EMSGSIZE;
+	}
+	ack->acked = sys_get_le32(pt);
+	ack->rssi = pt_len > 4 ? (int8_t)pt[4] : 0;
+	ack->pending = pt_len > 5 && (pt[5] & TWR_ACK_PENDING);
+	return 0;
+}
+#endif /* defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST) */
+
+#if defined(CONFIG_APP_P2P_TOWER_BENCH)
+/* ======================================================================== */
+/* TOWER-over-LoRa P0 bench: node role, driven by `ats tower`               */
+/* ======================================================================== */
+
+/* Plan §13.1 bench constants: static key and addresses, no pairing. */
+static const uint8_t m_twr_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+				      0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+#define TWR_GW_ADDR        0x4E420001U
+#define TWR_FREQ_DEFAULT   869525000U /* 10 % sub-band; 868.1 is the Hub's P2P channel */
+#define TWR_TURNAROUND_MS  20
+#define TWR_ACK_FRAME_LEN  (TWR_HDR_LEN + TWR_ACK_PAYLOAD_LEN + TWR_TAG_LEN)
+#define TWR_BACKOFF_MAX_MS 100
+#define TWR_REPS_MAX       10
+/* sx12xx_lora_config() arms the radio's TX timeout at a fixed 4000 ms: a longer
+ * frame is cut mid-air and lora_send() then blocks forever (HC finding). Keep
+ * 50 ms of it: SF12 <= 100 B, SF11 <= 198 B frames. */
+#define TWR_TOA_MAX_MS     3950U
+
+struct twr_rx {
+	uint32_t cyc; /* k_cycle_get_32() in the RxDone callback */
+	int16_t rssi;
+	int8_t snr;
+	uint8_t len;
+	uint8_t buf[TWR_FRAME_MAX];
+};
+
+K_MSGQ_DEFINE(m_twr_rxq, sizeof(struct twr_rx), 2, 4);
+
+static struct {
+	uint32_t freq;
+	uint8_t sf;
+	uint8_t reps;       /* transmissions per confirmed frame, first one included */
+	uint16_t window_ms; /* ACK window from RX armed; 0 = plan §5 formula */
+	uint16_t dlwin_ms;  /* downlink window after a PENDING ACK; 0 = formula */
+	uint32_t ack_drop;  /* valid ACKs still to ignore (M5) */
+	uint32_t run_left;  /* frames left in a `run` */
+	uint16_t run_gap_ms;
+	uint8_t pt_len; /* payload of the next frame(s) */
+	bool confirmed;
+	bool fast; /* confirmed frames: lora_send_recv_async(), no radio sleep TX->RX */
+} m_twr = {.freq = TWR_FREQ_DEFAULT,
+	   .sf = 7,
+	   .reps = 3,
+	   .fast = IS_ENABLED(CONFIG_LORA_SEND_RECV_ASYNC)};
+
+static struct {
+	uint32_t frames, tx, retx, acked, timeouts, ack_dropped, bad, stale, dl, pending;
+	uint32_t duty_held, limit;
+	uint32_t arm_min, arm_max, ack_min, ack_max; /* us */
+	uint64_t arm_sum, ack_sum;
+	uint32_t arm_n, ack_n;
+} m_twr_st;
+
+static uint32_t m_twr_gw_last; /* highest gateway counter accepted (replay lane) */
+static uint32_t m_twr_duty_freq;
+static struct twr_rx m_twr_rx_scratch; /* the RxDone callback's copy (system WQ only) */
+static struct k_work_delayable m_twr_work;
+
+static uint32_t twr_node_addr(void)
+{
+	return sys_get_be32(&g_app_config.radio_deveui[4]); /* low32(DevEUI) */
+}
+
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+/* The radio's last DIO interrupt, stamped by the fork driver's ISR */
+extern volatile uint32_t sx12xx_irq_cyc;
+#endif
+
+static uint32_t twr_us(uint32_t from_cyc, uint32_t to_cyc)
+{
+	return k_cyc_to_us_floor32(to_cyc - from_cyc);
+}
+
+static uint32_t twr_ack_window_ms(void)
+{
+	if (m_twr.window_ms) {
+		return m_twr.window_ms;
+	}
+	return MAX(200U, TWR_TURNAROUND_MS + p2p_toa_ms(m_twr.sf, TWR_ACK_FRAME_LEN) + 60U);
+}
+
+static uint32_t twr_dl_window_ms(void)
+{
+	if (m_twr.dlwin_ms) {
+		return m_twr.dlwin_ms;
+	}
+	return MAX(1000U, p2p_toa_ms(m_twr.sf, 96) + 200U);
+}
+
+static int twr_radio(bool tx)
+{
+	struct lora_modem_config c;
+
+	build_modem_config(&c, tx);
+	c.frequency = m_twr.freq;
+	c.datarate = (enum lora_datarate)m_twr.sf;
+	c.tx_power = (int8_t)g_app_config.p2p_tx_power;
+	return lora_config(m_lora_dev, &c);
+}
+
+static void twr_recv_cb(const struct device *dev, uint8_t *data, uint16_t size, int16_t rssi,
+			int8_t snr, void *user_data)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(user_data);
+
+	struct twr_rx *rx = &m_twr_rx_scratch;
+
+	rx->cyc = k_cycle_get_32();
+	rx->rssi = rssi;
+	rx->snr = snr;
+	rx->len = (uint8_t)MIN(size, (uint16_t)sizeof(rx->buf));
+	memcpy(rx->buf, data, rx->len);
+	(void)k_msgq_put(&m_twr_rxq, rx, K_NO_WAIT);
+}
+
+static void twr_stat_add(uint32_t v, uint32_t *min, uint32_t *max, uint64_t *sum, uint32_t *n)
+{
+	*min = (*n == 0 || v < *min) ? v : *min;
+	*max = MAX(*max, v);
+	*sum += v;
+	(*n)++;
+}
+
+/* Wait until `end` for a frame from the gateway to this node. Returns 1 with
+ * the frame opened into `h`/`pt`, or 0 at the deadline. Frames that fail the
+ * tag, the addresses or the replay lane are counted and skipped. */
+static int twr_wait_frame(k_timepoint_t end, struct twr_rx *rx, struct twr_hdr *h, uint8_t *pt,
+			  size_t *pt_len)
+{
+	while (k_msgq_get(&m_twr_rxq, rx, sys_timepoint_timeout(end)) == 0) {
+		if (twr_open(m_twr_key, rx->buf, rx->len, h, pt, TWR_FRAME_MAX, pt_len) ||
+		    h->src != TWR_GW_ADDR || h->dest != twr_node_addr()) {
+			m_twr_st.bad++;
+			continue;
+		}
+		if (h->counter <= m_twr_gw_last) {
+			m_twr_st.stale++;
+			continue;
+		}
+		m_twr_gw_last = h->counter;
+		return 1;
+	}
+	return 0;
+}
+
+/* Fast mode, one try: the driver switches the radio from TX-done straight to
+ * reception (no sleep, TCXO kept on) and stamps both moments: `done` is the
+ * TX-done interrupt, `arm` reception running. On success the radio receives
+ * into twr_recv_cb() until lora_recv_async(dev, NULL, NULL). */
+static int twr_send_recv(uint8_t *frame, size_t flen, uint32_t air, uint32_t *start, uint32_t *done,
+			 uint32_t *arm)
+{
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+	static struct k_poll_signal sig;
+	struct k_poll_event evt =
+		K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &sig);
+	struct lora_turnaround tm = {0};
+	unsigned int signaled;
+	int result = 0;
+
+	/* RX first: the driver keeps it for the turnaround; TX last sets power. */
+	int ret = twr_radio(false);
+
+	if (ret == 0) {
+		ret = twr_radio(true);
+	}
+	if (ret) {
+		return ret;
+	}
+
+	k_poll_signal_init(&sig);
+	app_radio_air_begin();
+	*start = k_cycle_get_32();
+	ret = lora_send_recv_async(m_lora_dev, frame, (uint32_t)flen, twr_recv_cb, NULL, &sig, &tm);
+	if (ret == 0) {
+		ret = k_poll(&evt, 1, K_MSEC(2 * air + 50));
+		k_poll_signal_check(&sig, &signaled, &result);
+		ret = ret ? ret : result;
+	}
+	app_radio_duty_charge(air);
+	if (ret) {
+		(void)lora_recv_async(m_lora_dev, NULL, NULL);
+		app_radio_air_end();
+		LOG_ERR_CALL_FAILED_INT("lora_send_recv_async", ret);
+		return ret;
+	}
+	*done = tm.tx_done_cyc;
+	*arm = tm.rx_armed_cyc;
+	return 0;
+#else
+	ARG_UNUSED(frame);
+	ARG_UNUSED(flen);
+	ARG_UNUSED(air);
+	ARG_UNUSED(start);
+	ARG_UNUSED(done);
+	ARG_UNUSED(arm);
+	return -ENOSYS;
+#endif
+}
+
+/* One frame: seal under a fresh counter, send, and for a confirmed frame wait
+ * for its ACK, resending the same bytes up to m_twr.reps times. Radio work
+ * queue. Logs one line per frame (the bench RTT buffer is 384 B). */
+static int twr_exchange(void)
+{
+	/* Radio work queue only, one exchange at a time: off its 4 KB stack. */
+	static uint8_t pt[TWR_FRAME_MAX];
+	static uint8_t frame[TWR_FRAME_MAX];
+	static struct twr_rx rx;
+	size_t flen = TWR_HDR_LEN + m_twr.pt_len + TWR_TAG_LEN;
+	uint32_t counter;
+	uint32_t air = p2p_toa_ms(m_twr.sf, (uint8_t)flen);
+
+	if (air > TWR_TOA_MAX_MS) {
+		/* Checked before the counter is spent; an SF change after `run`. */
+		m_twr_st.limit++;
+		LOG_WRN("TWR L=%u sf=%u LIMIT toa=%u > %u ms (driver TX timeout)",
+			(unsigned int)flen, m_twr.sf, air, TWR_TOA_MAX_MS);
+		return 0;
+	}
+
+	/* Plan §4 (U1): the counter is spent before the TX, never after. It comes
+	 * from the p2pfc reservation, so it survives a reboot. */
+	int ret = fcnt_next(&counter);
+
+	if (ret == 0 && counter == 0) {
+		ret = fcnt_next(&counter); /* TOWER reserves counter 0 */
+	}
+	if (ret) {
+		return ret;
+	}
+
+	pt[0] = 0x81; /* stage-1 data envelope; the rest is a pattern */
+	for (size_t i = 1; i < m_twr.pt_len; i++) {
+		pt[i] = (uint8_t)(i * 7U);
+	}
+
+	struct twr_hdr h = {
+		.type = TWR_TYPE_DATA,
+		.flags = m_twr.confirmed ? TWR_FLAG_CONFIRMED : 0,
+		.src = twr_node_addr(),
+		.dest = TWR_GW_ADDR,
+		.counter = counter,
+	};
+
+	ret = twr_seal(m_twr_key, &h, pt, m_twr.pt_len, frame, sizeof(frame), &flen);
+	if (ret) {
+		return ret;
+	}
+
+	uint8_t tries = m_twr.confirmed ? m_twr.reps : 1;
+	bool fast = m_twr.fast && m_twr.confirmed;
+	uint32_t t0 = (uint32_t)k_uptime_get();
+	uint32_t c_start = 0, c_done = 0, c_arm = 0, c_ack = 0, c_dl = 0, td = 0;
+	struct twr_hdr rh;
+	struct twr_ack ack = {0};
+	size_t rlen;
+	int16_t ack_rssi = 0;
+	int8_t ack_snr = 0;
+	uint8_t dl_len = 0;
+	const char *st = "UNC";
+	uint8_t n;
+
+	m_twr_st.frames++;
+	for (n = 1; n <= tries; n++) {
+		if (n > 1) {
+			k_sleep(K_MSEC(sys_rand32_get() % (TWR_BACKOFF_MAX_MS + 1)));
+		}
+		int64_t wait = app_radio_duty_wait_ms(air);
+
+		if (wait > 0) {
+			m_twr_st.duty_held++;
+			st = "DUTY";
+			break;
+		}
+
+		k_msgq_purge(&m_twr_rxq);
+		if (fast) {
+			ret = twr_send_recv(frame, flen, air, &c_start, &c_done, &c_arm);
+			if (ret) {
+				return ret;
+			}
+			m_twr_st.tx++;
+			m_twr_st.retx += n > 1;
+		} else {
+			ret = twr_radio(true);
+			if (ret) {
+				return ret;
+			}
+			app_radio_air_begin();
+			c_start = k_cycle_get_32();
+			ret = lora_send(m_lora_dev, frame, (uint32_t)flen);
+			c_done = k_cycle_get_32();
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+			/* lora_send() returns this long after the TX-done interrupt */
+			td = twr_us(sx12xx_irq_cyc, c_done);
+#endif
+			app_radio_duty_charge(air);
+			if (ret) {
+				app_radio_air_end();
+				LOG_ERR_CALL_FAILED_INT("lora_send", ret);
+				return ret;
+			}
+			m_twr_st.tx++;
+			m_twr_st.retx += n > 1;
+			if (!m_twr.confirmed) {
+				app_radio_air_end();
+				break;
+			}
+
+			ret = twr_radio(false);
+			if (ret == 0) {
+				ret = lora_recv_async(m_lora_dev, twr_recv_cb, NULL);
+			}
+			c_arm = k_cycle_get_32();
+			if (ret) {
+				app_radio_air_end();
+				LOG_ERR_CALL_FAILED_INT("lora_recv_async", ret);
+				return ret;
+			}
+		}
+
+		bool got = false;
+		/* The window runs from RX armed; fast mode learns of it a little later. */
+		uint32_t win_us = twr_ack_window_ms() * 1000U;
+		k_timepoint_t end = sys_timepoint_calc(
+			K_USEC(win_us - MIN(win_us, twr_us(c_arm, k_cycle_get_32()))));
+
+		while (twr_wait_frame(end, &rx, &rh, pt, &rlen)) {
+			if (rh.type != TWR_TYPE_ACK || twr_parse_ack(pt, rlen, &ack) ||
+			    ack.acked != counter) {
+				m_twr_st.bad++;
+				continue;
+			}
+			if (m_twr.ack_drop) {
+				m_twr.ack_drop--;
+				m_twr_st.ack_dropped++;
+				continue; /* as if lost: the window runs out, then a resend */
+			}
+			got = true;
+			break;
+		}
+
+		if (got) {
+			c_ack = rx.cyc;
+			ack_rssi = rx.rssi;
+			ack_snr = rx.snr;
+			m_twr_st.acked++;
+			twr_stat_add(twr_us(c_done, c_arm), &m_twr_st.arm_min, &m_twr_st.arm_max,
+				     &m_twr_st.arm_sum, &m_twr_st.arm_n);
+			twr_stat_add(twr_us(c_arm, c_ack), &m_twr_st.ack_min, &m_twr_st.ack_max,
+				     &m_twr_st.ack_sum, &m_twr_st.ack_n);
+			st = "OK";
+			if (ack.pending) {
+				m_twr_st.pending++;
+				end = sys_timepoint_calc(K_MSEC(twr_dl_window_ms()));
+				while (twr_wait_frame(end, &rx, &rh, pt, &rlen)) {
+					if (rh.type == TWR_TYPE_DATA) {
+						c_dl = rx.cyc;
+						dl_len = rx.len;
+						m_twr_st.dl++;
+						break;
+					}
+					m_twr_st.bad++;
+				}
+				st = c_dl ? "OK+DL" : "OK-DL";
+			}
+		} else {
+			m_twr_st.timeouts++;
+			st = "TO";
+		}
+		(void)lora_recv_async(m_lora_dev, NULL, NULL);
+		app_radio_air_end();
+		if (got) {
+			break;
+		}
+	}
+	(void)twr_radio(true);
+	app_radio_heartbeat_feed();
+
+	LOG_INF("TWR c=%u n=%u L=%u sf=%u f=%u t0=%u %s tx=%u td=%u arm=%u ack=%u dl=%u/%u rs=%d "
+		"sn=%d g=%d",
+		counter, MIN(n, tries), (unsigned int)flen, m_twr.sf, fast, t0, st,
+		twr_us(c_start, c_done), td, c_arm ? twr_us(c_done, c_arm) : 0,
+		c_ack ? twr_us(c_arm, c_ack) : 0, c_dl ? twr_us(c_ack, c_dl) : 0, dl_len, ack_rssi,
+		ack_snr, ack.rssi);
+	return 0;
+}
+
+static void twr_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (m_twr_duty_freq != m_twr.freq) {
+		/* The ledger of the sub-band the bench now transmits in. */
+		app_radio_duty_init(app_radio_duty_budget_ms(m_twr.freq));
+		m_twr_duty_freq = m_twr.freq;
+	}
+
+	uint32_t air = p2p_toa_ms(m_twr.sf, TWR_HDR_LEN + m_twr.pt_len + TWR_TAG_LEN);
+	int64_t wait = app_radio_duty_wait_ms(air);
+
+	if (wait > 0 && m_twr.run_left) {
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_twr_work, K_MSEC(wait));
+		return; /* a run waits for the duty ledger instead of dropping frames */
+	}
+
+	int ret = twr_exchange();
+
+	if (ret) {
+		LOG_ERR("TWR exchange failed: %d", ret);
+	}
+	if (m_twr.run_left && --m_twr.run_left) {
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_twr_work,
+					    K_MSEC(m_twr.run_gap_ms));
+	}
+}
+
+static int cmd_twr_send(const struct shell *sh, size_t argc, char **argv, uint32_t count,
+			uint16_t gap_ms)
+{
+	long len = strtol(argv[0], NULL, 0);
+
+	if (len < 1 || len > TWR_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) {
+		shell_error(sh, "payload 1..%d B", TWR_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN);
+		return -EINVAL;
+	}
+	/* Queued or running: an exchange reads m_twr while it runs. */
+	if (k_work_delayable_busy_get(&m_twr_work) || m_twr.run_left) {
+		shell_error(sh, "busy (run active: `ats tower stop`)");
+		return -EBUSY;
+	}
+	uint32_t flen = TWR_HDR_LEN + (uint32_t)len + TWR_TAG_LEN;
+	uint32_t air = p2p_toa_ms(m_twr.sf, (uint8_t)flen);
+
+	if (air > TWR_TOA_MAX_MS) {
+		shell_error(sh, "LIMIT: %u B frame at SF%u = %u ms > %u ms (driver TX timeout)",
+			    flen, m_twr.sf, air, TWR_TOA_MAX_MS);
+		return -EMSGSIZE;
+	}
+	m_twr.pt_len = (uint8_t)len;
+	m_twr.confirmed = argc > 1 && argv[1][0] == 'c';
+	m_twr.run_left = count > 1 ? count : 0;
+	m_twr.run_gap_ms = gap_ms;
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_twr_work, K_NO_WAIT);
+	return 0;
+}
+
+static int cmd_twr_tx(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_twr_send(sh, argc - 1, &argv[1], 1, 0);
+}
+
+static int cmd_twr_run(const struct shell *sh, size_t argc, char **argv)
+{
+	long count = strtol(argv[1], NULL, 0);
+	long gap = strtol(argv[3], NULL, 0);
+
+	if (count < 1 || gap < 0 || gap > UINT16_MAX) {
+		shell_error(sh, "run <count> <payload> <gap_ms> [c]");
+		return -EINVAL;
+	}
+	/* argv[2] = payload, argv[4] = optional c */
+	char *args[2] = {argv[2], argc > 4 ? argv[4] : "u"};
+
+	return cmd_twr_send(sh, 2, args, (uint32_t)count, (uint16_t)gap);
+}
+
+static int cmd_twr_stop(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	m_twr.run_left = 0;
+	(void)k_work_cancel_delayable(&m_twr_work);
+	shell_print(sh, "stopped");
+	return 0;
+}
+
+static int cmd_twr_set(const struct shell *sh, char **argv, long min, long max, long *out)
+{
+	long v = strtol(argv[1], NULL, 0);
+
+	if (v < min || v > max) {
+		shell_error(sh, "%s: %ld..%ld", argv[0], min, max);
+		return -EINVAL;
+	}
+	*out = v;
+	return 0;
+}
+
+static int cmd_twr_sf(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 7, 12, &v);
+
+	if (ret == 0) {
+		m_twr.sf = (uint8_t)v;
+		shell_print(sh, "sf %u, ack window %u ms, dl window %u ms", m_twr.sf,
+			    twr_ack_window_ms(), twr_dl_window_ms());
+	}
+	return ret;
+}
+
+static int cmd_twr_freq(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 863000000, 870000000, &v);
+
+	if (ret == 0) {
+		m_twr.freq = (uint32_t)v;
+		shell_print(sh, "freq %u Hz, duty budget %u ms/h", m_twr.freq,
+			    app_radio_duty_budget_ms(m_twr.freq));
+	}
+	return ret;
+}
+
+static int cmd_twr_window(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 0, 10000, &v);
+
+	if (ret == 0) {
+		m_twr.window_ms = (uint16_t)v;
+		shell_print(sh, "ack window %u ms", twr_ack_window_ms());
+	}
+	return ret;
+}
+
+static int cmd_twr_dlwin(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 0, 20000, &v);
+
+	if (ret == 0) {
+		m_twr.dlwin_ms = (uint16_t)v;
+		shell_print(sh, "dl window %u ms", twr_dl_window_ms());
+	}
+	return ret;
+}
+
+static int cmd_twr_reps(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 1, TWR_REPS_MAX, &v);
+
+	if (ret == 0) {
+		m_twr.reps = (uint8_t)v;
+	}
+	return ret;
+}
+
+static int cmd_twr_ack_drop(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 0, 1000, &v);
+
+	if (ret == 0) {
+		m_twr.ack_drop = (uint32_t)v;
+	}
+	return ret;
+}
+
+static int cmd_twr_fast(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 0, 1, &v);
+
+	if (ret == 0) {
+		if (v && !IS_ENABLED(CONFIG_LORA_SEND_RECV_ASYNC)) {
+			shell_error(sh, "driver has no lora_send_recv_async()");
+			return -ENOTSUP;
+		}
+		m_twr.fast = v;
+		shell_print(sh, "fast %u", m_twr.fast);
+	}
+	return ret;
+}
+
+/* The Northbridge counter restarts at 1 after its power cycle: reset the replay
+ * lane here (0) instead of rebooting the node. */
+static int cmd_twr_gw_last(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	m_twr_gw_last = (uint32_t)strtoul(argv[1], NULL, 0);
+	shell_print(sh, "gw_last %u", m_twr_gw_last);
+	return 0;
+}
+
+static int cmd_twr_stats(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc > 1 && strcmp(argv[1], "reset") == 0) {
+		memset(&m_twr_st, 0, sizeof(m_twr_st));
+		shell_print(sh, "stats reset");
+		return 0;
+	}
+	shell_print(sh, "node 0x%08x gw 0x%08x freq %u sf %u reps %u win %u dlwin %u ms fast %u",
+		    twr_node_addr(), TWR_GW_ADDR, m_twr.freq, m_twr.sf, m_twr.reps,
+		    twr_ack_window_ms(), twr_dl_window_ms(), m_twr.fast);
+	shell_print(sh, "frames %u tx %u retx %u acked %u timeouts %u ack_dropped %u",
+		    m_twr_st.frames, m_twr_st.tx, m_twr_st.retx, m_twr_st.acked, m_twr_st.timeouts,
+		    m_twr_st.ack_dropped);
+	shell_print(sh,
+		    "bad %u stale %u pending %u dl %u duty_held %u limit %u run_left %u gw_last %u",
+		    m_twr_st.bad, m_twr_st.stale, m_twr_st.pending, m_twr_st.dl, m_twr_st.duty_held,
+		    m_twr_st.limit, m_twr.run_left, m_twr_gw_last);
+	shell_print(sh, "arm us min %u avg %u max %u | ack us min %u avg %u max %u",
+		    m_twr_st.arm_min,
+		    m_twr_st.arm_n ? (uint32_t)(m_twr_st.arm_sum / m_twr_st.arm_n) : 0,
+		    m_twr_st.arm_max, m_twr_st.ack_min,
+		    m_twr_st.ack_n ? (uint32_t)(m_twr_st.ack_sum / m_twr_st.ack_n) : 0,
+		    m_twr_st.ack_max);
+	static struct app_radio_status st;
+
+	app_radio_get_status(&st);
+	shell_print(sh, "duty used %u of %u ms/h", st.airtime_hour_ms,
+		    app_radio_duty_budget_ms(m_twr.freq));
+	return 0;
+}
+
+SHELL_SUBCMD_ADD((tower_bench), tx, NULL, "tx <payload> [c]: one frame", cmd_twr_tx, 2, 1);
+SHELL_SUBCMD_ADD((tower_bench), run, NULL, "run <count> <payload> <gap_ms> [c]", cmd_twr_run, 4, 1);
+SHELL_SUBCMD_ADD((tower_bench), stop, NULL, "stop a run", cmd_twr_stop, 1, 0);
+SHELL_SUBCMD_ADD((tower_bench), sf, NULL, "sf <7..12>", cmd_twr_sf, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), freq, NULL, "freq <Hz>", cmd_twr_freq, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), window, NULL, "window <ms>, 0 = formula", cmd_twr_window, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), dlwin, NULL, "dlwin <ms>, 0 = formula", cmd_twr_dlwin, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), reps, NULL, "reps <1..10>", cmd_twr_reps, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), ack_drop, NULL, "ack_drop <n>", cmd_twr_ack_drop, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), fast, NULL, "fast <0|1>: TX->RX without radio sleep", cmd_twr_fast,
+		 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), gw_last, NULL, "gw_last <n>, 0 = accept any", cmd_twr_gw_last, 2,
+		 0);
+SHELL_SUBCMD_ADD((tower_bench), stats, NULL, "stats [reset]", cmd_twr_stats, 1, 1);
+
+static void twr_start(void)
+{
+	k_work_init_delayable(&m_twr_work, twr_work_handler);
+	LOG_WRN("TOWER P0 bench build: P2P link off; node 0x%08x gw 0x%08x %u Hz SF%u (ats tower)",
+		twr_node_addr(), TWR_GW_ADDR, m_twr.freq, m_twr.sf);
+}
+#endif /* defined(CONFIG_APP_P2P_TOWER_BENCH) */
+
 /* ======================================================================== */
 /* Public API                                                                */
 /* ======================================================================== */
@@ -2550,6 +3330,12 @@ int app_radio_p2p_init(void)
 
 void app_radio_p2p_start(void)
 {
+#if defined(CONFIG_APP_P2P_TOWER_BENCH)
+	/* The bench owns the radio through `ats tower`: no join, no uplinks. */
+	twr_start();
+	m_disabled = true;
+	return;
+#endif
 	/* No usable root key -- see app_key_is_set() above for why this refuses
 	 * outright instead of trying.
 	 *

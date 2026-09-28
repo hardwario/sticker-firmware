@@ -2174,12 +2174,14 @@ static void clock_sync_waits_for_the_time(void)
 	k_sleep(K_SECONDS(1));
 	zassert_equal(fk.time_requests, 1, "the backend is asked for a time");
 	zassert_true(app_radio_clock_sync_pending());
+	zassert_true(app_radio_time_wanted());
 	zassert_equal(fk.n, 0, "no uplink of its own");
 
 	app_radio_time_event();
 	k_sleep(K_SECONDS(5));
 	zassert_equal(info_frames(21), 1, "the time answers it");
 	zassert_false(app_radio_clock_sync_pending());
+	zassert_false(app_radio_time_wanted());
 
 	app_radio_time_event();
 	k_sleep(K_SECONDS(5));
@@ -2259,6 +2261,53 @@ static void time_event_without_a_request(void)
 	zassert_equal(fk.n, 0);
 }
 BOTH_PROFILES(time_event_without_a_request)
+
+/* ---- Network time request ---------------------------------------------------
+ * app_radio asks the backend (LoRaWAN DeviceTimeReq, P2P TIME_REQ), whoever
+ * wants the time: a link-up without one, the weekly re-sync, `clock sync`. */
+
+/* A link-up with no network time since boot asks with the session's first
+ * uplinks; the landed time ends the want and answers nothing. */
+static void link_up_without_time_asks(void)
+{
+	app_radio_link_up();
+	zassert_equal(fk.time_requests, 1, "the new session asks for the time");
+	zassert_true(app_radio_time_wanted());
+	zassert_false(app_radio_clock_sync_pending(), "no clock_sync to answer");
+
+	app_radio_time_event();
+	zassert_false(app_radio_time_wanted(), "the time landed");
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 0, "nothing to answer, no uplink of its own");
+}
+BOTH_PROFILES(link_up_without_time_asks)
+
+/* A link-up after a network time (a rejoin later in the boot) keeps it; the
+ * weekly re-sync refreshes it. */
+static void link_up_with_time_keeps_it(void)
+{
+	g_network_time_at_ms = 1;
+	app_radio_link_up();
+	zassert_equal(fk.time_requests, 0);
+	zassert_false(app_radio_time_wanted());
+}
+BOTH_PROFILES(link_up_with_time_keeps_it)
+
+/* app_radio_time_request() (weekly re-sync, shell `clock sync`), from any
+ * thread: the backend is asked on the radio work queue, even with a time. */
+static void time_request_asks_the_backend(void)
+{
+	g_network_time_at_ms = 1;
+	app_radio_time_request();
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.time_requests, 1);
+	zassert_true(app_radio_time_wanted());
+	zassert_equal(fk.n, 0, "no uplink of its own");
+
+	app_radio_time_event();
+	zassert_false(app_radio_time_wanted());
+}
+BOTH_PROFILES(time_request_asks_the_backend)
 
 /* ---- Flash writes vs radio exchanges ----------------------------------------
  * A writer thread (shell, NFC, report queue in the firmware) holds the flash

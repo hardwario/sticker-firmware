@@ -6,6 +6,7 @@
 
 #include "app_clock.h"
 #include "app_log.h"
+#include "app_radio.h"
 
 #if defined(__has_include) && __has_include("app_history.h")
 #include "app_history.h"
@@ -17,10 +18,6 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/sys/timeutil.h>
-
-#if defined(CONFIG_LORAWAN)
-#include <zephyr/lorawan/lorawan.h>
-#endif
 
 #if defined(CONFIG_SHELL)
 #include <zephyr/shell/shell.h>
@@ -34,46 +31,30 @@
 
 LOG_MODULE_REGISTER(app_clock, LOG_LEVEL_INF);
 
-/* GPS epoch (1980-01-06) to Unix epoch (1970-01-01) offset in seconds. */
-#define GPS_UNIX_EPOCH_OFFSET 315964800UL
-/* GPS-UTC leap second offset (18 s since 2017-01-01). Update if IERS adds a
- * leap second. GPS time does not count leap seconds; UTC does. */
-#define GPS_UTC_LEAP_SECONDS  18UL
-
 /* Plausible wall-clock window (L-5), matching the NFC clock_sync bounds in
- * app_cmd.c: reject a bogus network DeviceTimeAns rather than skewing every
+ * app_cmd.c: reject a bogus network time rather than skewing every
  * history/alarm timestamp (and underflowing the history re-anchor base). */
 #define APP_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
 #define APP_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
 
 static const struct device *const m_rtc = DEVICE_DT_GET(DT_NODELABEL(rtc));
 
-/* Set once the RTC has been synced from the network this session. Guards
- * against re-requesting DeviceTimeReq, which would pile up MAC commands and
- * push the uplink over the payload limit (Length error). */
-static bool m_time_synced;
 /* Uptime (ms) the last network time landed (app_clock_set_network_time()), 0 = never. */
 static int64_t m_network_time_at_ms;
 
 /* Periodic re-sync (#96): the LSE drifts ~±20 ppm (~1.7 s/day, ~10 min/year),
  * which shows up in history timestamps and GetInfo unix_time. Re-request the
- * network time roughly weekly — it's a MAC command piggybacked on the next
- * regular uplink, so it costs no extra message. The timer is armed once after
- * the first successful sync (no point before the network has time). */
+ * network time roughly weekly through app_radio, whatever the radio: it rides
+ * the next regular uplink (LoRaWAN DeviceTimeReq, P2P TIME_REQ), so it costs
+ * no extra message. The timer is armed once after the first network time (no
+ * point before the network has time). */
 #define RESYNC_PERIOD_SEC (7U * 24U * 3600U)
-
-static void resync_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	LOG_INF("Periodic time re-sync");
-	app_clock_force_resync();
-}
-static K_WORK_DEFINE(m_resync_work, resync_work_handler);
 
 static void resync_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	k_work_submit(&m_resync_work); /* defer off the ISR/timer context */
+	LOG_INF("Periodic time re-sync");
+	app_radio_time_request(); /* any context: work on the radio work queue */
 }
 static K_TIMER_DEFINE(m_resync_timer, resync_timer_handler, NULL);
 
@@ -85,85 +66,6 @@ int app_clock_init(void)
 	}
 
 	return 0;
-}
-
-void app_clock_request_sync(void)
-{
-#if defined(CONFIG_LORAWAN)
-	if (m_time_synced) {
-		/* Already have network time; don't queue another DeviceTimeReq. */
-		return;
-	}
-
-	/* force_request=false: piggyback the MAC command on the next regular
-	 * uplink instead of sending an extra empty message. */
-	int ret = lorawan_request_device_time(false);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_request_device_time", ret);
-	} else {
-		LOG_INF("DeviceTimeReq queued");
-	}
-#endif /* defined(CONFIG_LORAWAN) */
-}
-
-/* #340 L11: minimum spacing between forced resyncs. m_time_synced is the only
- * anti-pileup guard in this file, and app_clock_force_resync() unconditionally
- * defeats it every call by clearing it first -- app_cmd_handle_clock_sync()
- * calls force_resync() on every NFC/LoRaWAN clock_sync command, so repeated
- * taps or downlinks could each queue a fresh DeviceTimeReq with no spacing,
- * piling up MAC commands on the next uplink (Length error). */
-#define FORCE_RESYNC_MIN_INTERVAL_SEC 60U
-
-/* -1 = "never force-resynced yet" sentinel (same idiom as app_alarm.c). */
-static int64_t m_last_forced_ms = -1;
-
-void app_clock_force_resync(void)
-{
-	int64_t now = k_uptime_get();
-
-	if (m_last_forced_ms >= 0 &&
-	    (now - m_last_forced_ms) < (int64_t)FORCE_RESYNC_MIN_INTERVAL_SEC * 1000) {
-		LOG_WRN("force_resync: cooldown active, ignoring (#340 L11)");
-		return;
-	}
-	m_last_forced_ms = now;
-
-	/* Drop the guard so a fresh DeviceTimeReq is queued even if already synced. */
-	m_time_synced = false;
-	app_clock_request_sync();
-}
-
-void app_clock_handle_downlink(uint8_t flags)
-{
-#if defined(CONFIG_LORAWAN)
-	if (!(flags & LORAWAN_TIME_UPDATED)) {
-		return;
-	}
-
-	uint32_t gps_time = 0;
-	int ret = lorawan_device_time_get(&gps_time);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_device_time_get", ret);
-		return;
-	}
-
-	uint32_t unix_time = gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
-	bool first_sync = !m_time_synced;
-
-	/* A GPS→Unix conversion underflow lands outside the L-5 window too. */
-	if (app_clock_set_network_time(unix_time)) {
-		return;
-	}
-	LOG_INF("RTC synced from network: unix=%u", unix_time);
-
-	/* Arm the periodic re-sync once, after the first successful network sync. */
-	if (first_sync) {
-		k_timer_start(&m_resync_timer, K_SECONDS(RESYNC_PERIOD_SEC),
-			      K_SECONDS(RESYNC_PERIOD_SEC));
-	}
-#else
-	ARG_UNUSED(flags);
-#endif /* defined(CONFIG_LORAWAN) */
 }
 
 int app_clock_set_network_time(uint32_t unix_s)
@@ -183,7 +85,11 @@ int app_clock_set_network_time(uint32_t unix_s)
 		return ret;
 	}
 
-	m_time_synced = true;
+	/* Arm the periodic re-sync once, after the first network time. */
+	if (m_network_time_at_ms == 0) {
+		k_timer_start(&m_resync_timer, K_SECONDS(RESYNC_PERIOD_SEC),
+			      K_SECONDS(RESYNC_PERIOD_SEC));
+	}
 	m_network_time_at_ms = MAX(k_uptime_get(), 1);
 	return 0;
 }
@@ -222,7 +128,7 @@ int app_clock_set_unix(uint32_t unix_s)
 	 * read-twice-and-compare loop until the watchdog fires. APP_CLOCK_UNIX_MAX
 	 * (4102444800 = 2100-01-01T00:00:00Z) is itself the first INVALID instant,
 	 * not the last valid one (matches its use as an inclusive lower bound in
-	 * app_clock_handle_downlink()'s L-5 check and app_cmd_handle_clock_sync()'s
+	 * app_clock_set_network_time()'s L-5 check and app_cmd_handle_clock_sync()'s
 	 * bound — both use `>`, which lets exactly this instant through to here;
 	 * `>=` below is the actual backstop for it). Reuses the same bound those two
 	 * already enforce for their own paths (network DeviceTimeAns and the real
@@ -307,16 +213,16 @@ static int cmd_clock_sync(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_clock_request_sync();
-	shell_print(sh, "DeviceTimeReq requested; RTC updates on the next downlink");
+	app_radio_time_request();
+	shell_print(sh, "Network time requested; the RTC updates when it lands");
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_clock, SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
 	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
-	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq).", cmd_clock_sync,
-		      1, 0),
+	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq, P2P TIME_REQ).",
+		      cmd_clock_sync, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(clock, &sub_clock, "RTC wall-clock commands.", NULL);

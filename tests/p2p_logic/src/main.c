@@ -20,7 +20,7 @@ extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
 extern int test_save_sf_ret;
 extern int test_lora_send_ret;
-extern bool p2p_test_clock_sync_pending;
+extern bool p2p_test_time_wanted;
 extern int p2p_test_time_events;
 extern int p2p_test_air_begins;
 extern int p2p_test_air_ends;
@@ -1019,6 +1019,57 @@ ZTEST(p2p_logic, test_retry_resends_the_same_counter)
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
 
+/* A wanted network time sets FCtrl TIME_REQ on a fresh confirmed uplink only
+ * (an unconfirmed one gets no Ack to carry the tail), and the retry of that
+ * frame keeps it even when the want ended meanwhile: byte for byte (F-P1-1). */
+ZTEST(p2p_logic, test_time_req_on_confirmed_uplinks_kept_on_retry)
+{
+	static uint8_t body[10] = {0x20, 0x21};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .len = sizeof(body),
+				    .buf = body};
+	struct app_radio_tx_result res = {0};
+	uint8_t first[255];
+	uint32_t first_len;
+
+	zassert_equal(p2p_uplink_fctrl(false), 0);
+	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED, "no time wanted");
+	p2p_test_time_wanted = true;
+	zassert_equal(p2p_uplink_fctrl(false), 0, "unconfirmed: never TIME_REQ");
+	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ);
+
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_set_fcnt(400, 500);
+	p2p_test_tx_reset();
+
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL],
+		      P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ, "the time is asked for");
+	first_len = test_lora_last_len;
+	memcpy(first, test_lora_last_frame, first_len);
+
+	p2p_test_time_wanted = false; /* e.g. landed from a later request's answer */
+	f.attempt = 1;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_mem_equal(test_lora_last_frame, first, first_len, "the retry is the same frame");
+
+	f.attempt = 0;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], P2P_FCTRL_CONFIRMED,
+		      "a fresh frame drops TIME_REQ once the time landed");
+
+	p2p_test_time_wanted = true;
+	f.flags = 0;
+	f.kind = APP_RADIO_FRAME_TELEMETRY;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), 0);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], 0, "unconfirmed telemetry");
+	p2p_test_time_wanted = false;
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+}
+
 /* LoRaWAN parity: an empty clock_sync forces no uplink -- like LoRaWAN's
  * DeviceTimeReq it waits for the next regular uplink, whose Ack time tail then
  * sets the RTC and triggers the Info with the command's seq. */
@@ -1030,12 +1081,12 @@ ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
 	uint32_t sends = test_lora_send_count;
 	int kicks = p2p_test_tx_kick_calls;
 
-	p2p_test_clock_sync_pending = true;
+	p2p_test_time_wanted = true;
 	app_radio_p2p_backend.time_request();
 	k_sleep(K_MSEC(50)); /* a forced send would run on the radio work queue by now */
 	zassert_equal(test_lora_send_count, sends, "clock_sync must not send an uplink");
 	zassert_equal(p2p_test_tx_kick_calls, kicks, "nor ask app_radio for one");
-	p2p_test_clock_sync_pending = false;
+	p2p_test_time_wanted = false;
 	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
 }
 
@@ -1610,9 +1661,10 @@ static void apply_ack(bool with_time, uint32_t unix_time)
 	p2p_apply_ack(&ack, 1, -70, 5);
 }
 
-/* PF-2: a pending clock_sync makes the next reports CONFIRMED so an Ack (and
- * its time tail) comes back even with the periodic check off -- at most
- * P2P_CLOCK_SYNC_REPORTS_MAX (3) of them, then the node stops paying for it. */
+/* PF-2: a wanted network time (clock_sync, link-up, weekly re-sync) makes the
+ * next reports CONFIRMED so an Ack (and its time tail) comes back even with the
+ * periodic check off -- at most P2P_TIME_REPORTS_MAX (3) of them per request,
+ * then the node stops paying for it. */
 ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 {
 	p2p_test_join_setup(7);
@@ -1621,21 +1673,21 @@ ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 	p2p_test_link_reset();
 	g_app_config.radio_link_check_interval = 0;
 
-	p2p_test_clock_sync_pending = true;
+	p2p_test_time_wanted = true;
 	app_radio_p2p_backend.time_request();
 	for (int i = 0; i < 3; i++) {
-		zassert_true(send_report_confirmed(false), "clock_sync report %d", i);
+		zassert_true(send_report_confirmed(false), "time request report %d", i);
 	}
 	zassert_false(send_report_confirmed(false), "the 4th report is back to the cadence");
 
 	/* A new request gets its own three. */
 	app_radio_p2p_backend.time_request();
-	zassert_true(send_report_confirmed(false), "a new clock_sync confirms again");
+	zassert_true(send_report_confirmed(false), "a new request confirms again");
 
-	/* Answered (app_radio clears the flag): back to the cadence at once. */
+	/* The time landed (app_radio clears the want): back to the cadence at once. */
 	p2p_test_link_reset();
 	app_radio_p2p_backend.time_request();
-	p2p_test_clock_sync_pending = false;
+	p2p_test_time_wanted = false;
 	zassert_false(send_report_confirmed(false), "nothing pending, the cadence");
 
 	g_app_config.radio_link_check_interval = 5;
@@ -1741,6 +1793,175 @@ ZTEST(p2p_logic, test_warning_steps_tx_power_up_to_the_config)
 
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 	p2p_test_link_reset();
+}
+
+/* ---- TOWER-over-LoRa frame codec (P0 bench, doc/plan "TOWER protocol as the
+ * P2P transport" §13.1 M1) --------------------------------------------- */
+
+#include "tower_kat.h"
+
+static const uint8_t tower_kat_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
+static void tower_kat_hdr(const struct tower_kat *v, struct twr_hdr *h)
+{
+	h->type = v->frame_type;
+	h->flags = v->flags;
+	h->src = v->src;
+	h->dest = v->dest;
+	h->counter = v->counter;
+}
+
+ZTEST(p2p_logic, test_tower_seal_matches_the_kat)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t nonce[TWR_NONCE_LEN];
+		uint8_t frame[TWR_FRAME_MAX];
+		size_t len = 0;
+
+		tower_kat_hdr(v, &h);
+		twr_nonce(nonce, v->src, v->counter);
+		zassert_mem_equal(nonce, v->nonce, TWR_NONCE_LEN, "%s: nonce", v->name);
+		zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				    sizeof(frame), &len),
+			   "%s: seal", v->name);
+		zassert_equal(len, v->frame_len, "%s: length %zu", v->name, len);
+		zassert_mem_equal(frame, v->frame, v->frame_len, "%s: frame bytes", v->name);
+	}
+}
+
+ZTEST(p2p_logic, test_tower_open_matches_the_kat)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t pt[TWR_FRAME_MAX];
+		size_t pt_len = 0xffff;
+
+		zassert_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, sizeof(pt),
+				    &pt_len),
+			   "%s: open", v->name);
+		zassert_equal(h.type, v->frame_type, "%s: type", v->name);
+		zassert_equal(h.flags, v->flags, "%s: flags", v->name);
+		zassert_equal(h.src, v->src, "%s: src", v->name);
+		zassert_equal(h.dest, v->dest, "%s: dest", v->name);
+		zassert_equal(h.counter, v->counter, "%s: counter", v->name);
+		zassert_equal(pt_len, v->plaintext_len, "%s: plaintext length", v->name);
+		if (pt_len > 0) {
+			zassert_mem_equal(pt, v->plaintext, pt_len, "%s: plaintext", v->name);
+		}
+	}
+}
+
+ZTEST(p2p_logic, test_tower_header_layout)
+{
+	/* ver_type = version << 5 | type; the other fields little-endian. */
+	const struct twr_hdr h = {.type = TWR_TYPE_ACK,
+				  .flags = 0x5a,
+				  .src = 0x04030201,
+				  .dest = 0x08070605,
+				  .counter = 0x0c0b0a09};
+	const uint8_t want[TWR_HDR_LEN] = {0x21, 0x5a, 0x01, 0x02, 0x03, 0x04, 0x05,
+					   0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c};
+	uint8_t out[TWR_HDR_LEN];
+
+	twr_hdr_put(out, &h);
+	zassert_mem_equal(out, want, TWR_HDR_LEN);
+	zassert_equal(tower_kat[0].frame[0], 0x20, "KAT data frame: ver 1, type 0");
+	zassert_equal(tower_kat[2].frame[0], 0x21, "KAT ack frame: ver 1, type 1");
+}
+
+ZTEST(p2p_logic, test_tower_open_rejects_a_bad_frame)
+{
+	const struct tower_kat *v = &tower_kat[1]; /* uplink_confirmed */
+	uint8_t frame[TWR_FRAME_MAX];
+	uint8_t pt[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
+
+	/* A flipped bit anywhere -- header (AAD), ciphertext or tag -- fails auth. */
+	const size_t spots[] = {0, 1, 5, 13, TWR_HDR_LEN, v->frame_len - 1};
+
+	for (size_t i = 0; i < ARRAY_SIZE(spots); i++) {
+		memcpy(frame, v->frame, v->frame_len);
+		frame[spots[i]] ^= (spots[i] == 0) ? 0x01 : 0x80;
+		zassert_equal(
+			twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+			-EBADMSG, "byte %zu", spots[i]);
+	}
+
+	/* Another version is not a TOWER v1 frame, whatever its tag. */
+	memcpy(frame, v->frame, v->frame_len);
+	frame[0] = (2 << 5) | TWR_TYPE_DATA;
+	zassert_equal(twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+		      -EPROTO);
+	zassert_equal(twr_hdr_get(frame, v->frame_len, &h), -EPROTO);
+
+	/* Shorter than header + tag, or truncated: never authentic. */
+	zassert_equal(twr_hdr_get(v->frame, TWR_HDR_LEN + TWR_TAG_LEN - 1, &h), -EMSGSIZE);
+	zassert_not_ok(
+		twr_open(tower_kat_key, v->frame, v->frame_len - 1, &h, pt, sizeof(pt), &pt_len));
+
+	/* A wrong key. */
+	uint8_t key[16];
+
+	memcpy(key, tower_kat_key, sizeof(key));
+	key[15] ^= 1;
+	zassert_equal(twr_open(key, v->frame, v->frame_len, &h, pt, sizeof(pt), &pt_len), -EBADMSG);
+
+	/* No room for the plaintext. */
+	zassert_not_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, v->plaintext_len - 1,
+				&pt_len));
+}
+
+ZTEST(p2p_logic, test_tower_seal_refuses_a_short_buffer)
+{
+	const struct tower_kat *v = &tower_kat[6]; /* uplink_max_payload */
+	uint8_t frame[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t len;
+
+	tower_kat_hdr(v, &h);
+	zassert_not_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				v->frame_len - 1, &len));
+	zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame, v->frame_len,
+			    &len));
+}
+
+ZTEST(p2p_logic, test_tower_ack_payload)
+{
+	struct twr_ack ack;
+	uint8_t pt[TWR_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
+
+	/* ack_no_pending: acked 2, rssi -57, no PENDING. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[2].frame, tower_kat[2].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_equal(h.type, TWR_TYPE_ACK);
+	zassert_equal(h.src, TOWER_KAT_GW_ADDR);
+	zassert_equal(h.dest, TOWER_KAT_NODE_ADDR);
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_equal(ack.rssi, -57);
+	zassert_false(ack.pending);
+
+	/* ack_pending: PENDING set, a downlink follows. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[3].frame, tower_kat[3].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_true(ack.pending);
+
+	/* The minimum ACK carries only the acked counter. */
+	const uint8_t bare[4] = {0x07, 0x00, 0x00, 0x80};
+
+	zassert_ok(twr_parse_ack(bare, sizeof(bare), &ack));
+	zassert_equal(ack.acked, 0x80000007);
+	zassert_false(ack.pending);
+	zassert_equal(twr_parse_ack(bare, 3, &ack), -EMSGSIZE);
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

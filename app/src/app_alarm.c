@@ -45,7 +45,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_NO_DATA_MS   5000
 #define APP_ALARM_NO_DATA_SLOT 0xFF
 
-/* Low-battery watchdog (#210): raise a fPort-3 alarm (source=battery,
+/* Low-battery watchdog (#210): raise an alarm (source=battery,
  * quantity=voltage, type=low) when the supply drops below the configurable
  * `battery_level` threshold (config in mV, default 2400 — Li cells discharge
  * non-linearly so the warning level is left to the integrator) and clear it once
@@ -57,7 +57,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_BATTERY_HYST_V 0.3f /* fixed: recover above threshold + 0.3 V (anti-chatter) */
 #define APP_ALARM_BATTERY_SLOT   0xFE
 
-/* fPort-3 wire scaling per quantity; defined later, forward-declared for the
+/* Alarm-batch wire scaling per quantity; defined later, forward-declared for the
  * battery watchdog's alarm_collect_battery(). */
 static int32_t alarm_scale(enum app_alarm_quantity q, float v);
 
@@ -102,8 +102,7 @@ struct rstate {
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
 /* -1 = "never sent" sentinel; k_uptime_get() legitimately returns 0 in the first
  * millisecond after boot, so 0 cannot mark "never sent" without a window where the
- * rate limit is silently skipped (#219). NOT CONFIG_LORAWAN-gated: its only user,
- * alarm_lrw_send(), is transport-agnostic (see its comment). */
+ * rate limit is silently skipped (#219). */
 static int64_t m_last_alarm_send_ms = -1;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
@@ -127,7 +126,7 @@ static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool a
  * already-active/pending latch would carry over under the edited rule's new
  * parameters. Returns NULL for an empty slot.
  *
- * Resetting an ACTIVE latch must also emit the fPort-3 deactivate edge here:
+ * Resetting an ACTIVE latch must also emit the alarm-batch deactivate edge here:
  * this reset runs before the eval_* dispatch, so eval_threshold()/eval_state()'s
  * own !rule->enabled deactivate branches can never see the pre-reset latch for
  * the disable/clear/edit transition — without this, a backend pairing
@@ -161,7 +160,7 @@ static bool rt_sync(uint8_t slot, struct app_alarm_rule *out, bool *should_send)
 	return true;
 }
 
-/* ---- Alarm-detail batch on fPort 3 (#27) -------------------------------- */
+/* ---- Alarm-detail batch (#27) ------------------------------------------- */
 
 #define ALARM_BATCH_MAX 8
 #define ALARM_FRAME_MAX 64
@@ -193,13 +192,9 @@ static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 	return (int64_t)(s * 1000.0f);
 }
 
-/* Transport-agnostic (app_report_trigger() routes through app_radio) --
- * NOT CONFIG_LORAWAN-gated. Regression found via #118 phase 2 HIL after
- * CONFIG_LORAWAN became toggleable on the P2P bench overlay: this stale
- * guard (a leftover from before app_report_trigger()/app_radio existed,
- * when this called app_radio_lrw_* directly) compiled out ALL alarm TX on a
- * LoRaWAN-off build -- alarms are the highest-priority safety frame. */
-static void alarm_lrw_send(void)
+/* Send the alarm state now, rate-limited by alarm_limit. Goes through
+ * app_report/app_radio, so it is the same on every radio. */
+static void alarm_send(void)
 {
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
@@ -341,10 +336,8 @@ static void alarm_batch_flush(void)
 	m_batch_held = false;
 
 	size_t cap = ALARM_FRAME_MAX;
-	/* Transport-agnostic (app_radio_get_max_payload(), unconditionally
-	 * compiled) -- see alarm_lrw_send()'s comment on the stale CONFIG_LORAWAN
-	 * guard this used to have. 0 = budget unknown right now: encode against the
-	 * buffer and let the transport defer (#409 3a). */
+	/* 0 = budget unknown right now: encode against the buffer and let the
+	 * radio defer (#409 3a). */
 	uint8_t dr = app_radio_get_max_payload();
 
 	if (dr > 0 && dr < cap) {
@@ -391,8 +384,8 @@ static void alarm_batch_flush(void)
 			n--;
 		}
 		if (ret != 0) {
-			/* Not even one event fits (the 11 B budget tier): no fPort 3
-			 * detail for the rest. The alarm state still reaches the LNS
+			/* Not even one event fits (the 11 B budget tier): no alarm
+			 * detail for the rest. The alarm state still reaches the server
 			 * through the alarm bits in every telemetry frame. */
 			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
 				"in telemetry system_flags",
@@ -429,10 +422,9 @@ static void alarm_batch_flush(void)
 			LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
 			break;
 		}
-		/* Transport-agnostic, see alarm_lrw_send()'s comment. */
 		(void)app_radio_send_alarm(buf, len);
-		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u on fPort 3 (%u B)", p + 1,
-			pages, first + 1, first + page_n[p], m_window_total, (unsigned)len);
+		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u (%u B)", p + 1, pages,
+			first + 1, first + page_n[p], m_window_total, (unsigned)len);
 	}
 
 	m_batch_count = 0;
@@ -473,7 +465,7 @@ bool app_alarm_flush_pending(void)
 	return waiting;
 }
 
-/* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold
+/* Record one alarm edge for the alarm-detail batch. Caller does NOT hold
  * m_lock (this takes it). */
 /* Queue one built alarm event into the rate-limit window (or flush immediately
  * when alarm_limit <= 0). Shared by the rule path (alarm_collect) and the
@@ -574,7 +566,7 @@ static void alarm_collect_battery(bool active, float voltage)
 
 /* ---- value access (source, quantity) ------------------------------------ */
 
-/* Wire scaling per quantity for the fPort-3 detail value. */
+/* Wire scaling per quantity for the alarm-detail value. */
 static int32_t alarm_scale(enum app_alarm_quantity q, float v)
 {
 	switch (q) {
@@ -1244,7 +1236,7 @@ bool app_alarm_poll(void)
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
-		alarm_lrw_send();
+		alarm_send();
 	}
 
 	alarm_buzzer_sync(new_bits, all_cleared);
@@ -1299,7 +1291,7 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
-		alarm_lrw_send();
+		alarm_send();
 	}
 
 	if (cb) {
