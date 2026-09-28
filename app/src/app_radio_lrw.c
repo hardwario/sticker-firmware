@@ -837,7 +837,7 @@ static void join_work_handler(struct k_work *work)
 	static struct lorawan_join_config config;
 
 	memset(&config, 0, sizeof(config));
-	config.dev_eui = g_app_config.lrw_deveui;
+	config.dev_eui = g_app_config.radio_deveui;
 
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 		LOG_INF("Using OTAA activation");
@@ -847,9 +847,9 @@ static void join_work_handler(struct k_work *work)
 		config.otaa.nwk_key = g_app_config.lrw_nwkkey;
 #else
 		/* LoRaWAN 1.0.x: NwkKey == AppKey (TTN/ChirpStack/Helium). */
-		config.otaa.nwk_key = g_app_config.lrw_appkey;
+		config.otaa.nwk_key = g_app_config.radio_appkey;
 #endif
-		config.otaa.app_key = g_app_config.lrw_appkey;
+		config.otaa.app_key = g_app_config.radio_appkey;
 	} else if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
 		LOG_INF("Using ABP activation");
 		config.mode = LORAWAN_ACT_ABP;

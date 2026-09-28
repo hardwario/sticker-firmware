@@ -1888,8 +1888,8 @@ static uint32_t uplink_phase_ms(void)
 	uint32_t span_ms = MIN(room_ms, (uint32_t)UPLINK_PHASE_MAX_SEC * 1000U);
 	uint32_t h = 2166136261U; /* FNV-1a over the DevEUI */
 
-	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
-		h = (h ^ g_app_config.lrw_deveui[i]) * 16777619U;
+	for (size_t i = 0; i < sizeof(g_app_config.radio_deveui); i++) {
+		h = (h ^ g_app_config.radio_deveui[i]) * 16777619U;
 	}
 	return span_ms ? (h % span_ms) : 0U;
 }

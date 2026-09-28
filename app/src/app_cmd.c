@@ -133,9 +133,9 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	 * instead of the idle LoRaWAN module's. */
 	info->radio_state = (uint8_t)app_radio_get_state();
 
-	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
+	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.radio_deveui),
 		     "dev_eui size mismatch");
-	memcpy(info->dev_eui, g_app_config.lrw_deveui, sizeof(info->dev_eui));
+	memcpy(info->dev_eui, g_app_config.radio_deveui, sizeof(info->dev_eui));
 
 	/* Battery reading (mV) from the last sensor sample's cached value, NOT a
 	 * fresh app_battery_measure() here. get_info runs on the boot path (NFC inf

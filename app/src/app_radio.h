@@ -22,7 +22,7 @@ extern "C" {
  * (app_config.proto), so keep the order. LoRaWAN: IDLE before the first join, JOINING, HEALTHY,
  * RECONNECT after the link was lost, DISABLED when the DevEUI is all-zero (#98). P2P: IDLE when
  * unpaired and not joining (after a Detach), JOINING for a boot/forced join, HEALTHY when paired,
- * RECONNECT for a self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
+ * RECONNECT for a self-heal/RejoinRequest join, DISABLED when radio_appkey or radio_deveui is
  * all-zero. WARNING is app_radio's on either radio: HEALTHY after
  * APP_RADIO_LINK_WARNING_THRESHOLD failed link checks in a row (app_radio_link_result()). */
 enum app_radio_state {

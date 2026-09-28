@@ -514,14 +514,23 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
-  - name: lrw_deveui
+  # 2026-09-28: radio_deveui / radio_appkey were lrw_deveui / lrw_appkey. Both
+  # radios use them: the LoRaWAN OTAA join, and P2P's JoinRequest, session-key
+  # KDF and uplink phase. Only the C and shell names change:
+  #   - `stored_as` keeps the NVS key config/lrw-deveui / config/lrw-appkey, so
+  #     a v1.4 identity survives the upgrade (and a downgrade) with no migration;
+  #   - `proto_name` keeps the proto field names deveui / appkey (same numbers).
+  # The other lrw_* keys are LoRaWAN-only and keep their names.
+  - name: radio_deveui
+    stored_as: lrw_deveui
     proto_group: lorawan
+    proto_name: deveui
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 6
     type: bytes
     size: 8
     persistent: [device_reset, factory_reset]
-    help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
+    help: "Get/Set DevEUI (16 hex digits), the node identity on LoRaWAN and P2P."
 
   - name: lrw_joineui
     proto_group: lorawan
@@ -542,15 +551,17 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
-  - name: lrw_appkey
+  - name: radio_appkey
+    stored_as: lrw_appkey
     proto_group: lorawan
+    proto_name: appkey
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 9
     readable: [shell, nfc]
     type: bytes
     size: 16
     persistent: [device_reset]
-    help: "Get/Set LoRaWAN AppKey (32 hex digits)."
+    help: "Get/Set AppKey (32 hex digits): LoRaWAN OTAA root key, P2P join and session-key root."
 
   - name: lrw_devaddr
     proto_group: lorawan
@@ -937,7 +948,7 @@ parameters:
   # Raw-LoRa P2P transport (#118, see doc/p2p.md). Radio tuning only —
   # net_id/dev_addr/link key are NOT config parameters: net_id/dev_addr are
   # join-assigned (phase 2) and the link key (session_key) derives from the
-  # device's existing LoRaWAN AppKey (lrw_appkey below, §4, #118 phase 2
+  # device's existing AppKey (radio_appkey, §4, #118 phase 2
   # revision) — never hand-typed, and there is no separate join_key/secret_key
   # involved in P2P at all. LoRaWAN↔P2P parity (doc/plan/439):
   # `readable` is omitted (default, same as lrw_region/lrw_adr/lrw_datarate) so

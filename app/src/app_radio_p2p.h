@@ -214,12 +214,12 @@ enum p2p_link_state {
  * Returns 0 or a negative errno. */
 int app_radio_p2p_init(void);
 
-/* Boot-time bring-up. Refuses outright, and logs an error, if `lrw_appkey`
+/* Boot-time bring-up. Refuses outright, and logs an error, if `radio_appkey`
  * is all-zero: it is the root key for the whole transport, so an all-zero one
  * is a publicly known key and joining under it is forgeable by anyone in
  * range (doc/p2p.md §4). This is checked before the paired shortcut below, so
  * a device re-enabled into `radio-mode p2p` after a factory_reset -- which
- * wipes lrw_appkey but leaves the persisted pairing intact -- refuses rather
+ * wipes radio_appkey but leaves the persisted pairing intact -- refuses rather
  * than resuming a session it can never renew (doc/p2p.md §7).
  *
  * Otherwise: if already paired (persisted NVS state from a prior
@@ -290,7 +290,7 @@ struct app_radio_p2p_info {
 	int8_t last_ack_rssi;
 	int8_t last_ack_snr;
 	bool last_ack_valid;
-	/* False means lrw_appkey is all-zero, i.e. the device has no root key
+	/* False means radio_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
 	 * indistinguishable from a plain UNPAIRED one on the bench. */
@@ -301,7 +301,7 @@ struct app_radio_p2p_info {
 void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
 
 /* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
- * to the same all-zero `lrw_appkey` refusal as app_radio_p2p_start() -- the shell
+ * to the same all-zero `radio_appkey` refusal as app_radio_p2p_start() -- the shell
  * is not a way around it --
  * unlike app_radio_p2p_start(), an existing pairing is not treated as sufficient.
  * A successful JoinAccept overwrites the old pairing via pairing_persist(),

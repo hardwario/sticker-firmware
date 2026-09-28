@@ -145,7 +145,7 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_deveui) {
-			memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
+			memcpy(config->radio_deveui, src->deveui, sizeof(config->radio_deveui));
 		}
 	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
@@ -172,7 +172,7 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_appkey) {
-			memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
+			memcpy(config->radio_appkey, src->appkey, sizeof(config->radio_appkey));
 		}
 	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
@@ -280,7 +280,7 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	}
 	if (requested(ids, n, 6)) {
 		dst->has_deveui = true;
-		memcpy(dst->deveui, c->lrw_deveui, sizeof(c->lrw_deveui));
+		memcpy(dst->deveui, c->radio_deveui, sizeof(c->radio_deveui));
 	}
 	if (requested(ids, n, 7)) {
 		dst->has_joineui = true;
@@ -292,7 +292,7 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	}
 	if (requested(ids, n, 9)) {
 		dst->has_appkey = true;
-		memcpy(dst->appkey, c->lrw_appkey, sizeof(c->lrw_appkey));
+		memcpy(dst->appkey, c->radio_appkey, sizeof(c->radio_appkey));
 	}
 	if (requested(ids, n, 10)) {
 		dst->has_devaddr = true;

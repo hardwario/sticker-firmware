@@ -93,10 +93,10 @@ struct app_config {
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
 	enum app_config_lrw_activation lrw_activation;
-	uint8_t lrw_deveui[8];
+	uint8_t radio_deveui[8];
 	uint8_t lrw_joineui[8];
 	uint8_t lrw_nwkkey[16];
-	uint8_t lrw_appkey[16];
+	uint8_t radio_appkey[16];
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];

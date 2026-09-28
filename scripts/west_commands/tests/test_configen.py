@@ -348,7 +348,7 @@ def test_migration_preserves_factory_fields(workdir):
     # The whole point of #87: identity/credentials are flagged in the YAML.
     assert {p["name"] for p in preserved} >= {
         "secret_key", "serial_number", "nonce_counter",
-        "lrw_deveui", "lrw_joineui", "lrw_appkey", "lrw_nwkkey",
+        "radio_deveui", "lrw_joineui", "radio_appkey", "lrw_nwkkey",
         "lrw_devaddr", "lrw_nwkskey", "lrw_appskey",
     }
 
@@ -410,6 +410,50 @@ def test_persistent_rejects_invalid_op_and_stray_preserve_on_reset(tmp_path):
     # Sanity: every real param in the committed YAML still validates clean.
     for p in cfg["parameters"]:
         configen.Configen()._validate_param(p)
+
+
+def test_stored_as_keeps_the_nvs_key_of_a_renamed_param(workdir):
+    """radio_deveui / radio_appkey were lrw_deveui / lrw_appkey (2026-09-28): the
+    value loads from and saves to the old settings key, the shell takes the new
+    name, and the proto field keeps its old name and number."""
+    _run_configen(workdir)
+    c = (workdir / "app_config.c").read_text()
+    proto = (workdir / "app_config.proto").read_text()
+    for new, old, field, num in (("radio_deveui", "lrw-deveui", "deveui", 6),
+                                 ("radio_appkey", "lrw-appkey", "appkey", 9)):
+        assert f'SETTINGS_SET("{old}", m_app_config.{new},' in c
+        assert f'EXPORT_FUNC("{old}", m_app_config.{new},' in c
+        assert f"SHELL_CMD_ARG({new.replace('_', '-')}, NULL," in c
+        assert f'"{new.replace("_", "-")}"' not in c.split("h_set")[1].split("return -ENOENT")[0]
+        assert f" {field} = {num};" in proto
+    # A param without stored_as is stored under its own shell name.
+    assert 'SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui,' in c
+
+
+def test_stored_as_is_validated():
+    v = configen.Configen()._validate_param
+    for bad in ("lrw-deveui", "LrwDevEui", "", 5):
+        with pytest.raises(SystemExit):
+            v({"name": "radio_deveui", "type": "bool", "stored_as": bad})
+    with pytest.raises(SystemExit):
+        v({"name": "radio_deveui", "type": "bool", "stored_as": "radio_deveui"})
+    v({"name": "radio_deveui", "type": "bool", "stored_as": "lrw_deveui"})
+
+
+def test_stored_as_must_not_collide():
+    ok = [{"name": "radio_deveui", "stored_as": "lrw_deveui"}, {"name": "lrw_joineui"}]
+    configen.check_nvs_keys(ok)
+    for clash in ([{"name": "radio_deveui", "stored_as": "lrw_deveui"}, {"name": "lrw_deveui"}],
+                  [{"name": "a", "stored_as": "x"}, {"name": "b", "stored_as": "x"}]):
+        with pytest.raises(SystemExit):
+            configen.check_nvs_keys(clash)
+
+
+def test_configen_run_rejects_an_nvs_key_clash(workdir):
+    y = workdir / "app_config.yml"
+    y.write_text(y.read_text().replace("stored_as: lrw_appkey", "stored_as: lrw_joineui", 1))
+    with pytest.raises(SystemExit):
+        _run_configen(workdir)
 
 
 def test_h_commit_clamps_loaded_values(workdir):

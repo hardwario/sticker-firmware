@@ -2828,7 +2828,7 @@ static void nfc_info_setup(size_t alarms)
 	reset_cfg();
 	g_app_config.serial_number = 2162165682u;
 	memcpy(g_app_config.claim_token, token, sizeof(token));
-	memcpy(g_app_config.lrw_deveui, deveui, sizeof(deveui));
+	memcpy(g_app_config.radio_deveui, deveui, sizeof(deveui));
 	g_app_sensor_data.voltage = 3.3f;
 	test_set_active_alarm_count(alarms);
 }

@@ -92,7 +92,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_PREJOIN_NET_ID   0
 #define P2P_PREJOIN_DEV_ADDR 0
 
-/* The STICKER's existing LoRaWAN OTAA AppKey (g_app_config.lrw_appkey) is the
+/* The STICKER's existing LoRaWAN OTAA AppKey (g_app_config.radio_appkey) is the
  * ONLY root secret for the whole P2P transport -- there is no separate
  * join_key (#118 phase 2 revision, per proximos-v2 MR!7 §7). The central
  * already knows app_key from the device's OTAA/claim flow, so nothing new
@@ -156,7 +156,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  *
  * The identity field was serial_number(4 BE) until #417 / GitLab #73: the
  * serial is off the air entirely now, and stays only as the number printed on
- * the device. The DevEUI is written MSB-first, exactly as `config lrw-deveui`
+ * the device. The DevEUI is written MSB-first, exactly as `config radio-deveui`
  * prints it and as the hex string reads -- deliberately NOT LoRaWAN's LSB-first
  * on-air order, which LoRaMac applies internally for OTAA joins. Reusing that
  * serialization here would be the #118 failure class in its purest form
@@ -304,7 +304,7 @@ static void debug_compose_work_handler(struct k_work *work); /* defined near EOF
 #endif
 
 static bool m_started;
-/* app_radio_p2p_start() refused to run: lrw_appkey or lrw_deveui is all-zero.
+/* app_radio_p2p_start() refused to run: radio_appkey or radio_deveui is all-zero.
  * Reported as APP_RADIO_STATE_DISABLED. */
 static bool m_disabled;
 static bool m_listening;
@@ -422,7 +422,7 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
 /* ======================================================================== */
 
 /* The whole transport is rooted in app_key (see the P2P_JOIN_TAG_LABEL comment
- * above), so an all-zero lrw_appkey is not merely "unset" -- it is a PUBLICLY
+ * above), so an all-zero radio_appkey is not merely "unset" -- it is a PUBLICLY
  * KNOWN root key. Anything derived under it (both handshake tags and every
  * session_key) is forgeable by anyone in radio range: a forged JoinAccept
  * would pair the node into a hostile network and hand the attacker the same
@@ -430,8 +430,8 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
  *
  * It is also a genuinely reachable state, not a theoretical one. All-zero is
  * the config default, so any device set to `radio-mode p2p` before its
- * lrw_appkey was provisioned lands here -- the ordinary case on a bench or a
- * P2P-only build. It is also what a factory_reset leaves behind (lrw_appkey
+ * radio_appkey was provisioned lands here -- the ordinary case on a bench or a
+ * P2P-only build. It is also what a factory_reset leaves behind (radio_appkey
  * is `persistent: [device_reset]` only and is absent from
  * app_config_factory_reset()'s preserve list, unlike secret_key, which the
  * earlier join_key-rooted design could always fall back on).
@@ -443,15 +443,15 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
  * merely off. */
 static bool app_key_is_set(void)
 {
-	for (size_t i = 0; i < sizeof(g_app_config.lrw_appkey); i++) {
-		if (g_app_config.lrw_appkey[i] != 0) {
+	for (size_t i = 0; i < sizeof(g_app_config.radio_appkey); i++) {
+		if (g_app_config.radio_appkey[i] != 0) {
 			return true;
 		}
 	}
 	return false;
 }
 
-/* The same rule for lrw_deveui, which #417 / GitLab #73 made load-bearing:
+/* The same rule for radio_deveui, which #417 / GitLab #73 made load-bearing:
  * the DevEUI is now the central's lookup key on the air AND an input to the
  * session-key KDF, so an all-zero one is not a cosmetic gap.
  *
@@ -463,8 +463,8 @@ static bool app_key_is_set(void)
  * and in the same shape as app_key_is_set() above. */
 static bool dev_eui_is_set(void)
 {
-	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
-		if (g_app_config.lrw_deveui[i] != 0) {
+	for (size_t i = 0; i < sizeof(g_app_config.radio_deveui); i++) {
+		if (g_app_config.radio_deveui[i] != 0) {
 			return true;
 		}
 	}
@@ -504,13 +504,13 @@ static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8
 	block[label_len] = 0x01;
 	sys_put_be32(dev_nonce, &block[label_len + 1]);
 	sys_put_be32(central_nonce, &block[label_len + 5]);
-	/* MSB-first, straight out of the config array: lrw_deveui is already
+	/* MSB-first, straight out of the config array: radio_deveui is already
 	 * stored in the order the hex string reads (LoRaMac does the LoRaWAN
 	 * LSB reversal internally in lorawan_join), so no byte swap here. */
-	memcpy(&block[label_len + 9], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	memcpy(&block[label_len + 9], g_app_config.radio_deveui, sizeof(g_app_config.radio_deveui));
 	/* block[label_len+17 .. 31] = zero padding, already zero-initialized. */
 
-	(void)app_ccm_cmac(g_app_config.lrw_appkey, block, sizeof(block), out);
+	(void)app_ccm_cmac(g_app_config.radio_appkey, block, sizeof(block), out);
 }
 
 /* ======================================================================== */
@@ -1275,11 +1275,11 @@ static int p2p_tx_rejoin(bool forced)
 	ARG_UNUSED(forced);
 
 	if (!app_key_is_set()) {
-		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
+		LOG_ERR("P2P self-heal refused: radio_appkey is all-zero (unprovisioned)");
 		return -ENOTSUP;
 	}
 	if (!dev_eui_is_set()) {
-		LOG_ERR("P2P self-heal refused: lrw_deveui is all-zero (unprovisioned)");
+		LOG_ERR("P2P self-heal refused: radio_deveui is all-zero (unprovisioned)");
 		return -ENOTSUP;
 	}
 	LOG_WRN("P2P: self-healing re-join (§7)");
@@ -1626,8 +1626,9 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 			 * would put an all-zero app_key or DevEUI on the air, which
 			 * is exactly what the guards on the other three
 			 * start_join_episode() paths exist to prevent (#417). */
-			LOG_ERR("RejoinRequest received (counter %u) but lrw_appkey or lrw_deveui "
-				"is all-zero (device unprovisioned) -- not re-joining",
+			LOG_ERR("RejoinRequest received (counter %u) but radio_appkey or "
+				"radio_deveui is all-zero (device unprovisioned) -- not "
+				"re-joining",
 				counter);
 		} else {
 			LOG_WRN("RejoinRequest received (counter %u): re-joining", counter);
@@ -2024,7 +2025,7 @@ static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LE
 	body[1] = APP_PROTO_VERSION;
 	/* MSB-first -- see P2P_JOIN_REQ_BODY_LEN in app_radio_p2p.h for why this is a
 	 * plain memcpy and not LoRaMac's OTAA byte order. */
-	memcpy(&body[2], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	memcpy(&body[2], g_app_config.radio_deveui, sizeof(g_app_config.radio_deveui));
 	body[10] = APP_VERSION_MAJOR;
 	body[11] = APP_VERSION_MINOR;
 	body[12] = APP_VERSION_PATCH;
@@ -2039,7 +2040,7 @@ static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LE
 
 	uint8_t tag[P2P_JOIN_TAG_LEN];
 
-	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), tag);
+	(void)app_ccm_cmac(g_app_config.radio_appkey, tag_in, sizeof(tag_in), tag);
 	memcpy(&frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN], tag, P2P_JOIN_TAG_LEN);
 }
 
@@ -2162,7 +2163,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 
 	uint8_t expected_tag[P2P_JOIN_TAG_LEN];
 
-	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), expected_tag);
+	(void)app_ccm_cmac(g_app_config.radio_appkey, tag_in, sizeof(tag_in), expected_tag);
 
 	if (!p2p_tag_eq(expected_tag, &buf[P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN])) {
 		LOG_WRN("JoinAccept: auth failed");
@@ -2556,11 +2557,11 @@ void app_radio_p2p_start(void)
 	 * the network session (factory_reset, vendor_reset, lrw_reset) clear the
 	 * pairing through app_radio_reset_link(), but a pairing restored by
 	 * join_settings_set() survives device_reset and a config write that zeroes
-	 * lrw_appkey. Such a node would take the PAIRED shortcut and resume
+	 * radio_appkey. Such a node would take the PAIRED shortcut and resume
 	 * transmitting under a session it can never re-derive. */
 	if (!app_key_is_set()) {
-		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
-			"Set lrw-appkey over NFC or shell, then reboot.");
+		LOG_ERR("P2P not started: radio_appkey is all-zero (device unprovisioned). "
+			"Set radio-appkey over NFC or shell, then reboot.");
 		m_disabled = true;
 		return;
 	}
@@ -2578,12 +2579,12 @@ void app_radio_p2p_start(void)
 	 * before it was set is self-contained (P2P_JOIN_STATE_LEN is unchanged,
 	 * so join_settings_set() still accepts the old 24 B record). Every path
 	 * that would start a NEW join carries its own guard. And unlike
-	 * lrw_appkey it survives factory_reset (app_config.yml: persistent
+	 * radio_appkey it survives factory_reset (app_config.yml: persistent
 	 * [device_reset, factory_reset]), so the ordering argument above does
 	 * not transfer to this gate. */
 	if (!dev_eui_is_set()) {
-		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
-			"Set lrw-deveui over NFC or shell, then reboot.");
+		LOG_ERR("P2P not started: radio_deveui is all-zero (device unprovisioned). "
+			"Set radio-deveui over NFC or shell, then reboot.");
 		m_disabled = true;
 		return;
 	}
@@ -2676,11 +2677,11 @@ void app_radio_p2p_rejoin(void)
 	 * (a JoinRequest tagged under an all-zero app_key is forgeable by
 	 * anyone; see app_key_is_set()). */
 	if (!app_key_is_set()) {
-		LOG_ERR("P2P rejoin refused: lrw_appkey is all-zero (device unprovisioned)");
+		LOG_ERR("P2P rejoin refused: radio_appkey is all-zero (device unprovisioned)");
 		return;
 	}
 	if (!dev_eui_is_set()) {
-		LOG_ERR("P2P rejoin refused: lrw_deveui is all-zero (device unprovisioned)");
+		LOG_ERR("P2P rejoin refused: radio_deveui is all-zero (device unprovisioned)");
 		return;
 	}
 

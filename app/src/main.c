@@ -528,7 +528,7 @@ int main(void)
 		} else if (radio_state == APP_RADIO_STATE_DISABLED) {
 			/* Radio disabled (#271/#278): a single yellow blink — the lowest rung
 			 * of the yellow severity scale. LoRaWAN: DevEUI all-zero; P2P:
-			 * lrw_appkey or lrw_deveui all-zero (device not provisioned). */
+			 * radio_appkey or radio_deveui all-zero (device not provisioned). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,

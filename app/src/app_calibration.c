@@ -323,7 +323,7 @@ int app_calibration_init(void)
 	g_app_config.calibration = true;
 	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	g_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
-	memcpy(g_app_config.lrw_deveui, m_cal_deveui, sizeof(m_cal_deveui));
+	memcpy(g_app_config.radio_deveui, m_cal_deveui, sizeof(m_cal_deveui));
 	memset(g_app_config.lrw_joineui, 0, sizeof(g_app_config.lrw_joineui));
 	memcpy(g_app_config.lrw_devaddr, m_cal_devaddr, sizeof(m_cal_devaddr));
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
