@@ -41,6 +41,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. The M-2 watchdog waits out a ledger hold instead of rejoining. See §31. |
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
+| LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
 
 ---
 
@@ -1524,6 +1525,44 @@ The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequ
 - **Breaking for scripts that type the shell name.** Production and bench scripts using `config lrw-deveui` / `config lrw-appkey` must switch to the new names. No alias is kept.
 - Tests: `scripts/west_commands/tests/test_configen.py` checks that the old key is kept, the shell takes the new name and the proto names stay, plus the `stored_as` validation and clash checks.
 - HIL (2026-09-28, STICKER 2162190413, P2P, paired): flashed without an erase from the #462 image to this one and back. The DevEUI and the AppKey survived both ways, under `config radio-*` after the upgrade and `config lrw-*` after the downgrade. The session resumed with no JoinRequest, and the Info and telemetry frames were acked.
+
+## 34. Network time through `app_radio` (`TIME_REQ`)
+
+Before, `app_clock` called the LoRaWAN stack directly: the DeviceTimeReq on join, the weekly re-sync (#96) and the GPS → Unix conversion. P2P took the time only from the Ack tail, when the central chose to send it, and could not ask for it. The weekly re-sync did not run on P2P at all.
+
+Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026-09-28: "zavolat app_radio a to rozhodne").
+
+| Who asks | How |
+|---|---|
+| A link-up with no network time since boot (LoRaWAN join, P2P JoinAccept or a boot with a stored pairing) | `app_radio_link_up()` |
+| The weekly re-sync, armed by the first network time from either radio | `app_clock` → `app_radio_time_request()` |
+| `clock_sync` (radio or NFC) | `app_radio_clock_sync(seq)`, unchanged (§23) |
+| The shell `clock sync` | `app_radio_time_request()` |
+
+- **`app_radio`** keeps one "time wanted" state. It is set on a request and cleared by `app_radio_time_event()` when a time lands. It asks the backend through `time_request()` on the radio work queue.
+- **LoRaWAN** (`app_radio_lrw.c`):
+  - the DeviceTimeReq rides the next uplink, at most one per 60 s (#340 L11, now for every request);
+  - the DeviceTimeAns is converted from GPS to Unix and passed to `app_clock_set_network_time()`.
+- **P2P** (`app_radio_p2p.c`):
+  - while a time is wanted, every fresh confirmed uplink carries `FCtrl` bit 1 `TIME_REQ` (doc/p2p.md §3);
+  - the next reports go confirmed, at most 3 per request (unchanged, PF-2);
+  - a retry keeps its first FCtrl byte for byte;
+  - the TX log shows `time-req`.
+- **Central:** answers with the Unix tail (B5). The Hub sends the tail on every Ack today (`deliver_time` true) and ignores the bit, so it needs no change. The bit is registered in the Hub-side spec (`p2p_link_check.md` §3.2).
+- **`app_clock`** has no LoRaWAN code left.
+  - `app_clock_request_sync()`, `app_clock_force_resync()` and `app_clock_handle_downlink()` are gone.
+  - `RTC synced from network` is logged by the backend: on LoRaWAN for each DeviceTimeAns, on P2P only for a time it asked for.
+    The Hub sends the tail on every Ack, and a log per Ack was noise (found in the HIL).
+  - The first network time arms the weekly re-sync.
+- **Cost:** release +24 B flash, RAM unchanged. P2P bench +544 B flash, +64 B RAM. A build without a radio is 144 B smaller.
+- **Tests:**
+  - `tests/radio_common`: a link-up without a time asks and one with a time does not, `app_radio_time_request()` asks on the queue, and a clock_sync wants the time until it lands.
+  - `tests/p2p_logic`: `TIME_REQ` rides only confirmed uplinks, the retry keeps its FCtrl, and a fresh frame drops the bit once the time has landed.
+- HIL (2026-09-28, STICKER 2162190413, P2P, paired to the Hub; debug bench build with a HIL-only 240 s re-sync period):
+  - **Boot:** `TIME_REQ` came up at 6.2 s after the reboot. The first confirmed uplink (Info, counter 6144) carried `time-req`, and its Ack `[time]` set the RTC. There was one `RTC synced` log and no command was needed. The next confirmed frames (6145 Info page, 6146 link-check telemetry) had no `time-req`, and 6147 was unconfirmed again.
+  - **`clock_sync` + re-sync:** the Hub queued `clock_sync` seq 242. It arrived on 6150, 4 s before the periodic re-sync, which fired 240 s after the first time. One request served both. Telemetry 6151 went confirmed `time-req`, and the Hub acked it with flags 0x02 (the tail). The Info answer on 6152 carried seq 242 and `unix_time` 2 s before its reception.
+  - **Shell `clock sync`:** the next report (6154) went confirmed `time-req`, and the time landed. `clock get` matched host UTC to 2 s (rttt latency, plus the debug build's clock drift).
+  - **Re-sync again:** the next periodic re-sync fired 240 s after the first, on the timer armed by the first network time. Telemetry 6156 went confirmed `time-req`, and the time landed.
 
 ---
 
