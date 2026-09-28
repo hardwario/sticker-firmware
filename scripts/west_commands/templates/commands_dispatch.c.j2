@@ -7,7 +7,7 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 {% for c in commands %}
 	case {{ c.tag }}:
 {% if c.transport_guard %}
-		/* transports: [{{ c.transports | join(", ") }}] — reject on any other transport */
+		/* transports: [{{ c.allowed_transports | join(", ") }}] — reject on any other transport */
 		if ({% for e in c.transport_guard %}tp != {{ e }}{{ " && " if not loop.last }}{% endfor %}) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_clock.h"
 #include "app_config.h"
 #include "app_counters.h"
 #include "app_history.h"
@@ -11,6 +12,7 @@
 #include "app_lrw.h"
 #include "app_report.h"
 #include "app_sensor.h"
+#include "app_slot.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -35,6 +37,10 @@ static K_THREAD_STACK_DEFINE(m_work_stack, 3072);
 static struct k_work_q m_work_q;
 
 static struct k_timer m_report_timer; /* interval_report cadence */
+/* Slot grid the cadence runs on (F27): wall-clock slots, see app_slot.h. Only
+ * touched from app_report_init() (before the timer can fire) and from the
+ * periodic run on m_work_q. */
+static struct app_slot m_slot;
 /* Two entry points into the same report body, distinguished by whether the run
  * is on the fixed cadence or an ad-hoc trigger. Only the periodic path captures
  * history and re-arms the cadence, so off-cadence triggers (alarm / force_send /
@@ -42,6 +48,7 @@ static struct k_timer m_report_timer; /* interval_report cadence */
  * shift the timer — history stays at exactly interval_report (#H1). */
 static struct k_work m_periodic_work; /* fixed-cadence cycle: sample + capture + send */
 static struct k_work m_trigger_work;  /* ad-hoc cycle: sample + send, no history capture */
+static struct k_work m_force_work;    /* host-requested cycle: like trigger, sent without jitter */
 
 #if defined(CONFIG_WATCHDOG)
 /* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
@@ -63,19 +70,42 @@ static void heartbeat_work_handler(struct k_work *work)
 
 /* (Re)arm the periodic cadence for the next report. One-shot + manual restart
  * (like the old app_lrw m_send_timer) so a multi-frame snapshot in app_lrw
- * doesn't get a second cycle stacked behind it. */
-static void schedule_next_report(void)
+ * doesn't get a second cycle stacked behind it.
+ *
+ * `periodic` = called from a cadence run (the run is the grid slot nearest to
+ * now), false = arming at boot (first slot after now). Returns the slot of the
+ * run (the history record's time), *synced = its clock domain (unix / uptime).
+ *
+ * FIXED cadence, no jitter, on wall-clock slots (F27). This timer also drives
+ * app_sensor_sample() and app_history_capture() below, and history replay
+ * reconstructs each record's time as base + ordinal * interval_report — a
+ * *fixed* interval. So the delay is not a fixed interval_report after the last
+ * run (that let the debug SysTick drift, ~1.2 % on the MSI, and every late run
+ * accumulate) but the distance to the next slot of the grid, re-read from the
+ * RTC (LSE) on every run. Before the RTC is set the grid runs on uptime, as the
+ * old timer did; it keeps its phase when the clock switches to unix time.
+ * Jittering the period would make the stored samples land at 60..66 s (for a
+ * 60 s interval) while replay assumes exactly 60 s. Fleet-uplink de-correlation
+ * is instead a random *pre-send* delay applied in app_lrw
+ * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
+ * history-capture cadence (#267). */
+static uint32_t schedule_next_report(bool periodic, bool *slot_synced)
 {
-	/* FIXED cadence, no jitter. This timer also drives app_sensor_sample() and
-	 * app_history_capture() below, and history replay reconstructs each record's
-	 * time as base + ordinal * interval_report — a *fixed* interval. Jittering the
-	 * period would make the stored samples land at 60..66 s (for a 60 s interval)
-	 * while replay assumes exactly 60 s, drifting every timestamp cumulatively
-	 * (the old signed jitter averaged out; a one-sided jitter biases it). Fleet-
-	 * uplink de-correlation is instead a random *pre-send* delay applied in app_lrw
-	 * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
-	 * history-capture cadence (#267). */
-	k_timer_start(&m_report_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+	uint32_t uptime_s = (uint32_t)(k_uptime_get() / 1000);
+	uint32_t unix_s;
+	bool synced = (app_clock_get_unix(&unix_s) == 0);
+	uint32_t now = synced ? unix_s : uptime_s;
+	uint32_t slot;
+	uint32_t delay = app_slot_next(&m_slot, (uint32_t)g_app_config.interval_report, now, synced,
+				       uptime_s, periodic, &slot);
+
+	LOG_DBG("Report slot %u (%s), next in %u s", slot, synced ? "unix" : "uptime", delay);
+	k_timer_start(&m_report_timer, K_SECONDS(delay), K_FOREVER);
+
+	if (slot_synced) {
+		*slot_synced = synced;
+	}
+	return slot;
 }
 
 /* One report cycle. `periodic` is true only on the fixed-cadence timer path;
@@ -83,13 +113,16 @@ static void schedule_next_report(void)
  * the cadence, so the history inter-record interval stays exactly
  * interval_report regardless of how many alarms / force_sends / samples fire in
  * between (#H1). */
-static void run_report(bool periodic)
+static void run_report(bool periodic, bool now)
 {
 	/* Re-arm the cadence up front (periodic path only) so a skipped cycle still
 	 * keeps ticking; a trigger must NOT restart it, or the next periodic record
 	 * would land < interval_report after the previous one. */
+	uint32_t slot = 0;
+	bool slot_synced = false;
+
 	if (periodic) {
-		schedule_next_report();
+		slot = schedule_next_report(true, &slot_synced);
 	}
 
 	/* Persist the pulse totalizers at the report cadence (dirty-flagged, no-op
@@ -115,11 +148,15 @@ static void run_report(bool periodic)
 
 	/* Capture one history record — ONLY on the fixed cadence, so records are
 	 * spaced at exactly interval_report and replay's base + ord*interval time
-	 * reconstruction holds. Self-skips while a replay is active (#126). */
+	 * reconstruction holds. It carries this run's slot: a slot off the history
+	 * grid (missed slots after a halt/stall, an RTC step) starts a new segment
+	 * instead of shifting every later record. Also while a replay is streaming
+	 * (its cursor is absolute). */
 	if (periodic) {
-		app_history_capture();
+		app_history_capture_at(slot, slot_synced);
 	}
 
+#if defined(CONFIG_LORAWAN)
 	/* State-gated cadence: skip the UPLINK while the link is joining/
 	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
 	 * edge to resume promptly and drain the buffered history. */
@@ -130,19 +167,32 @@ static void run_report(bool periodic)
 
 	/* Hand off to the transport: app_lrw composes the snapshot and splits it
 	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
-	app_lrw_send_telemetry();
+	if (now) {
+		app_lrw_send_telemetry_now();
+	} else {
+		app_lrw_send_telemetry();
+	}
+#else
+	ARG_UNUSED(now);
+#endif /* defined(CONFIG_LORAWAN) */
 }
 
 static void periodic_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	run_report(true);
+	run_report(true, false);
 }
 
 static void trigger_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	run_report(false);
+	run_report(false, false);
+}
+
+static void force_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	run_report(false, true);
 }
 
 static void report_timer_handler(struct k_timer *timer)
@@ -151,6 +201,7 @@ static void report_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_periodic_work);
 }
 
+#if defined(CONFIG_LORAWAN)
 /* Link-ready edge from the transport (join success / history-replay finish):
  * send an immediate report to drain the buffered history, but leave the fixed
  * cadence (and its history capture) untouched. */
@@ -158,10 +209,16 @@ static void report_kick(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
+#endif /* defined(CONFIG_LORAWAN) */
 
 void app_report_trigger(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
+}
+
+void app_report_force(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_force_work);
 }
 
 void app_report_suspend(void)
@@ -180,6 +237,7 @@ void app_report_suspend(void)
 	k_timer_stop(&m_report_timer);
 	k_work_cancel(&m_periodic_work);
 	k_work_cancel(&m_trigger_work);
+	k_work_cancel(&m_force_work);
 }
 
 int app_report_init(void)
@@ -188,8 +246,13 @@ int app_report_init(void)
 	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
+	/* History's deferred flash writes (clock-sync fix-up) run here too, never
+	 * in the LoRaWAN downlink callback (#96). */
+	app_history_set_work_queue(&m_work_q);
+
 	k_work_init(&m_periodic_work, periodic_work_handler);
 	k_work_init(&m_trigger_work, trigger_work_handler);
+	k_work_init(&m_force_work, force_work_handler);
 	k_timer_init(&m_report_timer, report_timer_handler, NULL);
 
 #if defined(CONFIG_WATCHDOG)
@@ -206,8 +269,10 @@ int app_report_init(void)
 	 * joins — the worst-case lost-pulse window is interval_report regardless of
 	 * the link state. Reporting itself still self-skips at the link gate until
 	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
-	schedule_next_report();
+	(void)schedule_next_report(false, NULL);
+#if defined(CONFIG_LORAWAN)
 	app_lrw_register_ready_cb(report_kick);
+#endif /* defined(CONFIG_LORAWAN) */
 
 	return 0;
 }

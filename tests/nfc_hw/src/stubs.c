@@ -132,7 +132,8 @@ void app_input_reset_count(bool input_a, bool input_b)
 /* History — req_history_page (NFC-only, #260). Empty backend: export writes
  * nothing, next_ord stays at start_ord (has_more false). */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord)
 {
 	(void)from_unix;
 	(void)to_unix;
@@ -140,6 +141,9 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	(void)cap;
 	if (t0_out) {
 		*t0_out = 0;
+	}
+	if (synced_out) {
+		*synced_out = false;
 	}
 	if (n_written) {
 		*n_written = 0;
@@ -171,11 +175,6 @@ uint32_t app_history_get_mask(void)
 uint32_t app_history_get_interval(void)
 {
 	return 0;
-}
-
-bool app_history_base_synced(void)
-{
-	return false;
 }
 
 bool app_history_is_ready(void)
@@ -224,6 +223,14 @@ enum app_lrw_state app_lrw_get_state(void)
 	return APP_LRW_STATE_HEALTHY;
 }
 
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	(void)rssi;
+	(void)snr;
+	(void)age_s;
+	return false;
+}
+
 uint32_t app_alarm_status_flags(void)
 {
 	return 0;
@@ -245,10 +252,14 @@ bool app_sensor_i2c_wedged(void)
  * channel/state, only that app_nfc.c's calls into it don't crash the link. */
 int g_led_set_calls;
 
+/* Last state written per channel (R, G, Y) — the NFC LED tests assert on it. */
+int g_led_ch[3];
+
 void app_led_set(enum app_led_channel ch, int state)
 {
-	(void)ch;
-	(void)state;
+	if ((int)ch >= 0 && (int)ch < 3) {
+		g_led_ch[ch] = state;
+	}
 	g_led_set_calls++;
 }
 

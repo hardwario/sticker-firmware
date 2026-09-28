@@ -1,0 +1,2 @@
+# Module patches carry CRLF lines (loramac-node sources are CRLF); keep them byte-exact.
+zephyr/patches/**/*.patch -text

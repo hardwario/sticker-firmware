@@ -11,6 +11,7 @@
  */
 
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
@@ -104,23 +105,50 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len)
 
 struct app_cmd_alarm_event test_alarm_events[16];
 size_t test_alarm_event_count;
+/* Max events one encoded frame may hold (#409 3b): more -> -EMSGSIZE, like a
+ * small DR budget. 0 = not even one fits (the 11 B tier). */
+size_t test_alarm_max_events = SIZE_MAX;
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len)
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len)
 {
 	(void)base_time;
 	(void)total;
 	(void)time_synced;
+	/* #425: alarm_batch_flush() lays pages out first (pass 1, worst-case page
+	 * numbers = 127) and then encodes them — capture only the real pass. */
+	bool layout_pass = (page_index == 127 && page_count == 127);
 	if (!out || !out_len || out_cap == 0) {
 		return -EINVAL;
 	}
-	for (size_t i = 0; i < n_events; i++) {
+	if (n_events > test_alarm_max_events) {
+		return -EMSGSIZE;
+	}
+	for (size_t i = 0; i < n_events && !layout_pass; i++) {
 		if (test_alarm_event_count < ARRAY_SIZE(test_alarm_events)) {
 			test_alarm_events[test_alarm_event_count++] = events[i];
 		}
 	}
 	out[0] = 0;
 	*out_len = 1;
+	return 0;
+}
+
+/* ---- buzzer (#397): app_alarm_poll() drives the local buzzer as a side
+ * effect (alarm_buzzer_sync() in app_alarm.c). Track every call so cases can
+ * assert on the alarm-event -> melody trigger/stop plumbing without a real
+ * GPIO thread. ---- */
+
+int g_buzzer_play_calls;
+uint32_t g_buzzer_play_last_kind;
+uint16_t g_buzzer_play_last_repeat_s;
+
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
+{
+	g_buzzer_play_calls++;
+	g_buzzer_play_last_kind = kind;
+	g_buzzer_play_last_repeat_s = repeat_s;
 	return 0;
 }

@@ -1,0 +1,20 @@
+# Patches applied on top of west-managed modules for STICKER builds.
+# Apply after "west update" with:  west patch apply
+# (from a git worktree pass absolute paths: west patch apply -b <worktree>/zephyr/patches
+#  -l <worktree>/zephyr/patches.yml). CI applies them in .github/workflows/build.yml.
+# app/CMakeLists.txt refuses to build a LoRaWAN image while a patch is missing.
+patches:
+  - path: loramac-node/0001-mac-do-not-skip-trailing-DevStatusReq-after-LinkADRReq.patch
+    sha256sum: 4e2280785a7a029c4f85048178c0072cd3af40a7449078c1132b6d556a5b8ea2
+    module: modules/lib/loramac-node
+    author: Hynek Moravec
+    email: hynek.moravec@hardwario.com
+    date: 2026-09-22
+    upstreamable: true
+    issue: https://github.com/hardwario/sticker-firmware/issues/419
+    apply-command: git apply
+    comments: |
+      LoRaMac-node ProcessMacCommands() skipped a DevStatusReq that is the last
+      FOpts byte right after a LinkADRReq block, so DevStatusAns was never sent.
+      Not fixed upstream (Lora-net/LoRaMac-node, zephyrproject-rtos/loramac-node
+      master, checked 2026-09-22). Drop once upstreamed or with #16.

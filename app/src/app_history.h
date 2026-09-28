@@ -51,7 +51,8 @@ enum app_history_sensor {
 /* A decoded record handed to the shell. `value[i]` is valid only when
  * `present` has bit i set; counters are whole numbers, analog values are in
  * physical units (deg C, %RH). `time_unix` is absolute UTC when `time_synced`,
- * otherwise it is seconds relative to the buffer base (no wall-clock yet). */
+ * otherwise it is uptime seconds of the boot that recorded the record (no
+ * wall-clock yet). */
 struct app_history_record {
 	uint32_t time_unix;
 	bool time_synced;
@@ -64,18 +65,43 @@ struct app_history_record {
  * Returns 0 on success or a negative errno. */
 int app_history_init(void);
 
-/* Capture one record from the current g_app_sensor_data (called once per
- * interval_report). No-op when history is disabled or while a replay is active. */
+/* Capture one record from the current g_app_sensor_data on the report cadence:
+ * `slot` is the record's report slot (app_report's grid, see app_slot.h) in the
+ * clock domain `synced` says (unix when the RTC is set, else uptime seconds).
+ * A slot that continues the newest segment's grid (within half an interval) is
+ * appended to it; otherwise — missed slots (halt, stall, dropped record), an RTC
+ * step, a new boot — the record opens a new segment stamped `slot` (flash: the
+ * head page is closed early; RAM ring: a new entry of its 4-segment table, the
+ * oldest segment and its records dropped when full), so a gap in the data never
+ * shifts later times.
+ * No-op when history is disabled. Keeps capturing while a replay streams
+ * records back (the replay cursor is absolute, see app_history_export_abs()). */
+void app_history_capture_at(uint32_t slot, bool synced);
+
+/* Capture one record off the cadence (`history capture` shell / tests): it is
+ * stamped as the next slot of this boot's grid (or the clock now when there is
+ * none), without a discontinuity check. */
 void app_history_capture(void);
 
-/* Pause/resume history capture while a LoRaWAN replay is streaming records back
- * (#126). app_lrw sets it true at replay start and false at finish; capture
- * self-skips in between so the buffer it is replaying can't shift underneath it. */
+/* Tell history that a LoRaWAN replay is streaming records back (#126). app_lrw
+ * sets it true at replay start and false at finish. Capture goes on; only the
+ * flash backend holds off its page rollover (a ~20 ms erase that would stall
+ * the replay's RX windows) — a record that needs the next page meanwhile is
+ * dropped. */
 void app_history_set_replay_active(bool active);
 
-/* Fix up the buffer base time once the wall-clock becomes available, so all
- * stored records gain correct absolute timestamps. Idempotent. */
+/* The RTC was set to `unix_now`: re-base the segments recorded on this boot's
+ * uptime (before the RTC was set) to unix time, so their records gain absolute
+ * timestamps. Segments of an earlier boot that never saw the clock stay
+ * unsynced. Idempotent. */
 void app_history_on_clock_sync(uint32_t unix_now);
+
+/* Work queue for deferred history flash maintenance (the clock-sync fix-up
+ * double word, flash backend): app_report registers its own queue, the same
+ * context the captures (and their flash writes) run in. NULL = none; the next
+ * capture then writes pending fix-ups. */
+struct k_work_q;
+void app_history_set_work_queue(struct k_work_q *queue);
 
 /* Number of records currently stored (0..capacity). */
 size_t app_history_count(void);
@@ -105,26 +131,47 @@ void app_history_set_mask(uint32_t mask);
  * so a wire frame carries this once and per-record time = t0 + ord*interval. */
 uint32_t app_history_get_interval(void);
 
-/* True once the buffer's base time has been anchored to absolute UTC (the RTC
- * synced while records were held). Until then export_page's t0 is uptime-relative,
- * so the replay frame must carry time_synced=false (L-1/L-3). */
-bool app_history_base_synced(void);
-
-/* Pack one page of stored records into `buf` for a LoRaWAN replay (ReqHistory ->
- * HistoryFrame), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
+/* Pack one HistoryFrame's worth of stored records into `buf` (NFC paged read,
+ * ReqHistoryPage), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
  * many whole records as fit in `cap`. Each record is the raw stored bytes (values
  * only, fixed size = the sample size, sentinels mark absent values); the shared
- * present mask + interval travel in the frame header, not per record. Records in
- * [from_unix, to_unix] only (filter skipped until the clock is synced). Returns
- * bytes written; *t0_out = first packed record's absolute time, *n_written =
- * records packed, *next_ord = next ordinal to pass for the following page
- * (== app_history_count() when the scan is exhausted). */
+ * present mask + interval travel in the frame header, not per record.
+ *
+ * Record times are periodic within a segment (a flash page, stamped from the
+ * clock when it was opened), and a frame never crosses a segment boundary, so
+ * time(j) = t0 + j * interval holds for every frame. Records in [from_unix,
+ * to_unix] only; records whose segment was stamped before the RTC was set
+ * (unsynced) are returned only for an open window (0..UINT32_MAX) or while the
+ * device has no wall clock. Returns bytes written; *t0_out = first packed
+ * record's time, *synced_out = true when that time is unix (time_synced of the
+ * frame; false = uptime, L-1/L-3), *n_written = records packed, *next_ord = next
+ * ordinal to pass for the following page: the next record inside the window, or
+ * app_history_count() when none is left (the page that reaches the window end
+ * already says so). Output pointers may be NULL. */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord);
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord);
+
+/* Absolute-ordinal span [*first_abs, *end_abs) of the stored records. An
+ * absolute ordinal names one record for as long as it is stored: appends don't
+ * move it, eviction only raises first_abs, and a logical reset (clear / layout /
+ * interval change) starts past every earlier end_abs. Either pointer may be
+ * NULL. */
+void app_history_span(uint32_t *first_abs, uint32_t *end_abs);
+
+/* app_history_export_page() on absolute ordinals, for the LoRaWAN replay:
+ * packs records from `start_abs` (clamped up to the oldest stored record when it
+ * was evicted meanwhile) up to `end_abs` (exclusive, clamped to the newest).
+ * *next_abs = cursor for the following frame (the next record inside the
+ * window); the scan is exhausted once it is >= `end_abs`, which the frame that
+ * packs the window's last record already returns. */
+size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
+			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
+			      bool *synced_out, uint16_t *n_written, uint32_t *next_abs);
 
 /* Number of frames the [from_unix, to_unix] window needs at `cap` bytes/frame
- * (whole records per frame). Mirrors export_page's packing so the replay can
- * announce frame_count up front. */
+ * (whole records per frame, one frame never spans two segments). Mirrors
+ * export_page's packing so the replay can announce frame_count up front. */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap);
 
 /* Descriptor helpers for the shell. */

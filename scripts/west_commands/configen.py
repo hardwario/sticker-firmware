@@ -61,6 +61,9 @@ Access control (readable / writable):
     - readonly      <- shell readable but not writable
     - dump          <- readable over nfc or lrw
     - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
+  An explicit `dump_lrw: false` leaves a field readable everywhere but out of a
+  LoRaWAN get_config (it only costs downlink-answer pages there, e.g. the 1-Wire
+  slot ROMs); an explicit get_param still returns it.
     - no_write_lrw/no_write_nfc/no_write_vendor <- lrw/nfc/vendor not in writable
       (per-field SetParam transport gate, M-3; shell has no such gate -- see
       normalize_access)
@@ -837,8 +840,15 @@ _TRANSPORT_ENUM = {
     "nfc": "APP_CMD_TRANSPORT_NFC",
     "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
     "vendor": "APP_CMD_TRANSPORT_VENDOR",
+    "plain_text": "APP_CMD_TRANSPORT_PLAIN_TEXT",
 }
 _ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
+# Transports a command answers on when it omits `transports:`. plain_text (#415)
+# is the unencrypted, unauthenticated channel, so it is NOT in the implicit
+# default — a command reaches plain_text only by listing it explicitly (opt-in).
+# Every other transport stays on by default (the historical "omitted = all"
+# rule, now "all except plain_text").
+_DEFAULT_TRANSPORTS = _ALL_TRANSPORTS - {"plain_text"}
 
 
 def build_commands_model(config):
@@ -871,18 +881,22 @@ def build_commands_model(config):
             log.die(f"action command '{name}' must set 'action'")
 
         transports = c.get("transports")
-        # Emit a transport guard for every command whose allow-list is a proper
-        # subset of all transports (#183): the dispatch must reject the command on
-        # any disallowed transport, not just the [lrw]-only case. `None` (omitted)
-        # means all transports → no guard.
+        # Emit a transport guard for every command not reachable on ALL transports
+        # (#183): the dispatch must reject the command on any disallowed transport,
+        # not just the [lrw]-only case. `None` (omitted) means the implicit default
+        # set (every transport except the opt-in plain_text, #415), so an
+        # omitted-transports command still gets a guard that rejects plain_text —
+        # get_info/set_param/... must never answer on the unauthenticated channel.
         transport_guard = None
         if transports is not None:
             unknown = [t for t in transports if t not in _TRANSPORT_ENUM]
             if unknown:
                 log.die(f"command '{name}' has unknown transport(s) {unknown} "
                         f"(expected any of {sorted(_TRANSPORT_ENUM)})")
-            if set(transports) != _ALL_TRANSPORTS:
-                transport_guard = [_TRANSPORT_ENUM[t] for t in transports]
+        allowed = transports if transports is not None else \
+            [t for t in _TRANSPORT_ENUM if t in _DEFAULT_TRANSPORTS]
+        if set(allowed) != _ALL_TRANSPORTS:
+            transport_guard = [_TRANSPORT_ENUM[t] for t in allowed]
         cmds.append({
             "name": name,
             "proto_id": pid,
@@ -891,6 +905,7 @@ def build_commands_model(config):
             "action": c.get("action"),
             "response": c.get("response", "ack"),
             "transports": transports,
+            "allowed_transports": allowed,
             "transport_guard": transport_guard,
             "lrw_only": transports == ["lrw"],
             "emits_response": c.get("response", "ack") not in COMMAND_RESPONSE_NONE,
@@ -956,7 +971,9 @@ def build_dump_fields_model(config):
     A `dump_nfc_only: true` field is included with nfc_only=1; the handler only
     selects it when the transport is NFC, so it never enters a LoRaWAN response
     (e.g. the LoRaWAN crypto keys — readable over the encrypted NFC channel only).
-    A plain `dump: false` field stays excluded from every transport."""
+    A plain `dump: false` field stays excluded from every transport. A
+    `dump_lrw: false` field is included with lrw_skip=1: the get_config handler
+    leaves it out of a LoRaWAN dump (get_param still returns it on request)."""
     rows = []
     for section in DUMP_SECTIONS:
         macro = "DUMP_SECTION_" + section.upper()
@@ -967,7 +984,8 @@ def build_dump_fields_model(config):
             if p.get("dump") is False and not nfc_only:
                 continue
             rows.append({"section": macro, "tag": p["proto_id"],
-                         "size": _dump_field_size(p), "nfc_only": nfc_only})
+                         "size": _dump_field_size(p), "nfc_only": nfc_only,
+                         "lrw_skip": p.get("dump_lrw") is False})
     return {"dump_fields": rows}
 
 

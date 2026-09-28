@@ -660,3 +660,16 @@ def test_dispatch_template_routes_every_command():
     assert "tp != APP_CMD_TRANSPORT_VENDOR" in vnd
     ssk = out.split("case Command_set_secret_key_tag:", 1)[1].split("break;", 1)[0]
     assert "tp != APP_CMD_TRANSPORT_VENDOR" in ssk
+
+
+def test_dump_lrw_false_marks_lrw_skip_rows():
+    """`dump_lrw: false` keeps a field in DUMP_FIELDS (NFC/shell/vendor dumps and
+    get_param still read it) but flags it lrw_skip, so a LoRaWAN get_config leaves
+    it out — the 1-Wire slot ROMs are the committed users of it."""
+    cfg = _load_config()
+    configen.normalize_access(cfg)
+    rows = configen.build_dump_fields_model(cfg)["dump_fields"]
+    skip = {(r["section"], r["tag"]) for r in rows if r["lrw_skip"]}
+    assert skip == {("DUMP_SECTION_SENSORS", t) for t in (11, 12, 13, 14)}
+    # the flag is independent of nfc_only (the ROMs stay readable over LoRaWAN)
+    assert all(not r["nfc_only"] for r in rows if r["lrw_skip"])

@@ -6,8 +6,33 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+# Debug build (debug.conf in EXTRA_CONF_FILE): also apply debug.overlay, which
+# locks the MSI to the LSE (msi-pll-mode). debug.conf sets CONFIG_PM=n, so the
+# kernel tick is SysTick on the free-running MSI (~1.2 % off) instead of LPTIM
+# on the LSE. Kconfig cannot add a devicetree overlay, and Kconfig is not
+# parsed yet here, so key on the fragment name before find_package(Zephyr).
+if(EXTRA_CONF_FILE MATCHES "(^|;|/)debug\\.conf(;|$)")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/debug.overlay)
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
+
+# Module patches (zephyr/patches.yml, applied by `west patch apply`). A LoRaWAN
+# image built without them silently misses the fix, so refuse to build instead.
+# Each patch leaves a "STICKER-<issue>" marker in the patched source. Checked at
+# configure time and again on every build: `west update` resets the module and
+# an incremental build (incl. the one `west flash` runs) does not reconfigure.
+if(CONFIG_LORAWAN AND DEFINED ZEPHYR_LORAMAC_NODE_MODULE_DIR AND NOT STICKER_ALLOW_UNPATCHED_MODULES)
+  set(FILE ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c)
+  set(MARKER STICKER-419)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake)
+  add_custom_target(sticker_module_patch_check ALL
+    COMMAND ${CMAKE_COMMAND} -DFILE=${FILE} -DMARKER=${MARKER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake
+    COMMENT "Checking STICKER module patches")
+  add_dependencies(app sticker_module_patch_check)
+endif()
 
 # Firmware version + source baked into the image (logged at boot, reported by
 # the GetInfo command). CI passes the numeric version components and build type
@@ -20,7 +45,7 @@ project(sticker)
 if(NOT DEFINED APP_VERSION_MAJOR)
   set(APP_BUILD_TYPE 2) # CUSTOM
   set(APP_VERSION_MAJOR 1)
-  set(APP_VERSION_MINOR 4)
+  set(APP_VERSION_MINOR 5)
   set(APP_VERSION_PATCH 0)
 endif()
 add_compile_definitions(
@@ -45,7 +70,11 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
+# app_report.c owns the periodic sample/history cadence, not just the
+# LoRaWAN uplink (issue #395: CONFIG_LORAWAN=n toggle) -- compiled
+# unconditionally so history/sampling keep working with no radio; its own
+# app_lrw_* calls are internally CONFIG_LORAWAN-gated.
+target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
@@ -60,10 +89,10 @@ target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1_slots.c)
 target_sources_ifdef(CONFIG_WATCHDOG app PRIVATE src/app_wdog.c)
+target_sources_ifdef(CONFIG_APP_BUZZER app PRIVATE src/app_buzzer.c)
+target_sources_ifdef(CONFIG_APP_CALIBRATION app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_alarm.c)
 target_sources(app PRIVATE src/app_alarm_rules.c)
-target_sources(app PRIVATE src/app_buzzer.c)
-target_sources(app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_clock.c)
 target_sources(app PRIVATE src/app_cmd.c)
 target_sources(app PRIVATE src/app_compose.c)
@@ -91,7 +120,8 @@ if(NOT CONFIG_APP_CCM_HW_AES)
   set_source_files_properties(src/app_ccm.c ${SOFT_SE_DIR}/aes.c
     PROPERTIES COMPILE_DEFINITIONS "AES_ENC_PREKEYED")
 endif()
-target_sources(app PRIVATE src/app_pyq1648.c)
+target_sources_ifdef(CONFIG_APP_PYQ1648 app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_settings.c)
+target_sources(app PRIVATE src/app_slot.c)
 target_sources(app PRIVATE src/main.c)

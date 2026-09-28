@@ -419,11 +419,14 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Cleanup:** `git status` must stay clean.
 
 ### AT-HOST-02 — native_sim ztest suites
-- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, ccm, cmd,
-  compose, history, history_flash, ndef, nfc_crypto on `native_sim/native/64`). `alarm_eval`
-  (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
-  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed — `alarm_rules` only
-  covers the static rule-validation layer.
+- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
+  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
+  alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
+  only covers the static rule-validation layer. `buzzer` (#397) drives the real
+  `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -743,6 +746,24 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
 - **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
 
+### AT-LRW-19 — region not in the image → radio-silent (D, A; maps #409 A1) — **HW PASS 2026-09-23**
+- **Steps:** on a `debug.conf` image (US915/AU915 compiled out) set `config lrw-region us915`,
+  `settings save` (reboots). Read RTT, `ats radio status`, and NFC `get_info`.
+- **Expect:** RTT `lrw-region 1 is not compiled into this image: radio-silent`; LoRaWAN state
+  `DISABLED`; `device_status` has `lrw_disabled` (bit 12); **no RF
+  emission** (no join request on the LNS / SDR). Never an EU868 join.
+- **Cleanup:** `config lrw-region eu868`, `settings save` → normal join.
+
+### AT-LRW-20 — manual datarate `lrw-datarate` (D, A; maps #409 A3) — **HW PASS 2026-09-23** (a, b; c needs a 915 gateway)
+- **Steps:** (a) `config lrw-adr false`, `config lrw-datarate dr3`, save → capture uplinks on the
+  LNS. (b) `config lrw-adr true` (keep `dr3`), save. (c) US915: `lrw-adr false`,
+  `lrw-datarate dr7`, save.
+- **Expect:** (a) RTT `Uplink datarate pinned to DR3`, every uplink at DR3 (SF9/125 kHz on
+  EU868), telemetry split sized to the DR3 budget. (b) RTT `lrw-datarate DR3 ignored: ADR is
+  on`, ADR converges as usual. (c) RTT `lrw-datarate DR7 rejected in this region`, uplinks
+  continue at the stack DR.
+- **Cleanup:** `config lrw-datarate auto`, `config lrw-adr true`, save.
+
 ## 10. NFC + Manager-App (AT-NFC)
 
 All scenarios need the phone fixtured on the tag (one §18 assist batch covers the whole
@@ -995,6 +1016,27 @@ still required before the next `alarm poll` will observe it as elapsed.
   sanitised/ignored with a report (reload returns invalid count); the other 15 slots
   unaffected; no crash on the next poll.
 - **Cleanup:** clear slot 15.
+
+### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)
+- **Pre:** `cap-buzzer true` (buzzer HW variant fitted), `alarm-buzzer-mode normal`,
+  save/reboot (#154, config save reboots). One armed rule, e.g. AT-ALM-01's
+  onboard-temperature slot 0.
+- **Steps:** cross the threshold to activate the rule (same assist as AT-ALM-01); assist:
+  "listen for a repeating fast 5x-beep melody starting within a couple of seconds of the red
+  alarm LED"; wait > 30 s and assist-confirm it repeats; release the threshold to clear the
+  alarm; assist: "confirm the buzzer goes silent immediately, not fading out or finishing its
+  current repeat cycle". Mode sweep (spot-check): repeat the activation with
+  `alarm-buzzer-mode once` (single melody, no repeat) and `fast` (repeats every ~10 s).
+  New-alarm replay: with `normal` and the first alarm still active, activate a SECOND rule on
+  a different source — assist-confirm the melody replays right away (within the 3 s poll
+  cadence) instead of waiting out the 30 s repeat.
+- **Expect:** melody starts on each newly activated alarm, replays per the mode's interval
+  (`once` = never, `slow`/`normal`/`fast` = 120/30/10 s, `continuous` ≈ every 2.4 s) while
+  any alarm stays active, stops immediately once the last one clears. Negative case:
+  `alarm-buzzer-mode off` (or `cap-buzzer false`) → same rule activation produces the red
+  LED as normal but stays silent.
+- **Evidence:** operator confirmation of beep timing per mode + the negative (silent) case.
+- **Cleanup:** clear the rules; `alarm-buzzer-mode off` (factory default).
 
 ## 13. History (AT-HIS)
 
