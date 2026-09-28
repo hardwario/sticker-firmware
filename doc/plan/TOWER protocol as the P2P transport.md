@@ -485,6 +485,23 @@ a go/no-go.
   risky numbers, and they must be measured on the real gateway radio path, not on a second
   STICKER. P2 then only adds the net layer on top of a proven PHY/ACK path.
 
+**Agreed with the implementers (2026-09-28)**
+
+- KAT: `tests/ccm/tower_frame_kat.json` (9 vectors, upstream `tower-radio-core` /
+  `tower-net-core` @ `24259e3`, cross-checked with pycryptodome). Generator:
+  `~/Documents/claude/Scripts/tower_kat_gen`.
+- Turnaround is TOWER's fixed wait before the ACK TX, settable 20–60 ms on the Northbridge;
+  M2 passes when the node's RX is armed before that wait ends. Today's node path measures
+  ~22 ms (radio sleeps between ops, F-P2P-2); a standby-between-ops driver change only if M2
+  fails.
+- M3 / M6 run on 869.525 MHz (10 %) so the runs fit in hours: N = 500 / 300 / 200 / 50 for
+  SF7 / 9 / 10 / 12. M8 stays on 868.1 MHz.
+- Node TX counter: the existing reserved block (+256 per boot, advanced before TX), so a
+  node reboot never reuses a nonce or trips the Northbridge's replay check.
+- Timestamps: MSI PLL mode (LSE-locked) in the node bench overlay, since the debug clock is
+  ~1.22 % off. ToA is also measured on the Northbridge as a cross-check.
+- 0413 leaves the Hub P2P set for P0; Nodes test clears the slot first.
+
 **Measurements**
 
 | # | What | Pass |
