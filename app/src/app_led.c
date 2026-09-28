@@ -196,22 +196,20 @@ static void thread_entry(void *p1, void *p2, void *p3)
 		/* Check play queue first (higher priority) */
 		struct play_request play_req;
 		if (k_msgq_get(&m_play_msgq, &play_req, K_NO_WAIT) == 0) {
-			if (held_since(play_req.gen)) {
-				/* Dropped: the indicator was taken after it was queued. */
-			} else if (now - play_req.timestamp <= REQUEST_MAX_AGE_MS) {
+			/* A stale request (queued behind a longer one, e.g. a heartbeat
+			 * during the boot carousel) or one queued before the indicator
+			 * was taken is dropped: every request is a periodic or best-effort
+			 * indication, so the next one follows. */
+			if (!held_since(play_req.gen) &&
+			    now - play_req.timestamp <= REQUEST_MAX_AGE_MS) {
 				execute_play(&play_req.play, play_req.gen);
-			} else {
-				LOG_WRN("Discarding stale LED play request");
 			}
 		} else {
 			struct blink_request blink_req;
 			if (k_msgq_get(&m_blink_msgq, &blink_req, K_NO_WAIT) == 0) {
-				if (held_since(blink_req.gen)) {
-					/* Dropped: the indicator was taken after it was queued. */
-				} else if (now - blink_req.timestamp <= REQUEST_MAX_AGE_MS) {
+				if (!held_since(blink_req.gen) &&
+				    now - blink_req.timestamp <= REQUEST_MAX_AGE_MS) {
 					execute_blink(&blink_req.blink, blink_req.gen);
-				} else {
-					LOG_WRN("Discarding stale LED blink request");
 				}
 			}
 		}
@@ -275,9 +273,9 @@ int app_led_blink(const struct app_led_blink_req *req)
 	struct blink_request request = {
 		.timestamp = k_uptime_get(), .gen = atomic_get(&m_hold_gen), .blink = *req};
 
+	/* A full queue drops the request (-ENOMSG), like a stale one. */
 	int ret = k_msgq_put(&m_blink_msgq, &request, K_NO_WAIT);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
 
@@ -305,7 +303,6 @@ int app_led_play(const struct app_led_play_req *req)
 
 	int ret = k_msgq_put(&m_play_msgq, &request, K_NO_WAIT);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
 
