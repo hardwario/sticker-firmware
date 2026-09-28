@@ -324,9 +324,9 @@ dedups on the central by snapshot timestamp, responses by `seq` (as today).
 ### 7.4 Link supervision
 
 Unchanged state machine (`app_radio`, LoRaWAN-parity): 3 failed checks → WARNING (every
-report confirmed, TX power steps up); `radio-link-check-fail-rejoin` further failures →
-**keyed re-join** (rediscovers the gateway). Last resort after 24 h: `lora` sweeps SF
-(as today), `fsk` sweeps the three TOWER channels.
+report confirmed); `radio-link-check-fail-rejoin` further failures →
+**keyed re-join** (rediscovers the gateway). Last resort after 24 h: `fsk` sweeps the three TOWER channels;
+`lora` has no SF sweep (the SF is fixed for the whole fleet).
 
 No ADR on P2P (decision 2026-09-28): TX power and SF are fixed per network, with no adaptive
 data rate or power control. LoRaWAN ADR via ChirpStack is unaffected.
@@ -410,7 +410,7 @@ Stage 1 command set (IDs final — they carry over to N1 unchanged):
 | 0x07 | `JoinReq` | ↑ | product_type, proto_version, DevEUI(8), fw_version(4) — under `join_key` (§6.3) | P2P JoinRequest `0xF0` |
 | 0x08 | `JoinAccept` | ↓ | net_id(4), central_nonce(4), rx_delay(1), tx_power(1), reserved(3) — under `join_key` | P2P JoinAccept `0xF1` |
 | 0x10 | `LinkCheckReq` / `Ans` | ↑↓ | Ans: rssi(i8), snr(i8), margin(i8), gw_count(1) | link check with numbers; uplink SNR |
-| 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment, adaptive power (#443); auto-revert if no ACK |
+| 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment (network-wide change, not ADR); auto-revert if no ACK |
 | 0x14 | `LinkPolicy` | ↓ | confirm_every(1), warn_after(1), rejoin_after(1) | network-set supervision parameters |
 | 0x15 | `Backoff` | ↓ | seconds(2) | gateway/central congestion or duty relief |
 | 0x20 | `TimeReq` / `TimeAns` | ↑↓ | Ans: unix(4) ‖ fraction(1, 1/256 s) ‖ req_counter(4 LE) — the time at the end of the TimeReq uplink whose frame counter is `req_counter`; the node applies it relative to that frame's TX-done and drops an Ans with an unknown `req_counter` | B5 Unix-time tail, `clock_sync` |
