@@ -1,30 +1,30 @@
-// Reference receiver / decoder for the raw-LoRa P2P transport (#118, doc/p2p.md).
+// Reference receiver / decoder for the TOWER P2P transport (doc/plan/470, doc/p2p.md).
 //
-// Mirrors the on-air frame app_radio_p2p.c produces:
-//   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE) ]  12 B header
-// FCtrl (decision #22): bit 0 CONFIRMED (uplink), bit 4 FPending, bit 5 ACK (downlink).
-//   [ AES-CCM ciphertext (= plaintext) ] [ AES-CCM tag (4 B) ]
-// The header is cleartext and fed as AAD; the body is AES-CCM (AES-128). The CCM
-// nonce is counter(4 BE) || dev_addr(2 BE) || frame_type(1) || direction(1) ||
-// zeros(5) = 13 B (direction 0 = device TX). decodeP2pFrame()/encodeP2pFrame()
-// below implement this CCM framing for the DATA PLANE (telemetry/alarm/
-// response/ack) once a device is joined, keyed under `session_key`.
+// Mirrors the on-air frame app_radio_p2p.c produces and receives:
+//   [ ver_type(1) | flags(1) | src(4 LE) | dest(4 LE) | counter(4 LE) ]  14 B header
+//   [ AES-128-CCM ciphertext (= plaintext length) ] [ CCM tag (8 B) ]
+// ver_type = version(3 bits, 1) << 5 | type (Data 0, Ack 1); flags bit 0 CONFIRMED.
+// The whole header is the CCM AAD; the nonce is src(4 LE) || counter(4 LE) ||
+// bulk_idx(3 LE, 0) || 0x0000 = 13 B. There is no direction byte: the two
+// directions differ by src. The node's address is the low 32 bits of its DevEUI,
+// the gateway's the network's net_id.
 //
-// The join handshake (JoinRequest/JoinAccept, doc/p2p.md §5.3, #118 phase 2
-// revision) is a DIFFERENT, simpler construction: the SAME 12 B header (FCtrl 0), but a
-// CLEARTEXT body followed by a full 16 B plain AES-CMAC tag (joinTag() below)
-// -- NOT AES-CCM, neither frame carries an actual secret. There is no manual
-// p2p_key config parameter and no separate join_key any more: the root secret
-// for the whole transport is the device's existing LoRaWAN OTAA AppKey
-// (app_key), which the central already knows from the OTAA/claim flow.
-// deriveSessionKey() below computes the data-plane key from app_key once
-// dev_nonce/central_nonce are known from a successful join -- mirrors
-// app_radio_p2p.c's derive_session_key() exactly (same label, same big-endian field
-// encoding, same zero-padding).
+// An ACK payload is acked(4 LE) | rssi(i8) | flags(PENDING bit 0); any payload of
+// at least 4 B is an ACK. A Data payload carries one of two STICKER envelopes:
+//   0x81 | port(1) | LoRaWAN fPort payload   telemetry 2, alarm 3, answers 85,
+//                                            commands 86 (downlink)
+//   0x91 | { cmd(1) | len(1) | value } x n   control TLVs (Capabilities, Hello,
+//                                            join, LinkCheck, Time, ...)
+// The 0x81 body is the exact payload LoRaWAN would carry on that fPort, so it is
+// decoded by the ttn.js fPort decoders.
 //
-// The decrypted data-plane body is the exact payload LoRaWAN would carry, so
-// frame types reuse the LoRaWAN fPort decoders in ttn.js (telemetry=2, alarm=3,
-// response=85).
+// Keys: join_key seals the JoinRequest / JoinAccept, session_key every frame after
+// the join. Both are AES-128-CMAC of the device's LoRaWAN OTAA AppKey (app_key):
+//   join_key    = CMAC(app_key, "HIO-TWR-JOIN" || 0x01 || dev_eui(8) || pad to 32 B)
+//   session_key = CMAC(app_key, "HIO-TWR-SES" || 0x01 || dev_nonce(4 BE) ||
+//                      central_nonce(4 BE) || dev_eui(8) || pad to 32 B)
+// dev_eui MSB-first, as the hex string reads. Pinned against the firmware and the
+// central by tests/ccm/tower_join_kat.json and tests/ccm/tower_frame_kat.json.
 //
 // Zero-dependency (Node >= 18 built-in crypto). Run the tests with `node --test`.
 
@@ -33,46 +33,58 @@
 const crypto = require("crypto");
 const ttn = require("./ttn.js");
 
-const P2P_HDR_LEN = 12;
-const P2P_FCTRL_CONFIRMED = 0x01;
-const P2P_FCTRL_FPENDING = 0x10;
-const P2P_FCTRL_ACK = 0x20;
-const P2P_TAG_LEN = 4; // data-plane (session_key) CCM tag length only
-const P2P_NONCE_LEN = 13;
-const P2P_DIR_TX = 0x00;
-const P2P_DIR_RX = 0x01;
+const TWR_VERSION = 1;
+const TWR_HDR_LEN = 14;
+const TWR_TAG_LEN = 8;
+const TWR_NONCE_LEN = 13;
+const TWR_TYPE_DATA = 0;
+const TWR_TYPE_ACK = 1;
+const TWR_FLAG_CONFIRMED = 0x01;
+const TWR_ACK_PENDING = 0x01;
+const TWR_FRAME_MAX = 100; // the node's MTU (Capabilities)
 
-// Join handshake constants (doc/p2p.md §4/§5.3) -- see the file header comment
-// and app_radio_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
-// P2P_SESSION_KEY_LABEL comment for the full rationale.
-const P2P_JOIN_TAG_LEN = 16; // full CMAC output, NOT P2P_TAG_LEN
-const P2P_JOIN_TAG_LABEL = "HIO-P2P-JOIN"; // JoinRequest tag
-const P2P_JOINACCEPT_TAG_LABEL = "HIO-P2P-ACC"; // JoinAccept tag
-const P2P_SESSION_KEY_LABEL = "HIO-P2P-SES";
+const ENV_DATA = 0x81;
+const ENV_CTRL = 0x91;
 
-// 0xF0-0xFE are link control (doc/p2p.md §3.2). Named so a captured frame is
-// readable; none of them carries an app payload this decoder could decode --
-// the join handshake bodies are cleartext but CMAC-tagged, and Detach/
-// RejoinRequest are empty.
-const FRAME_TYPE_NAMES = {
+const JOIN_KEY_LABEL = "HIO-TWR-JOIN";
+const SESSION_KEY_LABEL = "HIO-TWR-SES";
+
+const TYPE_NAMES = { [TWR_TYPE_DATA]: "data", [TWR_TYPE_ACK]: "ack" };
+
+const PORT_NAMES = {
   2: "telemetry",
   3: "alarm",
   85: "response",
   86: "command",
-  0xf0: "join_request",
-  0xf1: "join_accept",
-  0xfa: "ack",
-  0xfd: "detach",
-  0xfe: "rejoin_request",
 };
 
-function buildNonce(counter, devAddr, frameType, dir) {
-  const n = Buffer.alloc(P2P_NONCE_LEN);
-  n.writeUInt32BE(counter >>> 0, 0);
-  n.writeUInt16BE(devAddr & 0xffff, 4);
-  n[6] = frameType & 0xff;
-  n[7] = dir & 0xff;
-  return n;
+const CTRL = {
+  CAPABILITIES: 0x01,
+  HELLO: 0x02,
+  DETACH: 0x03,
+  REJOIN_REQ: 0x04,
+  JOIN_REQ: 0x07,
+  JOIN_ACCEPT: 0x08,
+  LINK_CHECK: 0x10,
+  TIME: 0x20,
+};
+
+const CTRL_NAMES = {
+  [CTRL.CAPABILITIES]: "capabilities",
+  [CTRL.HELLO]: "hello",
+  [CTRL.DETACH]: "detach",
+  [CTRL.REJOIN_REQ]: "rejoin_request",
+  [CTRL.JOIN_REQ]: "join_request",
+  [CTRL.JOIN_ACCEPT]: "join_accept",
+  [CTRL.LINK_CHECK]: "link_check",
+  [CTRL.TIME]: "time",
+};
+
+function asBuffer(b) {
+  if (typeof b === "string") {
+    return Buffer.from(b, "hex");
+  }
+  return Buffer.isBuffer(b) ? b : Buffer.from(b || []);
 }
 
 function asKey(key) {
@@ -80,14 +92,37 @@ function asKey(key) {
     key = Buffer.from(key, "hex");
   }
   if (!Buffer.isBuffer(key) || key.length !== 16) {
-    throw new Error("p2p key must be 16 bytes (32 hex digits)");
+    throw new Error("key must be 16 bytes (32 hex digits)");
   }
   return key;
 }
 
-// Single-block AES-128 ECB forward encrypt, no padding: `block` must be
-// exactly 16 B. The one primitive both aes128Cmac() below and (on the device
-// side) app_ccm_ecb_encrypt_block() are built from.
+// Coerce a DevEUI to its 8 raw bytes, MSB-first.
+//
+// Deliberately strict: a 4-byte serial (the identity before #417) must fail here
+// rather than be zero-extended into a key that differs from the central's -- the
+// join would succeed and every data frame after it fail to decrypt with no clue why.
+function asDevEui(devEui) {
+  if (typeof devEui === "string") {
+    devEui = Buffer.from(devEui.replace(/[:-]/g, ""), "hex");
+  } else if (!Buffer.isBuffer(devEui)) {
+    if (typeof devEui === "number") {
+      throw new TypeError("dev_eui must be 8 bytes (MSB-first), not a number -- see #417");
+    }
+    devEui = Buffer.from(devEui);
+  }
+  if (devEui.length !== 8) {
+    throw new RangeError(`dev_eui must be 8 bytes (MSB-first), got ${devEui.length}`);
+  }
+  return devEui;
+}
+
+// The node's TOWER address: the low 32 bits of the DevEUI (plan §6.1).
+function nodeAddr(devEui) {
+  return asDevEui(devEui).readUInt32BE(4);
+}
+
+// Single-block AES-128 ECB forward encrypt, no padding: `block` must be 16 B.
 function aesEcbEncryptBlock(key, block) {
   const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
   cipher.setAutoPadding(false);
@@ -102,9 +137,8 @@ function xor16(a, b) {
   return out;
 }
 
-// GF(2^128) "shift left 1, XOR Rb if the vacated MSB was 1" doubling used to
-// derive both CMAC subkeys from L = E(K, 0^128). Rb = 0x87 (RFC 4493 §2.3).
-// Mirrors app_ccm.c's double_gf128() exactly.
+// GF(2^128) doubling for the CMAC subkeys, Rb = 0x87 (RFC 4493 §2.3). Mirrors
+// app_ccm.c's double_gf128().
 function doubleGf128(v) {
   const out = Buffer.alloc(16);
   const msb = (v[0] & 0x80) !== 0;
@@ -119,15 +153,11 @@ function doubleGf128(v) {
   return out;
 }
 
-// AES-128 CMAC (NIST SP 800-38B / RFC 4493). `key` a Buffer or 32-hex-digit
-// string; `msg` a Buffer (any length, including 0). Mirrors app_ccm.c's
-// app_ccm_cmac() exactly (same subkey derivation, same 10...0 padding on a
-// partial final block).
+// AES-128 CMAC (NIST SP 800-38B / RFC 4493), any message length. Mirrors
+// app_ccm.c's app_ccm_cmac().
 function aes128Cmac(key, msg) {
   key = asKey(key);
-  if (!Buffer.isBuffer(msg)) {
-    msg = Buffer.from(msg);
-  }
+  msg = asBuffer(msg);
 
   const k1 = doubleGf128(aesEcbEncryptBlock(key, Buffer.alloc(16)));
   const k2 = doubleGf128(k1);
@@ -153,187 +183,261 @@ function aes128Cmac(key, msg) {
   return aesEcbEncryptBlock(key, xor16(x, lastBlock));
 }
 
-// tag = AES128-CMAC(appKey, label + headerAndBody) -- the JoinRequest/
-// JoinAccept authentication tag (doc/p2p.md §4/§5.3, #118 phase 2 revision).
-// `appKey` a Buffer or 32-hex-digit string; `label` a Buffer or ASCII string
-// (P2P_JOIN_TAG_LABEL or P2P_JOINACCEPT_TAG_LABEL); `headerAndBody` the
-// frame's 11 B header immediately followed by its (cleartext) body. Returns
-// the full 16-byte tag as a Buffer -- NOT truncated like the data plane's
-// P2P_TAG_LEN. Matches app_radio_p2p.c's send_join_request()/recv_join_accept()
-// tag construction exactly.
-function joinTag(appKey, label, headerAndBody) {
-  appKey = asKey(appKey);
-  if (typeof label === "string") {
-    label = Buffer.from(label, "ascii");
-  }
-  if (!Buffer.isBuffer(headerAndBody)) {
-    headerAndBody = Buffer.from(headerAndBody);
-  }
-
-  return aes128Cmac(appKey, Buffer.concat([label, headerAndBody]));
-}
-
-// session_key = AES128-CMAC(appKey, "HIO-P2P-SES" || 0x01 || devNonce(4 BE) ||
-// centralNonce(4 BE) || devEui(8 B, MSB-first) || zero-pad to 32 B),
-// doc/p2p.md §4 -- derived DIRECTLY from the device's existing LoRaWAN OTAA
-// AppKey (no join_key intermediate any more, #118 phase 2 revision), once per
-// successful join. The last field was serialNumber(4 BE) until #417 / GitLab
-// #73 made the DevEUI the join identity; the input went 24 -> 28 octets and is
-// still zero-padded to 32, so it is still two CMAC blocks.
-//
-// `appKey` a Buffer or 32-hex-digit string; `devNonce`/`centralNonce` uint32s;
-// `devEui` an 8-byte Buffer or a 16-hex-digit string, MSB-FIRST -- exactly as
-// the hex string reads, deliberately NOT LoRaWAN's LSB-first on-air order
-// (decision D1). Returns the 16-byte session_key as a Buffer.
-//
-// Matches app_radio_p2p.c's derive_session_key() exactly (same label, same
-// big-endian field encoding, same zero-padding to a 32 B/2-block message), and
-// is pinned against it by the shared fixture tests/ccm/p2p_join_kat.json.
-function deriveSessionKey(appKey, devNonce, centralNonce, devEui) {
-  appKey = asKey(appKey);
-  devEui = asDevEui(devEui);
-
-  const label = Buffer.from(P2P_SESSION_KEY_LABEL, "ascii");
+// CMAC(app_key, label || 0x01 || fields || zero pad to 32 B), app_radio_p2p.c's
+// derive_key().
+function deriveKey(appKey, label, fields) {
   const block = Buffer.alloc(32);
+  const l = Buffer.from(label, "ascii");
 
-  label.copy(block, 0);
-  block[label.length] = 0x01;
-  block.writeUInt32BE(devNonce >>> 0, label.length + 1);
-  block.writeUInt32BE(centralNonce >>> 0, label.length + 5);
-  devEui.copy(block, label.length + 9);
-  // block[label.length+17 .. 31] = zero padding, already zero-initialized.
-
+  l.copy(block, 0);
+  block[l.length] = 0x01;
+  fields.copy(block, l.length + 1);
   return aes128Cmac(appKey, block);
 }
 
-// Coerce a DevEUI to its 8 raw bytes, MSB-first.
-//
-// Deliberately strict: a caller still passing the pre-#417 4-byte serial must
-// fail here rather than have it silently zero-extended into a key that differs
-// from the central's by four bytes. That is the #118 failure mode -- the join
-// succeeds and every data frame after it fails to decrypt with no clue why.
-function asDevEui(devEui) {
-  if (typeof devEui === "string") {
-    devEui = Buffer.from(devEui.replace(/[:-]/g, ""), "hex");
-  } else if (!Buffer.isBuffer(devEui)) {
-    if (typeof devEui === "number") {
-      throw new TypeError("dev_eui must be 8 bytes (MSB-first), not a number -- see #417");
-    }
-    devEui = Buffer.from(devEui);
-  }
-  if (devEui.length !== 8) {
-    throw new RangeError(`dev_eui must be 8 bytes (MSB-first), got ${devEui.length}`);
-  }
-  return devEui;
+function deriveJoinKey(appKey, devEui) {
+  return deriveKey(asKey(appKey), JOIN_KEY_LABEL, asDevEui(devEui));
 }
 
-// Decode one raw P2P DATA-PLANE frame (telemetry/alarm/response/ack -- NOT
-// JoinRequest/JoinAccept, which use joinTag() instead, see the file header
-// comment). `frame` is a Buffer / hex string / byte array, `key` the 16-byte
-// AES-CCM session_key (Buffer or hex; see deriveSessionKey()). Returns the
-// parsed header, the decrypted body and (for known frame types) the decoded
-// payload. Throws if the frame is malformed or the AES-CCM tag does not verify.
-function decodeP2pFrame(frame, key, opts) {
-  opts = opts || {};
-  if (typeof frame === "string") {
-    frame = Buffer.from(frame, "hex");
-  } else if (!Buffer.isBuffer(frame)) {
-    frame = Buffer.from(frame);
-  }
-  key = asKey(key);
+function deriveSessionKey(appKey, devNonce, centralNonce, devEui) {
+  const fields = Buffer.alloc(16);
 
-  if (frame.length < P2P_HDR_LEN + P2P_TAG_LEN) {
+  fields.writeUInt32BE(devNonce >>> 0, 0);
+  fields.writeUInt32BE(centralNonce >>> 0, 4);
+  asDevEui(devEui).copy(fields, 8);
+  return deriveKey(asKey(appKey), SESSION_KEY_LABEL, fields);
+}
+
+// src(4 LE) || counter(4 LE) || bulk_idx(3 LE) || 0x0000.
+function towerNonce(src, counter, bulkIdx) {
+  const n = Buffer.alloc(TWR_NONCE_LEN);
+
+  n.writeUInt32LE(src >>> 0, 0);
+  n.writeUInt32LE(counter >>> 0, 4);
+  n.writeUIntLE((bulkIdx || 0) & 0xffffff, 8, 3);
+  return n;
+}
+
+function encodeHeader(h) {
+  const out = Buffer.alloc(TWR_HDR_LEN);
+
+  out[0] = ((TWR_VERSION << 5) | (h.type & 0x1f)) & 0xff;
+  out[1] = (h.flags || 0) & 0xff;
+  out.writeUInt32LE(h.src >>> 0, 2);
+  out.writeUInt32LE(h.dest >>> 0, 6);
+  out.writeUInt32LE(h.counter >>> 0, 10);
+  return out;
+}
+
+// The cleartext header of a frame, without opening it (a listener has no key).
+function parseHeader(frame) {
+  frame = asBuffer(frame);
+  if (frame.length < TWR_HDR_LEN + TWR_TAG_LEN) {
     throw new Error(`frame too short: ${frame.length} B`);
   }
+  if (frame[0] >> 5 !== TWR_VERSION) {
+    throw new Error(`not a TOWER v${TWR_VERSION} frame (ver_type 0x${frame[0].toString(16)})`);
+  }
 
-  const netId = frame.readUInt32BE(0);
-  const devAddr = frame.readUInt16BE(4);
-  const frameType = frame[6];
-  const fctrl = frame[7];
-  const counter = frame.readUInt32BE(8);
-  const header = frame.subarray(0, P2P_HDR_LEN);
-  const ctLen = frame.length - P2P_HDR_LEN - P2P_TAG_LEN;
-  const ct = frame.subarray(P2P_HDR_LEN, P2P_HDR_LEN + ctLen);
-  const tag = frame.subarray(P2P_HDR_LEN + ctLen);
-  const dir = opts.dir != null ? opts.dir : P2P_DIR_TX;
+  const type = frame[0] & 0x1f;
+  const flags = frame[1];
 
-  const nonce = buildNonce(counter, devAddr, frameType, dir);
-  const decipher = crypto.createDecipheriv("aes-128-ccm", key, nonce, {
-    authTagLength: P2P_TAG_LEN,
-  });
-  decipher.setAuthTag(tag);
-  decipher.setAAD(header, { plaintextLength: ctLen });
-  const body = Buffer.concat([decipher.update(ct), decipher.final()]); // throws on bad tag
-
-  const out = {
-    netId,
-    devAddr,
-    frameType,
-    frameTypeName: FRAME_TYPE_NAMES[frameType] || "unknown",
-    fctrl,
-    confirmed: (fctrl & P2P_FCTRL_CONFIRMED) !== 0,
-    counter,
-    body,
+  return {
+    type,
+    typeName: TYPE_NAMES[type] || "unknown",
+    flags,
+    confirmed: (flags & TWR_FLAG_CONFIRMED) !== 0,
+    src: frame.readUInt32LE(2),
+    dest: frame.readUInt32LE(6),
+    counter: frame.readUInt32LE(10),
   };
+}
 
-  // Frame types mirror LoRaWAN fPorts, so reuse the ttn.js payload decoders.
-  if (frameType === 2 || frameType === 3 || frameType === 85) {
-    try {
-      out.data = ttn.decodeUplink({ fPort: frameType, bytes: Array.from(body) }).data;
-    } catch (e) {
-      out.decodeError = String(e);
+// Seal a frame: { key, type (default Data), flags, src, dest, counter, payload }.
+function encodeTowerFrame(p) {
+  const key = asKey(p.key);
+  const pt = asBuffer(p.payload);
+  const h = { type: p.type != null ? p.type : TWR_TYPE_DATA, ...p };
+  const header = encodeHeader(h);
+  const cipher = crypto.createCipheriv("aes-128-ccm", key, towerNonce(h.src, h.counter), {
+    authTagLength: TWR_TAG_LEN,
+  });
+
+  cipher.setAAD(header, { plaintextLength: pt.length });
+  const ct = Buffer.concat([cipher.update(pt), cipher.final()]);
+  return Buffer.concat([header, ct, cipher.getAuthTag()]);
+}
+
+// acked(4 LE) | rssi(i8) | flags(PENDING bit 0); fields past the first 4 B optional.
+function parseAck(pt) {
+  if (pt.length < 4) {
+    throw new Error(`ACK payload too short: ${pt.length} B`);
+  }
+  return {
+    acked: pt.readUInt32LE(0),
+    rssi: pt.length > 4 ? pt.readInt8(4) : null,
+    pending: pt.length > 5 && (pt[5] & TWR_ACK_PENDING) !== 0,
+  };
+}
+
+// The TLV list of a 0x91 payload (after the envelope byte). An unknown cmd is
+// skipped by its length; an entry running past the end throws.
+function parseTlvs(buf) {
+  buf = asBuffer(buf);
+  const out = [];
+  let off = 0;
+
+  while (off < buf.length) {
+    if (buf.length - off < 2 || buf.length - off - 2 < buf[off + 1]) {
+      throw new Error(`control TLV malformed at byte ${off}`);
     }
+    const cmd = buf[off];
+    const value = buf.subarray(off + 2, off + 2 + buf[off + 1]);
+
+    out.push({ cmd, name: CTRL_NAMES[cmd] || "unknown", value, fields: decodeCtrl(cmd, value) });
+    off += 2 + value.length;
   }
   return out;
 }
 
-// Build a frame from a plaintext body (for tests and a software sender). Returns
-// the wire Buffer. Phase 1: netId/devAddr default to 0 (the fixed pre-join
-// value, doc/p2p.md §5.3) if not given.
-function encodeP2pFrame(params) {
-  const key = asKey(params.key);
-  let body = params.body;
-  if (typeof body === "string") {
-    body = Buffer.from(body, "hex");
-  } else if (!Buffer.isBuffer(body)) {
-    body = Buffer.from(body);
+// The fields of one control value (doc/plan/470 §8.2), or null for an empty or
+// unknown one. Requests and answers share an ID; the length tells them apart.
+function decodeCtrl(cmd, v) {
+  switch (cmd) {
+    case CTRL.CAPABILITIES:
+      if (v.length < 12) {
+        return null;
+      }
+      return {
+        protoVersion: v[0],
+        mtu: v[1],
+        profiles: { fsk: (v[2] & 0x01) !== 0, lora: (v[2] & 0x02) !== 0 },
+        cmdBitmap: Buffer.from(v.subarray(3, 11)).toString("hex"),
+        powerClass: v[11],
+      };
+    case CTRL.HELLO:
+      if (v.length < 9) {
+        return null;
+      }
+      return {
+        sessionId: v.readUInt32LE(0),
+        resetReason: v[4],
+        fwVersion: `${v[5]}.${v[6]}.${v[7]}`,
+      };
+    case CTRL.DETACH:
+    case CTRL.REJOIN_REQ:
+      return v.length ? { reason: v[0] } : null;
+    case CTRL.JOIN_REQ:
+      if (v.length < 14) {
+        return null;
+      }
+      return {
+        productType: v[0],
+        protoVersion: v[1],
+        devEui: Buffer.from(v.subarray(2, 10)).toString("hex"),
+        fwVersion: `${v[10]}.${v[11]}.${v[12]}`,
+      };
+    case CTRL.JOIN_ACCEPT:
+      if (v.length < 13) {
+        return null;
+      }
+      return {
+        netId: v.readUInt32LE(0),
+        centralNonce: v.readUInt32LE(4),
+        rxDelay: v[8],
+        txPower: v[9], // 0 = no assignment
+      };
+    case CTRL.LINK_CHECK:
+      if (v.length < 4) {
+        return null; // LinkCheckReq
+      }
+      return { rssi: v.readInt8(0), snr: v.readInt8(1), margin: v.readInt8(2), gwCount: v[3] };
+    case CTRL.TIME:
+      if (v.length < 9) {
+        return null; // TimeReq
+      }
+      return { unix: v.readUInt32LE(0), frac: v[4], reqCounter: v.readUInt32LE(5) };
+    default:
+      return null;
   }
-  const dir = params.dir != null ? params.dir : P2P_DIR_TX;
+}
 
-  const header = Buffer.alloc(P2P_HDR_LEN);
-  header.writeUInt32BE((params.netId || 0) >>> 0, 0);
-  header.writeUInt16BE((params.devAddr || 0) & 0xffff, 4);
-  header[6] = params.frameType & 0xff;
-  header[7] = (params.fctrl || 0) & 0xff;
-  header.writeUInt32BE((params.counter || 0) >>> 0, 8);
+// A Data payload's STICKER envelope.
+function decodeEnvelope(pt) {
+  pt = asBuffer(pt);
+  if (pt.length >= 2 && pt[0] === ENV_DATA) {
+    const port = pt[1];
+    const body = pt.subarray(2);
+    const out = { envelope: "data", port, portName: PORT_NAMES[port] || "unknown", body };
 
-  const nonce = buildNonce(params.counter || 0, params.devAddr || 0, params.frameType, dir);
-  const cipher = crypto.createCipheriv("aes-128-ccm", key, nonce, {
-    authTagLength: P2P_TAG_LEN,
+    if (port === 2 || port === 3 || port === 85) {
+      try {
+        out.data = ttn.decodeUplink({ fPort: port, bytes: Array.from(body) }).data;
+      } catch (e) {
+        out.decodeError = String(e);
+      }
+    }
+    return out;
+  }
+  if (pt.length >= 1 && pt[0] === ENV_CTRL) {
+    return { envelope: "control", tlvs: parseTlvs(pt.subarray(1)) };
+  }
+  return { envelope: "unknown" };
+}
+
+// Open one frame under `key` (join_key for the join frames, session_key after).
+// Returns the header, the plaintext and, by type, `ack` or `envelope`. Throws if
+// the frame is malformed or the tag does not verify.
+function decodeTowerFrame(frame, key) {
+  frame = asBuffer(frame);
+  key = asKey(key);
+
+  const h = parseHeader(frame);
+  const ctLen = frame.length - TWR_HDR_LEN - TWR_TAG_LEN;
+  const decipher = crypto.createDecipheriv("aes-128-ccm", key, towerNonce(h.src, h.counter), {
+    authTagLength: TWR_TAG_LEN,
   });
-  cipher.setAAD(header, { plaintextLength: body.length });
-  const ct = Buffer.concat([cipher.update(body), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([header, ct, tag]);
+
+  decipher.setAuthTag(frame.subarray(TWR_HDR_LEN + ctLen));
+  decipher.setAAD(frame.subarray(0, TWR_HDR_LEN), { plaintextLength: ctLen });
+  const payload = Buffer.concat([
+    decipher.update(frame.subarray(TWR_HDR_LEN, TWR_HDR_LEN + ctLen)),
+    decipher.final(), // throws on a bad tag
+  ]);
+  const out = { ...h, payload };
+
+  if (h.type === TWR_TYPE_ACK) {
+    out.ack = parseAck(payload);
+  } else if (h.type === TWR_TYPE_DATA) {
+    out.envelope = decodeEnvelope(payload);
+  }
+  return out;
 }
 
 module.exports = {
-  decodeP2pFrame,
-  encodeP2pFrame,
-  joinTag,
+  decodeTowerFrame,
+  encodeTowerFrame,
+  parseHeader,
+  parseAck,
+  parseTlvs,
+  decodeEnvelope,
+  deriveJoinKey,
   deriveSessionKey,
+  nodeAddr,
+  towerNonce,
   aes128Cmac,
-  buildNonce,
-  P2P_HDR_LEN,
-  P2P_FCTRL_CONFIRMED,
-  P2P_FCTRL_FPENDING,
-  P2P_FCTRL_ACK,
-  P2P_TAG_LEN,
-  P2P_NONCE_LEN,
-  P2P_DIR_TX,
-  P2P_DIR_RX,
-  P2P_JOIN_TAG_LEN,
-  P2P_JOIN_TAG_LABEL,
-  P2P_JOINACCEPT_TAG_LABEL,
-  P2P_SESSION_KEY_LABEL,
+  TWR_VERSION,
+  TWR_HDR_LEN,
+  TWR_TAG_LEN,
+  TWR_NONCE_LEN,
+  TWR_TYPE_DATA,
+  TWR_TYPE_ACK,
+  TWR_FLAG_CONFIRMED,
+  TWR_ACK_PENDING,
+  TWR_FRAME_MAX,
+  ENV_DATA,
+  ENV_CTRL,
+  CTRL,
+  JOIN_KEY_LABEL,
+  SESSION_KEY_LABEL,
 };
