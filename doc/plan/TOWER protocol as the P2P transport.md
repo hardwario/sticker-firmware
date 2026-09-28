@@ -574,6 +574,13 @@ re-measured (release budget `0x34000`).
 
 ## 17. Risks
 
+- **Zephyr SX12xx 4 s TX timeout** (found in P0 by the Northbridge build): `sx12xx_lora_config()`
+  hard-codes 4000 ms; a longer frame is cut mid-air and `lora_send()` blocks forever. Caps the
+  `lora` MTU at ~100 B frame on SF12 and ~198 B on SF11 until the fork driver derives the
+  timeout from ToA (input to D14; same fork change as #408 B7).
+- **Gateway TX counter across power cycles**: the P0 Northbridge restarts it at 1 (nonce
+  reuse with a static key). P2 needs a reserved-block counter on the Northbridge, persisted
+  by the central (§9.4).
 - **PHY bit-exactness** (whitening coverage, CRC seed/order, length byte) — P0 gate; SW
   CRC/whitening fallback.
 - **Upstream latency or refusal** — extensions stay flag-gated; core compatibility holds.
