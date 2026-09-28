@@ -95,7 +95,7 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 
 ---
 
-## 3. LED: back to GPIO, PWM removed (#301)
+## 3. LED: back to GPIO, PWM removed (#301, #466)
 
 #301 (PR #406) moved red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) onto hardware
 PWM, dimmed "on" to 20 % duty and faded them in the boot carousel. That path is
