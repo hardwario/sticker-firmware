@@ -430,8 +430,8 @@ New proto_ids need the manual collision check (memory: proto_id collision gotcha
 
 | Phase | Content | Exit criterion |
 |---|---|---|
-| **P0 — LoRa physical verification (go/no-go, T7)** | TOWER frames + TOWER timing on SX126x LoRa, STICKER ↔ STICKER, bench build (§13.1) | M1–M8 pass; §5 timing table replaced by measured values |
-| **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); static `p2p-gw-addr` + derived key; a bench **gateway role** on a second STICKER | STICKER ↔ STICKER-gateway: telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
+| **P0 — LoRa physical verification (go/no-go, T7)** | TOWER frames + TOWER timing on SX126x LoRa, STICKER node ↔ **Northbridge** gateway (bench builds on both, §13.1) | M1–M8 pass; §5 timing table replaced by measured values |
+| **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); static `p2p-gw-addr` + derived key; the P0 Northbridge bench gateway grows the `0x81`/`0x91` codec | STICKER ↔ Northbridge (bench RTT bridge to the central or a host script): telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
 | **P2 — Hub gateway** | Northbridge TOWER gateway net layer (lora) + console link (D5); central registry, `NodeAdd`, `0x81` decode, `0x91` handling | STICKER lora → Hub → MQTT decoded; `TimeAns`/`LinkCheckAns` from the central |
 | **P3 — Downlink & lifecycle** | pending/queue, commands/responses, chaining, supervision on `LinkCheckAns`, `RadioParamReq`, `Detach`/`RejoinReq`, `DevStatus` | Portal GetParam/SetParam E2E over P2P |
 | **P4 — Upstream** (from P1 in parallel) | U1, U2, E3 now; N1, E4 drafted with the P1–P3 experience | E3 agreed; N1/E4 proposals submitted |
@@ -449,38 +449,53 @@ a go/no-go.
 
 **Setup**
 
-- Two STICKERs from the bench (0413 via J-Link 822005110, 5722 via J-Link EDU 801053710 —
-  both need a debug build; 5722 is currently the release range-test node, reflash only
-  after coordinating the bench).
-- Throw-away bench branch off `feat-p2p`, layered on `debug_p2p_bench.conf` (P2P without
-  LoRaWAN — RAM budget). Minimal code: TOWER frame codec + CCM nonce, static key and
-  addresses, a **gateway role** (continuous RX, auto-ACK, optional pending + 1 queued
-  downlink) and a **node role**, shell `ats tower …` (`role`, `tx <len> [c]`, `pend <len>`,
-  `stats`, `sf`, `window`).
+- **Node:** STICKER 0413 via J-Link 822005110 (Sticker-controller bench), debug build.
+- **Gateway:** the bench **Northbridge** (STM32WL5MOC, board `stm32wl5moc`,
+  `proximos/firmware`) with its own J-Link — currently the EDU **801053710** (moved to the
+  Northbridge 2026-09-28; always `-SelectEmuBySN 801053710 -NoGui 1` + timeout). Probe
+  ownership changes daily: confirm the SN and the owning session live before flashing.
+  Northbridge RTT telnet on port 19031 (19021 is the STICKER).
+- **Node FW:** throw-away bench branch off `feat-p2p`, layered on `debug_p2p_bench.conf` (P2P
+  without LoRaWAN — RAM budget). Minimal code: TOWER frame codec + CCM nonce, static key and
+  addresses, **node role** only, shell `ats tower …` (`tx <len> [c]`, `stats`, `sf`,
+  `window`, `ack_drop`).
+- **Gateway FW:** bench branch off `hynek/northbridge-p2p-protocol` (the HIL harness base,
+  MR!3), built with `-DBENCH_RTT_BRIDGE=ON`. Minimal TOWER gateway **on the MCU**: continuous
+  RX, frame decode + CCM with a static node key, **auto-ACK from the MCU** (the ≤ 20 ms
+  turnaround cannot go through the host), `PENDING` + one queued downlink loaded over RTT.
+  Every received frame and ACK is reported over RTT (`TWR_RX <hex> rssi snr t_rx`,
+  `TWR_ACK t_tx`) so no central is needed in P0.
+- **Host harness:** extend the `nb_hil.py` pattern (pylink, `--nb-sn` / `--dut-sn`, always
+  SN): drives both shells, loads downlinks, collects both timestamp streams and computes
+  M2–M8. No Hub/central, no MQTT in P0.
 - KAT generator: a small Rust tool over `tower-radio-core` / `tower-net-core` / `frame.rs`
-  emitting `tests/ccm/tower_*_kat.json` (kept for P1).
-- PPK2 on the node for energy; timestamps via `k_cycle_get_32()` around radio events (and a
-  GPIO toggle + logic analyzer if the numbers are borderline).
+  emitting `tests/ccm/tower_*_kat.json` (kept for P1); the Northbridge codec tests against
+  the same JSON.
+- PPK2 on the node for energy; timestamps via `k_cycle_get_32()` around radio events on both
+  sides (and a GPIO toggle + logic analyzer if the numbers are borderline).
+- Why the Northbridge already here: the gateway turnaround and duty (ACKs at 1 %) are the
+  risky numbers, and they must be measured on the real gateway radio path, not on a second
+  STICKER. P2 then only adds the net layer on top of a proven PHY/ACK path.
 
 **Measurements**
 
 | # | What | Pass |
 |---|---|---|
 | M1 | Codec + CCM + nonce vs Rust KAT (native ztest) | byte-identical |
-| M2 | Turnaround: gateway RX-done → ACK TX start; node TX-done → RX armed | gateway ≤ 20 ms; node RX armed before the ACK preamble |
+| M2 | Turnaround: Northbridge RX-done → ACK TX start; node TX-done → RX armed | Northbridge ≤ 20 ms; node RX armed before the ACK preamble |
 | M3 | ACK success per SF 7 / 9 / 10 / 12, 500 confirmed frames each, close range; shrink the window until it fails | ≥ 99 %; minimal working window recorded → §5 |
 | M4 | Frame lengths 14…96 B (and 255 B for D14) at SF7 and SF12; measured vs computed ToA | ToA within 2 % |
 | M5 | Retransmit path (`ack_drop`): byte-identical resend → re-ACK, no re-delivery; counter/replay | no duplicate delivery, strict monotonic counters |
 | M6 | Pending: ACK with `PENDING` → node window → 96 B downlink at SF7 / SF10 | ≥ 99 % received; window formula confirmed |
 | M7 | Energy per confirmed uplink cycle (30 B + ACK) at SF7 / SF10 vs today's P2P RX1 (1 s) | reported (expected clearly lower) |
-| M8 | Duty ledger on both roles incl. ACKs over a 1 h run | ≤ 1 % every sliding hour |
+| M8 | Duty ledger on node and Northbridge incl. ACKs over a 1 h run | ≤ 1 % every sliding hour |
 | M9 (opt.) | Range at 2 dBm: TOWER-over-LoRa vs current P2P | reported |
 
 **Go / no-go:** M1–M6 pass → P1. If M2 misses 20 ms, the `lora` constants just grow (timing
 is not on the wire); a no-go only if confirmed delivery cannot be made reliable within a
 window that keeps the energy advantage over today's RX1.
 
-Per-step verification as usual: three build configs, `bash tests/run_native.sh`,
+Per-step verification as usual (STICKER side): three build configs, `bash tests/run_native.sh`,
 clang-format, configen pytest + decoder tests on yml/proto changes; flash/RAM baseline
 re-measured (release budget `0x34000`).
 
@@ -496,7 +511,7 @@ re-measured (release budget `0x34000`).
   | STICKER | stock TOWER Radio Dongle + `tower-cli` | fsk |
   | STICKER | Hub Northbridge | fsk, lora SF7/SF10 |
   | TOWER `radio_push_button` | Hub Northbridge | fsk (legacy pairing) |
-  | STICKER ↔ STICKER (0413 / 5722) | — | fsk, lora (bench P2P) |
+  | STICKER 0413 | bench Northbridge (P0, MCU auto-ACK, RTT) | lora SF7–SF12 |
 
 - **Power** (PPK2): energy per uplink cycle `fsk` vs `lora` SF7/SF10 incl. ACK/downlink window,
   against the 92 µA idle baseline.
@@ -527,7 +542,7 @@ re-measured (release budget `0x34000`).
 |---|---|
 | sticker-firmware (`feat-p2p`) | `app_radio_p2p.c` rewrite, config params, KAT, decoder, docs |
 | sticker Zephyr fork (`v4.3.0-sticker2`) | FSK access / sx126x sync-CRC-whitening (with #408 B7) |
-| proximos/firmware (Northbridge) | TOWER gateway net layer, FSK, console link |
+| proximos/firmware (Northbridge) | P0 bench gateway (MCU auto-ACK, RTT report) off `hynek/northbridge-p2p-protocol`; then TOWER gateway net layer, FSK, console link |
 | proximos-v2 (central) | `tower-protocol` dependency, registry/key derivation, gateway mgmt, decode |
 | tower-firmware / tower-protocol | U1, U2, E3 (stage 1); N1, E4 (native stage) |
 | Manager-App | later: P2P params over NFC; decoder of the new frame |
