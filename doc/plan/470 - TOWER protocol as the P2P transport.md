@@ -569,6 +569,21 @@ vs after: M2, M2b, M3 SF7.
 | M8 | Duty ledger on node and Northbridge incl. ACKs over a 1 h run | ≤ 1 % every sliding hour |
 | M9 (opt.) | Range at 2 dBm: TOWER-over-LoRa vs current P2P | reported |
 
+**Results so far (2026-09-28, 0413 ↔ bench Northbridge, 869.525 MHz, 52 B frames, lab: duty not enforced)**
+
+| # | Result |
+|---|---|
+| M1 | 9/9 KAT vectors byte-identical on node and Northbridge |
+| M2 | Northbridge gate 20.00–20.01 ms. Node TX-done → RX armed: 22.29 ms (old path, sleep between ops) → **0.658 ms** with `lora_send_recv_async` (hardwario/sticker-zephyr#2, merged) |
+| M2b | turnaround 20 / 25 / 30 ms, both paths: 50/50 each |
+| M3 | fast path, 0 retransmits: SF7 500/500, SF9 300/300, SF10 200/200, SF12 50/50 (after the window fix below). ACK after RX armed: 90.1 / 254.4 / 446.9 / 1729.8 ms |
+| ToA | ACK 28 B at SF7: 66.95 ms measured vs 66.82 ms calculated (+0.2 %) |
+
+**Finding — ACK window:** TX-done → ACK RxDone = turnaround + ToA(ACK) + ~2 symbols +
+~1.5 ms (RX-done latency on both sides): +3.9 ms at SF7, +8.8 at SF9, +15.9 at SF10, ~+64 at
+SF12. A fixed-ms margin (`20 + ToA + 60 ms`) misses at SF12 (0/37). §5 rule for P1: **ACK
+window = turnaround + ToA(ACK) + 3 symbols + fixed margin**, and the same for the DL window.
+
 **Go / no-go:** M1–M6 pass → P1. If M2 misses 20 ms, the `lora` constants just grow (timing
 is not on the wire); a no-go only if confirmed delivery cannot be made reliable within a
 window that keeps the energy advantage over today's RX1.
