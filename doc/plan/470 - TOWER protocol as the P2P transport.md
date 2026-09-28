@@ -228,6 +228,30 @@ and the second Hub cannot ACK it.
 Either way the network needs one `net_id` shared by its Hubs, assigned by the join server
 instead of today's Hub-local random value.
 
+**Target topology (Hynek, 2026-09-28): one central Hub + client Hubs on a local network.**
+This is option 1 with the join server on a designated Hub:
+
+| Role | Holds | Does |
+|---|---|---|
+| **Central Hub** | Portal, AppKey registry, `net_id`, session DB, counters, downlink queues | join server + network server: verifies joins, derives session keys, dedups uplinks from all Hubs, decodes, picks the gateway for each downlink |
+| **Client Hub** | its Northbridge(s) + a thin forwarder; session keys only in Northbridge RAM, no AppKeys, nothing on disk | forwards every uplink (and unknown-`src` joins raw) to the central over the LAN, ACKs locally, sends queued downlinks |
+
+Rules this topology needs (P6, with multi-gateway):
+
+- **One ACKer per node ("home gateway").** If every Northbridge that hears a confirmed
+  frame ACKs it after the same 20 ms, the ACKs collide on air. The central assigns each node
+  a home Northbridge (best RSSI; `0x91` `HomeGateway`, cmd 0x06 reserved). Only the home
+  ACKs; the others just forward. After repeated misses the central moves the home.
+- **Disjoint gateway TX counters.** All Northbridges send as `src = net_id` under the same
+  per-node session key, so their counters must never overlap (nonce reuse otherwise). The
+  central hands each Northbridge its own reserved counter block.
+- **LAN or central outage.** Client Hubs keep ACKing already-joined nodes (session keys in
+  RAM) and buffer uplinks until the central is back. New joins, rekeys and downlinks wait
+  for the central. A client Hub reboot during the outage stops its ACKs until the central
+  re-sends `NodeAdd` (§6.6).
+- **Dedup** by `(addr, counter)` at the central, keeping the best RSSI/SNR per frame for the
+  home-gateway choice.
+
 ### 6.4 Legacy TOWER pairing
 
 - STICKER **never** uses public-key pairing (not compiled in, or behind a debug-only switch).
