@@ -39,6 +39,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
 | LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
 | LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. See §31. |
+| LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 
 ---
 
@@ -1488,6 +1489,22 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
 - Time on air follows LoRaMac's formula, rounded up; some P2P values are 1 ms longer than before (SF12 42 B: 2139 ms).
 - `RadioState.airtime_hour_ms` (§24) is filled on both radios.
 - RAM: the LoRaWAN-only debug image needs 384 B more (the ledger); the images with P2P are unchanged.
+
+## 32. Alarm bursts and the post-command reboot (#462)
+
+Found in the Nodes test E6 (2026-09-28): six rules toggled by one `SetParam{…, save=true}` with `alarm-limit 0` gave six one-event batches at once, and the `SetParam`'s own reboot followed 8 s later.
+
+- **Problem 1, a full alarm queue.** `alarm-limit 0` sends every edge as its own batch. The radio's alarm queue holds 4 frames, so a burst of more edges than that dropped the rest (`Alarm queue full; dropped`).
+- **Problem 2, the reboot.** A deferred command action (doc/p2p.md, §30) waited only for the command's answer and a pending Ack retry. Alarm frames still queued, and a batch still collecting in its `alarm-limit` window, died in the reboot.
+- **Fix, back-pressure.** A batch whose pages do not fit the free alarm slots waits, held like a batch waiting for the link or the boot announce. Later edges join it, so the burst leaves in fewer, fuller frames. Each alarm frame the radio takes from the queue releases it to try again. An empty queue takes a batch of any size, because no queued frame is left to release it.
+- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged: 8 s steps, at most 6 deferrals, then the action runs anyway.
+- Not in scope: an unconfirmed alarm frame lost on the air (`radio-alarm-ack false`, §30) is still not repeated.
+- Tests: `tests/alarm_eval` (burst hold, all pages must fit, empty queue, the early send of a collecting window, a batch held for the link), `tests/radio_common` (the action waits for queued alarm frames and for a collecting batch; taking an alarm frame releases a held batch).
+
+Hardware (0413, P2P, Hub c60, E6 replay 2026-09-28 06:15Z, `alarm-limit 0`). Both phases went through a `SetParam{…, save=true}` from the Hub:
+- **Setup** (6 rules that fire at once, applied live): 4 frames queued, then the batch was held for room. Released on dequeue, it went as one frame of 2 events. That is 6 events in 5 frames, and the post-command reboot was deferred once, until they were out.
+- **Revert** (6 rules → 1): 6 clear edges in 5 frames, deferred once.
+- The Hub decoded all 18 events. Nothing was dropped (the unpatched run had lost 3 of 6).
 
 ---
 

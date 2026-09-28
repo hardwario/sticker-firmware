@@ -1071,6 +1071,8 @@ ZTEST(radio_common, test_queue_validation)
 	zassert_equal(app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, 0, 0, big, sizeof(big)),
 		      -EMSGSIZE);
 	zassert_false(app_radio_tx_answer_pending());
+	zassert_false(app_radio_tx_alarm_pending());
+	zassert_equal(app_radio_tx_alarm_free(), APP_RADIO_TX_QUEUE_DEPTH);
 
 	for (int i = 0; i < APP_RADIO_TX_QUEUE_DEPTH; i++) {
 		zassert_ok(app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, 0, 0, big,
@@ -1081,6 +1083,8 @@ ZTEST(radio_common, test_queue_validation)
 	zassert_equal(app_radio_tx_queue(APP_RADIO_FRAME_ALARM, 0, 0, big, 8), -ENOMEM);
 	zassert_equal(app_radio_tx_answer_free(), 0);
 	zassert_true(app_radio_tx_answer_pending());
+	zassert_equal(app_radio_tx_alarm_free(), 0);
+	zassert_true(app_radio_tx_alarm_pending());
 }
 
 /* Calibration mode transmits through its own path. */
@@ -1532,6 +1536,65 @@ static void action_waits_for_the_answer_ack(void)
 	zassert_true(g_run_action_at_ms > fk.log[fk.n - 1].at_ms, "after the answer left");
 }
 BOTH_PROFILES(action_waits_for_the_answer_ack)
+
+/* #462: the action (mostly a reboot) also waits for the alarm frames still
+ * queued. Held by the duty cycle for 10 s, the alarm misses the first check. */
+static void action_waits_for_queued_alarms(void)
+{
+	const int r[] = {0, -EAGAIN};
+	int64_t t0 = k_uptime_get();
+
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 10000;
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa3);
+	k_sleep(K_SECONDS(14));
+	zassert_equal(fk.n, 3, "answer, then the alarm on its second try");
+	zassert_equal(fk.log[2].kind, APP_RADIO_FRAME_ALARM);
+	zassert_equal(fk.log[2].ret, 0);
+	zassert_equal(g_run_action_calls, 0, "deferred past the first check");
+	k_sleep(K_SECONDS(4));
+	zassert_equal(g_run_action_calls, 1);
+	zassert_true(g_run_action_at_ms > fk.log[2].at_ms, "after the alarm");
+	zassert_within(g_run_action_at_ms - t0, 16000, 500, "at the second check (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(action_waits_for_queued_alarms)
+
+/* #462: an alarm batch still collecting is sent early and the action waits a
+ * check for it. */
+static void action_waits_for_a_collecting_alarm_batch(void)
+{
+	int64_t t0 = k_uptime_get();
+
+	g_alarm_pending_left = 1;
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_REBOOT;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(9));
+	zassert_equal(g_alarm_pending_calls, 1, "asked at the first check");
+	zassert_equal(g_run_action_calls, 0, "deferred for the batch");
+	k_sleep(K_SECONDS(8));
+	zassert_equal(g_run_action_calls, 1);
+	zassert_within(g_run_action_at_ms - t0, 16000, 500, "at the second check (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(action_waits_for_a_collecting_alarm_batch)
+
+/* #462: taking an alarm frame off the queue frees a slot, so a batch held in
+ * app_alarm for room may go. */
+static void alarm_dequeue_releases_a_held_batch(void)
+{
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa4);
+	k_sleep(K_SECONDS(2));
+	zassert_equal(fk.n, 1);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_ALARM);
+	zassert_equal(g_alarm_flush_calls, 1, "released when the frame was taken");
+	zassert_false(app_radio_tx_alarm_pending());
+}
+BOTH_PROFILES(alarm_dequeue_releases_a_held_batch)
 
 /* The pages of an answer that did not fit follow page 0 by themselves, one
  * every 2 s; the stream is no action to run. */

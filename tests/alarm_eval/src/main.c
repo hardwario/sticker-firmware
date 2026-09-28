@@ -18,6 +18,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 #include <zephyr/kernel.h>
@@ -28,6 +29,9 @@ extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
 extern size_t test_alarm_max_events;
+extern int32_t test_radio_data_hold_ms;
+extern uint32_t test_radio_alarm_free;
+extern size_t test_alarm_frames;
 
 static void before(void *unused)
 {
@@ -42,6 +46,8 @@ static void before(void *unused)
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
 	test_alarm_max_events = SIZE_MAX;
+	test_radio_data_hold_ms = 0;
+	test_radio_alarm_free = APP_RADIO_TX_QUEUE_DEPTH;
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
 	 * (source, quantity) changes or the slot was never used — several tests
@@ -489,7 +495,6 @@ ZTEST(alarm_eval, test_alarm_detail_skipped_when_no_event_fits)
  * holds data (link down, or its announce still going out) the alarm batch
  * waits and collects later edges; app_alarm_flush_held() sends it once the
  * announce is out. */
-extern int32_t test_radio_data_hold_ms;
 
 ZTEST(alarm_eval, test_alarm_batch_waits_for_the_boot_announce)
 {
@@ -519,6 +524,122 @@ ZTEST(alarm_eval, test_alarm_batch_waits_for_the_boot_announce)
 	app_alarm_flush_held();
 	k_sleep(K_MSEC(20));
 	zassert_equal(test_alarm_event_count, 2, "no extra frame");
+}
+
+/* #462: a burst must not overflow the radio's alarm queue. With the queue full
+ * the batch waits held, later edges join it, and the frame app_radio takes next
+ * releases it: both edges go in one frame, none is dropped. */
+ZTEST(alarm_eval, test_alarm_burst_waits_for_queue_room)
+{
+	g_app_config.alarm_limit = 0; /* every edge would be a frame of its own */
+	test_radio_alarm_free = 0;    /* four frames still queued */
+
+	activate_threshold_slot0();
+	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
+	zassert_equal(app_alarm_rules_clear(0), 0, "rule clear rejected");
+	app_alarm_poll();
+	zassert_equal(test_alarm_frames, 0, "no frame into a full queue");
+
+	test_radio_alarm_free = 1; /* app_radio took a frame */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 1, "one frame, got %zu", test_alarm_frames);
+	zassert_equal(test_alarm_event_count, 2, "both edges in it, got %zu",
+		      test_alarm_event_count);
+	zassert_equal(test_alarm_events[0].edge, 0, "the held activate edge first");
+	zassert_equal(test_alarm_events[1].edge, 1, "then the deactivate edge");
+}
+
+/* #462: a batch waits until all its pages fit, so its pages stay together. */
+ZTEST(alarm_eval, test_alarm_batch_waits_until_all_pages_fit)
+{
+	g_app_config.alarm_limit = 0;
+	test_alarm_max_events = 1;     /* one event per page */
+	test_radio_data_hold_ms = -1;  /* collect two edges first */
+	activate_threshold_slot0();
+	zassert_equal(app_alarm_rules_clear(0), 0, "rule clear rejected");
+	app_alarm_poll();
+
+	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
+	test_radio_data_hold_ms = 0;
+	test_radio_alarm_free = 1;
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 0, "2 pages, 1 free slot: waits");
+
+	test_radio_alarm_free = 2;
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 2, "both pages, got %zu", test_alarm_frames);
+	zassert_equal(test_alarm_event_count, 2);
+}
+
+/* #462: an empty queue takes a batch of more pages than it holds: no queued
+ * frame is left whose dequeue would release it. */
+ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_TEMPERATURE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+	};
+
+	g_app_config.alarm_limit = 0;
+	test_alarm_max_events = 1;
+	test_radio_data_hold_ms = -1;
+	for (uint8_t i = 0; i <= APP_RADIO_TX_QUEUE_DEPTH; i++) {
+		zassert_equal(app_alarm_rules_set(i, &r), 0, "rule %u rejected", i);
+	}
+	g_app_sensor_data.temperature = 35.0f;
+	app_alarm_poll();
+
+	test_alarm_frames = 0;
+	test_radio_data_hold_ms = 0;
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH + 1, "every page, got %zu",
+		      test_alarm_frames);
+}
+
+/* #462: before a post-command action (a reboot) app_radio asks for a batch
+ * still open in its alarm-limit window: it goes now, not at the window's end. */
+ZTEST(alarm_eval, test_flush_pending_sends_a_collecting_window)
+{
+	g_app_config.alarm_limit = 10;
+	zassert_false(app_alarm_flush_pending(), "nothing waits yet");
+
+	activate_threshold_slot0();
+	test_alarm_frames = 0;
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 0, "the window is still open");
+
+	zassert_true(app_alarm_flush_pending(), "a batch waits");
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 1, "sent before the window's end");
+	zassert_false(app_alarm_flush_pending(), "nothing waits any more");
+}
+
+/* #462: with the link down a waiting batch cannot go; the action must not wait
+ * for it. */
+ZTEST(alarm_eval, test_flush_pending_ignores_a_batch_held_for_the_link)
+{
+	g_app_config.alarm_limit = 0;
+	test_radio_data_hold_ms = -1;
+	activate_threshold_slot0();
+
+	test_alarm_frames = 0;
+	zassert_false(app_alarm_flush_pending(), "the link is down");
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 0);
+
+	test_radio_data_hold_ms = 0; /* leave no held batch for the next case */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, 1);
 }
 
 ZTEST(alarm_eval, test_clearing_active_rule_emits_deactivate_edge)
