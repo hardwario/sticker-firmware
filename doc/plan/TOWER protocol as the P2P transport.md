@@ -452,8 +452,11 @@ a go/no-go.
 - **Node:** STICKER 0413 via J-Link 822005110 (Sticker-controller bench), debug build.
 - **Gateway:** the bench **Northbridge** (STM32WL5MOC, board `stm32wl5moc`,
   `proximos/firmware`) with its own J-Link — currently the EDU **801053710** (moved to the
-  Northbridge 2026-09-28; always `-SelectEmuBySN 801053710 -NoGui 1` + timeout). Probe
-  ownership changes daily: confirm the SN and the owning session live before flashing.
+  Northbridge 2026-09-28, confirmed; always `-SelectEmuBySN 801053710 -NoGui 1` + timeout).
+  Owners: node side = Sticker controller session, Northbridge = Hub controller session.
+- **Bench constants:** LoRa 868.1 MHz, BW125, CR4/5, preamble 8, P2P sync word; gateway addr
+  `0x4E420001`, node addr = low32(DevEUI), static key `000102…0f`; node TX counter advanced
+  before TX (U1).
   Northbridge RTT telnet on port 19031 (19021 is the STICKER).
 - **Node FW:** throw-away bench branch off `feat-p2p`, layered on `debug_p2p_bench.conf` (P2P
   without LoRaWAN — RAM budget). Minimal code: TOWER frame codec + CCM nonce, static key and
