@@ -56,7 +56,7 @@
 | **L2 frame + crypto** | Byte-exact: header, frame types, flags, nonce, CCM (8 B tag), ACK payload, JOIN, BULK. | §4; KAT vectors generated from the Rust reference |
 | **L3 timing** | `fsk`: TOWER constants exactly. `lora`: scaled per SF. Timing is not on the wire, so scaling does not break L2. | §5 |
 | **L4 app payload** | TOWER envelope `[schema] ‖ body`; STICKER needs its own schema id → upstream (E3). | §8 |
-| **L5 gateway ↔ host** | Recommended: the Northbridge speaks the tower-protocol console (COBS + CRC, postcard `MgmtRequest`/`Uplink`/`RadioStat`) so the central can drive a Radio Dongle and a Northbridge the same way. | §9, decision D5 |
+| **L5 gateway ↔ host** | **Not a TOWER interface — ours.** The Northbridge ↔ Hub link is internal to the Hub, so TOWER compatibility is only needed on air. We keep our own HDLC link and extend it (D5, §13.2 H2). | §9.4, decision D5 |
 
 ## 3. PHY profiles (T4)
 
@@ -292,7 +292,7 @@ Rules this topology needs (P6, with multi-gateway):
 - The AppKey never leaves the Hub central and the STICKER; the Northbridge only ever sees session keys.
 - **Northbridge power loss:** it boots with an empty registry and ACKs nothing (no key, no
   ACK). Nodes retry, count the frame as undelivered and keep it in history. The Northbridge
-  announces `boot` on the console link; the central re-sends `NodeAdd` for every node with
+  announces `boot` on the Northbridge ↔ Hub link; the central re-sends `NodeAdd` for every node with
   its exact `last_seen` (the central sees every accepted frame, so there is no replay window)
   and a fresh reserved block for the Northbridge TX counter, persisted before use.
 - The central keeps the registry in its local database, so the recovery needs no Portal.
@@ -457,10 +457,10 @@ fragments. Replaces the per-feature paging for P2P.
   and session keys in RAM only (D15, restored by the central after a boot), TX counter from
   central-assigned blocks, auto-ACK within 20 ms, pending flags, RAM downlink queue with TTL,
   joins forwarded raw, duty ledger counting ACKs, `RadioStat`. RDP on. Work breakdown: §13.2.
-- **Host link (D5, recommended):** replace the CRC16 UART protocol (`TX_PACKET`/`ENTER_RX`/…)
-  with the tower-protocol console subset (`Hello`, `MgmtRequest/Response`, `Uplink`,
-  `RadioStat`). Then a TOWER Radio Dongle on USB and a Northbridge on UART are the same
-  kind of device for the central, and `tower-cli` can debug a Northbridge.
+- **Host link (D5):** our own protocol, not part of TOWER — today's HDLC/CRC16 link on
+  ttyAMA3, extended with the TOWER gateway messages (§13.2 H2). Nothing in it goes upstream.
+  Driving a stock TOWER Radio Dongle from the central (fsk interop, P5) would be a separate
+  adapter for the dongle's own console, if ever needed.
 - **Central** (proximos-v2 `control-radio`, Rust): depends on the `tower-protocol` crate;
   registry DevEUI ↔ addr ↔ AppKey → `node_key`; `NodeAdd`/`NodeRemove` on every managed
   gateway; decodes port-2/3/85 with the existing Rust decoder; `QueuePush` for commands;
@@ -501,7 +501,6 @@ dual-protocol period.
 N1 replaces the earlier single-purpose proposals E1 (time bit in ACK) and E5 (SNR byte in
 ACK). Moving from stage 1 to N1 is a carrier change only: same command IDs, same TLV codec,
 so node and central keep one command implementation.
-| **D5** | Gateway console spoken by non-TOWER gateways (Northbridge) | interchangeable gateways | none (reuse) |
 
 Owner/contact on the TOWER side and acceptance are an open point (D12). If an extension is
 refused, we keep it **off by default** behind a flag bit so the core stays compatible.
@@ -525,7 +524,7 @@ New proto_ids need the manual collision check (memory: proto_id collision gotcha
 |---|---|---|
 | **P0 — LoRa physical verification (go/no-go, T7)** | TOWER frames + TOWER timing on SX126x LoRa, STICKER node ↔ **Northbridge** gateway (bench builds on both, §13.1) | M1–M8 pass; §5 timing table replaced by measured values |
 | **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); join in TOWER frames (§6.3) with the central's session key; the P0 Northbridge bench gateway grows the `0x81`/`0x91` codec | STICKER ↔ Northbridge (bench RTT bridge to the central or a host script): telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
-| **P2 — Hub gateway** | Northbridge TOWER gateway net layer (lora) + console link (D5); central registry, `NodeAdd`, `0x81` decode, `0x91` handling | STICKER lora → Hub → MQTT decoded; `TimeAns`/`LinkCheckAns` from the central |
+| **P2 — Hub gateway** | Northbridge TOWER gateway net layer (lora) + Northbridge ↔ Hub link (D5); central registry, `NodeAdd`, `0x81` decode, `0x91` handling | STICKER lora → Hub → MQTT decoded; `TimeAns`/`LinkCheckAns` from the central |
 | **P3 — Downlink & lifecycle** | pending/queue, commands/responses, chaining, supervision on `LinkCheckAns`, `RadioParamReq`, `Detach`/`RejoinReq`, `DevStatus` | Portal GetParam/SetParam E2E over P2P |
 | **P4 — Upstream** (from P1 in parallel) | U1, U2, E3 now; N1, E4 drafted with the P1–P3 experience | E3 agreed; N1/E4 proposals submitted |
 | **P5 — FSK profile** | FSK access on SX126x (driver decision with #408 B7), bit-exact vs TOWER Core Module / Radio Dongle (HW vs SW CRC/whitening) | STICKER fsk ↔ stock Radio Dongle via `tower-cli` `NodeAdd` |
@@ -654,7 +653,7 @@ re-measured (release budget `0x34000`).
 
 TOWER replaces only the P2P **wire**. Enrollment, the registry, the decoded data, commands,
 alarms and the MQTT surface stay as they are, so the Portal changes are small (H4). The work
-sits in the Northbridge firmware (H1), the console link (H2) and the central's `p2p` module
+sits in the Northbridge firmware (H1), the Northbridge ↔ Hub link (H2) and the central's `p2p` module
 (H3). P2P is pre-deployment: flag day, no dual-wire period, no session migration (nodes
 rejoin).
 
@@ -675,10 +674,10 @@ rollback to 0.2.2-rxsens when the node runs end.
 | H1.8 | `boot` announce (FW version, capabilities, empty table) → the central restores the table and a fresh counter block (§6.6) |
 | H1.9 | Duty ledger incl. ACKs, `RadioStat`, `stats`; frame ≤ ToA cap of the SX12xx 4 s TX timeout (§17) |
 
-**H2 — Console link (D5, decided 2026-09-28).** Today's HDLC/CRC16 framing on ttyAMA3
-with a TOWER-console-shaped message set; the tower console framing comes later as a codec
-swap, because tower-protocol v3 has no raw-frame forward, no `last_seen` in `NodeAdd`, no
-counter blocks and no SNR in `Uplink` (an upstream wire v4 first, D12). The NB announces
+**H2 — Northbridge ↔ Hub link (D5, decided 2026-09-28).** Our own protocol, internal to
+the Hub: today's HDLC/CRC16 framing on ttyAMA3, extended with the TOWER gateway messages
+below. TOWER compatibility is required only on air, so this link has no upstream dependency
+and no planned switch to the tower console. The NB announces
 `proto_version = 2` in `EVT_BOOT` / `GET_INFO`; the central picks the TOWER adapter by it.
 Frozen message set (full text: proximos-v2 `plan/control/radio/p2p_tower_gateway.md` §2),
 LE, response = `0x40 | cmd` + status (new: 6 `NO_SPACE`, 7 `NOT_FOUND`):
@@ -773,7 +772,7 @@ check runs at `node-add` **and** at join.
 | # | Question | Recommendation |
 |---|---|---|
 | D4 | Default `p2p-modulation` | **Decided 2026-09-28: `lora`**; `fsk` for TOWER-mixed sites |
-| D5 | Northbridge ↔ RPi link = tower-protocol console | **Decided 2026-09-28:** today's HDLC framing + TOWER-console-shaped messages (§13.2 H2); console framing later as a codec swap after an upstream wire v4 |
+| D5 | Northbridge ↔ Hub link | **Decided 2026-09-28:** our own protocol (today's HDLC link extended, §13.2 H2); TOWER compatibility only on air, no tower console |
 | D6 | Address derivation | low 32 bits of DevEUI if unique across the HARDWARIO range, else FNV-1a-32 |
 | D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2 |
 | D8 | Envelope `0x81 ‖ port ‖ protobuf` | yes, pending E3 |
@@ -793,7 +792,7 @@ check runs at `node-add` **and** at join.
 |---|---|
 | sticker-firmware (`feat-p2p`) | `app_radio_p2p.c` rewrite, config params, KAT, decoder, docs |
 | sticker Zephyr fork (`v4.3.0-sticker2`) | FSK access / sx126x sync-CRC-whitening (with #408 B7) |
-| proximos/firmware (Northbridge) | P0 bench gateway (MCU auto-ACK, RTT report) off `hynek/northbridge-p2p-protocol`; then TOWER gateway net layer, FSK, console link |
+| proximos/firmware (Northbridge) | P0 bench gateway (MCU auto-ACK, RTT report) off `hynek/northbridge-p2p-protocol`; then TOWER gateway net layer, FSK, Northbridge ↔ Hub link messages |
 | proximos-v2 (central) | `tower-protocol` dependency, registry/key derivation, gateway mgmt, decode |
 | tower-firmware / tower-protocol | U1, U2, E3 (stage 1); N1, E4 (native stage) |
 | Manager-App | later: P2P params over NFC; decoder of the new frame |
