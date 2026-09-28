@@ -378,11 +378,12 @@ static void publish_link(void)
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
-/* Reports sent CONFIRMED for a pending clock_sync so far (PF-2): at most
- * P2P_CLOCK_SYNC_REPORTS_MAX, so a central that sends no time tail cannot keep
- * every report confirmed; the request then waits for the next link check. */
-#define P2P_CLOCK_SYNC_REPORTS_MAX 3
-static atomic_t m_clock_sync_reports;
+/* Reports sent CONFIRMED for a wanted network time so far (PF-2): at most
+ * P2P_TIME_REPORTS_MAX per request, so a central that sends no time tail cannot
+ * keep every report confirmed; TIME_REQ then rides the frames that are
+ * confirmed anyway (link checks, answers, acknowledged alarms). */
+#define P2P_TIME_REPORTS_MAX 3
+static atomic_t m_time_reports;
 static int8_t m_last_ack_rssi;
 static int8_t m_last_ack_snr;
 static bool m_last_ack_valid;
@@ -404,6 +405,7 @@ static uint8_t m_pending_frame_len;
  * (key, nonce) pair once m_fcnt reaches it (review of #400, H1). Radio work
  * queue only. */
 static uint32_t m_retry_counter;
+static uint8_t m_retry_fctrl;
 static bool m_retry_valid;
 
 #if defined(CONFIG_SHELL)
@@ -1426,8 +1428,9 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	app_radio_note_send(true, false);
 	publish_link();
 
-	LOG_INF("TX type %u%s, %zu B (counter %u, %u ms air)", frame_type,
-		(fctrl & P2P_FCTRL_CONFIRMED) ? " confirmed" : "", wire_len, counter, air);
+	LOG_INF("TX type %u%s%s, %zu B (counter %u, %u ms air)", frame_type,
+		(fctrl & P2P_FCTRL_CONFIRMED) ? " confirmed" : "",
+		(fctrl & P2P_FCTRL_TIME_REQ) ? " time-req" : "", wire_len, counter, air);
 
 	*tx_end_ms = end;
 	return 0;
@@ -1490,7 +1493,12 @@ P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter
 	 * LoRaWAN on LORAWAN_TIME_UPDATED). An Ack without the tail, or a 0x56 in
 	 * its place, leaves it pending for the next confirmed uplink. */
 	if (ack->time_present) {
-		(void)app_clock_set_network_time(ack->unix_time);
+		/* A central may send the tail on every Ack: log only an asked-for one. */
+		bool wanted = app_radio_time_wanted();
+
+		if (app_clock_set_network_time(ack->unix_time) == 0 && wanted) {
+			LOG_INF("RTC synced from network: unix=%u", ack->unix_time);
+		}
 		app_radio_time_event();
 	}
 
@@ -1701,6 +1709,17 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	return true;
 }
 
+/* FCtrl of a fresh uplink: CONFIRMED asks for an Ack in RX1, TIME_REQ for its
+ * Unix-time tail while a network time is wanted (a central that sends the tail
+ * on every Ack ignores it, §3). */
+P2P_TESTABLE uint8_t p2p_uplink_fctrl(bool confirmed)
+{
+	if (!confirmed) {
+		return 0;
+	}
+	return P2P_FCTRL_CONFIRMED | (app_radio_time_wanted() ? P2P_FCTRL_TIME_REQ : 0);
+}
+
 /* One uplink and its RX1 (§6). `attempt` > 0: app_radio's retry of the
  * confirmed frame that went out last without its Ack, resent under the same
  * counter (a byte-identical frame, so the central's strict high-water holds,
@@ -1716,13 +1735,15 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	int64_t tx_end;
 	int ret;
 
+	/* TIME_REQ asks the central for the Ack's time tail: only a confirmed
+	 * uplink gets an Ack. A retry keeps the first FCtrl (byte-identical). */
+	uint8_t fctrl = resend ? m_retry_fctrl : p2p_uplink_fctrl(confirmed);
+
 	if (resend) {
 		counter = m_retry_counter;
-		ret = tx_frame_at(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, counter,
-				  &tx_end);
+		ret = tx_frame_at(frame_type, fctrl, body, body_len, counter, &tx_end);
 	} else {
-		ret = tx_frame(frame_type, confirmed ? P2P_FCTRL_CONFIRMED : 0, body, body_len,
-			       &counter, &tx_end);
+		ret = tx_frame(frame_type, fctrl, body, body_len, &counter, &tx_end);
 	}
 	if (ret) {
 		return ret;
@@ -1744,6 +1765,7 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	}
 	if (confirmed) {
 		m_retry_counter = counter;
+		m_retry_fctrl = fctrl;
 		m_retry_valid = true;
 		return -ETIMEDOUT;
 	}
@@ -1758,20 +1780,21 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
  * their own. Decided once per snapshot, kept for all its frames. */
 static bool telemetry_report_confirmed(bool due)
 {
-	/* A pending clock_sync also rides a confirmed report: the time comes in the
-	 * Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
-	if (app_radio_clock_sync_pending() &&
-	    atomic_inc(&m_clock_sync_reports) < P2P_CLOCK_SYNC_REPORTS_MAX) {
+	/* A wanted network time also rides a confirmed report: the time comes in
+	 * the Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
+	if (app_radio_time_wanted() && atomic_inc(&m_time_reports) < P2P_TIME_REPORTS_MAX) {
 		return true;
 	}
 	return due;
 }
 
-/* struct app_radio_backend.time_request: a new clock_sync gets its own
- * P2P_CLOCK_SYNC_REPORTS_MAX confirmed reports. */
+/* struct app_radio_backend.time_request: TIME_REQ on the confirmed uplinks
+ * until the time lands (app_radio_time_wanted()), and a new request gets its
+ * own P2P_TIME_REPORTS_MAX confirmed reports. */
 static void p2p_time_request(void)
 {
-	atomic_clear(&m_clock_sync_reports);
+	atomic_clear(&m_time_reports);
+	LOG_INF("Network time requested (TIME_REQ)");
 }
 
 /* ---- TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4) ---- */
@@ -2357,10 +2380,10 @@ void p2p_test_join_setup(int cfg_sf)
 	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
 }
 
-/* A pending clock_sync forces confirmed reports (PF-2). */
+/* A wanted network time forces confirmed reports (PF-2). */
 void p2p_test_link_reset(void)
 {
-	atomic_clear(&m_clock_sync_reports);
+	atomic_clear(&m_time_reports);
 }
 
 /* Stop a join episode a case started, waiting out an attempt in progress. */

@@ -1626,6 +1626,29 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 
 - [ ] Pass
 
+### K3b — Network time sync over P2P (`TIME_REQ`)
+
+**Goal:** On P2P the node asks for the time the same way as on LoRaWAN: at a link-up without a
+time, by `clock sync`, by a `clock_sync` command and by the weekly re-sync (v1.5 §34).
+**Observable:**
+- RTT `Network time requested (TIME_REQ)`.
+- Then a `TX type … confirmed time-req` uplink and an `Ack (counter …) … [time]`.
+- Then `RTC synced from network: unix=<...>`.
+- The next fresh confirmed uplinks drop `time-req`.
+
+**Prompt for Claude:**
+> On a paired P2P node, reboot with RTT attached (`ats device reboot`). Confirm the first
+> confirmed uplink carries `time-req` and the Ack's `[time]` sets the RTC, with no command. Wait for
+> the next confirmed frames and confirm they have no `time-req`.
+>
+> Run `clock sync` and confirm the next report goes `confirmed time-req` even though no link
+> check is due, and that the time lands. `clock get` must match real UTC.
+>
+> For the weekly path, flash a HIL-only build with `RESYNC_PERIOD_SEC` shortened. Confirm
+> `Periodic time re-sync` repeats the same sequence at that period.
+
+- [ ] Pass
+
 ### K4 — `unix_time` in GetInfo
 
 **Goal:** Synced time surfaces in GetInfo.

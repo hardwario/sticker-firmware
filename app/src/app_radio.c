@@ -1104,6 +1104,8 @@ static void link_clear(void)
 
 static void hist_drop(void);
 
+static void time_request_run(void);
+
 void app_radio_link_up(void)
 {
 	/* A replay does not outlive its session: its frame waiting for the retry
@@ -1118,6 +1120,12 @@ void app_radio_link_up(void)
 	m_last_uplink_ms = MAX(k_uptime_get(), 1);
 	m_dc = (struct app_radio_stale_dc){0};
 	m_dc_hold_logged = false;
+	/* No network time since boot: ask for one with the session's first
+	 * uplinks (LoRaWAN DeviceTimeReq, P2P TIME_REQ). A rejoin later in the
+	 * boot keeps the time it has; the weekly re-sync refreshes it. */
+	if (app_clock_network_time_at_ms() == 0) {
+		time_request_run();
+	}
 }
 
 void app_radio_link_result(bool ok)
@@ -2345,6 +2353,31 @@ void app_radio_test_air_reset(void)
  * time. Set from any thread; the answer goes on the radio work queue. */
 static atomic_t m_clock_sync_seq;
 static atomic_t m_clock_sync_pending;
+/* A network time was requested and has not landed yet. */
+static atomic_t m_time_wanted;
+
+/* Radio work queue: ask the backend for a network time. */
+static void time_request_run(void)
+{
+	if (m_be == NULL || m_be->time_request == NULL) {
+		return;
+	}
+	atomic_set(&m_time_wanted, 1);
+	m_be->time_request();
+}
+
+static void time_request_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	time_request_run();
+}
+
+static K_WORK_DEFINE(m_time_request_work, time_request_work_handler);
+
+void app_radio_time_request(void)
+{
+	k_work_submit_to_queue(app_radio_work_q(), &m_time_request_work);
+}
 
 static void clock_sync_answer_work_handler(struct k_work *work)
 {
@@ -2370,9 +2403,7 @@ static void clock_sync_work_handler(struct k_work *work)
 		return;
 	}
 	atomic_set(&m_clock_sync_pending, 1);
-	if (m_be && m_be->time_request) {
-		m_be->time_request();
-	}
+	time_request_run();
 }
 
 static K_WORK_DEFINE(m_clock_sync_work, clock_sync_work_handler);
@@ -2386,9 +2417,15 @@ void app_radio_clock_sync(uint32_t seq)
 
 void app_radio_time_event(void)
 {
+	atomic_clear(&m_time_wanted);
 	if (atomic_cas(&m_clock_sync_pending, 1, 0)) {
 		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_answer_work);
 	}
+}
+
+bool app_radio_time_wanted(void)
+{
+	return atomic_get(&m_time_wanted) != 0;
 }
 
 bool app_radio_clock_sync_pending(void)
@@ -2403,7 +2440,9 @@ void app_radio_test_clock_sync_reset(void)
 
 	k_work_cancel_sync(&m_clock_sync_work, &sync);
 	k_work_cancel_sync(&m_clock_sync_answer_work, &sync);
+	k_work_cancel_sync(&m_time_request_work, &sync);
 	atomic_clear(&m_clock_sync_pending);
+	atomic_clear(&m_time_wanted);
 	atomic_clear(&m_clock_sync_seq);
 }
 #endif

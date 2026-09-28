@@ -96,10 +96,6 @@ int app_clock_set_unix(uint32_t unix_s)
 	return 0;
 }
 
-void app_clock_force_resync(void)
-{
-}
-
 void app_radio_clock_sync(uint32_t seq)
 {
 	ARG_UNUSED(seq);

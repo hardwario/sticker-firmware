@@ -35,6 +35,7 @@ extern "C" {
 /* FCtrl bits. Reserved / RFU bits are sent as 0 and ignored on receipt; bits 7
  * (ADR) and 6 (ADRACKReq) are kept for phase 2. */
 #define P2P_FCTRL_CONFIRMED 0x01 /* uplink: the node wants an ACK in RX1 */
+#define P2P_FCTRL_TIME_REQ  0x02 /* uplink: the node wants the Ack's Unix-time tail */
 #define P2P_FCTRL_FPENDING  0x10 /* downlink: more is queued for this node */
 #define P2P_FCTRL_ACK       0x20 /* downlink: acknowledges the confirmed uplink */
 
@@ -376,6 +377,7 @@ int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait
 				uint32_t backoff_ms, uint32_t jitter_ms);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
+uint8_t p2p_uplink_fctrl(bool confirmed);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
 int p2p_join_adopt_sf(uint8_t joined_sf);
 void p2p_test_join_setup(int cfg_sf);
