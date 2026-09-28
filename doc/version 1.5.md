@@ -42,6 +42,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
+| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 100 B MTU), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §35 and `doc/p2p.md`. |
 
 ---
 
@@ -1412,6 +1413,10 @@ all three retries of both colliding). Two causes, two fixes (decision #22
 
 ## 28. P2P: unconfirmed telemetry, FCtrl header, link supervision (decision #22)
 
+> **Superseded by §35** (TOWER protocol, #470): the header, the `FCtrl` byte, the RX1 after
+> every uplink and the `p2p_join_kat` / `p2p_data_kat` fixtures below are gone. The confirmed
+> policy and link supervision carry over.
+
 Hynek, 2026-09-27: "zrušíme pro p2p potvrzování telemetrie ihned". With every
 uplink confirmed, the Hub's ACK traffic alone (57 ms per ACK at SF7, 1 % duty)
 capped a 60 s network at ~10 Nodes; LoRaWAN confirms nothing but its link
@@ -1528,6 +1533,9 @@ The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequ
 
 ## 34. Network time through `app_radio` (`TIME_REQ`)
 
+> The P2P half (`FCtrl` bit 1 `TIME_REQ`, the Ack's Unix tail) is **superseded by §35**:
+> P2P asks with a TimeReq in the `0x91` control envelope. The `app_radio` half is unchanged.
+
 Before, `app_clock` called the LoRaWAN stack directly: the DeviceTimeReq on join, the weekly re-sync (#96) and the GPS → Unix conversion. P2P took the time only from the Ack tail, when the central chose to send it, and could not ask for it. The weekly re-sync did not run on P2P at all.
 
 Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026-09-28: "zavolat app_radio a to rozhodne").
@@ -1567,6 +1575,53 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **Join:** `app_radio_link_up()` queued the DeviceTimeReq, and the DeviceTimeAns set the RTC 33 s later, on the next uplink, to host UTC.
   - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
   - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
+
+
+## 35. P2P on the TOWER protocol (#470)
+
+Hynek, 2026-09-28 (plan T1–T7): STICKER P2P is replaced by the HARDWARIO TOWER radio
+protocol, wire-compatible with `tower-firmware` / `tower-protocol` wire v3. The old P2P
+is abandoned, with no rollback. Design: `doc/plan/470 - TOWER protocol as the P2P
+transport.md`; node behaviour: `doc/p2p.md`.
+
+- **Frames:** `ver_type | flags | src(4 LE) | dest(4 LE) | counter(4 LE)`, all 14 B as
+  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 100 B,
+  which leaves a 76 B body. The node's address is low32(DevEUI), the gateway's the
+  `net_id`.
+- **Confirmed send:** up to 3 byte-identical transmissions, each with a 200 ms (SF7)
+  ACK window armed at TX-done. An ACK with PENDING keeps the receiver on for one
+  downlink, which the node ACKs when it is confirmed. An app_radio retry is a new send
+  under a new counter. Unconfirmed frames open no window.
+- **Envelopes:** `0x81 | port | LoRaWAN fPort payload` (telemetry 2, alarm 3,
+  answers 85, commands 86). `0x91 | TLV…` for control:
+  - Capabilities `0x01`, Hello `0x02`;
+  - Detach `0x03`, RejoinReq `0x04`;
+  - JoinReq `0x07`, JoinAccept `0x08`;
+  - LinkCheck `0x10`, Time `0x20`.
+- **Join:** a JoinReq under `join_key = CMAC(app_key, "HIO-TWR-JOIN" ‖ 1 ‖ DevEUI)`,
+  counter = the dev_nonce. The JoinAccept arrives in a 1 s RX window and carries
+  `net_id`, `central_nonce`, `rx_delay` and `tx_power`. `session_key = CMAC(app_key,
+  "HIO-TWR-SES" ‖ 1 ‖ dev_nonce ‖ central_nonce ‖ DevEUI)`. The old 24 B pairing record
+  does not load, so every node joins afresh after the update.
+- **Time:** a TimeReq in the `0x91` frame. The TimeAns carries the time at the TimeReq's
+  TX-done and names its counter; answers to another counter or older than 2 h are dropped.
+- **Link check:** the link-check report is confirmed and queues a LinkCheckReq. The
+  LinkCheckAns fills the uplink RSSI / SNR / margin in `RadioState`.
+- **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
+  rung; the SF sweep and adoption are gone.
+- **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
+  P5: P2P refuses to start with it.
+- **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
+  `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`. The
+  `tests/p2p` gw-sim firmware (old wire only) is removed.
+- **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
+- **Cost:** release 185 588 B flash / 56 036 B RAM. About +2.3 KB of it is the new
+  config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
+- **Tests:**
+  - `tests/p2p_logic` is rewritten (68 cases). It runs against a gateway emulator on
+    the fake radio: codec and join KATs byte for byte, repetitions, ACK / PENDING /
+    node ACK, replay, control TLVs.
+  - All 14 native suites pass.
 
 ---
 
