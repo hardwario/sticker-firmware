@@ -341,22 +341,6 @@ tail of `0xFA`.
   (the central has RSSI/SNR of every uplink from the gateway's `Uplink` record).
 - `pending_frame_len` — not needed: the downlink window is fixed per profile (§5).
 
-### 7.7 Link margin for Node-side ADR (requirement, Nodes test 2026-09-28)
-
-Node-side ADR (proximos-v2 draft !109, window of 8) needs the **uplink SNR or margin**,
-not RSSI alone. At our levels RSSI overstates the margin: the Northbridge noise floor was
-measured at ≈ −110.5 dBm at the chip, not −117 dBm thermal. At the bench edge, RSSI
-−107 dBm looked like ~17 dB of margin, while the real SNR was +1…+2 dB (~9 dB over the SF7
-limit).
-
-- **Stage 1 (P1–P3):** the node gets SNR and margin from `LinkCheckAns` (`0x91 0x10`: rssi,
-  snr, margin, gw_count). The central computes the margin from the gateway's SNR against the
-  SF demodulation floor. The node requests it periodically, and ADR uses this answer, not the
-  ACK RSSI.
-- **Native (N1, §11):** SNR or margin in every ACK (1 B, `CTRL` tail). The ACK ≥ 4 B rule
-  makes it interop-safe, but it is a wire change, so it waits for N1. This is the former
-  proposal E5.
-
 ## 8. Application payload
 
 TOWER envelope = `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, ≤ 74 B. The gateway
