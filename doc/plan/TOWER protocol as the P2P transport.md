@@ -502,6 +502,16 @@ a go/no-go.
   ~1.22 % off. ToA is also measured on the Northbridge as a cross-check.
 - 0413 leaves the Hub P2P set for P0; Nodes test clears the slot first.
 
+**Node TX→RX without sleep (added 2026-09-28, P0 finding M2)**
+
+M2 measured the node's RX armed 20.15–20.36 ms after TX-done, against the Northbridge's
+exact 20.00 ms turnaround. The ACK only lands because of the 8-symbol preamble (8.2 ms at
+SF7). Fix: a fork-driver call that sends and receives without sleeping the radio. The RX is
+configured before TX, the fallback mode is STDBY_XOSC so the TCXO stays on, and SetRx is
+issued on TxDone. The same call covers the DL window after `PENDING`. `lora_send()` /
+`lora_recv()` are unchanged, and LoRaWAN is untouched. Target: arm ≲ 2 ms. Measured before
+vs after: M2, M2b, M3 SF7.
+
 **Measurements**
 
 | # | What | Pass |
