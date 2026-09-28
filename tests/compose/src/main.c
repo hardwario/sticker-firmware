@@ -48,17 +48,17 @@ static void set_clean(void)
 	test_alarm_flags = 0;
 
 	g_app_sensor_data = (struct app_sensor_data){0};
-	g_app_sensor_data.orientation = INT_MAX; /* absent */
+	APP_SENSOR_MB_F(&g_app_sensor_data, ACCEL_ORIENTATION) = NAN; /* absent */
 	/* Analog scalars: NaN = absent. */
-	g_app_sensor_data.voltage = NAN;
-	g_app_sensor_data.temperature = NAN;
-	g_app_sensor_data.humidity = NAN;
-	g_app_sensor_data.illuminance = NAN;
-	g_app_sensor_data.altitude = NAN;
-	g_app_sensor_data.pressure = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = NAN;
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		g_app_sensor_data.w1[s].temperature = NAN;
-		g_app_sensor_data.w1[s].humidity = NAN;
+		g_app_sensor_data.w1[s].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = NAN;
+		g_app_sensor_data.w1[s].v[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY].f = NAN;
 	}
 }
 
@@ -108,7 +108,7 @@ ZTEST(compose, test_debug_probe_before_first_uplink_preserves_boot_flag)
 	bool more = true;
 
 	set_clean();
-	g_app_sensor_data.temperature = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
 
 	/* Mirrors `ats lrw compose` (app_ats.c): drains a full report via
 	 * app_compose_ex(), the same entry point the debug shell command uses. */
@@ -128,8 +128,8 @@ ZTEST(compose, test_boot_internal)
 	size_t n;
 
 	set_clean();
-	g_app_sensor_data.temperature = 23.5f;
-	g_app_sensor_data.humidity = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 
 	run_report(fr, 8, &n);
 
@@ -153,7 +153,7 @@ ZTEST(compose, test_capability_gating)
 
 	/* barometer capability OFF -> pressure dropped even with valid data */
 	set_clean();
-	g_app_sensor_data.pressure = 1000.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 10000.0f; /* hPa */
 	g_app_config.cap_barometer = false;
 	run_report(fr, 8, &n);
 	for (size_t i = 0; i < n; i++) {
@@ -161,9 +161,9 @@ ZTEST(compose, test_capability_gating)
 	}
 
 	/* barometer capability ON -> pressure present, scaled to hPa x10 (#92).
-	 * d.pressure is kPa; wire is hPa x10 = kPa x100, so 1000 kPa -> 100000. */
+	 * The pressure channel is hPa (#430), so 10000 hPa -> 100000. */
 	set_clean();
-	g_app_sensor_data.pressure = 1000.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 10000.0f; /* hPa */
 	g_app_config.cap_barometer = true;
 	run_report(fr, 8, &n);
 	bool seen = false;
@@ -208,15 +208,15 @@ ZTEST(compose, test_multiframe_split)
 
 	set_clean();
 	/* Enable several independent groups with data. */
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	g_app_config.cap_barometer = true;
-	g_app_sensor_data.pressure = 990.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 9900.0f; /* hPa */
 	g_app_config.cap_light_sensor = true;
-	g_app_sensor_data.illuminance = 300.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
 	g_app_config.cap_w1_sensors = true;
 	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 11.0f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 11.0f;
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42;
 
@@ -254,14 +254,14 @@ ZTEST(compose, test_machine_probe_cluster)
 	set_clean();
 	g_app_config.cap_w1_sensors = true;
 	test_w1_types[0] = APP_W1_SLOT_MACHINE_PROBE;
-	g_app_sensor_data.w1[0].temperature = 23.65f;
-	g_app_sensor_data.w1[0].humidity = 54.0f;
-	g_app_sensor_data.w1[0].illuminance = 27.0f;
-	g_app_sensor_data.w1[0].magnetic_field = 0.062f; /* mT */
-	g_app_sensor_data.w1[0].accel_x = 0.38f;
-	g_app_sensor_data.w1[0].accel_y = -9.35f;
-	g_app_sensor_data.w1[0].accel_z = -0.54f;
-	g_app_sensor_data.w1[0].is_tilt_alert = true;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 23.65f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY].f = 54.0f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE].f = 27.0f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD].f = 0.062f; /* mT */
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X].f = 0.38f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y].f = -9.35f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z].f = -0.54f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TILT].f = 1.0f;
 	g_app_sensor_data.w1[0].present = true;
 
 	run_report(fr, 4, &n);
@@ -292,7 +292,7 @@ ZTEST(compose, test_dallas_temperature_only)
 	set_clean();
 	g_app_config.cap_w1_sensors = true;
 	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 21.5f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 21.5f;
 	g_app_sensor_data.w1[0].present = true;
 
 	run_report(fr, 4, &n);
@@ -351,8 +351,8 @@ ZTEST(compose, test_system_flags_carry_alarm_bits)
 	set_clean();
 	/* Real readings: NaN sentinels (INT32_MIN / UINT32_MAX) would make the
 	 * internal group alone exceed 11 B (pre-existing M-10 oversize path). */
-	g_app_sensor_data.temperature = 23.5f;
-	g_app_sensor_data.humidity = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 	test_alarm_flags = 0x03; /* ALARM_ANY | ALARM_THRESHOLD */
 	test_budget = 11;        /* US915 DR0 / AU915 DR2 */
 	run_report(fr, 8, &n);
@@ -371,7 +371,7 @@ ZTEST(compose, test_budget_unknown_pre_join)
 	bool more = false;
 
 	set_clean();
-	g_app_sensor_data.temperature = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
 	test_budget = 0; /* app_lrw_get_max_payload() == 0 -> pre-join */
 	int ret = app_compose(buf, sizeof(buf), &len, &more);
 
@@ -400,15 +400,15 @@ ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
 	/* Same multi-group setup as test_multiframe_split: proven to leave a
 	 * pending snapshot (more=true) after a single app_compose() call at this
 	 * budget. */
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	g_app_config.cap_barometer = true;
-	g_app_sensor_data.pressure = 990.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 9900.0f; /* hPa */
 	g_app_config.cap_light_sensor = true;
-	g_app_sensor_data.illuminance = 300.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
 	g_app_config.cap_w1_sensors = true;
 	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 11.0f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 11.0f;
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42; /* "abandoned cycle" value */
 

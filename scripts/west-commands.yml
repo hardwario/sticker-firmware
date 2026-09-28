@@ -4,3 +4,8 @@ west-commands:
       - name: configen
         class: Configen
         help: generate configuration module from YAML
+  - file: scripts/west_commands/sensorgen.py
+    commands:
+      - name: sensorgen
+        class: Sensorgen
+        help: generate the sensor type registry from app_w1_slots.yaml

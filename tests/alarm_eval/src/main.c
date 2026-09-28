@@ -234,13 +234,13 @@ ZTEST(alarm_eval, test_rate_count_fires_after_window_then_holds)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	g_app_sensor_data.hall_left_count = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
 	app_alarm_poll(); /* first poll only seeds the baseline + window start */
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
 		      "spuriously active before any window elapsed");
 
-	g_app_sensor_data.hall_left_count = 3; /* 3 pulses within this window */
-	k_sleep(K_MSEC(1100));                 /* past the 1 s window */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3; /* 3 pulses within this window */
+	k_sleep(K_MSEC(1100));                                    /* past the 1 s window */
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
 		     "rate alarm never fired after an over-limit window elapsed");
@@ -267,7 +267,7 @@ ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	g_app_sensor_data.temperature = 35.0f; /* above hi: arms the dwell */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f; /* above hi: arms the dwell */
 	app_alarm_poll();
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		      "threshold fired before the dwell elapsed");
@@ -277,7 +277,7 @@ ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		     "threshold never fired after the dwell elapsed");
 
-	g_app_sensor_data.temperature = 20.0f; /* back in band */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f; /* back in band */
 	app_alarm_poll();
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		      "threshold deactivation was not immediate");
@@ -295,11 +295,12 @@ ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	g_app_sensor_data.temperature = 35.0f; /* arm the dwell */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f; /* arm the dwell */
 	app_alarm_poll();
 
-	k_sleep(K_MSEC(100));                  /* well short of the 300 ms dwell */
-	g_app_sensor_data.temperature = 20.0f; /* reverts: back in band, cancel */
+	k_sleep(K_MSEC(100)); /* well short of the 300 ms dwell */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) =
+		20.0f; /* reverts: back in band, cancel */
 	app_alarm_poll();
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		      "revert did not cancel the pending dwell");
@@ -386,13 +387,13 @@ ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	g_app_sensor_data.hall_left_count = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
 	app_alarm_poll(); /* seeds the baseline + window start, no rule evaluated yet */
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
 		      "spuriously active before any window elapsed");
 
 	/* Window 1: over-threshold delta (3 >= hi 2) -> first fire. */
-	g_app_sensor_data.hall_left_count = 3;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3;
 	k_sleep(K_MSEC(1100));
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
@@ -403,7 +404,7 @@ ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
 	 * unconditionally re-fires and pushes oneshot_expiry another 1.5 s out.
 	 * Fixed: the `!rt->active` gate suppresses this re-fire, so the hold set
 	 * by window 1 is left untouched. */
-	g_app_sensor_data.hall_left_count = 6;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 6;
 	k_sleep(K_MSEC(1100));
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
@@ -424,7 +425,7 @@ ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
 
 	/* Window 3: still over-threshold -> having genuinely gone inactive above,
 	 * the rule must re-arm and fire again (not just suppress forever). */
-	g_app_sensor_data.hall_left_count = 9;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 9;
 	k_sleep(K_MSEC(600)); /* 500 + 600 = 1.1 s since window 2's re-baseline: window elapsed */
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
@@ -454,7 +455,7 @@ static void activate_threshold_slot0(void)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	g_app_sensor_data.temperature = 35.0f; /* above hi, dwell 0: fires now */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f; /* above hi, dwell 0: fires now */
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		     "threshold did not activate");
@@ -541,7 +542,7 @@ ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
 
 	/* The edited rule must still evaluate and re-fire cleanly. */
 	test_alarm_event_count = 0;
-	g_app_sensor_data.temperature = 45.0f; /* above the NEW hi */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 45.0f; /* above the NEW hi */
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		     "edited rule never re-fired");
@@ -622,7 +623,8 @@ ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
 		zassert_equal(g_buzzer_play_last_repeat_s, cases[i].repeat_s,
 			      "mode %d: wrong repeat interval", cases[i].mode);
 
-		g_app_sensor_data.temperature = 20.0f; /* clear for the next round */
+		APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) =
+			20.0f; /* clear for the next round */
 		app_alarm_poll();
 	}
 }
@@ -665,7 +667,7 @@ ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
 		.dwell = 0.0f,
 	};
 	zassert_equal(app_alarm_rules_set(1, &r), 0, "rule setup rejected");
-	g_app_sensor_data.humidity = 90.0f; /* above hi */
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 90.0f; /* above hi */
 
 	g_buzzer_play_calls = 0;
 	zassert_true(app_alarm_poll(), "aggregate unexpectedly cleared");
@@ -673,7 +675,7 @@ ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
 	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_ALARM, "wrong melody kind");
 
 	/* Alarm #2 clearing while #1 stays active: no new melody, no stop. */
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	g_buzzer_play_calls = 0;
 	zassert_true(app_alarm_poll(), "alarm #1 should still be active");
 	zassert_equal(g_buzzer_play_calls, 0, "partial deactivation must not touch the buzzer");
@@ -709,15 +711,15 @@ ZTEST(alarm_eval, test_active_mask_and_activation_seq)
 		.dwell = 0.0f,
 	};
 	zassert_equal(app_alarm_rules_set(1, &r), 0, "rule setup rejected");
-	g_app_sensor_data.humidity = 90.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 90.0f;
 	app_alarm_poll();
 	zassert_equal(app_alarm_active_mask(), BIT(0) | BIT(1), "slot 1 bit not added");
 	uint32_t seq2 = app_alarm_activation_seq();
 	zassert_true(seq2 != seq1, "second activation did not bump the sequence");
 
 	/* Deactivations clear bits but never bump the sequence. */
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	zassert_false(app_alarm_poll(), "alarms did not clear");
 	zassert_equal(app_alarm_active_mask(), 0, "mask not empty after deactivation");
 	zassert_equal(app_alarm_activation_seq(), seq2, "deactivation bumped the sequence");
@@ -731,10 +733,83 @@ ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
 	activate_threshold_slot0();
 	g_buzzer_play_calls = 0;
 
-	g_app_sensor_data.temperature = 20.0f; /* back in band: deactivates */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f; /* back in band: deactivates */
 	zassert_false(app_alarm_poll(), "alarm did not clear");
 
 	zassert_equal(g_buzzer_play_calls, 1, "deactivation must trigger exactly one buzzer call");
 	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_STOP,
 		      "expected a stop, not a melody");
+}
+
+/* #430 step 2: 1-Wire slot rules read the slot's channel vector. A machine-probe
+ * slot serves humidity from its own channel; a dallas slot has no humidity, so
+ * the same rule stays inert even if a stray value sits at that index. */
+static bool fire_slot1_humidity_rule(uint8_t type)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_SLOT1,
+		.quantity = APP_ALARM_Q_HUMIDITY,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 60.0f,
+		.dwell = 0.0f,
+	};
+
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+	app_sensor_w1_clear(&g_app_sensor_data.w1[0], type);
+	g_app_sensor_data.w1[0].present = true;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY].f = 90.0f;
+	return app_alarm_poll();
+}
+
+ZTEST(alarm_eval, test_w1_machine_probe_humidity_channel_fires)
+{
+	zassert_true(fire_slot1_humidity_rule(APP_SENSOR_TYPE_MACHINE_PROBE),
+		     "machine-probe humidity above hi must fire");
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_SLOT1, APP_ALARM_Q_HUMIDITY));
+}
+
+ZTEST(alarm_eval, test_w1_dallas_has_no_humidity_channel)
+{
+	zassert_false(fire_slot1_humidity_rule(APP_SENSOR_TYPE_DALLAS),
+		      "a dallas slot must not serve humidity");
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_SLOT1, APP_ALARM_Q_HUMIDITY));
+}
+
+ZTEST(alarm_eval, test_w1_dallas_temperature_channel_fires)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_SLOT2,
+		.quantity = APP_ALARM_Q_TEMPERATURE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+		.dwell = 0.0f,
+	};
+
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+	app_sensor_w1_clear(&g_app_sensor_data.w1[1], APP_SENSOR_TYPE_DALLAS);
+	g_app_sensor_data.w1[1].present = true;
+	g_app_sensor_data.w1[1].v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f = 35.0f;
+	zassert_true(app_alarm_poll(), "dallas temperature above hi must fire");
+}
+
+/* The pressure channel is hPa (#430); the rule thresholds are hPa too, so no
+ * unit conversion sits between them any more (it used to be kPa x10). */
+ZTEST(alarm_eval, test_onboard_pressure_is_hpa)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_PRESSURE,
+		.enabled = 1,
+		.lo = 950.0f,
+		.hi = 1050.0f,
+		.dwell = 0.0f,
+	};
+
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1013.0f;
+	zassert_false(app_alarm_poll(), "1013 hPa is inside [950, 1050]");
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1080.0f;
+	zassert_true(app_alarm_poll(), "1080 hPa is above hi");
 }

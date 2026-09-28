@@ -32,24 +32,13 @@ enum app_w1_slot_type {
 	APP_W1_SLOT_MACHINE_PROBE = 2, /* DS28E17 bridge, family 0x19 — temp + humidity + tilt */
 };
 
-/* One slot's latest readings. Quantities a slot's type doesn't provide are
- * NaN (floats) / false (tilt). present=false when the bound ROM was not seen
- * on the last scan (alarms stay inert via NaN). The machine-probe carries a
- * whole sensor cluster (SHT temp/hum, OPT3001 lux, Si7210 field, LIS2DH12
- * accel + tilt); a Dallas slot fills only temperature. A sub-sensor that fails
- * to respond (e.g. an unpopulated TMP112 on older probe revisions) stays NaN
- * without failing the whole slot read. */
-struct app_w1_slot_reading {
-	float temperature;    /* degC, NaN if absent/unsupported */
-	float humidity;       /* %RH, NaN unless machine-probe */
-	float illuminance;    /* lux, NaN unless machine-probe */
-	float magnetic_field; /* mT, NaN unless machine-probe */
-	float accel_x;        /* m/s^2, NaN unless machine-probe */
-	float accel_y;        /* m/s^2, NaN unless machine-probe */
-	float accel_z;        /* m/s^2, NaN unless machine-probe */
-	bool is_tilt_alert;
-	bool present;
-};
+/* A slot's readings are a channel vector of its sensor type (struct
+ * app_sensor_w1 in app_sensor.h, #430). The machine-probe carries a whole
+ * sensor cluster (SHT temp/hum, TMP112 temp, OPT3001 lux, Si7210 field,
+ * LIS2DH12 accel + tilt); a Dallas slot fills only its temperature. A
+ * sub-sensor that fails to respond (e.g. an unpopulated TMP112 on older probe
+ * revisions) stays NaN without failing the whole slot read. */
+struct app_sensor_w1;
 
 /* True if at least one 1-Wire slot is taught (has a non-zero configured ROM,
  * `sensorN-rom`). Used to skip the pointless boot sensor init+scan when
@@ -68,9 +57,10 @@ bool app_w1_slots_any_taught(void);
 int app_w1_slots_rebind(void);
 
 /* Read a slot's current values through its bound driver. slot is 0-based
- * (0..APP_W1_SLOT_COUNT-1). Fills *out (present=false + NaN when unbound /
- * absent). Returns 0 on success, negative errno on a read error. */
-int app_w1_slots_read(int slot, struct app_w1_slot_reading *out);
+ * (0..APP_W1_SLOT_COUNT-1). Fills *out (type + channels; present=false and all
+ * channels NaN when unbound / absent). Returns 0 on success, negative errno on
+ * a read error. */
+int app_w1_slots_read(int slot, struct app_sensor_w1 *out);
 
 /* Encode a slot's reading into its telemetry SensorReading (Telemetry field 27),
  * dispatched to the slot type's driver — the caller (composer) owns the slot
@@ -81,7 +71,7 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out);
  * app_w1_slots.c, the HW drivers never see the wire schema). No-op for an
  * unknown/empty type. */
 struct _SensorReading;
-void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, struct _SensorReading *sr);
+void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, struct _SensorReading *sr);
 
 /* Human-readable name for a slot type ("dallas", "machine-probe", "empty"),
  * from the sensor-type registry. */

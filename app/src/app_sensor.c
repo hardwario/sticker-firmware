@@ -19,6 +19,7 @@
 #include "app_opt3001.h"
 #include "app_pyq1648.h"
 #include "app_sensor.h"
+#include "app_sensor_types.h"
 #include "app_sht4x.h"
 #include "app_w1_slots.h"
 
@@ -48,21 +49,58 @@ LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 static const struct device *const m_i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static int m_i2c_fail_streak;
 
+BUILD_ASSERT(APP_SENSOR_CH_MOTHERBOARD_COUNT <= 32, "motherboard valid mask is a uint32");
+BUILD_ASSERT(APP_SENSOR_W1_CH_MAX <= 32, "1-Wire valid mask is a uint32");
+
+/* Every channel starts absent (NaN); mb_counters_init() zeroes the counter
+ * channels in app_sensor_init(). */
 struct app_sensor_data g_app_sensor_data = {
-	.orientation = INT_MAX,
-	.voltage = NAN,
-	.temperature = NAN,
-	.humidity = NAN,
-	.illuminance = NAN,
-	.altitude = NAN,
-	.pressure = NAN,
+	.mb =
+		{
+			.v =
+				{
+					[0 ... APP_SENSOR_CH_MOTHERBOARD_COUNT - 1] = {.f = NAN},
+				},
+		},
 	.w1 =
 		{
-			[0 ... APP_W1_SLOT_COUNT - 1] = {.temperature = NAN, .humidity = NAN},
+			[0 ... APP_W1_SLOT_COUNT - 1] =
+				{
+					.v =
+						{
+							[0 ... APP_SENSOR_W1_CH_MAX -
+							 1] = {.f = NAN},
+						},
+				},
 		},
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
+
+/* The motherboard counter channels live in g_app_sensor_data between samples:
+ * PIR / accel events increment them directly, app_sensor_sample() refreshes the
+ * hall / input ones from their drivers. */
+static void mb_counters_init(void)
+{
+	const struct app_sensor_type *t = app_sensor_type_get(APP_SENSOR_TYPE_MOTHERBOARD);
+
+	for (uint8_t ch = 0; ch < t->channel_count; ch++) {
+		if (t->channels[ch].flags & APP_SENSOR_F_COUNTER) {
+			g_app_sensor_data.mb.v[ch].u = 0;
+		}
+	}
+}
+
+static void mb_put(struct app_sensor_mb *mb, uint8_t ch, float value)
+{
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb->v, &mb->valid, ch, value);
+}
+
+static void mb_put_u(struct app_sensor_mb *mb, uint8_t ch, uint32_t value)
+{
+	mb->v[ch].u = value;
+	mb->valid |= BIT(ch);
+}
 
 static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 2048);
 static struct k_work_q m_sensor_work_q;
@@ -96,7 +134,7 @@ static void pyq1648_event_handler(void *user_data)
 	LOG_INF("Motion detected");
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.motion_count++;
+	APP_SENSOR_MB_U(&g_app_sensor_data, PIR_COUNT)++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	app_alarm_event(APP_ALARM_SRC_PIR, true);
@@ -151,7 +189,7 @@ static void accel_motion_handler(void *user_data)
 	LOG_INF("Accelerometer motion detected");
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.accel_motion_count++;
+	APP_SENSOR_MB_U(&g_app_sensor_data, ACCEL_COUNT)++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	app_alarm_event(APP_ALARM_SRC_ACCEL, true);
@@ -188,6 +226,10 @@ int app_sensor_init(void)
 {
 	int ret;
 	int res = 0;
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	mb_counters_init();
+	k_mutex_unlock(&g_app_sensor_data_lock);
 
 #if defined(CONFIG_OPT3001)
 	if (g_app_config.cap_light_sensor) {
@@ -455,6 +497,7 @@ void app_sensor_sample(void)
 	float illuminance = NAN;
 	float altitude = NAN;
 	float pressure = NAN;
+	float baro_temperature = NAN;
 
 	struct app_hall_data hall_data = {0};
 	struct app_input_data input_data = {0};
@@ -467,12 +510,9 @@ void app_sensor_sample(void)
 	 * true (write-through, same as today) whenever CONFIG_SHT4X is off. */
 	bool sht4x_valid = true;
 
-	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
+	struct app_sensor_w1 w1[APP_W1_SLOT_COUNT];
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		w1[s] = (struct app_w1_slot_reading){.temperature = NAN,
-						     .humidity = NAN,
-						     .is_tilt_alert = false,
-						     .present = false};
+		app_sensor_w1_clear(&w1[s], APP_SENSOR_TYPE_NONE);
 	}
 
 #if defined(CONFIG_ADC)
@@ -528,7 +568,7 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_OPT3001) */
 
 	if (g_app_config.cap_barometer) {
-		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
+		ret = app_mpl3115a2_read(&altitude, &pressure, &baro_temperature);
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
@@ -552,7 +592,7 @@ void app_sensor_sample(void)
 
 	/* Read each logical 1-Wire slot through its ROM-bound driver (app_w1_slots
 	 * dispatches on the slot type). Unbound / absent slots return present=false
-	 * with NaN readings, so a slot keeps a stable identity across reboots
+	 * with NaN channels, so a slot keeps a stable identity across reboots
 	 * regardless of bus enumeration order. */
 #if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
@@ -563,15 +603,62 @@ void app_sensor_sample(void)
 				continue;
 			}
 			if (w1[s].present) {
+				float t = app_sensor_w1_f(&w1[s],
+							  APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
+				float h = app_sensor_w1_f(&w1[s],
+							  APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
+				bool tilt =
+					app_sensor_w1_f(&w1[s], APP_SENSOR_CH_MACHINE_PROBE_TILT) ==
+					1.0f;
+
 				LOG_INF("Slot %d / Temperature: %s%d.%02d C / Humidity: %s%d.%01d "
 					"%% "
 					"/ Tilt: %sactive",
-					s, APP_FP2(w1[s].temperature), APP_FP1(w1[s].humidity),
-					w1[s].is_tilt_alert ? "" : "not ");
+					s, APP_FP2(t), APP_FP1(h), tilt ? "" : "not ");
 			}
 		}
 	}
 #endif /* defined(CONFIG_W1) */
+
+	/* The motherboard channel vector for this sweep (#430). Physical units per
+	 * app_w1_slots.yaml: the MPL3115A2 reports kPa, the channel is hPa. */
+	struct app_sensor_mb mb = {.valid = 0};
+
+	for (size_t ch = 0; ch < ARRAY_SIZE(mb.v); ch++) {
+		mb.v[ch].f = NAN;
+	}
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, temperature);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, humidity);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_PRESSURE, pressure * 10.0f);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE, illuminance);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE_BARO, baro_temperature);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_ALTITUDE, altitude);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE, voltage);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION,
+	       orientation == INT_MAX ? NAN : (float)orientation);
+
+	if (g_app_config.cap_hall_left) {
+		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE,
+		       hall_data.left_is_active ? 1.0f : 0.0f);
+	}
+	if (g_app_config.cap_hall_right) {
+		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_STATE,
+		       hall_data.right_is_active ? 1.0f : 0.0f);
+	}
+	if (g_app_config.cap_input_a) {
+		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE,
+		       input_data.input_a_is_active ? 1.0f : 0.0f);
+	}
+	if (g_app_config.cap_input_b) {
+		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE,
+		       input_data.input_b_is_active ? 1.0f : 0.0f);
+	}
+	/* Counters are exact integers; they read 0 while their capability is off,
+	 * as before the channel model. */
+	mb_put_u(&mb, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT, hall_data.left_count);
+	mb_put_u(&mb, APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_COUNT, hall_data.right_count);
+	mb_put_u(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT, input_data.input_a_count);
+	mb_put_u(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT, input_data.input_b_count);
 
 	/* #340 M19: m_i2c_fail_streak is read/written by app_sensor_i2c_wedged()
 	 * (app_cmd.c, a different thread context) with no protection of its own;
@@ -600,29 +687,28 @@ void app_sensor_sample(void)
 		m_i2c_fail_streak = 0;
 	}
 
-	g_app_sensor_data.orientation = orientation;
-	g_app_sensor_data.voltage = voltage;
+	struct app_sensor_mb *g = &g_app_sensor_data.mb;
 
 	/* #340 M18: keep the last known-good reading on a plausibility reject
 	 * instead of overwriting it with this sweep's NaN locals. */
-	if (sht4x_valid) {
-		g_app_sensor_data.temperature = temperature;
-		g_app_sensor_data.humidity = humidity;
+	if (!sht4x_valid) {
+		const uint32_t keep = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE) |
+				      BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY);
+
+		mb.v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE] =
+			g->v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE];
+		mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY] = g->v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY];
+		mb.valid = (mb.valid & ~keep) | (g->valid & keep);
 	}
-	g_app_sensor_data.illuminance = illuminance;
-	g_app_sensor_data.altitude = altitude;
-	g_app_sensor_data.pressure = pressure;
 
-	g_app_sensor_data.hall_left_count = hall_data.left_count;
-	g_app_sensor_data.hall_right_count = hall_data.right_count;
-	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;
-	g_app_sensor_data.hall_right_is_active = hall_data.right_is_active;
+	/* The PIR / accel event counters are owned by their event handlers, not by
+	 * this sweep — carry them over. */
+	mb.v[APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT] = g->v[APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT];
+	mb.v[APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT] = g->v[APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT];
+	mb.valid |= BIT(APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT) |
+		    BIT(APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT);
 
-	g_app_sensor_data.input_a_count = input_data.input_a_count;
-	g_app_sensor_data.input_b_count = input_data.input_b_count;
-	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
-	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
-
+	*g = mb;
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		g_app_sensor_data.w1[s] = w1[s];
 	}

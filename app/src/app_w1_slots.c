@@ -9,6 +9,8 @@
 #include "app_ds18b20.h"
 #include "app_log.h"
 #include "app_machine_probe.h"
+#include "app_sensor.h"
+#include "app_sensor_types.h"
 
 /* Nanopb includes — this framework layer owns the slot→telemetry encode so the
  * HW transport drivers (app_ds18b20, app_machine_probe) never see the wire
@@ -27,6 +29,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 
@@ -40,21 +43,22 @@ LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 /* per-type behaviour (read, encode) lives behind this vtable.             */
 /* ====================================================================== */
 
-/* Fill *out (temperature/humidity/cluster/tilt) for device `index` of this type
- * and return its ROM serial in *serial. Quantities the type doesn't provide stay
- * at the caller-initialised NaN/false. Returns 0 or negative errno. */
-typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_w1_slot_reading *out);
+/* Fill the channels of *out (already cleared to NaN for this type) for device
+ * `index` of this type and return its ROM serial in *serial. Channels the read
+ * does not produce stay NaN. Returns 0 or negative errno. */
+typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_sensor_w1 *out);
 
-/* Encode a reading's value fields into its telemetry SensorReading. The caller
- * owns slot/type/array; this fills only the quantities the type provides, each
+/* Encode a reading's channels into its telemetry SensorReading. The caller
+ * owns slot/type/array; this fills only the fields the type provides, each
  * omitted when NaN. */
-typedef void (*w1_encode_fn)(const struct app_w1_slot_reading *r, SensorReading *sr);
+typedef void (*w1_encode_fn)(const struct app_sensor_w1 *r, SensorReading *sr);
 
 struct app_w1_sensor_type {
 	enum app_w1_slot_type type;
-	uint8_t family;    /* 1-Wire family code (informational) */
-	const char *name;  /* shell / log label */
-	int (*scan)(void); /* re-enumerate this transport's devices */
+	uint8_t sensor_type; /* registry type id (app_w1_slots.yaml) */
+	uint8_t family;      /* 1-Wire family code (informational) */
+	const char *name;    /* shell / log label */
+	int (*scan)(void);   /* re-enumerate this transport's devices */
 	int (*get_count)(void);
 	w1_read_fn read;
 	w1_encode_fn encode;
@@ -80,14 +84,15 @@ struct app_w1_sensor_type {
 #define DS18B20_TEMP_MAX     125.0f
 #define DS18B20_POR_SENTINEL 85.0f
 
-static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+static int dallas_read(int index, uint64_t *serial, struct app_sensor_w1 *out)
 {
 	float temperature;
 	int ret = app_ds18b20_read(index, serial, &temperature);
 
 	if (ret == 0) {
 		if (temperature >= DS18B20_TEMP_MIN && temperature <= DS18B20_TEMP_MAX) {
-			out->temperature = temperature;
+			app_sensor_put_f(APP_SENSOR_TYPE_DALLAS, out->v, &out->valid,
+					 APP_SENSOR_CH_DALLAS_TEMPERATURE, temperature);
 		} else {
 			/* Leave temperature NaN so eval_threshold / encode treat it
 			 * as absent rather than firing a false alarm. */
@@ -98,41 +103,67 @@ static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *
 	return ret;
 }
 
-static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+/* TMP112 (machine-probe ch temperature-aux) is not populated on older probe
+ * revisions: the read then fails on every sample, costing ~60 ms of bus time and
+ * an error log each time. After TMP112_FAIL_LIMIT consecutive failures the
+ * sub-sensor is skipped for that driver index until the next rebind (boot,
+ * teach, scan), which also reshuffles the driver indices. */
+#define TMP112_FAIL_LIMIT 3
+static uint8_t m_tmp112_fails[APP_W1_SLOT_COUNT * 2];
+
+static void mp_put(struct app_sensor_w1 *out, uint8_t ch, float value)
+{
+	app_sensor_put_f(APP_SENSOR_TYPE_MACHINE_PROBE, out->v, &out->valid, ch, value);
+}
+
+static int machine_probe_read(int index, uint64_t *serial, struct app_sensor_w1 *out)
 {
 	/* Temperature + humidity (SHT) is the primary reading — its result decides
 	 * the slot read's success. The remaining probe sub-sensors are best-effort:
-	 * a failure (e.g. an absent TMP112 on older revisions) leaves that quantity
-	 * NaN/false without failing the whole read. */
+	 * a failure (e.g. an absent TMP112 on older revisions) leaves that channel
+	 * NaN without failing the whole read. */
 	float temperature, humidity;
 	int ret = app_machine_probe_read_hygrometer(index, serial, &temperature, &humidity);
 
 	if (ret == 0) {
-		out->temperature = temperature;
-		out->humidity = humidity;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, temperature);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, humidity);
+	}
+
+	if (index >= 0 && index < (int)ARRAY_SIZE(m_tmp112_fails) &&
+	    m_tmp112_fails[index] < TMP112_FAIL_LIMIT) {
+		float aux;
+
+		if (app_machine_probe_read_thermometer(index, serial, &aux) == 0) {
+			m_tmp112_fails[index] = 0;
+			mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, aux);
+		} else if (++m_tmp112_fails[index] == TMP112_FAIL_LIMIT) {
+			LOG_WRN("Machine probe idx %d: TMP112 not responding, skipped until rebind",
+				index);
+		}
 	}
 
 	float illuminance;
 	if (app_machine_probe_read_lux_meter(index, serial, &illuminance) == 0) {
-		out->illuminance = illuminance;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, illuminance);
 	}
 
 	float magnetic_field;
 	if (app_machine_probe_read_magnetometer(index, serial, &magnetic_field) == 0) {
-		out->magnetic_field = magnetic_field;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, magnetic_field);
 	}
 
 	float ax, ay, az;
 	int orientation;
 	if (app_machine_probe_read_accelerometer(index, serial, &ax, &ay, &az, &orientation) == 0) {
-		out->accel_x = ax;
-		out->accel_y = ay;
-		out->accel_z = az;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, ax);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, ay);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, az);
 	}
 
 	bool tilt = false;
 	if (app_machine_probe_get_tilt_alert(index, serial, &tilt) == 0) {
-		out->is_tilt_alert = tilt;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TILT, tilt ? 1.0f : 0.0f);
 	}
 	return ret;
 }
@@ -144,48 +175,55 @@ static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_re
 /* Dallas (DS18B20): temperature only. A NaN reading (sensor disconnected or
  * faulted) is sent as TM_S32_NA so the decoder surfaces temperature=null,
  * rather than dropping the field. */
-static void dallas_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
+static void dallas_encode(const struct app_sensor_w1 *r, SensorReading *sr)
 {
+	float t = r->v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f;
+
 	sr->has_temperature = true;
-	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
+	sr->temperature = isnan(t) ? TM_S32_NA : (int32_t)(t * 100.0f);
 }
 
 /* Machine probe: the full sensor cluster. flags (tilt) is a real digital state
  * sent every report per #80; the analog quantities are omitted individually when
  * their sub-sensor did not respond (NaN). */
-static void machine_probe_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
+static void machine_probe_encode(const struct app_sensor_w1 *r, SensorReading *sr)
 {
+#define MP(NAME) (r->v[APP_SENSOR_CH_MACHINE_PROBE_##NAME].f)
+	/* The TMP112 (temperature-aux) has no telemetry field until the
+	 * SensorReading channel encoding lands (#430 step 5). */
 	sr->has_temperature = true;
-	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
-	if (!isnan(r->humidity)) {
+	sr->temperature = isnan(MP(TEMPERATURE)) ? TM_S32_NA : (int32_t)(MP(TEMPERATURE) * 100.0f);
+	if (!isnan(MP(HUMIDITY))) {
 		sr->has_humidity = true;
-		sr->humidity = (uint32_t)(r->humidity * 2.0f);
+		sr->humidity = (uint32_t)(MP(HUMIDITY) * 2.0f);
 	}
 	sr->has_flags = true;
-	sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
-	if (!isnan(r->illuminance)) {
+	sr->flags = MP(TILT) == 1.0f ? MP_FLAG_TILT : 0;
+	if (!isnan(MP(ILLUMINANCE))) {
 		sr->has_illuminance = true;
-		sr->illuminance = (uint32_t)r->illuminance;
+		sr->illuminance = (uint32_t)MP(ILLUMINANCE);
 	}
-	if (!isnan(r->magnetic_field)) {
+	if (!isnan(MP(MAGNETIC_FIELD))) {
 		sr->has_magnetic_field = true;
-		sr->magnetic_field = (int32_t)(r->magnetic_field * 1000.0f);
+		sr->magnetic_field = (int32_t)(MP(MAGNETIC_FIELD) * 1000.0f);
 	}
-	if (!isnan(r->accel_x) && !isnan(r->accel_y) && !isnan(r->accel_z)) {
+	if (!isnan(MP(ACCEL_X)) && !isnan(MP(ACCEL_Y)) && !isnan(MP(ACCEL_Z))) {
 		sr->has_accel_x = true;
-		sr->accel_x = (int32_t)(r->accel_x * 100.0f);
+		sr->accel_x = (int32_t)(MP(ACCEL_X) * 100.0f);
 		sr->has_accel_y = true;
-		sr->accel_y = (int32_t)(r->accel_y * 100.0f);
+		sr->accel_y = (int32_t)(MP(ACCEL_Y) * 100.0f);
 		sr->has_accel_z = true;
-		sr->accel_z = (int32_t)(r->accel_z * 100.0f);
+		sr->accel_z = (int32_t)(MP(ACCEL_Z) * 100.0f);
 	}
+#undef MP
 }
 
 static const struct app_w1_sensor_type m_types[] = {
-	{APP_W1_SLOT_DALLAS, 0x28, "dallas", app_ds18b20_scan, app_ds18b20_get_count, dallas_read,
-	 dallas_encode},
-	{APP_W1_SLOT_MACHINE_PROBE, 0x19, "machine-probe", app_machine_probe_scan,
-	 app_machine_probe_get_count, machine_probe_read, machine_probe_encode},
+	{APP_W1_SLOT_DALLAS, APP_SENSOR_TYPE_DALLAS, 0x28, "dallas", app_ds18b20_scan,
+	 app_ds18b20_get_count, dallas_read, dallas_encode},
+	{APP_W1_SLOT_MACHINE_PROBE, APP_SENSOR_TYPE_MACHINE_PROBE, 0x19, "machine-probe",
+	 app_machine_probe_scan, app_machine_probe_get_count, machine_probe_read,
+	 machine_probe_encode},
 };
 
 static const struct app_w1_sensor_type *type_desc(enum app_w1_slot_type type)
@@ -317,7 +355,9 @@ static int collect_all(struct discovered *out, int max)
 
 		for (int i = 0; i < count && n < max; i++) {
 			uint64_t serial = 0;
-			struct app_w1_slot_reading r = {.temperature = NAN, .humidity = NAN};
+			struct app_sensor_w1 r;
+
+			app_sensor_w1_clear(&r, t->sensor_type);
 
 			if (t->read(i, &serial, &r) == 0 && serial != 0) {
 				out[n].serial = serial;
@@ -339,6 +379,10 @@ int app_w1_slots_rebind(void)
 	int ndev = collect_all(dev, DISCOVERED_MAX);
 
 	k_mutex_lock(&m_lock, K_FOREVER);
+
+	/* The scans before a rebind reshuffle the driver indices: give every probe
+	 * a fresh TMP112 chance. */
+	memset(m_tmp112_fails, 0, sizeof(m_tmp112_fails));
 
 	/* Load persisted slot identity (ROM only) and reset runtime state. The
 	 * type/driver are resolved from the discovered device's family below. */
@@ -423,20 +467,13 @@ int app_w1_slots_rebind(void)
 
 /* ---- read --------------------------------------------------------------- */
 
-int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
+int app_w1_slots_read(int slot, struct app_sensor_w1 *out)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || out == NULL) {
 		return -EINVAL;
 	}
 
-	out->temperature = NAN;
-	out->humidity = NAN;
-	out->illuminance = NAN;
-	out->magnetic_field = NAN;
-	out->accel_x = NAN;
-	out->accel_y = NAN;
-	out->accel_z = NAN;
-	out->is_tilt_alert = false;
+	app_sensor_w1_clear(out, APP_SENSOR_TYPE_NONE);
 
 	/* Snapshot the binding under the lock; the (slow) driver read runs outside
 	 * it so a teach/list in the shell never blocks sampling and vice versa. */
@@ -447,6 +484,9 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	bool present = m_slots[slot].present;
 	k_mutex_unlock(&m_lock);
 
+	if (desc != NULL) {
+		app_sensor_w1_clear(out, desc->sensor_type);
+	}
 	out->present = present;
 
 	if (!present || driver_index < 0 || desc == NULL) {
@@ -463,15 +503,8 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	 * reject a reading whose serial no longer matches the slot's ROM rather
 	 * than report another sensor's values under this slot's identity. */
 	if (serial != rom) {
-		*out = (struct app_w1_slot_reading){.temperature = NAN,
-						    .humidity = NAN,
-						    .illuminance = NAN,
-						    .magnetic_field = NAN,
-						    .accel_x = NAN,
-						    .accel_y = NAN,
-						    .accel_z = NAN,
-						    .is_tilt_alert = false,
-						    .present = present};
+		app_sensor_w1_clear(out, desc->sensor_type);
+		out->present = present;
 		return -ENODEV;
 	}
 
@@ -482,16 +515,19 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	 * +85 C still gets through after one extra sample. Any other valid reading
 	 * clears the suspicion. Keyed on the (stable) slot, not the driver index. */
 	if (desc->type == APP_W1_SLOT_DALLAS) {
+		float *t = &out->v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f;
+
 		k_mutex_lock(&m_lock, K_FOREVER);
-		if (out->temperature == DS18B20_POR_SENTINEL) {
+		if (*t == DS18B20_POR_SENTINEL) {
 			if (!m_slots[slot].ds18b20_pending_85) {
 				m_slots[slot].ds18b20_pending_85 = true;
-				out->temperature = NAN;
+				app_sensor_put_f(APP_SENSOR_TYPE_DALLAS, out->v, &out->valid,
+						 APP_SENSOR_CH_DALLAS_TEMPERATURE, NAN);
 				LOG_WRN("Slot %d: DS18B20 +85.0 C suppressed (awaiting confirm)",
 					slot + 1);
 			}
 			/* else: confirmed by a second consecutive +85.0 C — accept. */
-		} else if (!isnan(out->temperature)) {
+		} else if (!isnan(*t)) {
 			m_slots[slot].ds18b20_pending_85 = false;
 		}
 		k_mutex_unlock(&m_lock);
@@ -501,7 +537,7 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 
 /* ---- telemetry encode dispatch ------------------------------------------ */
 
-void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, SensorReading *sr)
+void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, SensorReading *sr)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || r == NULL || sr == NULL) {
 		return;
@@ -761,16 +797,18 @@ static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 				    : app_w1_slot_is_replaced(s) ? "REPLACED?"
 								 : "absent";
 
-		struct app_w1_slot_reading r;
+		struct app_sensor_w1 r;
 		char reading[40] = "--";
 		if (app_w1_slots_read(s, &r) == 0 && r.present) {
-			if (!isnan(r.humidity)) {
+			float temp = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
+			float hum = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
+			bool tilt = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
+
+			if (!isnan(hum)) {
 				snprintf(reading, sizeof(reading), "%s%d.%02d C / %s%d.%01d %%%s",
-					 APP_FP2(r.temperature), APP_FP1(r.humidity),
-					 r.is_tilt_alert ? " / TILT" : "");
-			} else if (!isnan(r.temperature)) {
-				snprintf(reading, sizeof(reading), "%s%d.%02d C",
-					 APP_FP2(r.temperature));
+					 APP_FP2(temp), APP_FP1(hum), tilt ? " / TILT" : "");
+			} else if (!isnan(temp)) {
+				snprintf(reading, sizeof(reading), "%s%d.%02d C", APP_FP2(temp));
 			}
 		}
 
