@@ -216,6 +216,26 @@ the native stage (P5/P6).
   `NodeRemove` on the gateway → any further confirmed uplinks stop being ACKed →
   supervision (§7.4).
 
+### 6.6 Key ownership and gateway power loss (D15)
+
+| Layer | Holds | Does |
+|---|---|---|
+| Portal | DevEUI, `radio_appkey`, `key_epoch`, config, Hub assignment | source of truth, downlink commands |
+| Hub central | registry DevEUI ↔ addr, derived `node_key`s, persisted counters | derives keys, `NodeAdd` to the Northbridge, decodes `0x81`, answers `0x91`, builds downlinks |
+| Northbridge | RAM only: addr → `node_key`, `last_seen`, downlink queue | CCM open/verify, ACK ≤ turnaround, `PENDING`, DL TX, forwards plaintext to the central |
+| STICKER | `radio_appkey` + DevEUI (NFC provisioning) | derives its own `node_key` |
+
+- The AppKey never leaves the Portal/Hub/STICKER; the Northbridge only ever sees derived keys.
+- **Northbridge power loss:** it boots with an empty registry and ACKs nothing (no key, no
+  ACK). Nodes retry, count the frame as undelivered and keep it in history. The Northbridge
+  announces `boot` on the console link; the central re-sends `NodeAdd` for every node with
+  its exact `last_seen` (the central sees every accepted frame, so there is no replay window)
+  and a fresh reserved block for the Northbridge TX counter, persisted before use.
+- The central keeps the registry in its local database, so the recovery needs no Portal.
+- A Hub power loss takes both down; the Northbridge is up long before Linux. The gap (tens of
+  seconds) is covered by node retries and history. No key copy in Northbridge flash
+  (removable module, wear, consistency).
+
 ## 7. Uplink
 
 ### 7.1 Frame
@@ -559,7 +579,7 @@ re-measured (release budget `0x34000`).
 
 | # | Question | Recommendation |
 |---|---|---|
-| D4 | Default `p2p-modulation` | `lora` (range, today's coverage expectations); `fsk` for TOWER-mixed sites |
+| D4 | Default `p2p-modulation` | **Decided 2026-09-28: `lora`**; `fsk` for TOWER-mixed sites |
 | D5 | Northbridge ↔ RPi link = tower-protocol console | yes |
 | D6 | Address derivation | low 32 bits of DevEUI if unique across the HARDWARIO range, else FNV-1a-32 |
 | D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2 |
@@ -567,9 +587,11 @@ re-measured (release budget `0x34000`).
 | D9 | `fsk` frequency: free `p2p-frequency` or TOWER channel index 0..2 | keep frequency, validate against the TOWER plan in `fsk` |
 | D10 | TOWER `NodeCmd::Shell` on STICKER | drop and log |
 | D11 | Legacy public-key pairing on the Hub for stock TOWER nodes | allowed, user-initiated, short window, documented as insecure |
-| D12 | TOWER-side owner for the upstream work | ? |
-| D13 | PR: reuse #410 (retitle, rebase on current `feat-p2p`) or a new PR | reuse #410 |
-| D14 | MTU per profile: `fsk` 96 B frame (72 B data), `lora` up to 255 B frame (231 B data)? | measure in P0 (M4), decide before P1 |
+| D12 | TOWER-side owner for the upstream work | **Decided 2026-09-28:** we first verify each proposal on our side (P0–P3), then prepare the PRs to `hardwario/tower` ourselves |
+| D13 | PR: reuse #410 or a new PR | **Decided: new PR #470**; #410 closed as superseded |
+| D14 | MTU per profile | **Decided 2026-09-28:** `fsk` 96 B frame (TOWER); `lora` ≤ ~100 B frame (SF12 fits the SX12xx 4 s TX timeout, §17) |
+| D15 | Key ownership and gateway power loss | **Decided 2026-09-28:** keys only on the Hub (§6.6); the Northbridge holds derived keys in RAM, no flash copy |
+| D16 | Fast TX→RX fork call (hardwario/sticker-zephyr#2) | **Decided 2026-09-28:** merge |
 
 ## 16. Cross-repo impact
 
