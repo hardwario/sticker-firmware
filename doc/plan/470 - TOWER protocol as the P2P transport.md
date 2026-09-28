@@ -486,7 +486,10 @@ ledger, link supervision, announce, uplink phase, M-2, post-command executor), `
 the zero-key guards, the `p2p-*` config params.
 
 P2P is pre-deployment, so this is a flag day (Nodes, Northbridge, central together); no
-dual-protocol period.
+dual-protocol period. **Decided 2026-09-28 (Hynek): the old P2P is abandoned.** From the
+first TOWER bench build on, the bench runs only TOWER-based P2P; there is no return to the
+old P2P, no rollback provision for it and no legacy path to keep alive. The old wire code,
+KAT and decoder paths are removed as part of P1/P2 (the P8 cleanup is folded in).
 
 ## 11. Upstream proposals (tower-protocol / tower-firmware)
 
@@ -530,7 +533,7 @@ New proto_ids need the manual collision check (memory: proto_id collision gotcha
 | **P5 — FSK profile** | FSK access on SX126x (driver decision with #408 B7), bit-exact vs TOWER Core Module / Radio Dongle (HW vs SW CRC/whitening) | STICKER fsk ↔ stock Radio Dongle via `tower-cli` `NodeAdd` |
 | **P6 — Native control + join** | N1 (control in the TOWER protocol), keyed join E4, legacy pairing on Hub for TOWER nodes, bulk (history) | control piggybacked on ACK; zero-touch join; TOWER push-button on Hub |
 | **P7 — Later** | 869.525 downlink channel for `lora` (D7), LBT+AFA / FHSS, multi-gateway, radio FOTA | — |
-| **P8 — Cleanup** | remove old frames/KAT/decoder paths, rewrite `doc/p2p.md`, Manager-App params via NFC (if agreed) | docs = code |
+| **P8 — Cleanup** | rewrite `doc/p2p.md`, Manager-App params via NFC (if agreed); the removal of the old frames/KAT/decoder paths moved into P1/P2 (old P2P abandoned) | docs = code |
 
 ### 13.1 Phase 0 — physical verification on LoRa
 

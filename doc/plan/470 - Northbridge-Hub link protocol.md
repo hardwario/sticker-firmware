@@ -79,9 +79,8 @@ The NB firmware and the Hub software are flashed together. There is no version
 negotiation, no capability bits and no backward compatibility:
 - no legacy (keyless P2P modem) path in the central;
 - no rules for older or newer images;
-- rollback = flashing the previous NB image **and** the previous Hub image together. TOWER
-  sessions live in their own file (`p2p/tower.db`), so the previous Hub image finds its
-  `sessions.db` untouched; data-wise it is still a flag day (nodes rejoin).
+- no rollback to the old P2P: it is abandoned (Hynek 2026-09-28); the old
+  `sessions.db` and the legacy code are removed, not preserved.
 
 `fw_ver` in `EVT_BOOT` / `GET_INFO` is for diagnostics only. The central logs a mismatch
 against the image it was built with, but never switches behaviour by it.
