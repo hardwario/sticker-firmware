@@ -20,7 +20,7 @@ extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
 extern int test_save_sf_ret;
 extern int test_lora_send_ret;
-extern bool p2p_test_clock_sync_pending;
+extern bool p2p_test_time_wanted;
 extern int p2p_test_time_events;
 extern int p2p_test_air_begins;
 extern int p2p_test_air_ends;
@@ -1019,6 +1019,57 @@ ZTEST(p2p_logic, test_retry_resends_the_same_counter)
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
 
+/* A wanted network time sets FCtrl TIME_REQ on a fresh confirmed uplink only
+ * (an unconfirmed one gets no Ack to carry the tail), and the retry of that
+ * frame keeps it even when the want ended meanwhile: byte for byte (F-P1-1). */
+ZTEST(p2p_logic, test_time_req_on_confirmed_uplinks_kept_on_retry)
+{
+	static uint8_t body[10] = {0x20, 0x21};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .len = sizeof(body),
+				    .buf = body};
+	struct app_radio_tx_result res = {0};
+	uint8_t first[255];
+	uint32_t first_len;
+
+	zassert_equal(p2p_uplink_fctrl(false), 0);
+	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED, "no time wanted");
+	p2p_test_time_wanted = true;
+	zassert_equal(p2p_uplink_fctrl(false), 0, "unconfirmed: never TIME_REQ");
+	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ);
+
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_set_fcnt(400, 500);
+	p2p_test_tx_reset();
+
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL],
+		      P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ, "the time is asked for");
+	first_len = test_lora_last_len;
+	memcpy(first, test_lora_last_frame, first_len);
+
+	p2p_test_time_wanted = false; /* e.g. landed from a later request's answer */
+	f.attempt = 1;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_mem_equal(test_lora_last_frame, first, first_len, "the retry is the same frame");
+
+	f.attempt = 0;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], P2P_FCTRL_CONFIRMED,
+		      "a fresh frame drops TIME_REQ once the time landed");
+
+	p2p_test_time_wanted = true;
+	f.flags = 0;
+	f.kind = APP_RADIO_FRAME_TELEMETRY;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), 0);
+	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], 0, "unconfirmed telemetry");
+	p2p_test_time_wanted = false;
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+}
+
 /* LoRaWAN parity: an empty clock_sync forces no uplink -- like LoRaWAN's
  * DeviceTimeReq it waits for the next regular uplink, whose Ack time tail then
  * sets the RTC and triggers the Info with the command's seq. */
@@ -1030,12 +1081,12 @@ ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
 	uint32_t sends = test_lora_send_count;
 	int kicks = p2p_test_tx_kick_calls;
 
-	p2p_test_clock_sync_pending = true;
+	p2p_test_time_wanted = true;
 	app_radio_p2p_backend.time_request();
 	k_sleep(K_MSEC(50)); /* a forced send would run on the radio work queue by now */
 	zassert_equal(test_lora_send_count, sends, "clock_sync must not send an uplink");
 	zassert_equal(p2p_test_tx_kick_calls, kicks, "nor ask app_radio for one");
-	p2p_test_clock_sync_pending = false;
+	p2p_test_time_wanted = false;
 	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
 }
 
@@ -1610,9 +1661,10 @@ static void apply_ack(bool with_time, uint32_t unix_time)
 	p2p_apply_ack(&ack, 1, -70, 5);
 }
 
-/* PF-2: a pending clock_sync makes the next reports CONFIRMED so an Ack (and
- * its time tail) comes back even with the periodic check off -- at most
- * P2P_CLOCK_SYNC_REPORTS_MAX (3) of them, then the node stops paying for it. */
+/* PF-2: a wanted network time (clock_sync, link-up, weekly re-sync) makes the
+ * next reports CONFIRMED so an Ack (and its time tail) comes back even with the
+ * periodic check off -- at most P2P_TIME_REPORTS_MAX (3) of them per request,
+ * then the node stops paying for it. */
 ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 {
 	p2p_test_join_setup(7);
@@ -1621,21 +1673,21 @@ ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 	p2p_test_link_reset();
 	g_app_config.radio_link_check_interval = 0;
 
-	p2p_test_clock_sync_pending = true;
+	p2p_test_time_wanted = true;
 	app_radio_p2p_backend.time_request();
 	for (int i = 0; i < 3; i++) {
-		zassert_true(send_report_confirmed(false), "clock_sync report %d", i);
+		zassert_true(send_report_confirmed(false), "time request report %d", i);
 	}
 	zassert_false(send_report_confirmed(false), "the 4th report is back to the cadence");
 
 	/* A new request gets its own three. */
 	app_radio_p2p_backend.time_request();
-	zassert_true(send_report_confirmed(false), "a new clock_sync confirms again");
+	zassert_true(send_report_confirmed(false), "a new request confirms again");
 
-	/* Answered (app_radio clears the flag): back to the cadence at once. */
+	/* The time landed (app_radio clears the want): back to the cadence at once. */
 	p2p_test_link_reset();
 	app_radio_p2p_backend.time_request();
-	p2p_test_clock_sync_pending = false;
+	p2p_test_time_wanted = false;
 	zassert_false(send_report_confirmed(false), "nothing pending, the cadence");
 
 	g_app_config.radio_link_check_interval = 5;

@@ -88,14 +88,14 @@ void app_radio_announce(void)
 	p2p_test_announce_calls++;
 }
 
-/* The common clock_sync state (F3d): the backend reads the pending flag and
+/* The common network-time state (F3d): the backend reads the wanted flag and
  * reports a landed time; tests drive the one and count the other. */
-bool p2p_test_clock_sync_pending;
+bool p2p_test_time_wanted;
 int p2p_test_time_events;
 
-bool app_radio_clock_sync_pending(void)
+bool app_radio_time_wanted(void)
 {
-	return p2p_test_clock_sync_pending;
+	return p2p_test_time_wanted;
 }
 
 void app_radio_time_event(void)

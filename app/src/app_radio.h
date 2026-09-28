@@ -526,11 +526,11 @@ struct app_radio_backend {
 	 * WARNING budget ran out. Returns 0, or -ENOTSUP when this node cannot
 	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
 	int (*rejoin)(bool forced);
-	/* A clock_sync waits for a network time (app_radio_clock_sync()): LoRaWAN
-	 * forces a DeviceTimeReq onto the next uplink, P2P sends its next reports
-	 * (at most 3) confirmed so an Ack brings the time tail. Neither sends an
-	 * uplink of its own. The backend calls app_radio_time_event() when the
-	 * time lands. */
+	/* A network time is wanted (app_radio_time_request()): LoRaWAN queues a
+	 * DeviceTimeReq onto the next uplink, P2P sets FCtrl TIME_REQ on its
+	 * confirmed uplinks and sends its next reports (at most 3) confirmed so
+	 * an Ack brings the time tail. Neither sends an uplink of its own. The
+	 * backend calls app_radio_time_event() when the time lands. */
 	void (*time_request)(void);
 	/* Time on air (ms) of an uplink carrying `len` payload bytes now, for the
 	 * duty ledger: P2P at its SF with header and tag, LoRaWAN at its DR with
@@ -729,17 +729,27 @@ int app_radio_send_info(uint32_t seq);
  * with an Info carrying `seq` once the time has landed -- the same shape on
  * both radios, no extra uplink: LoRaWAN's DeviceTimeReq rides on the next
  * uplink and the answer comes in its downlink; P2P sends its next report
- * CONFIRMED (at most 3 of them) and the time comes in the Ack's tail. A network
+ * CONFIRMED (at most 3 of them) with FCtrl TIME_REQ and the time comes in the
+ * Ack's tail (app_radio_time_request()). A network
  * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2).
  * A newer request before the time lands takes over the seq. Any thread. */
 void app_radio_clock_sync(uint32_t seq);
 
+/* Ask the network for the wall-clock time, whatever the radio (any thread):
+ * the backend's time_request() on the radio work queue. The time lands via
+ * app_radio_time_event(). Also asked by app_radio itself at a link-up while
+ * no network time has landed since boot. No-op without a radio. */
+void app_radio_time_request(void);
+
 /* Backend, any context: a network time has landed and gone to app_clock (the
- * LoRaWAN DeviceTimeAns, the P2P Ack time tail). A pending clock_sync is
- * answered with its Info, on the radio work queue (F3d). */
+ * LoRaWAN DeviceTimeAns, the P2P Ack time tail). Ends the request; a pending
+ * clock_sync is answered with its Info, on the radio work queue (F3d). */
 void app_radio_time_event(void);
 
-/* A clock_sync waits for a network time (P2P confirms reports meanwhile). */
+/* A network time was requested and has not landed yet (P2P sets TIME_REQ). */
+bool app_radio_time_wanted(void);
+
+/* A clock_sync waits for a network time. */
 bool app_radio_clock_sync_pending(void);
 
 #ifdef __cplusplus

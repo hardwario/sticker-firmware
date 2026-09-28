@@ -521,10 +521,9 @@ static void on_join_success(void)
 	refresh_payload_budget();
 
 	state_transition(APP_RADIO_STATE_HEALTHY); /* resets the rejoin attempts */
-	app_radio_link_up(); /* link supervision and the M-2 clock start afresh */
-
-	/* Request network time once joined; the answer sets the RTC asynchronously. */
-	app_clock_request_sync();
+	/* Link supervision and the M-2 clock start afresh; with no network time
+	 * since boot it also asks for one (lrw_time_request()). */
+	app_radio_link_up();
 
 	/* Autonomous Info + settings-info ConfigDump (#412) on join, through the
 	 * common announce (app_radio): identity/firmware and the effective config on
@@ -1057,6 +1056,57 @@ static int lrw_tx_rejoin(bool forced)
 	return 0;
 }
 
+/* #340 L11: minimum spacing between DeviceTimeReqs. Each request adds a MAC
+ * command to the next uplink; repeated clock_syncs (NFC taps, downlinks) must
+ * not pile them up (Length error). One still unanswered inside the window is
+ * the one whose answer app_radio waits for. */
+#define TIME_REQUEST_MIN_INTERVAL_MS (60 * MSEC_PER_SEC)
+
+/* GPS epoch (1980-01-06) to Unix epoch (1970-01-01) offset in seconds. */
+#define GPS_UNIX_EPOCH_OFFSET 315964800UL
+/* GPS-UTC leap second offset (18 s since 2017-01-01). Update if IERS adds a
+ * leap second. GPS time does not count leap seconds; UTC does. */
+#define GPS_UTC_LEAP_SECONDS  18UL
+
+/* -1 = no DeviceTimeReq yet (same idiom as app_alarm.c). */
+static int64_t m_time_request_ms = -1;
+
+/* struct app_radio_backend.time_request: a DeviceTimeReq rides the next
+ * uplink (force_request=false: no extra empty message); its answer raises
+ * LORAWAN_TIME_UPDATED in downlink_callback(). */
+static void lrw_time_request(void)
+{
+	int64_t now = k_uptime_get();
+
+	if (m_time_request_ms >= 0 && now - m_time_request_ms < TIME_REQUEST_MIN_INTERVAL_MS) {
+		LOG_WRN("DeviceTimeReq: cooldown active, ignoring (#340 L11)");
+		return;
+	}
+	m_time_request_ms = now;
+
+	int ret = lorawan_request_device_time(false);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lorawan_request_device_time", ret);
+	} else {
+		LOG_INF("DeviceTimeReq queued");
+	}
+}
+
+/* A DeviceTimeAns landed: GPS time to Unix, into app_clock (which bounds it,
+ * L-5; a conversion underflow lands outside that window too). */
+static void lrw_time_landed(void)
+{
+	uint32_t gps_time = 0;
+	int ret = lorawan_device_time_get(&gps_time);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lorawan_device_time_get", ret);
+		return;
+	}
+	(void)app_clock_set_network_time(gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS);
+}
+
 const struct app_radio_backend app_radio_lrw_backend = {
 	.send = lrw_tx_send,
 	.budget = lrw_tx_budget,
@@ -1065,9 +1115,7 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	.get_state = app_radio_lrw_get_state,
 	.warning_step = lrw_backoff_step,
 	.rejoin = lrw_tx_rejoin,
-	/* A DeviceTimeReq rides the next uplink; its answer raises
-	 * LORAWAN_TIME_UPDATED in downlink_callback(). */
-	.time_request = app_clock_force_resync,
+	.time_request = lrw_time_request,
 	.airtime_ms = lrw_tx_airtime_ms,
 	/* Unconfirmed: the link check is the liveness probe; alarms as
 	 * radio-alarm-ack says (app_radio). */
@@ -1109,12 +1157,11 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
 	}
 
-	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
-	app_clock_handle_downlink(flags);
-
-	/* The time landed: app_radio answers a pending clock_sync, on its work
-	 * queue, never on this callback stack (#219). */
+	/* A DeviceTimeAns: set the RTC; app_radio ends the request and answers a
+	 * pending clock_sync, on its work queue, never on this callback stack
+	 * (#219). */
 	if (flags & LORAWAN_TIME_UPDATED) {
+		lrw_time_landed();
 		app_radio_time_event();
 	}
 
