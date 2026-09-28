@@ -1563,6 +1563,10 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **`clock_sync` + re-sync:** the Hub queued `clock_sync` seq 242. It arrived on 6150, 4 s before the periodic re-sync, which fired 240 s after the first time. One request served both. Telemetry 6151 went confirmed `time-req`, and the Hub acked it with flags 0x02 (the tail). The Info answer on 6152 carried seq 242 and `unix_time` 2 s before its reception.
   - **Shell `clock sync`:** the next report (6154) went confirmed `time-req`, and the time landed. `clock get` matched host UTC to 2 s (rttt latency, plus the debug build's clock drift).
   - **Re-sync again:** the next periodic re-sync fired 240 s after the first, on the timer armed by the first network time. Telemetry 6156 went confirmed `time-req`, and the time landed.
+- HIL (2026-09-28, STICKER 2162190413, LoRaWAN EU868 via the Hub's ChirpStack; debug build with the 240 s re-sync and the time logs raised to WRN, HIL-only):
+  - **Join:** `app_radio_link_up()` queued the DeviceTimeReq, and the DeviceTimeAns set the RTC 33 s later, on the next uplink, to host UTC.
+  - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
+  - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
 
 ---
 
