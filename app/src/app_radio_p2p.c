@@ -2657,7 +2657,8 @@ static struct {
 	uint16_t run_gap_ms;
 	uint8_t pt_len; /* payload of the next frame(s) */
 	bool confirmed;
-	bool fast; /* confirmed frames: lora_send_recv_async(), no radio sleep TX->RX */
+	bool fast;     /* confirmed frames: lora_send_recv_async(), no radio sleep TX->RX */
+	bool duty_off; /* lab only: air is still charged and reported, never held */
 } m_twr = {.freq = TWR_FREQ_DEFAULT,
 	   .sf = 7,
 	   .reps = 3,
@@ -2887,7 +2888,7 @@ static int twr_exchange(void)
 		if (n > 1) {
 			k_sleep(K_MSEC(sys_rand32_get() % (TWR_BACKOFF_MAX_MS + 1)));
 		}
-		int64_t wait = app_radio_duty_wait_ms(air);
+		int64_t wait = m_twr.duty_off ? 0 : app_radio_duty_wait_ms(air);
 
 		if (wait > 0) {
 			m_twr_st.duty_held++;
@@ -3019,7 +3020,7 @@ static void twr_work_handler(struct k_work *work)
 	}
 
 	uint32_t air = p2p_toa_ms(m_twr.sf, TWR_HDR_LEN + m_twr.pt_len + TWR_TAG_LEN);
-	int64_t wait = app_radio_duty_wait_ms(air);
+	int64_t wait = m_twr.duty_off ? 0 : app_radio_duty_wait_ms(air);
 
 	if (wait > 0 && m_twr.run_left) {
 		k_work_reschedule_for_queue(app_radio_work_q(), &m_twr_work, K_MSEC(wait));
@@ -3170,6 +3171,25 @@ static int cmd_twr_reps(const struct shell *sh, size_t argc, char **argv)
 	return ret;
 }
 
+/* Lab bench only (Hynek 2026-09-28): the ledger keeps charging, so `stats`
+ * still reports the air used per hour, but never holds a frame. */
+static int cmd_twr_duty(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2 && strcmp(argv[1], "off") == 0) {
+		m_twr.duty_off = true;
+	} else if (argc == 2 && strcmp(argv[1], "on") == 0) {
+		m_twr.duty_off = false;
+	} else if (argc == 2 && strcmp(argv[1], "reset") == 0) {
+		app_radio_duty_init(app_radio_duty_budget_ms(m_twr.freq));
+		m_twr_duty_freq = m_twr.freq;
+	} else if (argc != 1) {
+		shell_error(sh, "duty [on|off|reset]");
+		return -EINVAL;
+	}
+	shell_print(sh, "duty %s", m_twr.duty_off ? "off (not enforced)" : "on");
+	return 0;
+}
+
 static int cmd_twr_ack_drop(const struct shell *sh, size_t argc, char **argv)
 {
 	long v;
@@ -3233,8 +3253,8 @@ static int cmd_twr_stats(const struct shell *sh, size_t argc, char **argv)
 	static struct app_radio_status st;
 
 	app_radio_get_status(&st);
-	shell_print(sh, "duty used %u of %u ms/h", st.airtime_hour_ms,
-		    app_radio_duty_budget_ms(m_twr.freq));
+	shell_print(sh, "duty used %u of %u ms/h%s", st.airtime_hour_ms,
+		    app_radio_duty_budget_ms(m_twr.freq), m_twr.duty_off ? " (not enforced)" : "");
 	return 0;
 }
 
@@ -3247,6 +3267,8 @@ SHELL_SUBCMD_ADD((tower_bench), window, NULL, "window <ms>, 0 = formula", cmd_tw
 SHELL_SUBCMD_ADD((tower_bench), dlwin, NULL, "dlwin <ms>, 0 = formula", cmd_twr_dlwin, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), reps, NULL, "reps <1..10>", cmd_twr_reps, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), ack_drop, NULL, "ack_drop <n>", cmd_twr_ack_drop, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), duty, NULL, "duty [on|off|reset]: lab-only enforcement switch",
+		 cmd_twr_duty, 1, 1);
 SHELL_SUBCMD_ADD((tower_bench), fast, NULL, "fast <0|1>: TX->RX without radio sleep", cmd_twr_fast,
 		 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), gw_last, NULL, "gw_last <n>, 0 = accept any", cmd_twr_gw_last, 2,
