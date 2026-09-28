@@ -17,61 +17,90 @@
 extern "C" {
 #endif
 
-/* Frame geometry (data plane), doc/p2p.md §3. Single source of truth, shared
- * by app_radio_p2p.c and tests/p2p_logic.
+/* Frame layer: the TOWER radio frame, adopted verbatim (doc/plan/470 §4).
+ * Single source of truth, shared by app_radio_p2p.c and tests/p2p_logic:
  *
- * Header, all of it the CCM AAD (decision #22 added FCtrl, 11 -> 12 B):
- *   net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE)
- * frame_type says what the body is; FCtrl says what the frame asks for or
- * carries (LoRaWAN's MType / FCtrl split). The join frames carry the same
- * header with FCtrl = 0. */
-#define P2P_HDR_OFF_NET_ID   0
-#define P2P_HDR_OFF_DEV_ADDR 4
-#define P2P_HDR_OFF_TYPE     6
-#define P2P_HDR_OFF_FCTRL    7
-#define P2P_HDR_OFF_COUNTER  8
-#define P2P_HDR_LEN          12
+ *   ver_type(1) | flags(1) | src(4) | dest(4) | counter(4) | ciphertext | tag(8)
+ *
+ * ver_type = version(3 bits, 1) << 5 | type(5 bits); every multi-byte field is
+ * little-endian; the 14 B header is the CCM AAD. The nonce is src(4) |
+ * counter(4) | bulk_idx(3) | 0x0000 -- no direction byte, the two directions
+ * differ by src. Checked byte for byte against tests/ccm/tower_frame_kat.json
+ * and tower_join_kat.json. */
+#define TWR_VERSION         1
+#define TWR_HDR_LEN         14
+#define TWR_TAG_LEN         8
+#define TWR_NONCE_LEN       13
+#define TWR_TYPE_DATA       0
+#define TWR_TYPE_ACK        1
+#define TWR_FLAG_CONFIRMED  0x01
+#define TWR_ACK_PENDING     0x01 /* ACK payload flags */
+#define TWR_ACK_PAYLOAD_LEN 6    /* acked(4) rssi(1) flags(1); receivers accept >= 4 */
+#define TWR_ACK_FRAME_LEN   (TWR_HDR_LEN + TWR_ACK_PAYLOAD_LEN + TWR_TAG_LEN) /* 28 */
+#define TWR_ADDR_NONE       0x00000000u /* reserved; the JoinRequest's dest */
+#define TWR_ADDR_BROADCAST  0xFFFFFFFFu /* reserved */
 
-/* FCtrl bits. Reserved / RFU bits are sent as 0 and ignored on receipt; bits 7
- * (ADR) and 6 (ADRACKReq) are kept for phase 2. */
-#define P2P_FCTRL_CONFIRMED 0x01 /* uplink: the node wants an ACK in RX1 */
-#define P2P_FCTRL_TIME_REQ  0x02 /* uplink: the node wants the Ack's Unix-time tail */
-#define P2P_FCTRL_FPENDING  0x10 /* downlink: more is queued for this node */
-#define P2P_FCTRL_ACK       0x20 /* downlink: acknowledges the confirmed uplink */
-
-/* The header, decoded. */
-struct p2p_hdr {
-	uint32_t net_id;
-	uint16_t dev_addr;
-	uint8_t frame_type;
-	uint8_t fctrl;
+struct twr_hdr {
+	uint8_t type;
+	uint8_t flags;
+	uint32_t src;
+	uint32_t dest;
 	uint32_t counter;
 };
 
-#define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
-#define P2P_NONCE_LEN 13
-#define P2P_KEY_LEN   16
-#define P2P_DIR_TX    0x00
-#define P2P_DIR_RX    0x01
-#define P2P_LORA_MTU  255
-#define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 239 */
-#define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
+struct twr_ack {
+	uint32_t acked;
+	int8_t rssi; /* the gateway's RSSI of the acked frame; 0 if absent */
+	bool pending;
+};
 
-/* Join frame geometry (§5.3), shared with tests/p2p_logic so the time-on-air
- * and duty-budget rows there stop hard-coding 37/42.
+/* The lora profile's MTU (D14, P1 decision D-g): a frame of at most 100 B, so a
+ * 78 B payload -- the STICKER envelope (2 B) and a 76 B body, the LoRaWAN fPort
+ * payload including its APP_PROTO_VERSION byte (D-a). */
+#define P2P_FRAME_MAX   100
+#define TWR_PAYLOAD_MAX (P2P_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) /* 78 */
+#define P2P_ENV_LEN     2
+#define P2P_MAX_BODY    (TWR_PAYLOAD_MAX - P2P_ENV_LEN) /* 76 */
+#define P2P_KEY_LEN     16
+
+/* STICKER application envelopes (plan §8), the payload's first byte. */
+#define P2P_ENV_DATA 0x81 /* port(1) | LoRaWAN fPort payload */
+#define P2P_ENV_CTRL 0x91 /* { cmd(1) | len(1) | value(len) } x n */
+
+/* 0x81 ports: the LoRaWAN fPort values, so the central reuses its decoder. */
+enum p2p_port {
+	P2P_PORT_TELEMETRY = 2,
+	P2P_PORT_ALARM = 3,
+	P2P_PORT_RESPONSE = 85, /* answers and the announce */
+	P2P_PORT_COMMAND = 86,  /* downlink */
+};
+
+/* 0x91 command IDs (plan §8.2, final). P1 sends Capabilities, Hello, JoinReq,
+ * LinkCheckReq and TimeReq, and handles Capabilities, Detach, RejoinReq,
+ * JoinAccept, LinkCheckAns and TimeAns; any other ID is skipped by its length. */
+#define P2P_CTRL_CAPABILITIES 0x01
+#define P2P_CTRL_HELLO        0x02
+#define P2P_CTRL_DETACH       0x03
+#define P2P_CTRL_REJOIN_REQ   0x04
+#define P2P_CTRL_JOIN_REQ     0x07
+#define P2P_CTRL_JOIN_ACCEPT  0x08
+#define P2P_CTRL_LINK_CHECK   0x10
+#define P2P_CTRL_TIME         0x20
+
+#define P2P_CAPS_LEN           12 /* proto(1) mtu(1) profiles(1) cmds(8) power_class(1) */
+#define P2P_HELLO_LEN          9  /* session_id(4) reset_reason(1) fw(4) */
+#define P2P_LINK_CHECK_ANS_LEN 4  /* rssi(i8) snr(i8) margin(i8) gw_count(1) */
+#define P2P_TIME_ANS_LEN       9  /* unix(4) frac(1, 1/256 s) req_counter(4) */
+
+/* Join frames (plan §6.3): TOWER Data frames under join_key, 0x91 payloads.
  *
- * The join frames carry a FULL 16 B plain AES-CMAC tag, not the data plane's
- * truncated 4 B CCM tag -- they have no ciphertext and no nonce at all (see
- * P2P_JOIN_TAG_LABEL in app_radio_p2p.c).
- *
- * JoinRequest body: product_type(1) | proto_version(1) | dev_eui(8, MSB-first)
- * | fw_version(4). It was 10 B with a serial_number(4 BE) until #417 / GitLab
- * #73 took the serial off the air. JoinAccept is unchanged. */
-#define P2P_JOIN_TAG_LEN         16
-#define P2P_JOIN_REQ_BODY_LEN    14
-#define P2P_JOIN_ACCEPT_BODY_LEN 15
-#define P2P_JOIN_REQ_LEN         (P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
-#define P2P_JOIN_ACCEPT_LEN      (P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN)
+ * JoinReq value: product_type(1) | proto_version(1) | dev_eui(8, MSB-first) |
+ * fw_version(4: major, minor, patch, 0). JoinAccept value: net_id(4) |
+ * central_nonce(4) | rx_delay(1) | tx_power(1, 0 = none) | reserved(3). */
+#define P2P_JOIN_REQ_VALUE_LEN    14
+#define P2P_JOIN_ACCEPT_VALUE_LEN 13
+#define P2P_JOIN_REQ_LEN          (TWR_HDR_LEN + 3 + P2P_JOIN_REQ_VALUE_LEN + TWR_TAG_LEN) /* 39 */
+#define P2P_JOIN_ACCEPT_LEN (TWR_HDR_LEN + 3 + P2P_JOIN_ACCEPT_VALUE_LEN + TWR_TAG_LEN)    /* 38 */
 
 /* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
  *
@@ -81,134 +110,61 @@ struct p2p_hdr {
 #define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
-/* JoinRequests to send at the configured SF (sweep step 0) before moving on to
- * the next SF; every other step gets one. The configured SF is the overwhelmingly
- * likely answer, so it is worth a second shot at a lost frame before paying a
- * whole pass, but a third would just delay finding a Hub that really has moved. */
-#define P2P_JOIN_SF_ATTEMPTS 2
-
-/* Ack (0xFA) body layout, doc/p2p.md §6:
- *
- *   flags(1) | rssi(i8) | snr(i8) | [pending_frame_len(1) if bit0] |
- *   [unix_be32 if bit1]
- *
- * giving valid lengths 3, 4, 7 and 8. The body is NOT wire-versioned (P2P is
- * pre-deployment) -- it is self-describing by length, so the node derives the
- * shape from the received frame length and treats the flags as a refinement,
- * never as the authority. Shared with the pure parser and tests/p2p_logic. */
-#define P2P_ACK_FLAG_PENDING    0x01 /* bit 0: a downlink command is pending (B4) */
-#define P2P_ACK_FLAG_TIME       0x02 /* bit 1: 4-byte Unix time tail present (B5) */
-#define P2P_ACK_BODY_BASE_LEN   3    /* flags | rssi_i8 | snr_i8 */
-#define P2P_ACK_PENDING_LEN_LEN 1    /* optional on-air length of the pending 0x56 */
-#define P2P_ACK_TIME_LEN        4    /* optional big-endian Unix seconds */
-#define P2P_ACK_BODY_MAX_LEN                                                                       \
-	(P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN + P2P_ACK_TIME_LEN) /* 8 */
-
-/* JoinAccept `reserved(4)` -- the central's radio assignment for this session
- * (decision D3, doc/p2p.md §5.3):
- *
- *   channel_idx(1) | sf(1) | tx_power(1) | flags(1)
- *
- * This release honours `tx_power` only. `channel_idx` must be 0 (the
- * NorthBridge has one physical channel) and `sf` is a documented hook that the
- * node logs and ignores, because that same single receiver makes SF
- * network-wide rather than per-node -- it is provisioned out of band on both
- * ends. All-zero means "no assignment", which is what the central sends until
- * its own tx-power key is configured, so an unassigned session simply keeps
- * the node's own `p2p_tx_power`. */
+/* JoinAccept tx_power: 0 = no assignment (the node keeps p2p_tx_power), else
+ * within the config parameter's own range. */
 #define P2P_TX_POWER_MIN_DBM 2  /* mirrors app_config.yml::p2p_tx_power min */
 #define P2P_TX_POWER_MAX_DBM 22 /* ... and its max */
 
-struct p2p_radio_assign {
+/* A parsed, validated JoinAccept (p2p_parse_join_accept()). */
+struct p2p_join_accept {
+	uint32_t net_id;
+	uint32_t central_nonce;
+	uint8_t rx_delay_s;
 	bool tx_power_assigned;
 	int8_t tx_power_dbm; /* valid iff tx_power_assigned */
-	uint8_t sf_hint;     /* raw byte, 0 = none; logged and ignored (see above) */
 };
 
-/* Parsed Ack body, filled by p2p_parse_ack_body(). */
-struct p2p_ack_info {
-	uint8_t flags;      /* raw flags byte (P2P_ACK_FLAG_*) */
-	int8_t rssi;        /* central-measured uplink RSSI, dBm */
-	int8_t snr;         /* central-measured uplink SNR, dB */
-	bool time_present;  /* a valid Unix time tail was present */
-	uint32_t unix_time; /* wall-clock seconds (valid iff time_present) */
-	/* Total on-air length of the NEXT 0x56 the central will deliver
-	 * (12 B header + ciphertext + 4 B tag), so the node can size its RX1
-	 * window exactly instead of opening for a 255 B worst case. False when
-	 * the central is still on the pre-announcement 3/7-byte body -- the
-	 * node then falls back to the old worst case (doc/p2p.md §6). */
-	bool pending_len_present;
-	uint8_t pending_frame_len;
+/* One 0x91 entry (p2p_tlv_next()). `val` points into the parsed buffer. */
+struct p2p_tlv {
+	uint8_t cmd;
+	uint8_t len;
+	const uint8_t *val;
 };
 
-/* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
- * alternative to app_radio_lrw for deployments without LoRaWAN infrastructure,
- * selected at boot by `radio-mode p2p` via the app_radio facade. It
- * mirrors the slice of the app_radio_lrw public surface the radio-agnostic
- * layers (app_report / app_compose / app_alarm) need, but talks raw LoRa via
- * the Zephyr drivers/lora API instead of LoRaMac -- no join, no network
- * server, no per-DR payload budget.
+/* p2p_replay_check() verdicts on an authenticated gateway frame (plan §4). */
+#define P2P_RX_REPEAT 0 /* == last: a retransmission -- re-ACK, never re-deliver */
+#define P2P_RX_FRESH  1 /* > last: new */
+
+/* Raw-LoRa point-to-point transport (#118, doc/p2p.md), on TOWER frames since
+ * P1 of doc/plan/470. A drop-in alternative to app_radio_lrw for deployments
+ * without LoRaWAN infrastructure, selected at boot by `radio-mode p2p` via the
+ * app_radio facade. It talks raw LoRa through the Zephyr drivers/lora API.
  *
- * The payload layer is reused unchanged: app_compose builds the protobuf
- * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (a
- * 12 B cleartext header replacing the LoRaWAN fPort, see app_radio_p2p.c) and
- * AES-CCM encrypts+authenticates the body under the derived `session_key`
- * (doc/p2p.md §4, derived directly from the device's existing LoRaWAN OTAA
- * AppKey -- there is no manual p2p_key config parameter and no separate
- * join_key).
+ * The payload layer is reused unchanged: an uplink is the exact LoRaWAN fPort
+ * payload behind a 2 B data envelope (0x81 | port), sealed in a TOWER Data
+ * frame under the session_key the join derived from the device's LoRaWAN OTAA
+ * AppKey (plan §6.2). Link control (Capabilities, Hello, LinkCheck, Time,
+ * Detach, RejoinReq and the join itself) travels in the 0x91 TLV envelope.
  *
- * Phase 1 shipped deliberately unpaired/unACKed fire-and-forget: net_id/
- * dev_addr were the fixed pre-join value 0 (doc/p2p.md §5.3's own
- * JoinRequest convention), with no join/ACK handshake at all. Phase 2
- * (#118) adds the join handshake itself: on first start with no persisted
- * pairing state, the device sends JoinRequest, opens a bounded RX1 window
- * for JoinAccept, and on success persists net_id/dev_addr/session_key/
- * rx1_delay to NVS and switches the data plane on to session_key
- * (doc/p2p.md §5.3). app_radio_p2p_is_ready() (and therefore the report
- * cadence) only goes true once paired -- a device still unpaired when its
- * boot join window closes (§5.2, 120 s) does not stop: it hands the
- * episode to the slow backoff curve (§7) and keeps sweeping the spreading
- * factors, converging to about one pass an hour, so a node powered on
- * before its Hub joins on its own once the Hub appears. The confirmed-uplink Ack/retry (§6),
- * self-healing re-join (§7) and the Detach/RejoinRequest link-control
- * downlinks (§5.4) are all implemented. The optional listen mode
- * (CONFIG_SHELL) puts the radio in continuous RX for the two-STICKER bench
- * rig (doc/p2p.md §14) -- it decrypts and logs received frames but does not
- * dispatch COMMAND frames to app_cmd (that arrives with a later, real
- * anti-replay-protected command channel).
+ * A confirmed uplink is one TOWER confirmed send: up to 3 byte-identical
+ * transmissions, each followed by an ACK window sized from the SF. An ACK with
+ * PENDING keeps the receiver on for one gateway Data frame: a command (0x81
+ * port 86) or a control answer (0x91), auto-ACKed when it is confirmed.
+ *
+ * On first start with no persisted pairing the device joins (JoinRequest, a
+ * 1 s RX1 for the JoinAccept) and persists net_id/session_key; a pairing
+ * survives reboots. app_radio_p2p_is_ready() goes true once paired; an
+ * unanswered boot window (§5.2, 120 s) hands the episode to the slow backoff
+ * curve (§7) and the node keeps looking. The optional listen mode
+ * (CONFIG_SHELL) logs the TOWER headers heard on the channel.
  */
-
-/* Wire frame types -- mirror the LoRaWAN fPort values so the off-device
- * decoder logic is shared (doc/p2p.md §3.2). 0xF0-0xFE are reserved for
- * link control; all of them are handled now that Detach/RejoinRequest land
- * (§5.4/§7). Values are the wire contract shared with the central
- * (proximos-v2 control-radio, src/p2p/frame.rs::frame_type) -- never
- * renumber one without changing it there in the same release. */
-enum app_radio_p2p_frame_type {
-	APP_RADIO_P2P_FRAME_TELEMETRY = 2,
-	APP_RADIO_P2P_FRAME_ALARM = 3,
-	APP_RADIO_P2P_FRAME_RESPONSE = 85,
-	APP_RADIO_P2P_FRAME_COMMAND = 86, /* inbound (RX): downlink command, dispatched (B4) */
-	APP_RADIO_P2P_FRAME_JOIN_REQUEST = 0xF0,
-	APP_RADIO_P2P_FRAME_JOIN_ACCEPT = 0xF1,
-	APP_RADIO_P2P_FRAME_ACK = 0xFA,
-	/* Link control, both inbound (RX), both empty-bodied and authenticated
-	 * under session_key with the acknowledged uplink's counter (§5.4). */
-	APP_RADIO_P2P_FRAME_DETACH = 0xFD,
-	APP_RADIO_P2P_FRAME_REJOIN_REQUEST = 0xFE,
-};
-
-/* LoRa PHY max payload -- the largest a single P2P wire frame (header + body
- * + tag) can ever be. Keep in sync with P2P_FRAME_MAX in app_radio_p2p.c; sizes a
- * caller's dry-run compose buffer (app_radio_p2p_debug_compose() below). */
-#define APP_RADIO_P2P_FRAME_MAX_LEN 255
 
 /* Join/session state (#118 phase 2, doc/p2p.md §5.3) -- public so `ats radio
  * status` can report it via struct app_radio_p2p_info below. */
 enum p2p_link_state {
 	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
 	P2P_LINK_JOINING,  /* join attempts in progress: boot window, then slow backoff */
-	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
+	P2P_LINK_PAIRED,   /* net_id/session_key valid, data plane live */
 };
 
 /* Configure the radio from the p2p config group and set up the work queue.
@@ -242,19 +198,14 @@ bool app_radio_p2p_is_ready(void);
 /* Link state in the common app_radio terms (see enum app_radio_state). */
 enum app_radio_state app_radio_p2p_get_state(void);
 
-/* Current network SF and TX power (dBm; the central's assignment if any, else
- * p2p-tx-power). Always true. */
-bool app_radio_p2p_get_radio_params(uint8_t *sf, int8_t *tx_power_dbm);
-
-/* Fixed application-payload budget for one frame (LoRa MTU minus the P2P
- * header and AES-CCM tag). app_compose() bin-packs telemetry groups against
- * this. */
+/* Fixed application-payload budget for one frame (P2P_MAX_BODY: the frame MTU
+ * minus the TOWER header, tag and envelope). app_compose() bin-packs telemetry
+ * groups against this. */
 uint8_t app_radio_p2p_get_max_payload(void);
 
 /* The P2P TX backend of the common scheduler (app_radio, doc/plan/460 F4):
- * sends one frame -- answers as 0x55 RESPONSE, alarms as 0x57 ALARM, both
- * confirmed; telemetry as 0x52, confirmed on the N-th report -- under the duty
- * ledger and the one-confirmed-uplink-in-flight rule (F-P1-1). */
+ * sends one frame -- answers on port 85, alarms on 3, both confirmed;
+ * telemetry on 2, confirmed on the N-th report. */
 extern const struct app_radio_backend app_radio_p2p_backend;
 
 /* Register the link-ready kick fired by app_radio_p2p_start() so app_report can
@@ -265,32 +216,31 @@ void app_radio_p2p_register_ready_cb(void (*cb)(void));
 void app_radio_p2p_suspend(void);
 
 /* Snapshot for `ats radio status` (#118) -- the P2P analogue of struct
- * app_radio_lrw_info, but the raw-LoRa protocol has no per-frame link-quality
- * feedback (no ADR/margin/gateway count), so this only surfaces
- * pairing/session state. */
+ * app_radio_lrw_info. */
 struct app_radio_p2p_info {
 	enum p2p_link_state link_state;
-	uint32_t net_id;   /* 0 pre-pairing */
-	uint16_t dev_addr; /* 0 pre-pairing */
-	uint8_t rx1_delay_s;
-	/* The spreading factor the radio is tuned to RIGHT NOW. It is not
-	 * necessarily p2p_spreading_factor: a join episode sweeps, and a join
-	 * that landed on a swept SF persists it. This is what tells a bench
-	 * whether a node found the network's SF or is still looking. */
-	uint8_t sf;
+	uint32_t addr;   /* this node's TOWER address, low32(DevEUI) */
+	uint32_t net_id; /* the gateway address; 0 pre-pairing */
+	uint8_t rx_delay_s;
+	uint8_t sf; /* the spreading factor the radio is tuned to */
 	/* Session TX power: the value the central assigned in JoinAccept when
 	 * tx_power_assigned, otherwise the node's own p2p_tx_power config. */
 	bool tx_power_assigned;
 	int8_t tx_power_dbm;
-	uint32_t fcnt;              /* next data-plane TX counter */
+	uint32_t fcnt;              /* next TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
-	uint32_t ack_retry_pending; /* 1: a confirmed frame awaits its Ack retry (app_radio) */
-	/* B1: RSSI/SNR the central reported in the last Ack (its measurement of
-	 * this device's uplink). last_ack_valid is false until the first Ack of
-	 * the current session. */
+	uint32_t gw_last;           /* highest gateway counter accepted this session */
+	uint32_t ack_retry_pending; /* 1: a confirmed frame awaits its retry (app_radio) */
+	/* The gateway's RSSI of this node's last acknowledged uplink (the TOWER
+	 * ACK carries no SNR); false until the first ACK of the session. */
 	int8_t last_ack_rssi;
-	int8_t last_ack_snr;
 	bool last_ack_valid;
+	/* The last LinkCheckAns: the central's view of this node's uplink. */
+	bool lc_valid;
+	int8_t lc_rssi;
+	int8_t lc_snr;
+	int8_t lc_margin;
+	uint8_t lc_gw_count;
 	/* False means radio_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
@@ -318,35 +268,26 @@ void app_radio_p2p_forget_pairing(void);
 
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
- * radio for continuous RX and starts async receive -- each frame is
- * filtered by net_id and logged with RSSI/SNR/frame_type/counter.
- * JoinRequest/JoinAccept bodies are cleartext (see app_radio_p2p.c's
- * P2P_JOIN_TAG_LABEL comment) and are logged as-is; any other frame_type is
- * a session_key-encrypted data-plane frame this diagnostic listener has no
- * key for and cannot decode. enable=false stops it and returns to TX
- * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
- * send_alarm) is refused with -EBUSY while listening. */
+ * radio for continuous RX and logs the TOWER header, RSSI and SNR of every
+ * frame heard (it has no key to open them with). enable=false stops it and
+ * returns to TX config. Returns 0 or a negative errno. Uplinks are refused
+ * with -EBUSY while listening. */
 int app_radio_p2p_listen(bool enable);
 
-/* Clear the persisted pairing (net_id/dev_addr/session_key/rx1_delay) so the
- * next boot starts a fresh JoinRequest. NEVER touches the dev_nonce
- * anti-replay counter -- see dnonce_persist()'s comment in app_radio_p2p.c for why
- * a re-join must never risk presenting a dev_nonce the central already saw.
- * Mirrors app_radio_lrw_reset_nvm(): settings only, reboot required to take
- * effect. Returns 0 or a negative errno. */
+/* Clear the persisted pairing (net_id/session_key/rx_delay) so the next boot
+ * starts a fresh JoinRequest. NEVER touches the dev_nonce anti-replay counter
+ * -- see dnonce_persist()'s comment in app_radio_p2p.c for why a re-join must
+ * never risk presenting a dev_nonce the central already saw. Mirrors
+ * app_radio_lrw_reset_nvm(): settings only, reboot required to take effect.
+ * Returns 0 or a negative errno. */
 int app_radio_p2p_unjoin(void);
 
-/* Debug: override the live rx1_delay used for the next TX's RX window,
- * without persisting it or requiring a re-join (doc/p2p.md §13). A real
- * JoinAccept overwrites it back to the paired value. */
-void app_radio_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s);
-
-/* Debug: make the next `count` confirmed-uplink Acks appear dropped (as if
- * the central never replied), to exercise the retry path (doc/p2p.md §6)
+/* Debug: make the next `count` valid ACKs appear lost (as if the gateway never
+ * replied), to exercise the net-layer repetitions and app_radio's retry
  * deterministically without a real RF outage. 0 disables the injection. */
 void app_radio_p2p_debug_drop_acks(uint32_t count);
 
-/* Debug: build (frame + encrypt) one TELEMETRY frame under the CURRENT
+/* Debug: build (frame + encrypt) one telemetry frame under the CURRENT
  * session state WITHOUT transmitting or advancing the frame counter -- lets
  * a bench tech inspect the exact bytes that would go on air. Runs on the P2P
  * work queue like a real send (app_compose.c's "solely on m_work_q"
@@ -365,44 +306,53 @@ int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, 
 uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
 uint32_t rx1_preamble_catch_ms(int sf);
 uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
-void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t frame_type,
-		 uint8_t dir);
-void p2p_hdr_put(uint8_t *frame, const struct p2p_hdr *h);
-void p2p_hdr_get(const uint8_t *frame, struct p2p_hdr *h);
-int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
-		      uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
-		      uint32_t counter, uint8_t *frame);
-int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
+uint32_t p2p_twr_window_ms(int sf, uint8_t frame_len);
+int p2p_replay_check(uint32_t last, uint32_t counter);
+int p2p_tlv_next(const uint8_t *buf, size_t len, size_t *off, struct p2p_tlv *tlv);
+int p2p_parse_join_accept(const uint8_t *val, size_t len, uint32_t hdr_src,
+			  struct p2p_join_accept *out);
+uint32_t p2p_time_at(uint32_t unix_s, uint8_t frac, int64_t elapsed_ms);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
-bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
-void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
-uint8_t p2p_uplink_fctrl(bool confirmed);
-void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
-int p2p_join_adopt_sf(uint8_t joined_sf);
+void twr_hdr_put(uint8_t out[TWR_HDR_LEN], const struct twr_hdr *h);
+int twr_hdr_get(const uint8_t *frame, size_t frame_len, struct twr_hdr *h);
+void twr_nonce(uint8_t nonce[TWR_NONCE_LEN], uint32_t src, uint32_t counter);
+int twr_seal(const uint8_t key[16], const struct twr_hdr *h, const uint8_t *pt, size_t pt_len,
+	     uint8_t *frame, size_t frame_size, size_t *frame_len);
+int twr_open(const uint8_t key[16], const uint8_t *frame, size_t frame_len, struct twr_hdr *h,
+	     uint8_t *pt, size_t pt_size, size_t *pt_len);
+int twr_parse_ack(const uint8_t *pt, size_t pt_len, struct twr_ack *ack);
 void p2p_test_join_setup(int cfg_sf);
-void p2p_test_allow_join_sweep(void);
 void p2p_test_link_reset(void);
 void p2p_test_join_stop(void);
 void p2p_test_set_session_tx_power(bool assigned, int8_t dbm);
 void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
+void p2p_test_set_session(uint32_t net_id, const uint8_t key[P2P_KEY_LEN]);
 void p2p_test_tx_reset(void);
-void p2p_test_drop_old_session(void);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);
 void p2p_test_join_restart(void);
 int64_t p2p_test_join_pending_ms(void);
-void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
-		       enum p2p_link_state *state);
+void p2p_test_get_join(uint8_t *sf, bool *slow, uint8_t *rejoin, enum p2p_link_state *state);
 void p2p_test_set_join_started_at(int64_t at_ms);
-void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
+void p2p_test_derive_join_key(uint8_t out[P2P_KEY_LEN]);
 void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);
+int p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
+int p2p_test_open_join_accept(uint32_t dev_nonce, const uint8_t *frame, size_t len);
+void p2p_test_set_dev_nonce(uint32_t v);
+uint32_t p2p_test_get_dev_nonce(void);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);
+uint32_t p2p_test_get_gw_last(void);
+int p2p_test_uplink(const uint8_t *pt, size_t pt_len, bool confirmed);
+void p2p_test_ctrl_downlink(const uint8_t *val, size_t len);
+uint32_t p2p_test_ctrl_pending(void);
+void p2p_test_ctrl_run(void);
+void p2p_test_set_time_req(uint32_t counter, int64_t done_ms);
 #endif /* defined(CONFIG_ZTEST) */
 
 #ifdef __cplusplus

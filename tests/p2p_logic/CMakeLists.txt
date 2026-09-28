@@ -10,22 +10,25 @@ list(APPEND DTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 # NOTE: not APP_DIR -- find_package(Zephyr) overwrites APP_DIR internally.
 set(APP_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../app)
 set(KCONFIG_ROOT ${APP_SRC_DIR}/Kconfig)
-set(SOFT_SE_DIR $ENV{ZEPHYR_BASE}/../modules/lib/loramac-node/src/peripherals/soft-se)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(test_app_p2p_logic)
 
+# The module's own path, not one derived from ZEPHYR_BASE: a build may point
+# ZEPHYR_MODULES at a loramac-node checkout outside the west workspace.
+set(SOFT_SE_DIR ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/peripherals/soft-se)
+
 target_include_directories(app PRIVATE ${APP_SRC_DIR}/src ${SOFT_SE_DIR})
 
-# The shared join KAT fixture (tests/ccm/p2p_join_kat.json, #417 / GitLab #73)
-# has fw_version 1.4.0.0 among its inputs, and the JoinRequest tag covers it.
-# This suite compiles app_radio_p2p.c directly rather than through app/CMakeLists.txt,
-# so it does not inherit the firmware's version definitions and app_version.h
-# would fall back to 0.0.0. Pin the fixture's values here: they are inputs to a
-# fixed vector, not a claim about what the firmware version is.
+# The TOWER join KAT (tests/ccm/tower_join_kat.json) has fw_version 1.5.0 among
+# its inputs, and the JoinRequest tag covers it. This suite compiles
+# app_radio_p2p.c directly rather than through app/CMakeLists.txt, so it does not
+# inherit the firmware's version definitions and app_version.h would fall back
+# to 0.0.0. Pin the fixture's values here: they are inputs to a fixed vector,
+# not a claim about what the firmware version is.
 target_compile_definitions(app PRIVATE
   APP_VERSION_MAJOR=1
-  APP_VERSION_MINOR=4
+  APP_VERSION_MINOR=5
   APP_VERSION_PATCH=0
 )
 target_sources(app PRIVATE

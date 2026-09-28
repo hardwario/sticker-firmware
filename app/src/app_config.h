@@ -52,6 +52,11 @@ enum app_config_radio_mode {
 	APP_CONFIG_RADIO_MODE_P2P = 2,
 };
 
+enum app_config_p2p_modulation {
+	APP_CONFIG_P2P_MODULATION_LORA = 0,
+	APP_CONFIG_P2P_MODULATION_FSK = 1,
+};
+
 enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
 	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
@@ -143,6 +148,7 @@ struct app_config {
 	int p2p_frequency;
 	int p2p_spreading_factor;
 	int p2p_tx_power;
+	enum app_config_p2p_modulation p2p_modulation;
 };
 
 extern struct app_config g_app_config;

@@ -1,5 +1,9 @@
 # P2P end-to-end test plan — STICKER firmware vs. Proximos central
 
+> **Superseded (2026-09-28, #470).** This plan tests the old P2P wire (12 B header, `0xF0`/`0xF1`
+> join, `0xFA` Ack body, `tests/p2p` gw-sim), which was abandoned for the TOWER protocol. Kept
+> for history; the TOWER test plan is `doc/plan/470 - TOWER protocol as the P2P transport.md` §14.
+
 Acceptance test for the P2P downlink protocol (PR #408 items B1–B5, B2, B3) against the
 Proximos `control-radio` central runtime (proximos-v2 MR!30 items S1–S4). The topology is the
 **real STICKER firmware ↔ northbridge modem ↔ Proximos central**, not two STICKERs — the
