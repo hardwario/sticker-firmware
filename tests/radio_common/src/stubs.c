@@ -36,6 +36,9 @@ uint32_t g_budget_error_seq;
 size_t g_budget_error_cap;
 int g_budget_error_calls;
 int g_alarm_flush_calls;
+/* app_alarm_flush_pending() answers true this many times (#462). */
+int g_alarm_pending_left;
+int g_alarm_pending_calls;
 
 int g_cmd_handle_calls;
 int g_cmd_transport;
@@ -70,6 +73,8 @@ void stubs_reset(void)
 	g_budget_error_cap = 0;
 	g_budget_error_calls = 0;
 	g_alarm_flush_calls = 0;
+	g_alarm_pending_left = 0;
+	g_alarm_pending_calls = 0;
 	g_cmd_handle_calls = 0;
 	g_cmd_transport = -1;
 	g_cmd_out_cap = 0;
@@ -239,6 +244,16 @@ int64_t app_clock_network_time_at_ms(void)
 void app_alarm_flush_held(void)
 {
 	g_alarm_flush_calls++;
+}
+
+bool app_alarm_flush_pending(void)
+{
+	g_alarm_pending_calls++;
+	if (g_alarm_pending_left > 0) {
+		g_alarm_pending_left--;
+		return true;
+	}
+	return false;
 }
 
 /* ---- app_history and the HistoryFrame codec (F3c) ---- */

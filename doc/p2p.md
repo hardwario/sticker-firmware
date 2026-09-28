@@ -747,14 +747,17 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   handed to `post_cmd_work_handler()`, which fires
   `POST_CMD_DRAIN_WAIT_SEC` (8 s) later and re-defers, up to
   `POST_CMD_DRAIN_MAX_DEFERRALS` (6) times, while the `0x55` is still queued
-  or duty-cycle-parked (`app_radio_tx_answer_pending()`), or a confirmed
-  frame awaits its Ack retry (`app_radio_ack_pending()`, T2c). So a `Reboot` reboots only after
+  or duty-cycle-parked (`app_radio_tx_answer_pending()`), a confirmed
+  frame awaits its Ack retry (`app_radio_ack_pending()`, T2c), or an alarm
+  frame is queued or in flight (`app_radio_tx_alarm_pending()`, #462). An
+  alarm batch still collecting in its `alarm-limit` window is sent at once
+  (`app_alarm_flush_pending()`). So a `Reboot` reboots only after
   its response has actually been acknowledged, and a
   `SetParam{…, save=true}` cannot lose the staged config to a reboot that
   raced its own answer. The wait is bounded on purpose: a permanently failing
   TX must not postpone a commanded action forever, so after 6 deferrals it
-  runs anyway — the same bargain LoRaWAN makes (`app_radio_lrw.c`, identical
-  constants and log strings). `lrw_join` means "join the network again now" on
+  runs anyway. LoRaWAN runs the same executor (`app_radio.c`, one path for
+  both radios since #460 F3). `lrw_join` means "join the network again now" on
   whichever radio runs (`app_radio_rejoin()`, #448): on P2P a fresh join
   handshake without a reboot, exactly like the shell `join`; the new session
   announces itself (below). `lrw_reset` is honoured where the LoRaWAN stack is

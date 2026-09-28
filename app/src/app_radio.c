@@ -921,6 +921,17 @@ uint32_t app_radio_tx_answer_free(void)
 	return k_msgq_num_free_get(&m_answer_q);
 }
 
+bool app_radio_tx_alarm_pending(void)
+{
+	return k_msgq_num_used_get(&m_alarm_q) > 0 ||
+	       (m_cur_valid && m_cur_kind == APP_RADIO_FRAME_ALARM);
+}
+
+uint32_t app_radio_tx_alarm_free(void)
+{
+	return k_msgq_num_free_get(&m_alarm_q);
+}
+
 size_t app_radio_tx_answer_cap(size_t buf_size)
 {
 	size_t cap = MIN(buf_size, (size_t)APP_RADIO_TX_SLOT_SIZE);
@@ -1012,6 +1023,10 @@ static bool tx_queued_step(void)
 		}
 		m_cur_valid = true;
 		m_cur_retries = 0;
+		if (m_cur_kind == APP_RADIO_FRAME_ALARM) {
+			/* A slot is free: a batch held for room may go now (#462). */
+			app_alarm_flush_held();
+		}
 	}
 
 	struct app_radio_frame f = {
@@ -2078,25 +2093,32 @@ static void page_stream_kick(void)
 /* A deferred action waits for its answer: 8 s covers a send and its receive
  * windows; a duty-cycle-held or retrying answer takes longer, so the wait is
  * re-checked, at most POST_CMD_DRAIN_MAX_DEFERRALS times -- a TX that keeps
- * failing must not postpone the commanded action forever. */
+ * failing must not postpone the commanded action forever. The action (mostly a
+ * reboot) also waits for the alarm frames still queued and for an alarm batch
+ * that can go now, which is sent early instead of at the end of its window
+ * (#462). */
 #define POST_CMD_DRAIN_WAIT_SEC      8
 #define POST_CMD_DRAIN_MAX_DEFERRALS 6
 
 static enum app_cmd_action m_post_cmd_action;
 static uint8_t m_post_cmd_deferrals;
 
-static bool answer_undelivered(void)
+static bool tx_undelivered(void)
 {
-	return app_radio_tx_answer_pending() || app_radio_ack_pending();
+	return app_radio_tx_answer_pending() || app_radio_tx_alarm_pending() ||
+	       app_radio_ack_pending();
 }
 
 static void post_cmd_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if (answer_undelivered() && m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
+	bool alarm_batch = app_alarm_flush_pending();
+
+	if ((alarm_batch || tx_undelivered()) &&
+	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
 		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
+		LOG_WRN("Post-command action %d deferred: frames still undelivered (%u/%u)",
 			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
 			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
 		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,

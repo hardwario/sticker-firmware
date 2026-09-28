@@ -173,8 +173,9 @@ static uint32_t m_window_base_unix;
 static bool m_window_base_synced; /* m_window_base_unix is absolute UTC, not uptime */
 static int64_t m_window_start_ms;
 static bool m_window_open;
-/* The batch waits for the radio: link down, or the boot/join announce is
- * still going out (Info -> settings-info -> data, 2026-09-27). m_lock. */
+/* The batch waits for the radio: link down, the boot/join announce is still
+ * going out (Info -> settings-info -> data, 2026-09-27), or its pages do not
+ * fit the free alarm slots (#462). m_lock. */
 static bool m_batch_held;
 static struct k_work_delayable m_alarm_batch_work;
 
@@ -335,6 +336,8 @@ static void alarm_batch_flush(void)
 		}
 		return;
 	}
+	bool was_held = m_batch_held;
+
 	m_batch_held = false;
 
 	size_t cap = ALARM_FRAME_MAX;
@@ -400,6 +403,23 @@ static void alarm_batch_flush(void)
 		laid += n;
 	}
 
+	/* #462: a burst must not overflow the radio's alarm queue (4 frames). While
+	 * queued frames still drain, the batch waits held and later edges join it
+	 * (fewer, fuller frames); app_radio flushes it when it takes the next alarm
+	 * frame. An empty queue takes the batch whatever its size: there is no
+	 * frame left to release it. */
+	uint32_t room = app_radio_tx_alarm_free();
+
+	if (pages > room && room < APP_RADIO_TX_QUEUE_DEPTH) {
+		if (!was_held) {
+			LOG_INF("Alarm batch held: %u page(s), %u alarm slot(s) free", pages,
+				(unsigned)room);
+		}
+		m_batch_held = true;
+		m_window_open = true;
+		return;
+	}
+
 	for (uint8_t p = 0, first = 0; p < pages; first += page_n[p], p++) {
 		size_t len = 0;
 		int ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
@@ -438,6 +458,19 @@ void app_alarm_flush_held(void)
 	if (held) {
 		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
 	}
+}
+
+bool app_alarm_flush_pending(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	bool waiting = m_batch_count > 0 && app_radio_data_hold_ms() == 0;
+
+	k_mutex_unlock(&m_lock);
+	if (waiting) {
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
+	}
+	return waiting;
 }
 
 /* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold

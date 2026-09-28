@@ -539,6 +539,15 @@ void app_radio_tx_kick(void);
 /* An answer is still queued or being sent (the post-command drain). */
 bool app_radio_tx_answer_pending(void);
 
+/* An alarm batch frame is still queued or being sent (the post-command drain,
+ * #462). */
+bool app_radio_tx_alarm_pending(void);
+
+/* Free alarm slots, APP_RADIO_TX_QUEUE_DEPTH when none is queued. A batch that
+ * needs more waits held in app_alarm; taking the next alarm frame releases it
+ * (app_alarm_flush_held(), #462). */
+uint32_t app_radio_tx_alarm_free(void);
+
 /* A confirmed frame went out without its Ack and waits for a retry: nothing
  * else is sent meanwhile, and a post-command reboot waits too (T2c). */
 bool app_radio_ack_pending(void);

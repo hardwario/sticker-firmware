@@ -26,6 +26,8 @@ extern uint32_t g_budget_error_seq;
 extern size_t g_budget_error_cap;
 extern int g_budget_error_calls;
 extern int g_alarm_flush_calls;
+extern int g_alarm_pending_left;
+extern int g_alarm_pending_calls;
 
 /* app_cmd, scripted for the downlink path (F3): app_cmd_handle() answers
  * g_cmd_resp_len bytes {0xa0, request byte 0, ...} with g_cmd_action; a page
