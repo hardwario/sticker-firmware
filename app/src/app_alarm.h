@@ -78,6 +78,12 @@ uint32_t app_alarm_activation_seq(void);
  * for it (app_radio_data_hold_ms()). No-op when nothing is held. */
 void app_alarm_flush_held(void);
 
+/* app_radio, before a post-command action (#462): send an alarm batch that is
+ * still collecting (alarm-limit window, or held for queue room) now, so the
+ * action's reboot does not drop it. Returns true while such a batch waits and
+ * the radio takes data; false when none waits or the link is down. */
+bool app_alarm_flush_pending(void);
+
 #ifdef __cplusplus
 }
 #endif
