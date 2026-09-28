@@ -84,6 +84,13 @@ static void die(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/* End of the boot carousel (k_uptime_get() ms); the periodic status blinks in
+ * main() wait for it rather than queue up behind it. */
+static int64_t m_carousel_end_ms;
+
+/* Boot self-test of all three LEDs, 3 s. It plays in the LED thread; main()
+ * goes on with the init chain meanwhile, and an NFC tap cuts it short
+ * (app_led_hold), so neither the phone nor the boot waits for it. */
 static void play_carousel_boot(void)
 {
 	struct app_led_play_req req = {
@@ -101,8 +108,16 @@ static void play_carousel_boot(void)
 			     {.type = APP_LED_CMD_END}},
 		.repetitions = 1};
 
+	int64_t len_ms = 0;
+
+	for (int i = 0; req.commands[i].type != APP_LED_CMD_END; i++) {
+		if (req.commands[i].type == APP_LED_CMD_DELAY) {
+			len_ms += req.commands[i].duration;
+		}
+	}
+
+	m_carousel_end_ms = k_uptime_get() + len_ms;
 	app_led_play(&req);
-	k_sleep(K_MSEC(5000));
 }
 
 /* #414: before an NFC-triggered reboot, let the mailbox session's result finish
@@ -333,12 +348,6 @@ int main(void)
 
 	play_carousel_boot();
 
-#if defined(CONFIG_WATCHDOG)
-	/* The carousel just blocked for 5 s of the 10 s IWDG window; feed again so
-	 * the init chain below gets the full budget rather than the remainder. */
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
@@ -455,8 +464,9 @@ int main(void)
 		/* While a phone is interacting over NFC, the NFC interaction LED (app_nfc.c)
 		 * owns the indicator — suppress the periodic status/heartbeat blinks below so
 		 * they do not fight it. Alarm polling still runs (its latch/queue side
-		 * effects), only its LED is gated like the rest. */
-		bool led_handled = app_nfc_session_active();
+		 * effects), only its LED is gated like the rest. The same holds while the
+		 * boot carousel is still playing. */
+		bool led_handled = app_nfc_session_active() || k_uptime_get() < m_carousel_end_ms;
 
 		/* Config NVS failed to load at boot (H-4): the device is running on
 		 * compile-time defaults with its identity + provisioning gone. Signal it
