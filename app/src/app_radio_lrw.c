@@ -1104,7 +1104,11 @@ static void lrw_time_landed(void)
 		LOG_ERR_CALL_FAILED_INT("lorawan_device_time_get", ret);
 		return;
 	}
-	(void)app_clock_set_network_time(gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS);
+	uint32_t unix_time = gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
+
+	if (app_clock_set_network_time(unix_time) == 0) {
+		LOG_INF("RTC synced from network: unix=%u", unix_time);
+	}
 }
 
 const struct app_radio_backend app_radio_lrw_backend = {

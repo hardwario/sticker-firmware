@@ -85,8 +85,6 @@ int app_clock_set_network_time(uint32_t unix_s)
 		return ret;
 	}
 
-	LOG_INF("RTC synced from network: unix=%u", unix_s);
-
 	/* Arm the periodic re-sync once, after the first network time. */
 	if (m_network_time_at_ms == 0) {
 		k_timer_start(&m_resync_timer, K_SECONDS(RESYNC_PERIOD_SEC),

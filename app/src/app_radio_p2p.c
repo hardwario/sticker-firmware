@@ -1493,7 +1493,12 @@ P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter
 	 * LoRaWAN on LORAWAN_TIME_UPDATED). An Ack without the tail, or a 0x56 in
 	 * its place, leaves it pending for the next confirmed uplink. */
 	if (ack->time_present) {
-		(void)app_clock_set_network_time(ack->unix_time);
+		/* A central may send the tail on every Ack: log only an asked-for one. */
+		bool wanted = app_radio_time_wanted();
+
+		if (app_clock_set_network_time(ack->unix_time) == 0 && wanted) {
+			LOG_INF("RTC synced from network: unix=%u", ack->unix_time);
+		}
 		app_radio_time_event();
 	}
 
