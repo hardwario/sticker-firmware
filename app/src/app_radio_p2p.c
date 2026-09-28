@@ -906,6 +906,14 @@ static bool p2p_warning_step(void)
 /* struct app_radio_backend.rejoin: the self-healing re-join (§7) on the slow
  * policy. Refused while unprovisioned: no JoinRequest can succeed under an
  * all-zero app_key (§4) or without a valid address. */
+/* Only the lora PHY profile exists so far; fsk (TOWER-native GFSK) is plan
+ * #470 P5. Every path that would transmit refuses rather than send LoRa to an
+ * fsk network. */
+static bool phy_is_supported(void)
+{
+	return g_app_config.p2p_modulation == APP_CONFIG_P2P_MODULATION_LORA;
+}
+
 static int p2p_tx_rejoin(bool forced)
 {
 	ARG_UNUSED(forced);
@@ -916,6 +924,10 @@ static int p2p_tx_rejoin(bool forced)
 	}
 	if (!addr_is_valid()) {
 		LOG_ERR("P2P self-heal refused: radio_deveui gives no valid address");
+		return -ENOTSUP;
+	}
+	if (!phy_is_supported()) {
+		LOG_ERR("P2P self-heal refused: p2p-modulation fsk is not supported yet");
 		return -ENOTSUP;
 	}
 	LOG_WRN("P2P: self-healing re-join (§7)");
@@ -2618,6 +2630,13 @@ void app_radio_p2p_start(void)
 		return;
 	}
 
+	if (!phy_is_supported()) {
+		LOG_ERR("P2P not started: p2p-modulation fsk is not supported yet. Set "
+			"p2p-modulation lora, then reboot.");
+		m_disabled = true;
+		return;
+	}
+
 	if (m_link_state == P2P_LINK_PAIRED) {
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
 		 * a session survives normal power cycles). */
@@ -2723,6 +2742,10 @@ void app_radio_p2p_rejoin(void)
 	}
 	if (!addr_is_valid()) {
 		LOG_ERR("P2P rejoin refused: radio_deveui gives no valid address");
+		return;
+	}
+	if (!phy_is_supported()) {
+		LOG_ERR("P2P rejoin refused: p2p-modulation fsk is not supported yet");
 		return;
 	}
 

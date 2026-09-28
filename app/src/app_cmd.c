@@ -620,6 +620,7 @@ static const struct {
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},
+	{DUMP_SECTION_P2P, 4, 2, false, false},
 	// END GENERATED DUMP_FIELDS
 };
 
