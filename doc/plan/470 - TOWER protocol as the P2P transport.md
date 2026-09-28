@@ -160,49 +160,73 @@ for `lora`, both wire-neutral (they change timing/frequency, not bytes):
 TOWER addresses are 32-bit and chosen by the node. STICKER: `addr = low 32 bits of DevEUI`
 (D6 — verify uniqueness across the HARDWARIO DevEUI range; fall back to FNV-1a-32(DevEUI)),
 shown in `ats radio status`. The central knows every DevEUI, so it detects collisions,
-which TOWER cannot. The gateway address comes from the Northbridge identity the same way.
+which TOWER cannot. The gateway address is the network's `net_id`, learnt in the JoinAccept (§6.3).
 
-### 6.2 Per-node key — derived, never transmitted
+### 6.2 Enrollment and keys (decided 2026-09-28)
+
+Enrollment stays **as it is today** (proximos-v2, verified 2026-09-28): the user adds the
+device in the Portal form (serial, DevEUI, AppKey, `radio = p2p`). The Portal runs on the Hub
+(`fiber-portal.service`) and does not store the AppKey; it sends a `node-add` command to the
+Hub central, which keeps one registry for both carriers
+(`/data/proximos/radio/node_registry.json`, 0600, `radio: lorawan|p2p`). The central
+verifies the JoinRequest and derives and persists the session
+(`/data/proximos/radio/p2p/sessions.db`). `net_id` is a Hub-local random 4 B value created
+with the P2P transport and persisted on the Hub. The device joins with a **JoinRequest**. There are no new
+config parameters (`p2p-gw-addr` and `p2p-key-epoch` are dropped).
 
 ```
-node_key = AES-CMAC(radio_appkey, "HIO-TWR-KEY" ‖ 0x01 ‖ DevEUI(8, MSB-first) ‖ key_epoch(2 LE) ‖ zero pad to 32 B)
+join_key    = AES-CMAC(radio_appkey, "HIO-TWR-JOIN" ‖ 0x01 ‖ DevEUI(8, MSB-first) ‖ zero pad to 32 B)
+session_key = AES-CMAC(radio_appkey, "HIO-TWR-SES"  ‖ 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ DevEUI(8) ‖ zero pad)
 ```
 
-- Rooted in `radio_appkey`, as the current P2P session key is (doc/p2p.md §4): the central
-  already has the AppKey registry, so there is **no enrollment step and the key is never on
-  the air**.
-- The central computes the same key and installs it on the gateway with the existing TOWER
-  op `MgmtOp::NodeAdd{addr, key, name, flags}` — TOWER's cable-pairing path. **On the wire
-  it is simply a static per-peer TOWER key**, so this is fully compatible.
-- `key_epoch` (persisted, default 0) is the rekey lever: bumping it (§7.5) gives a disjoint
-  nonce space, so TX counter and replay lanes reset — TOWER's own re-key rule.
+- Same construction as the current P2P session key (doc/p2p.md §4, PR #404), with TOWER
+  labels for domain separation. The AppKey and the session key never go on air.
+- A new session key on every join, as in LoRaWAN OTAA. Rekey = rejoin or a new AppKey, so no
+  `key_epoch`.
 - Zero-AppKey / zero-DevEUI guard stays as today: the radio refuses to start.
 
-### 6.3 Finding the gateway — keyed join (upstream extension E4)
+### 6.3 Join in TOWER frames — no wire change
 
-The node knows its key but not the gateway address, band/channel or the time. TOWER's
-3-way JOIN answers exactly that, but it seals everything under the **public**
-`PAIRING_KEY` and ships the node key inside `JOIN_RESP` — anyone listening in the window
-gets it. Proposal, reusing the same frame types:
+The join handshake of the current P2P (`send_join_request()` / `recv_join_accept()`, `PAIRED`
+state persisted in NVS, no rejoin on reboot) is kept and only re-framed:
 
-- `JOIN_REQ` with a new flag **`KEYED`** (bit 1, currently unused), `dest = 0`, sealed under
-  `node_key` instead of `PAIRING_KEY`, body = `addr(4)` as today.
-- A gateway that has `addr` in its peer table opens it with that peer's key; a stock TOWER
-  dongle tries `PAIRING_KEY`, fails CCM and ignores it — harmless.
-- `JOIN_RESP` (`KEYED`, under `node_key`) = `challenge(4) ‖ unix_time(4) ‖ assignment(4)`
-  — **no key**. Gateway address = header `src`.
-- `JOIN_CONFIRM` unchanged (`addr ‖ challenge`), under `node_key`.
+- **JoinRequest** = TOWER Data frame, `src = addr`, `dest = 0`, sealed under `join_key`,
+  payload `0x91` cmd `JoinReq` = `product_type ‖ proto_version ‖ dev_nonce(4)` (the body of
+  today's P2P JoinRequest). The CCM tag replaces today's CMAC tag.
+- The Northbridge has no key for an unknown `src`: it **forwards the frame raw** to the
+  central (no ACK; the join needs no 20 ms answer).
+- The central finds the device by `addr` → DevEUI, verifies under its `join_key`, allocates
+  `central_nonce`, derives `session_key`, installs it on the Northbridge (`NodeAdd{addr,
+  session_key, last_seen = 0}`) and queues the **JoinAccept**.
+- **JoinAccept** = TOWER Data frame, `src = net_id`, `dest = addr`, sealed under `join_key`,
+  payload `0x91` cmd `JoinAccept` = `net_id(4) ‖ central_nonce(4) ‖ rx_delay(1)`, sent a
+  fixed delay after the JoinRequest (today's RX1 model).
+- From then on the gateway address in every frame is **`net_id`** (the network, not an
+  individual Northbridge, as in the current P2P).
+- A stock TOWER dongle cannot open these frames (wrong key) and ignores them.
+- The keyed-join extension E4 (§11) stays as the later native form of this handshake.
 
-This buys mutual authentication (only a party holding `node_key` can answer) with zero key
-material on air — the property the current P2P join has, expressed in TOWER frames. It
-replaces JoinRequest/JoinAccept (`0xF0`/`0xF1`).
+### 6.3.1 Scope of the Hub-held AppKey — multi-gateway
 
-The node persists `gw_addr` (+ assignment); a reboot does not re-join (like P2P `PAIRED`).
+With the AppKey registry on the Hub, the **network is one Hub**. It may have several
+Northbridges on that Hub's central (the central dedups and picks the best one for the
+downlink), but **not several Hubs**. A node that roams to a second Hub cannot join there,
+and the second Hub cannot ACK it.
 
-**Stage 1 (T5) uses no join frames at all:** `p2p-gw-addr` is configured over shell (and
-later NFC, Manager-App release needed) = TOWER's `Provision` op; the key is derived (§6.2)
-and the central installs it with `NodeAdd`. The keyed join is a wire change and comes with
-the native stage (P5/P6).
+**Multi-Hub (multi-gateway across Hubs) needs one of:**
+
+1. **Keys in a shared join server (recommended):** a Portal instance above the Hubs (cloud,
+   or one designated Hub) is the join server (holds the AppKeys,
+   verifies JoinRequests, derives session keys) and pushes the session key + counters to
+   every Hub of the network. Hubs hold only session keys, never AppKeys. New joins need the
+   Portal online; joined nodes keep working offline.
+2. **AppKeys on all Hubs of the network:** the Portal syncs the AppKey registry to every
+   Hub. It works offline, but every Hub holds every AppKey of the network (larger exposure
+   when a Hub is stolen or compromised), and the Hubs must share counters/dedup (session
+   state sync between Hubs).
+
+Either way the network needs one `net_id` shared by its Hubs, assigned by the join server
+instead of today's Hub-local random value.
 
 ### 6.4 Legacy TOWER pairing
 
@@ -220,12 +244,12 @@ the native stage (P5/P6).
 
 | Layer | Holds | Does |
 |---|---|---|
-| Portal | DevEUI, `radio_appkey`, `key_epoch`, config, Hub assignment | source of truth, downlink commands |
-| Hub central | registry DevEUI ↔ addr, derived `node_key`s, persisted counters | derives keys, `NodeAdd` to the Northbridge, decodes `0x81`, answers `0x91`, builds downlinks |
+| Portal (on the Hub) | device metadata; the AppKey only passes through (`node-add`) | UI, enrollment, downlink commands |
+| Hub central | registry DevEUI ↔ addr + AppKey, session keys, persisted counters, `net_id` | verifies joins, derives session keys, `NodeAdd` to the Northbridge, decodes `0x81`, answers `0x91`, builds downlinks |
 | Northbridge | RAM only: addr → `node_key`, `last_seen`, downlink queue | CCM open/verify, ACK ≤ turnaround, `PENDING`, DL TX, forwards plaintext to the central |
 | STICKER | `radio_appkey` + DevEUI (NFC provisioning) | derives its own `node_key` |
 
-- The AppKey never leaves the Portal/Hub/STICKER; the Northbridge only ever sees derived keys.
+- The AppKey never leaves the Hub central and the STICKER; the Northbridge only ever sees session keys.
 - **Northbridge power loss:** it boots with an empty registry and ACKs nothing (no key, no
   ACK). Nodes retry, count the frame as undelivered and keep it in history. The Northbridge
   announces `boot` on the console link; the central re-sends `NodeAdd` for every node with
@@ -393,7 +417,7 @@ fragments. Replaces the per-feature paging for P2P.
   gateway; decodes port-2/3/85 with the existing Rust decoder; `QueuePush` for commands;
   MQTT surface unchanged.
 - **Security trade-off (accepted with T3):** a compromised Northbridge leaks the keys of its
-  nodes. Mitigation: RDP, per-hub key sets (`key_epoch` rotation after a hub is lost).
+  nodes. Mitigation: RDP, per-hub key sets (new AppKeys / rejoin after a Hub is lost).
 - **Multi-gateway (later):** all gateways hold the keys; one "home" gateway per node ACKs and
   owns the replay lane, others only forward `Uplink`s for dedup at the central.
 
@@ -440,8 +464,7 @@ refused, we keep it **off by default** behind a flag bit so the core stays compa
 | `p2p-frequency` | 863–870 MHz | shell | `fsk` default 868.1 (TOWER ch0) |
 | `p2p-spreading-factor` | 7..12 | shell | `lora` only |
 | `p2p-tx-power` | 2..22 dBm | shell | ≤ 14 dBm ERP |
-| `p2p-gw-addr` | u32, 0 = discover (keyed join) | shell (NFC later) | new |
-| `p2p-key-epoch` | u16 | read-only (radio command to bump) | new |
+| gateway address | `net_id` from the JoinAccept | read-only, `ats radio status` | persisted with the session |
 | address | derived from DevEUI | read-only, `ats radio status` | |
 
 New proto_ids need the manual collision check (memory: proto_id collision gotcha).
@@ -451,7 +474,7 @@ New proto_ids need the manual collision check (memory: proto_id collision gotcha
 | Phase | Content | Exit criterion |
 |---|---|---|
 | **P0 — LoRa physical verification (go/no-go, T7)** | TOWER frames + TOWER timing on SX126x LoRa, STICKER node ↔ **Northbridge** gateway (bench builds on both, §13.1) | M1–M8 pass; §5 timing table replaced by measured values |
-| **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); static `p2p-gw-addr` + derived key; the P0 Northbridge bench gateway grows the `0x81`/`0x91` codec | STICKER ↔ Northbridge (bench RTT bridge to the central or a host script): telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
+| **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); join in TOWER frames (§6.3) with the central's session key; the P0 Northbridge bench gateway grows the `0x81`/`0x91` codec | STICKER ↔ Northbridge (bench RTT bridge to the central or a host script): telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
 | **P2 — Hub gateway** | Northbridge TOWER gateway net layer (lora) + console link (D5); central registry, `NodeAdd`, `0x81` decode, `0x91` handling | STICKER lora → Hub → MQTT decoded; `TimeAns`/`LinkCheckAns` from the central |
 | **P3 — Downlink & lifecycle** | pending/queue, commands/responses, chaining, supervision on `LinkCheckAns`, `RadioParamReq`, `Detach`/`RejoinReq`, `DevStatus` | Portal GetParam/SetParam E2E over P2P |
 | **P4 — Upstream** (from P1 in parallel) | U1, U2, E3 now; N1, E4 drafted with the P1–P3 experience | E3 agreed; N1/E4 proposals submitted |
@@ -617,7 +640,7 @@ re-measured (release budget `0x34000`).
   CRC/whitening fallback.
 - **Upstream latency or refusal** — extensions stay flag-gated; core compatibility holds.
 - **Gateway duty in `lora`** — sparse confirmation + 869.525 MHz; sizes fleet per gateway.
-- **Keys on the Hub** (T3) — RDP, `key_epoch` rotation, documented threat model.
+- **Keys on the Hub** (T3) — RDP, rejoin / new AppKey after a Hub loss, documented threat model; multi-Hub needs §6.3.1.
 - **72 B payload** — compose/paging budgets must be re-checked for every message type
   (cf. the 11 B tier audit).
 - **Flash** — net layer + FSK path + bulk against the release budget; measure in P2.
