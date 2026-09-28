@@ -10,7 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
-| LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
+| LED | **Changed** — red and green are plain GPIO again, as in v1.4.0. The PWM path from #301 is removed, mainly to save ~2 KB of flash; it also froze in Stop mode on release builds, so the heartbeat and the boot fades were broken. The boot carousel is the v1.4.0 hard blink (§3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
@@ -95,58 +95,52 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 
 ---
 
-## 3. LED PWM primitives (#301)
+## 3. LED: back to GPIO, PWM removed (#301)
 
-Red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) status LEDs gained a hardware-PWM
-path (`app.overlay`'s new `pwmleds` node) alongside their existing plain-GPIO
-control, so they can be dimmed and smoothly faded instead of a hard on/off
-blink. Yellow (PA4) has no timer channel and stays GPIO-only. "On" now drives
-the PWM at a ~20% duty (`LED_DIM_PERCENT`) instead of full brightness — about
-1/5 the LED current while staying clearly visible.
+#301 (PR #406) moved red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) onto hardware
+PWM, dimmed "on" to 20 % duty and faded them in the boot carousel. That path is
+removed again. All three LEDs are plain GPIO, as in v1.4.0.
 
-New `app_led` primitives (`app_led.h`):
+**Why we dropped PWM:**
 
-| Function | Behaviour |
-|---|---|
-| `app_led_fade(channel, from%, to%, duration_ms)` | Smooth PWM ramp (~5 ms step), red/green only, blocking |
-| `app_led_heartbeat(channel)` | One pulse: 0→100% over 80 ms, 100→0% over 120 ms (200 ms total) |
-| `app_led_idle_config()` / `_get()` / `_pulse()` | Runtime-only (not persisted) style knob for a periodic indicator: `off` / `gpio` (short blink) / `pwm` (heartbeat), any colour |
+- **Flash, the main reason.** PWM served only a cosmetic fade in the boot carousel,
+  and it cost about 2 KB of flash. Removing it saves:
 
-Debug-build shell (`ats led fade|heartbeat|idle`) exercises all three directly
-on hardware, for comparing visual behaviour and power live.
+  | Image | Flash | RAM |
+  |---|---|---|
+  | Release, `v1.5.0` (53966b92) | −1944 B (165428 → 163484) | −64 B |
+  | Debug, `v1.5.0` (53966b92) | −3712 B (223888 → 220176) | −64 B |
+  | Release, `feat-p2p` (647acf21) | −1960 B (182916 → 180956) | 0 |
 
-**Deliberately not wired into the app.** The original goal (#301) was to drive
-the LoRaWAN-off idle indicator with the PWM heartbeat by default, once per
-3 s. A review of the software fade implementation found a concrete power risk
-before that could ship: `app_led_fade()`'s 5 ms step granularity is *shorter*
-than this SoC's own ~9 ms Stop-mode wake cost (`power-consumption.md` §5,
-`stm32_clock_control_init` re-running on every Stop0/1/2 exit) — so a periodic
-200 ms/3 s heartbeat would likely keep the MCU out of deep sleep for most of
-every pulse, an estimated 100+ µA average adder on top of this board's
-~74–119 µA measured idle floor (`power-consumption.md` §1). That is exactly
-the risk #301 flagged as the merge blocker, and it remains unmeasured on real
-hardware.
+- **It did not work on release builds.** Release runs with `CONFIG_PM=y`, and every
+  `k_sleep()` enters Stop (Stop0 min-residency 100 µs). In Stop, TIM2 and TIM16 have no
+  clock, so the PWM output freezes at whatever phase it was in.
+  - The release heartbeat (5 ms green at 20 % duty) was mostly invisible, and the boot
+    fades stuttered.
+  - Every red or green indication outside an NFC session was unreliable. An NFC session
+    holds a PM lock, which hid the problem there.
+  - Debug builds (`CONFIG_PM=n`) hid it too; the #406 HW check ran on a debug image.
+    Found on 5722 and 0413 (release, 2026-09-28).
+- **Power.** A GPIO keeps its level in Stop, so the CPU sleeps while an LED is lit.
+  Working PWM would need the CPU out of Stop for as long as an LED is on (Sleep, mA-level,
+  instead of Stop, µA-level). The 20 % dimming would not win that back.
+- **One LED path.** The alternative was GPIO for every indication, with the pins switched
+  to the timer only for the boot fade. It would have kept the ~2 KB, needed runtime
+  pinmux switching (`PINCTRL_NON_STATIC`) and a PM lock during the carousel. It would
+  also have kept two LED paths that behave differently between builds, which is how this
+  bug hid. Rejected.
 
-Rather than ship the periodic path unvalidated, this PR ships **only the
-primitives**: the LoRaWAN-off branch keeps its original single yellow GPIO
-blink, unchanged. This closes out #301's own documented fallback option
-("restrict PWM to interactive moments... keep a plain GPIO blink for the idle
-heartbeat"). Doing the PPK2 measurement to settle whether a periodic heartbeat
-is viable after all is unscheduled future work — not tracked by an open issue
-for now.
+**What changed:**
 
-**First event-driven consumer: the boot carousel.** `main.c`'s
-`play_carousel_boot()` — the one-shot red/yellow/green sequence played once
-at boot, before the app's normal idle behaviour starts — now fades red and
-green in/out (`app_led_fade`) instead of a hard on/off blink; yellow keeps its
-plain GPIO blink (no timer channel). This is exactly the kind of caller the
-power concern above doesn't apply to: it runs once per boot, not on a 3 s
-idle cadence, and the CPU is already fully awake for NFC/radio bring-up during
-that window regardless. Per-colour timing (500/250/500/250/1500 ms) is
-unchanged from the previous hard-blink carousel, so the overall boot animation
-length is identical — only the red/green transitions are now smooth. HW-
-confirmed on the bench (J-Link EDU Mini 801053709, SN 2162165627): red and
-green fade smoothly, yellow blinks as before.
+- `app_led.c`, `app_led.h` and `app.overlay` are the pre-#406 versions again.
+  - Gone: `app_led_fade()`, `app_led_heartbeat()`, `app_led_idle_config()` / `_get()` /
+    `_pulse()`, the `pwmleds` node, and the TIM2 and TIM16 PWM nodes.
+  - `CONFIG_PWM` is off.
+- The debug shell loses `ats led fade|heartbeat|idle`; `ats led cycle|switch` stay.
+- The boot carousel is the v1.4.0 hard blink: red 500 ms, yellow 500 ms, green 1500 ms,
+  with 250 ms gaps.
+- The heartbeat is the v1.4.0 one again: a 5 ms green blink every 3 s at full brightness
+  (#390: about +6 µA average, accepted).
 
 ---
 
