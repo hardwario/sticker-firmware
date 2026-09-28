@@ -239,9 +239,21 @@ This is option 1 with the join server on a designated Hub:
 Rules this topology needs (P6, with multi-gateway):
 
 - **One ACKer per node ("home gateway").** If every Northbridge that hears a confirmed
-  frame ACKs it after the same 20 ms, the ACKs collide on air. The central assigns each node
-  a home Northbridge (best RSSI; `0x91` `HomeGateway`, cmd 0x06 reserved). Only the home
-  ACKs; the others just forward. After repeated misses the central moves the home.
+  frame ACKs it after the same 20 ms, the ACKs collide on air. The server (central Hub)
+  chooses which gateway answers **by the signal strength each gateway reports**:
+  - **A — chosen (D17, 2026-09-28): home gateway from history.** Every gateway forwards
+    each frame with RSSI/SNR. The server keeps per-node statistics and assigns the best
+    gateway as the node's home (`0x91` `HomeGateway`, cmd 0x06 reserved; installed on the
+    gateways with `NodeAdd`/flags). Only the home ACKs, locally within the 20 ms
+    turnaround; the others just forward. The home moves when another gateway is
+    consistently better (hysteresis) or after repeated missed ACKs. Keeps the fast ACK and
+    TOWER timing; reacts to a sudden change one frame late (the node retransmits).
+  - **B — not chosen: per-frame arbitration.** Every gateway reports the frame; the server
+    waits for all reports, picks the strongest and tells only that gateway to ACK. The round
+    trip (Northbridge → RPi → LAN → server → back) does not fit 20 ms, so the turnaround
+    would grow to ~100–200 ms (like LoRaWAN RX1). The node listens longer on every confirmed
+    frame (energy) and the timing is no longer TOWER-compatible. Rejected for that reason.
+  - Downlinks: the server always picks the gateway by the latest uplink (not time-critical).
 - **Disjoint gateway TX counters.** All Northbridges send as `src = net_id` under the same
   per-node session key, so their counters must never overlap (nonce reuse otherwise). The
   central hands each Northbridge its own reserved counter block.
@@ -653,6 +665,7 @@ re-measured (release budget `0x34000`).
 | D13 | PR: reuse #410 or a new PR | **Decided: new PR #470**; #410 closed as superseded |
 | D14 | MTU per profile | **Decided 2026-09-28:** `fsk` 96 B frame (TOWER); `lora` ≤ ~100 B frame (SF12 fits the SX12xx 4 s TX timeout, §17) |
 | D15 | Key ownership and gateway power loss | **Decided 2026-09-28:** keys only on the Hub (§6.6); the Northbridge holds derived keys in RAM, no flash copy |
+| D17 | Which gateway ACKs in a multi-Hub network | **Decided 2026-09-28: A** — the server assigns a home gateway per node from the reported RSSI/SNR history; the home ACKs locally. B (per-frame server arbitration, ~100–200 ms turnaround) documented as not chosen (§6.3.1) |
 | D16 | Fast TX→RX fork call (hardwario/sticker-zephyr#2) | **Decided 2026-09-28:** merge |
 
 ## 16. Cross-repo impact
