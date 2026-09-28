@@ -79,7 +79,9 @@ The NB firmware and the Hub software are flashed together. There is no version
 negotiation, no capability bits and no backward compatibility:
 - no legacy (keyless P2P modem) path in the central;
 - no rules for older or newer images;
-- rollback = flashing the previous NB image **and** the previous Hub image together.
+- rollback = flashing the previous NB image **and** the previous Hub image together. TOWER
+  sessions live in their own file (`p2p/tower.db`), so the previous Hub image finds its
+  `sessions.db` untouched; data-wise it is still a flag day (nodes rejoin).
 
 `fw_ver` in `EVT_BOOT` / `GET_INFO` is for diagnostics only. The central logs a mismatch
 against the image it was built with, but never switches behaviour by it.
@@ -89,15 +91,21 @@ against the image it was built with, but never switches behaviour by it.
 `GET_INFO` returns everything about the NB in one response (it also replaces a separate
 stats command):
 
-| Group | Fields |
+| Group | Fields (LE, in byte order) |
 |---|---|
-| Identity | `fw_ver u8[3]`, `git_sha u32`, `reset_cause u8`, `build_flags u8` (b0 debug, b1 RTT bridge) |
-| Clock | `uptime_ms u64`, `now_ms u64` (modem clock at RSP build = the `TimeAns` anchor) |
+| Identity | `fw_ver u8[3]`, `git_sha u8[4]` (first 4 commit bytes, display order), `reset_cause u8`, `build_flags u8` (b0 `BENCH_RTT_BRIDGE`, b1 debug) |
+| Clock | `now_ms u64` (NB `k_uptime_get()`: the `TimeAns` anchor, and a drop means a reboot, §6.3) |
 | State | `state u8` (0 `BOOT`, 1 `CONFIGURED`, 2 `GATEWAY`), `net_id u32`, `turnaround_ms u8`, `dl_gap_ms u8` |
-| Radio | `modulation u8` (0 lora), `freq_hz u32`, `sf u8`, `bw u8`, `cr u8`, `preamble u16`, `tx_power_dbm i8`, `radio_flags u8` |
-| Counters (u32, since boot) | `rx_total`, `rx_fresh`, `rx_dup`, `rx_replay`, `rx_mic_fail`, `rx_unknown_src`, `rx_join_fwd`, `rx_not_for_us`, `rx_bad_hdr`, `tx_total`, `acks_sent`, `acks_late`, `acks_suppressed`, `dl_sent`, `dl_delivered`, `dl_not_delivered`, `dl_expired`, `link_crc_err`, `evt_resent` |
+| Radio | `modulation u8` (0 lora) ‖ the `SET_RADIO_CONFIG` body (`freq_hz u32, sf u8, bw u8, cr u8, preamble u16, tx_power_dbm i8, flags u8`) |
+| Errors | `err_flags u32`, `last_err_code u8`, `last_err_age_s u32` |
+| Counters | 25 × `u32` since boot: `rx_total, rx_fresh, rx_dup, rx_replay, rx_mic_fail, rx_unknown_src, rx_join_fwd, rx_not_for_us, rx_bad_hdr, radio_crc_err, radio_hdr_err, rx_overrun, rx_rearm_fail, tx_total, tx_radio_err, acks_sent, acks_late, acks_suppressed, dl_sent, dl_delivered, dl_not_delivered, dl_expired, link_crc_err, link_err, evt_resent` |
+| Timing | `ack_turnaround_last_us u16`, `ack_turnaround_max_us u16` |
 | Duty | `airtime_ms_last_hour u32` |
-| Resources | `peers u16`, `peers_max u16`, `queue_used u16`, `queue_max u16`, `evt_ring_used u8`, `evt_ring_max u8`, `ctr_next u32`, `ctr_last u32` |
+| Tables | `peers u16, peers_max u16, queue_used u16, queue_max u16, evt_ring_used u8, evt_ring_max u8, ctr_next u32, ctr_last u32` |
+
+171 B after the status byte. `EVT_BOOT` = `fw_ver[3] ‖ git_sha[4] ‖ reset_cause` (8 B).
+Byte layout frozen by the Hub controller 2026-09-28; the Hub's NB status document
+(`northbridge_diagnostics.md`) shows these fields.
 
 The layout is fixed for the image (flag day). The field order above is the byte order on
 the link.
@@ -175,7 +183,7 @@ sends `last_seen = 0` without the flag.
 
 | ID | Name | Body | Delivery | Note |
 |---|---|---|---|---|
-| `0x80` | `EVT_BOOT` | `fw_ver[3], git_sha u32, reset_cause` | best-effort | the table, queue and block are empty; the host runs §6.2 |
+| `0x80` | `EVT_BOOT` | `fw_ver[3], git_sha[4], reset_cause` (8 B) | best-effort | the table, queue and block are empty; the host runs §6.2 |
 | `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | ring | `dest == 0` (JoinReq) or an unknown `src`; no ACK |
 | `0x82` | `EVT_TX_DONE` | `tx_id, status, t_actual_ms` | best-effort | the `TX_SCHEDULE` outcome only |
 | `0x83` | `EVT_LOG` | ASCII | best-effort | debug builds only |
