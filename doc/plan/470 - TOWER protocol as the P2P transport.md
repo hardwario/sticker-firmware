@@ -359,9 +359,15 @@ envelopes (T5), one per frame:
 ### 8.1 Data envelope `0x81`
 
 ```
-0x81 ‖ port(1) ‖ protobuf body (≤ 72 B with the 96 B frame)
+0x81 ‖ port(1) ‖ LoRaWAN fPort payload (APP_PROTO_VERSION 0x01 ‖ protobuf)
 port: 2 telemetry · 3 alarm · 85 response/announce · 86 command (downlink) — the current frame_type values
 ```
+
+- The body after `port` is **byte-identical to the LoRaWAN fPort payload**, version byte
+  included (P1 decision D-a), so the central reuses its decoder and `app_cmd_handle()` is
+  unchanged. Budget: `fsk` 96 B frame → 70 B body; `lora` ≤ 100 B frame → 76 B body (D14).
+  The `first_uplink` vector in `tower_frame_kat.json` predates this and carries no version
+  byte; it tests the frame layer only and stays as is (sha pinned).
 
 - 72 B per frame: responses are already paged for 64 B (#425); `app_compose` splits
   telemetry against a budget, which becomes 72 B for P2P (larger in `lora` if D14).
