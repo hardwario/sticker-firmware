@@ -59,7 +59,7 @@ the MCU, and everything durable is in the central.
   | 5 | `INTERNAL` |
   | 6 | `NO_SPACE` |
   | 7 | `NOT_FOUND` |
-  | 8 | `UNSUPPORTED` (proposed: unknown command) |
+  | 8 | `UNSUPPORTED` (unknown command; the host also accepts `BAD_PARAM` or a timeout from a v1 image) |
 
 - Command timeout on the host: 500 ms.
 - Retransmission of commands: only for idempotent commands (§5, *Idempotent* column).
@@ -80,10 +80,11 @@ the MCU, and everything durable is in the central.
   - `2` = the TOWER gateway (this document).
 - The central picks the adapter by that byte, so the NB image is the switch and flashing
   the previous image is the rollback.
-- The v2 `GET_INFO` response appends:
+- `GET_INFO` already carries the modem clock (`now_ms u64` after the version bytes, the
+  `TimeAns` clock anchor). The v2 response appends, after the existing diag and turnaround
+  tails:
 
   ```
-  now_ms u64          (modem clock at RSP build time → clock anchor for TimeAns)
   caps u32            (bit0 TWR gateway, bit1 EVT_ACK delivery §4.1, bit2 KEEP_NEWER §4.2,
                        bit3 FSK (P5), bit4 multi-gateway HOME handling (P7))
   peers_max u16, queue_max u16, evt_ring u8
@@ -108,21 +109,27 @@ busy or restarting), the data is lost for good. Today's keyless modem does not h
 problem, because the ACK comes from the central.
 
 **Rule.**
-- **Which events:** `EVT_TWR_UPLINK`, `EVT_RX` (joins) and `EVT_TWR_TX` go into an NB
-  event ring of `evt_ring` entries (≥ 32).
+- **Which events:** `EVT_TWR_UPLINK` and `EVT_TWR_TX` go into an NB event ring of
+  `evt_ring` entries (≥ 32, ~3.3 KB). `EVT_RX` (joins) stays out: the NB never ACKs a join,
+  so the air retry already covers a lost one.
 - **Numbering:** these events use the frame `seq` as a delivery sequence number.
 - **Host ack:** the host confirms cumulatively with `0x18 TWR_EVT_ACK {seq u8}`, meaning
   "everything up to and including `seq` was processed". It sends the ack after persisting,
   at the latest every 100 ms or every 8 events.
-- **Resend:** after 300 ms without an ack, the NB sends the unconfirmed events again, in
-  order. The host deduplicates by `(addr, counter)`, which it already does.
-- **Backpressure to the air:** when the ring is full, the NB **stops ACKing** fresh
-  confirmed frames (`acks_suppressed` counter) until there is room again.
+- **Resend:** go-back-N from the oldest unacked event, at most one pass per 300 ms.
+- **Host dedup (MUST):** by delivery `seq` (window 128 behind the last acked) for every ring
+  event — `EVT_TWR_TX` has no counter — on top of the `(addr, counter)` dedup.
+- **Backpressure to the air (MUST):** when the ring is full, the NB **drops the fresh frame
+  completely** — no ACK **and no `last_seen` update** (`acks_suppressed` counter). Updating
+  `last_seen` would make the node's net-layer reps hit the `==` rule and get a re-ACK for data
+  the host never got.
   - The STICKER then sees no ACK, keeps the data (retry ladder, history) and sends it
     again later.
   - An outage of the host service therefore costs no data, only a delay, the same as an
     NB outage (#470 §6.6).
-- `EVT_BOOT`, `EVT_TWR_CTR_LOW`, `EVT_TX_DONE` and `EVT_LOG` stay best-effort; they carry
+- Residual window (accepted, same class as D15): an NB reset after the ACK but before the
+  host ack loses those frames (RAM).
+- `EVT_BOOT`, `EVT_RX`, `EVT_TWR_CTR_LOW`, `EVT_TX_DONE` and `EVT_LOG` stay best-effort; they carry
   the current delivery `seq` without advancing it, so the cumulative ack stays unambiguous.
 
 ### 4.2 `last_seen` merge on restore (`KEEP_NEWER`)
@@ -211,12 +218,16 @@ Then:
 
 ### 6.4 Join
 
-`EVT_RX (dest 0)` → the central verifies it and derives the session → `TX_SCHEDULE`
-(JoinAccept at `t_rx + rx_delay`) → after `RSP OK`, persist the session →
-`TWR_NODE_ADD{last_seen = 0}` (a new key, without `KEEP_NEWER`).
+`EVT_RX (dest 0)` → the central verifies it and derives the session → **persist the
+session** → `TWR_NODE_ADD{last_seen = 0}` (a new key, without `KEEP_NEWER`) →
+`TX_SCHEDULE` (JoinAccept at `t_rx + rx_delay`).
 
-The first uplink under the new session gets an ACK only after `TWR_NODE_ADD`. `rx_delay`
-= 1 s, so the host has enough time.
+- Persisting first means a central crash cannot leave the node with a session the Hub lacks.
+- The cost: if the JoinAccept is refused or missed, the node stays on its old session
+  while the Hub already has the new one. At most one extra rejoin follows, since a new
+  `dev_nonce` replaces the session.
+- The NB has the key before the node can send its first uplink under it, so there is no
+  race.
 
 ### 6.5 Uplink and downlink
 
@@ -279,9 +290,15 @@ Hubs):
 
 Everything in HC's frozen set holds. §4 adds:
 - NB: an event ring + resend, the `acks_suppressed` backpressure, the `KEEP_NEWER` merge,
-  `UNSUPPORTED`, the v2 part of `GET_INFO`;
-- central: the `TWR_EVT_ACK` send after persisting, `KEEP_NEWER` on restore, dedup of
-  resent events (already there).
+  `UNSUPPORTED`, the v2 tail of `GET_INFO`;
+- central: the `TWR_EVT_ACK` send after persisting, `KEEP_NEWER` on restore, dedup by
+  delivery `seq`.
+
+Reviewed by the Hub controller 2026-09-28: §4.1 and §4.2 are agreed with the fixes above,
+at ~2 h for the NB and the central in parallel, after the first E2E. The normative copy is
+folded into proximos-v2 `plan/control/radio/p2p_tower_gateway.md`. Golden vectors
+`nb_link_golden.json` are generated from the central's Rust codec and consumed verbatim by
+the NB native_sim.
 
 Timing: in P2 right after the first E2E (H5), before P3; the estimate is the Hub
 controller's.
