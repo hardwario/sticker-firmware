@@ -457,7 +457,12 @@ a go/no-go.
 - **Bench constants:** LoRa 868.1 MHz, BW125, CR4/5, preamble 8, P2P sync word; gateway addr
   `0x4E420001`, node addr = low32(DevEUI), static key `000102…0f`; node TX counter advanced
   before TX (U1).
-  Northbridge RTT telnet on port 19031 (19021 is the STICKER).
+  Northbridge RTT on 127.0.0.1:19031 (Hub controller's JLinkGDBServer); 19021/19030 are the
+  STICKER's rttt on 822005110.
+- **Gateway slot gating:** flashing the TOWER gateway takes Hub P2P down for all nodes.
+  Needed first: Nodes test schedules the slot and ends its runs, Hub radio switched off P2P
+  (Portal), Hynek approves the NB flash directly in the Hub controller's chat. Rollback =
+  NB 0.2.2 / 0.2.1 hex, then back to P2P.
 - **Node FW:** throw-away bench branch off `feat-p2p`, layered on `debug_p2p_bench.conf` (P2P
   without LoRaWAN — RAM budget). Minimal code: TOWER frame codec + CCM nonce, static key and
   addresses, **node role** only, shell `ats tower …` (`tx <len> [c]`, `stats`, `sf`,
