@@ -65,7 +65,7 @@ the MCU, and everything durable is in the central.
   range (e.g. `tx_power_dbm` outside the board PA range, no clamping), `TWR_QUEUE_PUSH` with
   `item`, `ttl_s` or `len` = 0, `TX_CANCEL` after the transmission has started.
 
-- Command timeout on the host: 500 ms.
+- Command timeout on the host: 800 ms (covers the bench RTT bridge).
 - Retransmission of commands: only for idempotent commands (§5, *Idempotent* column).
 - Bad CRC: drop the frame, resync on the next `0x7E`, count `crc_err`.
 
@@ -192,7 +192,7 @@ sends `last_seen = 0` without the flag.
 | `0x83` | `EVT_LOG` | ASCII | best-effort | all builds, rate-limited |
 | `0x84` | `EVT_TWR_UPLINK` | `t_ms u64, rssi i16, snr i8, frame_flags u8, addr u32, counter u32, ack u8, len u8, plaintext` | ring | fresh frames only; `ack`: 0 none, 1 sent, 2 sent + `PENDING`, 3 late, 4 no counter, **5 suppressed (ring full, §4.1)** |
 | `0x85` | `EVT_TWR_TX` | `addr, item, outcome, gw_counter, node_ack_counter, ack_rssi` | ring | outcome `DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER` |
-| `0x86` | `EVT_TWR_CTR_LOW` | `next u32, last u32` | best-effort, repeated every 10 s until a new block | below 25 % left; fail-closed when the block is used up |
+| `0x86` | `EVT_TWR_CTR_LOW` | `next u32, last u32` | best-effort, once per block; the host also checks `ctr_next`/`ctr_last` in every `GET_INFO` | below 25 % left; fail-closed when the block is used up |
 
 `snr` is in quarter dB (SX126x native, `snr_q`).
 
