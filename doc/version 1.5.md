@@ -39,6 +39,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
 | LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
 | LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. See §31. |
+| LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 
 ---
 
@@ -283,18 +284,18 @@ builds the same protobuf snapshots and `app_report` owns the same
 over LoRaWAN. Full design in `doc/p2p.md`; the acceptance matrix is
 `doc/p2p-e2e-test-plan.md`.
 
-**Setup** is three commands and a save. `lrw_appkey` is the root of the whole
+**Setup** is three commands and a save. `radio_appkey` is the root of the whole
 transport (there is no separate P2P key — the central already has it from
 ordinary OTAA provisioning), and an all-zero one makes the radio refuse to
-start rather than join under a publicly known key. `lrw_deveui` is the node's
+start rather than join under a publicly known key. `radio_deveui` is the node's
 on-air identity (#417): an all-zero DevEUI refuses a new join likewise:
 
 ```
-config lrw-appkey <32 hex>
+config radio-appkey <32 hex>
 config radio-mode p2p
 settings save                    # persists + reboots
 ats radio status                 # kind: P2P, app_key: set, state: JOINING|PAIRED
-config show                      # lrw-deveui: the DevEUI the central registers
+config show                      # radio-deveui: the DevEUI the central registers
 ```
 
 The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
@@ -1488,6 +1489,27 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
 - Time on air follows LoRaMac's formula, rounded up; some P2P values are 1 ms longer than before (SF12 42 B: 2139 ms).
 - `RadioState.airtime_hour_ms` (§24) is filled on both radios.
 - RAM: the LoRaWAN-only debug image needs 384 B more (the ledger); the images with P2P are unchanged.
+
+## 33. `radio-deveui` / `radio-appkey` (the DevEUI and the AppKey are shared)
+
+The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequest, its session-key KDF (#417) and its uplink phase from them. They are renamed like the link-check parameters (§26), but without losing the stored value:
+
+| v1.4 / before | v1.5 | NVS key | proto (`lorawan` group) |
+|---|---|---|---|
+| `lrw-deveui` | `radio-deveui` | `config/lrw-deveui` (unchanged) | `deveui = 6` (unchanged) |
+| `lrw-appkey` | `radio-appkey` | `config/lrw-appkey` (unchanged) | `appkey = 9` (unchanged) |
+
+- **What changes:** the shell command (`config radio-deveui`, `config radio-appkey`), the `config show` label, the C field (`g_app_config.radio_deveui` / `radio_appkey`) and the log texts.
+- **What does not change:**
+  - The wire: SetParam, GetParam, GetConfig and the settings-info dump use field numbers.
+  - The generated nanopb names (`deveui`, `appkey`), so the Manager-App and Hub code are unaffected.
+  - The NVS key. A v1.4 unit keeps its identity across the upgrade, and a downgrade still reads it.
+- **Why the NVS key stays:** §26 renamed the key itself. A value under an unknown key is ignored at boot and the default applies, which was harmless there (5 / 5). For the DevEUI and the AppKey it would leave an all-zero identity: P2P refuses to start, and LoRaWAN cannot join. The only way to fix that is a physical touch (NFC or shell) on every unit.
+- **configen `stored_as`:** a new parameter attribute naming the key the value is stored under. `filter_nvs_key()` feeds `h_set` / `h_export`. configen refuses two parameters on one key and a `stored_as` that repeats the name. The proto name is kept by the existing `proto_name` override.
+- **Other `lrw-*` keys** (region, sub-band, network, ADR, activation, JoinEUI, NwkKey, DevAddr, the ABP session keys, datarate) are read only by the LoRaWAN backend and keep their names.
+- **Breaking for scripts that type the shell name.** Production and bench scripts using `config lrw-deveui` / `config lrw-appkey` must switch to the new names. No alias is kept.
+- Tests: `scripts/west_commands/tests/test_configen.py` checks that the old key is kept, the shell takes the new name and the proto names stay, plus the `stored_as` validation and clash checks.
+- HIL (2026-09-28, STICKER 2162190413, P2P, paired): flashed without an erase from the #462 image to this one and back. The DevEUI and the AppKey survived both ways, under `config radio-*` after the upgrade and `config lrw-*` after the downgrade. The session resumed with no JoinRequest, and the Info and telemetry frames were acked.
 
 ---
 
