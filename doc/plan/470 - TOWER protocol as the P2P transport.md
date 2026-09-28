@@ -649,7 +649,10 @@ sx126x shares `PacketParams` between TX and RX, so every node uplink of P0 went 
 the LoRa payload CRC (node TX = ToA(no CRC) + ~6.8 ms + ~15 µs/B). The NB accepted them;
 a corrupted frame died only at the CCM tag, and `crc_err` could never fire. Fix: `crcOn = true`
 (one line, reception unchanged — the explicit header carries the CRC flag),
-hardwario/sticker-zephyr#3. P1 builds use the fixed driver; a short M4 re-run confirms it.
+hardwario/sticker-zephyr#3. P1 builds use the fixed driver. M4 re-run with the fix: 53/53,
+NB `crc_err` 0; node TX − ToA(CRC on) is a smooth ≈ 6.85 ms + 13–17 µs/B (radio wake, 5 ms
+TCXO, SPI write) at SF7 and SF12 — the P1 window keeps the computed ToA, so this constant only
+moves the window start later.
 
 **P0 verdict: GO** (M1–M6 pass; M7/M8 not run, moved to P2 HIL).
 
