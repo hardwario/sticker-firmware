@@ -15,7 +15,6 @@
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
 #include "app_report.h"
@@ -586,16 +585,10 @@ int main(void)
 	return 0;
 }
 
-#if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P))
+#if defined(CONFIG_SHELL)
 
-/* app_radio_rejoin() is transport-agnostic (routes through app_radio, #118)
- * and, unlike app_radio_start() (boot-time bring-up), always forces a fresh
- * join attempt even if the radio already has a live session/pairing --
- * LoRaWAN already worked that way unconditionally; P2P needed the explicit
- * rejoin entry point since app_radio_p2p_start() intentionally treats an existing
- * pairing as sufficient (a session persists across a normal power cycle,
- * doc/p2p.md §7). Mirrors the `send` fix below -- this used to call
- * app_radio_lrw_join() directly and was compiled out on P2P-only builds. */
+/* Unlike app_radio_start() (boot-time bring-up), app_radio_rejoin() always forces
+ * a fresh join, even with a live session or pairing. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
 	app_radio_rejoin();
@@ -607,11 +600,6 @@ static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 
 SHELL_CMD_REGISTER(join, NULL, "Force a fresh (re)join, even if already joined/paired.", cmd_join);
 
-/* app_report_trigger() is transport-agnostic too (routes through app_radio,
- * #118 phase 2), so it stays available on a P2P-only (CONFIG_LORAWAN=n) build
- * just like `join` above. Regression found via #118 phase 2 HIL after
- * CONFIG_LORAWAN became toggleable: this command was silently compiled out on
- * the P2P bench overlay. */
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
 	app_report_trigger();
@@ -623,4 +611,4 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 
 SHELL_CMD_REGISTER(send, NULL, "Trigger an ad-hoc report send.", cmd_send);
 
-#endif /* defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)) */
+#endif /* defined(CONFIG_SHELL) */
