@@ -283,6 +283,14 @@ void app_led_set(enum app_led_channel ch, int state)
 	g_led_set_calls++;
 }
 
+/* Indicator hold (app_led_hold) as last set by app_nfc.c. */
+int g_led_hold;
+
+void app_led_hold(bool hold)
+{
+	g_led_hold = hold;
+}
+
 /* Reset/save ladder — app_nfc.c only reaches these via its deferred-action
  * dispatch (app_nfc_take_cmd_action() consumers), not via anything the first
  * slice of tests here drives. Record calls so a future test can assert on
