@@ -410,7 +410,7 @@ Stage 1 command set (IDs final — they carry over to N1 unchanged):
 | 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment, adaptive power (#443); auto-revert if no ACK |
 | 0x14 | `LinkPolicy` | ↓ | confirm_every(1), warn_after(1), rejoin_after(1) | network-set supervision parameters |
 | 0x15 | `Backoff` | ↓ | seconds(2) | gateway/central congestion or duty relief |
-| 0x20 | `TimeReq` / `TimeAns` | ↑↓ | Ans: unix(4) ‖ fraction(1, 1/256 s) at the end of the requesting uplink | B5 Unix-time tail, `clock_sync` |
+| 0x20 | `TimeReq` / `TimeAns` | ↑↓ | Ans: unix(4) ‖ fraction(1, 1/256 s) ‖ req_counter(4 LE) — the time at the end of the TimeReq uplink whose frame counter is `req_counter`; the node applies it relative to that frame's TX-done and drops an Ans with an unknown `req_counter` | B5 Unix-time tail, `clock_sync` |
 | 0x21 | `Poll` | ↑ | — | "anything for me?" without data |
 | 0x30 | `DevStatusReq` / `Ans` | ↓↑ | battery mV(2), battery %(1), MCU temp(i8), uptime(4), dl rssi/snr(2) | LoRaWAN DevStatus (#419 gap) |
 
@@ -630,6 +630,11 @@ vs after: M2, M2b, M3 SF7.
 | M3 window | SF7 ACK window shrink, 50 frames each: 100/95/92/91 ms 50/50; 90 ms fails (3 TO / 53). Minimal window = turnaround + ToA(ACK) + 3.3 ms |
 | M5 | dropped ACKs: SF7 drop 1 ×100 → 100 OK (NB ok 100, dup 100); drop all 3 ×20 → 20 TO, NB delivered 20 once (dup 40); SF10 drop 1 ×30 → 30 OK. Resends byte-identical, counters strictly increasing, 0 replay / MIC fails |
 | ToA | ACK 28 B at SF7: 66.95 ms measured vs 66.82 ms calculated (+0.2 %) |
+| NB (16:26–18:06Z) | RX 2688 frames: 2434 fresh + 254 dup (net-layer reps), 0 MIC / replay / CRC / header / overrun errors; RSSI −69…−56 dBm (mean −62.5), SNR 4…14 dB (mean 11.6) |
+| NB turnaround | 20.001–20.017 ms at the 20 ms setting; 25.0 / 30.0 ms at the M2b settings |
+| NB ToA (28 B) | measured − calculated: SF7 +0.16 ms (n = 1965), SF9 −0.08 ms (226.3 ms), SF10 −0.34 ms (411.6 ms), SF12 −2.26 ms (1.647 s) |
+| NB DL | 69 × 96 B at SF7, TX 20.001–20.003 ms after the ACK TxDone, ToA +16 µs vs 164.1 ms; 69 ACKs carried `PENDING` |
+| NB duty | report-only: 541 TX = 36.2 s/h = 100.6 % of the 1 % budget during the dense runs (lab, not enforced; the gateway duty needs the §17 measures in production) |
 
 **Finding — ACK window:** TX-done → ACK RxDone = turnaround + ToA(ACK) + ~2 symbols +
 ~1.5 ms (RX-done latency on both sides): +3.9 ms at SF7, +8.8 at SF9, +15.9 at SF10, ~+64 at
@@ -669,11 +674,35 @@ rollback to 0.2.2-rxsens when the node runs end.
 | H1.8 | `boot` announce (FW version, capabilities, empty table) → the central restores the table and a fresh counter block (§6.6) |
 | H1.9 | Duty ledger incl. ACKs, `RadioStat`, `stats`; frame ≤ ToA cap of the SX12xx 4 s TX timeout (§17) |
 
-**H2 — Console link (D5).** Message set = tower-protocol console semantics (`Hello`, `Mgmt*`,
-`Uplink`, `RawFrame`, `TxAt`, `RadioStat`, `Boot`); the framing (today's HDLC on ttyAMA3 or
-the tower console framing) is the Hub controller's call. The message set is frozen and
-written into this section **before** H1/H3 code, because both sides and the host harness
-depend on it.
+**H2 — Console link (D5, decided 2026-09-28).** Today's HDLC/CRC16 framing on ttyAMA3
+with a TOWER-console-shaped message set; the tower console framing comes later as a codec
+swap, because tower-protocol v3 has no raw-frame forward, no `last_seen` in `NodeAdd`, no
+counter blocks and no SNR in `Uplink` (an upstream wire v4 first, D12). The NB announces
+`proto_version = 2` in `EVT_BOOT` / `GET_INFO`; the central picks the TOWER adapter by it.
+Frozen message set (full text: proximos-v2 `plan/control/radio/p2p_tower_gateway.md` §2),
+LE, response = `0x40 | cmd` + status (new: 6 `NO_SPACE`, 7 `NOT_FOUND`):
+
+| Dir | Cmd | Message |
+|---|---|---|
+| → NB | 0x02 | `SET_RADIO_CONFIG` (existing; `lora` only) |
+| → NB | 0x05 | `TX_SCHEDULE` (existing; JoinAccept only, sealed by the central) |
+| → NB | 0x10 | `TWR_START {net_id u32, turnaround_ms u8, dl_gap_ms u8, flags}` |
+| → NB | 0x11 | `TWR_NODE_ADD {addr u32, session_key[16], last_seen u32, flags: bit0 HOME}` |
+| → NB | 0x12 | `TWR_NODE_REMOVE {addr}` |
+| → NB | 0x13 | `TWR_CTR_BLOCK {first u32, last u32}` |
+| → NB | 0x14 | `TWR_QUEUE_PUSH {addr, item u16, ttl_s u16, flags: bit0 CONFIRMED, len, plaintext ≤ 78}` |
+| → NB | 0x15 | `TWR_QUEUE_DROP {addr, item \| 0}` |
+| → NB | 0x16 | `TWR_GET_STATS` (u32 list, append-only) |
+| → NB | 0x17 | `TWR_NODE_LIST {start u16}` → paged `{addr, last_seen, flags}`, no keys |
+| NB → | 0x80 | `EVT_BOOT` (existing; proto 2, empty table → the central restores) |
+| NB → | 0x81 | `EVT_RX` (existing raw frame: `dest = 0` or unknown `src`; `t_ms, rssi, snr_q, frame`) |
+| NB → | 0x84 | `EVT_TWR_UPLINK {t_ms u64, rssi i16, snr_q i8, frame_flags, addr, counter, ack (0 none / 1 sent / 2 +PENDING / 3 late / 4 no counter), len, plaintext}` — fresh frames only |
+| NB → | 0x85 | `EVT_TWR_TX {addr, item, outcome (DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER), gw_counter, node_ack_counter, ack_rssi}` |
+| NB → | 0x86 | `EVT_TWR_CTR_LOW {next, last}` below 25 % left; fail-closed when exhausted |
+
+The legacy proto-1 central path stays (selected by the NB image, TOWER sessions stored
+apart) until P8, so the bench can still roll back to the legacy NB. The address collision
+check runs at `node-add` **and** at join.
 
 **H3 — Central** (proximos-v2 `control-radio`, `p2p/`):
 
@@ -686,7 +715,7 @@ depend on it.
 | H3.5 | Persistence (`sessions.db`, new schema, old rows dropped): `addr`, `session_key`, `last_seen`, `dev_nonce`, per-NB counter block (persisted **before** it is handed out) |
 | H3.6 | NB `boot` → re-send every `NodeAdd` with the exact `last_seen` + a new counter block |
 | H3.7 | `0x81` → the existing decoder by port (2/3/85); uplink event shape unchanged plus the transport |
-| H3.8 | `0x91`: `Capabilities` / `Hello` (store FW + caps), `LinkCheckAns` (margin from RSSI/SNR, gateway count), `TimeAns` (unix ms) — queued as DL |
+| H3.8 | `0x91`: `Capabilities` / `Hello` (store FW + caps), `LinkCheckAns` (margin from RSSI/SNR, gateway count), `TimeAns` (§8.2 format, time = the Northbridge `t_rx` of the TimeReq frame) — queued as DL; the answer rides `PENDING` on the node's next confirmed uplink (P1 forces up to 3 confirmed reports after a TimeReq/LinkCheckReq, no `Poll`) |
 | H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ the `lora` MTU (D14), longer → the existing paging |
 | H3.10 | `P2pRadio` config: add `modulation` (`lora`), `sync_word`, `tx_power`; drop what only the old wire needed |
 | H3.11 (P3) | `node-remove` → `Detach` (`0x91 03`) then `NodeRemove`; `RejoinReq` (`0x91 04`); `DevStatus` |
@@ -743,7 +772,7 @@ depend on it.
 | # | Question | Recommendation |
 |---|---|---|
 | D4 | Default `p2p-modulation` | **Decided 2026-09-28: `lora`**; `fsk` for TOWER-mixed sites |
-| D5 | Northbridge ↔ RPi link = tower-protocol console | yes |
+| D5 | Northbridge ↔ RPi link = tower-protocol console | **Decided 2026-09-28:** today's HDLC framing + TOWER-console-shaped messages (§13.2 H2); console framing later as a codec swap after an upstream wire v4 |
 | D6 | Address derivation | low 32 bits of DevEUI if unique across the HARDWARIO range, else FNV-1a-32 |
 | D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2 |
 | D8 | Envelope `0x81 ‖ port ‖ protobuf` | yes, pending E3 |
