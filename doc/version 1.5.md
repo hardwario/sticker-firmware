@@ -38,7 +38,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
 | LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
-| LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. See §31. |
+| LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. The M-2 watchdog waits out a ledger hold instead of rejoining. See §31. |
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 
@@ -1490,6 +1490,9 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
 - Time on air follows LoRaMac's formula, rounded up; some P2P values are 1 ms longer than before (SF12 42 B: 2139 ms).
 - `RadioState.airtime_hour_ms` (§24) is filled on both radios.
 - RAM: the LoRaWAN-only debug image needs 384 B more (the ledger); the images with P2P are unchanged.
+- **M-2 waits out a ledger hold** (fix from the HIL). A held frame waits for its hold in one go, up to the hour. The M-2 watchdog (§22) now takes the known end of that hold as its duty-cycle excuse, and no longer only the last held attempt plus one interval + 3 min. Without the fix, the DR0 bench run rejoined 4 min into a 41 min hold and then every ~5 min: fcnt restarted and nothing was sent for 45 min. The 75 min cap is unchanged.
+- The Info / settings-info announce no longer re-encodes into a full answer queue on its 5 s retry.
+- Hardware (0413, EU868 DR0, ADR off, 60 s, 2026-09-28): the ledger held at 34.9 s of 36 s. The MAC never refused a frame, M-2 did not rejoin, and the held frame went at the end of the hold on the same session.
 
 ## 32. Alarm bursts and the post-command reboot (#462)
 

@@ -253,7 +253,14 @@ Implemented in T2c.
     - An ADR backoff step that the MAC takes inside a send is charged at the DR read before it, one frame long.
     - The MAC needs its credits strictly above the cost; the ledger admits a frame that fills the hour exactly.
   - The ledger does not hold a LoRaWAN join; the MAC's join backoff (1 %, then 0.1 % after the first hour, 0.01 % after 11 h) is stricter. The JoinRequest is still charged.
-  - To be confirmed on HIL: a DR0 stream on EU868 must reach a duty hold before any "Duty-cycle restricted" from the MAC.
+  - Confirmed on HIL (below): a DR0 stream on EU868 reaches the ledger hold, and the MAC never refuses a frame.
+- **M-2 and a hold of known length (fix from the T2d HIL).** `tx_send()` notes a ledger hold once and then waits it out, with nothing tried in between. The M-2 duty excuse wanted a held send within one interval + 3 min, so it ran out 4 min into any longer hold.
+  - `struct app_radio_stale_dc` gains `until_ms`, the end of the latest known hold. `app_radio_stale_note_hold()` sets it, and `app_radio_stale_check()` takes the later of `last_ms` and `until_ms`. The 75 min cap from the start of the streak is unchanged. A MAC refusal (`-ECONNREFUSED`) still notes only the attempt: its wait is unknown and it is retried every 15 s.
+  - `announce_run()` no longer builds an Info or settings-info into a full answer queue. The 5 s retry used to encode both and log two drops each time.
+  - Tests: `test_stale_known_hold_lasts_until_its_end` (pure: past interval + margin, the hold's end, the cap, a send ends it), `stale_ledger_hold_keeps_m2_quiet` (both profiles, through the TX path: a 30 min ledger hold, no rejoin until interval + margin after its end), and a build counter on `announce_retries_when_the_queue_is_full`. `radio_common` has 176 cases. Both fixes' mutants are caught.
+- **HIL (2026-09-28, 0413, EU868 DR0 with ADR off, 60 s intervals, Hub c62 dual):**
+  - Run 1 (3a29e83): the ledger held a frame for 41 min at fcnt 22, with no MAC refusal. M-2 forced a rejoin 4 min in and then every ~5.3 min: 8 JoinRequests, fcnt restarted, no data uplink for 45 min, and the held report was abandoned. After two rejoins the Info and settings-info copies filled the answer queue, and 470 "Answer queue full" lines followed.
+  - Run 2 (with the fix): hold at 09:16:18Z after fcnt 22 (34.9 s of 36 s). M-2 logged the duty excuse once and did not rejoin. The held frame went at 09:57:26Z as fcnt 23, and later frames were paced by the sliding window (holds of 22, 103 and 111 s). Same session, `join_attempts` 0, no "Duty-cycle restricted", no ERR. `RadioState.airtime_hour_ms` and `duty_blocked_s` tracked the ledger.
 - **RadioState** fills `airtime_hour_ms` from the ledger on both radios now (`has_airtime`).
 - Gone from P2P: `struct p2p_duty`, its ledger functions and test hooks, the duty checks in `tx_frame()` and the resend, the `-EAGAIN` case of `p2p_tx_send()`, `P2P_TX_RETRY_MARGIN_MS` and `P2P_CR_DENOM`.
 - **Tests:**
@@ -263,6 +270,7 @@ Implemented in T2c.
   - `radio_common` has 167 cases (+21), `p2p_logic` 62 (−7 moved).
   - Mutation check: 15 mutants, all caught. The expiry inside `used_ms()` (a status read expires nothing first) survived at first; `test_duty_used_skips_expired_without_expiry` was added for it.
 - **Footprint** against T2c: release 182708 B (+712) / 54988 B (±0), debug 237832 B (+1328, 96.77 %) / 63772 B (+384, 97.31 %), bench 217240 B (+208) / 55452 B (±0). The ledger's RAM was already in the P2P images; the LoRaWAN-only debug image gains it.
+- **Footprint** of the M-2 fix against #464 (3a29e83): release 182916 B / 54988 B, debug 238112 B (96.89 %) / 63772 B, bench 217592 B / 55452 B.
 
 ### 2.8 Flash writes vs radio exchanges (fix from the F4 HIL)
 
