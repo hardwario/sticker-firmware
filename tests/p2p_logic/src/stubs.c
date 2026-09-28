@@ -12,7 +12,6 @@
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_radio.h"
-#include "app_settings.h"
 
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
@@ -23,6 +22,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 struct app_config g_app_config;
 
@@ -53,24 +53,16 @@ void app_compose_reset(void)
 	g_compose_reset_calls++;
 }
 
-/* ---- app_settings, for p2p_join_adopt_sf's persist ---- */
+/* The Hello's reset_reason byte (app_cmd.c is not built here). */
+uint32_t test_reset_cause = 0x08; /* RESET_POR */
 
-/* The SF the last call was asked to persist. */
-int g_test_saved_sf;
-/* How many calls the module made -- an unchanged SF must make none. */
-int g_test_save_sf_calls;
-/* What the save returns; set to an errno to exercise the failure path. */
-int test_save_sf_ret;
-
-int app_settings_save_p2p_spreading_factor(int sf)
+uint32_t app_cmd_get_reset_cause(void)
 {
-	g_test_saved_sf = sf;
-	g_test_save_sf_calls++;
-	return test_save_sf_ret;
+	return test_reset_cause;
 }
 
-/* Last value handed to the network-time setter (0 = none), for the Ack time
- * tail tests. */
+/* Last value handed to the network-time setter (0 = none), for the TimeAns
+ * tests. */
 uint32_t g_test_network_time;
 
 int app_clock_set_network_time(uint32_t unix_time)
@@ -103,9 +95,12 @@ void app_radio_time_event(void)
 	p2p_test_time_events++;
 }
 
-/* The radio work queue app_radio.c owns (doc/plan/439 T2a), started before the
- * tests the same way. */
-static K_THREAD_STACK_DEFINE(m_radio_wq_stack, 4096);
+/* The radio work queue app_radio.c owns (doc/plan/439 T2a) -- initialised but
+ * never started. Every handler under test is driven on the test thread by its
+ * hook (p2p_test_join_step(), p2p_test_ctrl_run()), so nothing the module
+ * schedules can run underneath the assertions: a submit to a queue that is not
+ * started is refused, and a delayed one keeps its timer for
+ * p2p_test_join_pending_ms() to read. */
 static struct k_work_q m_radio_wq;
 
 struct k_work_q *app_radio_work_q(void)
@@ -116,8 +111,6 @@ struct k_work_q *app_radio_work_q(void)
 static int radio_wq_init(void)
 {
 	k_work_queue_init(&m_radio_wq);
-	k_work_queue_start(&m_radio_wq, m_radio_wq_stack, K_THREAD_STACK_SIZEOF(m_radio_wq_stack),
-			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 	return 0;
 }
 
@@ -155,10 +148,22 @@ void app_radio_set_params(uint8_t sf, int datarate, int8_t tx_power_dbm)
 	ARG_UNUSED(tx_power_dbm);
 }
 
+/* The LinkCheckAns numbers the backend pushes (plan §7.6). */
+int16_t p2p_test_ul_rssi;
+int8_t p2p_test_ul_snr;
+uint8_t p2p_test_ul_margin;
+uint8_t p2p_test_ul_gw_count;
+
 void app_radio_set_uplink_rssi(int16_t rssi, int8_t snr)
 {
-	ARG_UNUSED(rssi);
-	ARG_UNUSED(snr);
+	p2p_test_ul_rssi = rssi;
+	p2p_test_ul_snr = snr;
+}
+
+void app_radio_set_uplink_margin(uint8_t margin, uint8_t gw_count)
+{
+	p2p_test_ul_margin = margin;
+	p2p_test_ul_gw_count = gw_count;
 }
 
 void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up)
@@ -239,14 +244,17 @@ void app_radio_reset_link(void)
 {
 }
 
-/* Common downlink path (app_radio.c, doc/plan/460 F3): a received 0x56 is
- * handed over here; its dispatch is tested in tests/radio_common. */
+/* Common downlink path (app_radio.c, doc/plan/460 F3): a received command is
+ * handed over here; its dispatch is tested in tests/radio_common. The last one
+ * is kept for the envelope checks. */
 int p2p_test_downlinks;
+uint8_t p2p_test_downlink_buf[80];
+size_t p2p_test_downlink_len;
 
 void app_radio_downlink(const uint8_t *buf, size_t len)
 {
-	ARG_UNUSED(buf);
-	ARG_UNUSED(len);
+	p2p_test_downlink_len = MIN(len, sizeof(p2p_test_downlink_buf));
+	memcpy(p2p_test_downlink_buf, buf, p2p_test_downlink_len);
 	p2p_test_downlinks++;
 }
 
