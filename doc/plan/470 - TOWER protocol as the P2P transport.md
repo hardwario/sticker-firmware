@@ -190,17 +190,21 @@ session_key = AES-CMAC(radio_appkey, "HIO-TWR-SES"  ‖ 0x01 ‖ dev_nonce(4) �
 The join handshake of the current P2P (`send_join_request()` / `recv_join_accept()`, `PAIRED`
 state persisted in NVS, no rejoin on reboot) is kept and only re-framed:
 
-- **JoinRequest** = TOWER Data frame, `src = addr`, `dest = 0`, sealed under `join_key`,
-  payload `0x91` cmd `JoinReq` = `product_type ‖ proto_version ‖ dev_nonce(4)` (the body of
-  today's P2P JoinRequest). The CCM tag replaces today's CMAC tag.
+- **JoinRequest** = TOWER Data frame, `src = addr`, `dest = 0`, `counter = dev_nonce`
+  (persisted, monotonic for the device lifetime, so the `join_key` nonce never repeats),
+  sealed under `join_key`, payload `0x91` cmd `0x07 JoinReq` = today's P2P JoinRequest body
+  `product_type(1) ‖ proto_version(1) ‖ DevEUI(8, MSB-first) ‖ fw_version(4 BE)`. The CCM
+  tag replaces today's CMAC tag.
 - The Northbridge has no key for an unknown `src`: it **forwards the frame raw** to the
   central (no ACK; the join needs no 20 ms answer).
 - The central finds the device by `addr` → DevEUI, verifies under its `join_key`, allocates
   `central_nonce`, derives `session_key`, installs it on the Northbridge (`NodeAdd{addr,
   session_key, last_seen = 0}`) and queues the **JoinAccept**.
-- **JoinAccept** = TOWER Data frame, `src = net_id`, `dest = addr`, sealed under `join_key`,
-  payload `0x91` cmd `JoinAccept` = `net_id(4) ‖ central_nonce(4) ‖ rx_delay(1)`, sent a
-  fixed delay after the JoinRequest (today's RX1 model).
+- **JoinAccept** = TOWER Data frame, `src = net_id`, `dest = addr`, `counter = dev_nonce`
+  (echo), sealed under `join_key`, payload `0x91` cmd `0x08 JoinAccept` =
+  `net_id(4 LE) ‖ central_nonce(4 LE) ‖ rx_delay(1) ‖ tx_power(1) ‖ reserved(3)`, sent
+  `rx_delay` after the JoinRequest (today's RX1 model).
+- KAT: `tests/ccm/tower_join_kat.json` (generator `tower_join_kat.py`, pycryptodome).
 - From then on the gateway address in every frame is **`net_id`** (the network, not an
   individual Northbridge, as in the current P2P).
 - A stock TOWER dongle cannot open these frames (wrong key) and ignores them.
@@ -394,6 +398,8 @@ Stage 1 command set (IDs final — they carry over to N1 unchanged):
 | 0x02 | `Hello` | ↑ | session_id(4), reset_reason(1), fw version(4) | reboot on the link level (today: boot `Info`) |
 | 0x03 | `Detach` | ↓ | reason(1) | `0xFD` |
 | 0x04 | `RejoinReq` | ↓ | kind(1): rediscover / rekey | `0xFE` |
+| 0x07 | `JoinReq` | ↑ | product_type, proto_version, DevEUI(8), fw_version(4) — under `join_key` (§6.3) | P2P JoinRequest `0xF0` |
+| 0x08 | `JoinAccept` | ↓ | net_id(4), central_nonce(4), rx_delay(1), tx_power(1), reserved(3) — under `join_key` | P2P JoinAccept `0xF1` |
 | 0x10 | `LinkCheckReq` / `Ans` | ↑↓ | Ans: rssi(i8), snr(i8), margin(i8), gw_count(1) | link check with numbers; uplink SNR |
 | 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment, adaptive power (#443); auto-revert if no ACK |
 | 0x14 | `LinkPolicy` | ↓ | confirm_every(1), warn_after(1), rejoin_after(1) | network-set supervision parameters |

@@ -1,0 +1,41 @@
+{
+  "_comment": "TOWER-framed join KAT (plan #470 \u00a76.3): prints tower_join_kat.json.\n\njoin_key    = CMAC(app_key, \"HIO-TWR-JOIN\" 0x01 DevEUI(8 MSB) pad32)\nsession_key = CMAC(app_key, \"HIO-TWR-SES\" 0x01 dev_nonce(4 BE) central_nonce(4 BE) DevEUI(8) pad32)\nJoinReq    = TOWER Data, src=addr, dest=0, counter=dev_nonce, key=join_key,\n             payload 0x91 07 0e product_type(1) proto_version(1) DevEUI(8 MSB) fw_version(4 BE)\nJoinAccept = TOWER Data, src=net_id, dest=addr, counter=dev_nonce (echo), key=join_key,\n             payload 0x91 08 0d net_id(4 LE) central_nonce(4 LE) rx_delay(1) tx_power(1) reserved(3)\nFrame/CCM exactly as tower_frame_kat.json (14 B header = AAD, nonce src|counter|000000|0000, 8 B tag).",
+  "app_key": "000102030405060708090a0b0c0d0e0f",
+  "dev_eui": "5876070000000413",
+  "addr": 1043,
+  "net_id": 1831114338,
+  "dev_nonce": 17,
+  "central_nonce": 2712847316,
+  "join_key": "5fddac97ce55c3acc8692a5c15fd743d",
+  "session_key": "78027b77910bf7abe80b9fbadc26452e",
+  "join_request": {
+    "src": 1043,
+    "dest": 0,
+    "counter": 17,
+    "plaintext": "91070e0101587607000000041301050000",
+    "header": "2000130400000000000011000000",
+    "nonce": "13040000110000000000000000",
+    "frame": "2000130400000000000011000000d0a9af7c3f74964950a9581b3ed0395270b3d18e636eb90415",
+    "frame_len": 39
+  },
+  "join_accept": {
+    "src": 1831114338,
+    "dest": 1043,
+    "counter": 17,
+    "plaintext": "91080d6296246dd4c3b2a1010e000000",
+    "header": "20006296246d1304000011000000",
+    "nonce": "6296246d110000000000000000",
+    "frame": "20006296246d13040000110000001599bcc8088cbafdbcb72becd1b66498ee61163a80489474",
+    "frame_len": 38
+  },
+  "first_uplink": {
+    "src": 1043,
+    "dest": 1831114338,
+    "counter": 1,
+    "plaintext": "81020801",
+    "header": "2001130400006296246d01000000",
+    "nonce": "13040000010000000000000000",
+    "frame": "2001130400006296246d01000000e26940bf1560bb9b60903369",
+    "frame_len": 26
+  }
+}
