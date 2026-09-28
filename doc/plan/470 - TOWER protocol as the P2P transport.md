@@ -63,14 +63,14 @@
 | | `fsk` (TOWER-native) | `lora` |
 |---|---|---|
 | Modulation | GFSK 19 200 bps, deviation 20 kHz, BT 1.0 | LoRa, BW 125 kHz, CR 4/5 |
-| Rate knob | fixed | `p2p-spreading-factor` 7..12 (default 7, decision #22) |
+| Rate knob | fixed | fixed SF7 (§3.3); `p2p-spreading-factor` shell-only |
 | RX bandwidth | SX126x 234.3 kHz (nearest to SPIRIT1's ~216 kHz; must pass TOWER's ±40 ppm crystal offset, ~69 kHz) | 125 kHz |
 | Preamble | 4 B `0xAA…` | 8 symbols |
 | Sync | 4 B `0xDB624715` | private LoRa sync word (as today) |
 | Packet | variable length (1 B length), CRC-16 poly `0x1021`, PN9 whitening | explicit header, CRC on |
 | Max frame | **96 B** (SPIRIT1 FIFO) | **96 B** as well — one MTU for both profiles, so a frame never depends on the PHY |
-| Channels (EU868) | TOWER ch0/1/2 = 868.1 / 868.3 / 868.5 MHz | `p2p-frequency` (default 868.1) |
-| TX power | ≤ 14 dBm ERP (g1); TOWER itself runs +11.6 dBm | 2..22 dBm config, ≤ 14 dBm ERP |
+| Channels (EU868) | TOWER ch0/1/2 = 868.1 / 868.3 / 868.5 MHz | 869.525 MHz, one channel both ways (§3.3, proposal); fallback 868.1 |
+| TX power | ≤ 14 dBm ERP (g1); TOWER itself runs +11.6 dBm | fixed 14 dBm on node and gateway (§3.3) |
 | ToA 96 B / ACK 28 B | ~45 ms / ~16 ms | SF7 ~164 ms / ~67 ms · SF10 ~985 ms / ~412 ms · SF12 ~3.9 s / ~1.65 s |
 | Link budget vs `fsk` | — | ~+20 dB (SF7) … ~+30 dB (SF12) |
 
@@ -94,6 +94,60 @@
 reasoning as the existing `p2p-frequency`/`-spreading-factor`/`-tx-power` (doc/p2p.md §2:
 changing it over the air cuts the link carrying it). Both ends must match; a Hub runs one
 profile per Northbridge (one radio).
+
+### 3.3 Fixed `lora` radio parameters (decided 2026-09-28)
+
+Hynek 2026-09-28: P2P has no power control and no SF change. Every radio parameter is a
+fixed network constant, the same on every node and gateway. The values below balance range,
+speed and battery life:
+
+| Parameter | Fixed value | Why |
+|---|---|---|
+| Modulation | LoRa (D4) | ~+20 dB link budget over TOWER `fsk` |
+| Frequency | **869.525 MHz** for uplink, ACK and downlink (h1.6: 10 % duty, ≤ 500 mW ERP) — **proposal, extends D7 to the uplink** | The gateway's ACK duty is the binding limit (§5). At 10 % the gateway can send ~5 400 ACKs/h at SF7, against ~540/h on 868.1 MHz. No LoRaWAN uplinks use this channel; 868.1 MHz carries every LoRaWAN join and ~⅓ of the uplinks, at the same SF7, so frames there collide on the same SF. One channel keeps the fast TX→RX path (sticker-zephyr#2) exactly as P0 measured it (P0 ran on 869.525 MHz). Risk: LoRaWAN RX2 downlinks (rare) and Meshtastic EU868 (SF11/BW250, partly orthogonal) share the channel, so check the noise at install. Fallback: 868.1 MHz (1 %) via `p2p-frequency`. |
+| Spreading factor | **SF7** | Lowest energy and airtime, highest gateway capacity. Each SF step up buys ~2.5–3 dB but doubles airtime and energy and halves the gateway capacity (cost table below). |
+| Bandwidth | 125 kHz | BW250 halves the airtime but costs 3 dB, the same trade as one SF step. 125 kHz is what P0 validated. |
+| Coding rate | 4/5 | 4/8 adds +48 % airtime (52 B frame: 152 vs 103 ms) for ~1 dB. Errors are caught by the CRC and the CCM tag and repaired by the net-layer reps. |
+| Preamble | 8 symbols (8.2 ms) | Dropping to 6 symbols saves 2 ms (2 %). 8 gave the margin in P0 M2 and is the SX126x/LoRaWAN norm. |
+| Header / CRC / sync word | explicit header, CRC on (sticker-zephyr#3), private sync word 0x12 | LoRaWAN gateways (public 0x34) do not decode P2P frames, and P2P does not decode LoRaWAN frames. |
+| Node TX power | **14 dBm** | This is the board's RFO_LP maximum (`rfo-lp-max-power = <14>`, `sticker.dts`) and ≤ 25 mW ERP with an antenna gain ≤ 2.15 dBi. Power is the cheapest link budget: going from 10 to 14 dBm gives +4 dB for ~+0.9 µA average. The same +4 dB from the SF costs 2–3× more. |
+| Gateway TX power | 14 dBm | The path is reciprocal and both ends have the same sensitivity, so the node's 14 dBm uplink is the limit. A stronger ACK adds no range (h1.6 would allow 27 dBm); it only adds self-interference with the Hub's LoRaWAN concentrator. |
+| RX gain | boosted (`REG_RX_GAIN` 0x96) on both ends — **proposal, fork change** | Gives ~+2 dB sensitivity. On the mains-powered gateway it is free and lifts the uplink, which is the limiting direction. On the node it costs ~+1 mA for ~90 ms ≈ +0.1 µA. Today the Zephyr sx12xx driver calls `Radio.Rx()` at normal gain. The change applies to the P2P path only; LoRaWAN is untouched. |
+| JoinAccept `tx_power` | the central sends 0 (= none) | The node keeps its fixed `p2p-tx-power`. The field stays on the wire (KAT, TOWER layout), and the power does not change after the join. |
+
+**Cost per SF.** Assumptions: 52 B telemetry frame, 28 B ACK, 14 dBm, a report every 900 s
+with every report confirmed (worst case). TX ~24 mA and RX ~5.3 mA come from the
+SX126x/STM32WL datasheets until M7 measures them. Gateway capacity = duty budget / ACK
+airtime. Collision chance: 30 nodes, pure ALOHA.
+
+| SF | Sensitivity | Link budget | Airtime 52 B / ACK | Charge per confirmed uplink | Avg current | Gateway ACKs/h at 10 % / 1 % | Collision chance |
+|---|---|---|---|---|---|---|---|
+| **7** | −123 dBm | 137 dB | 103 / 67 ms | 3.0 mC | **3.3 µA** | 5 390 / 540 | ~1 % |
+| 8 | −126 dBm | 140 dB | 185 / 123 ms | 5.3 mC | 5.8 µA | 2 920 / 290 | ~2 % |
+| 9 | −129 dBm | 143 dB | 329 / 226 ms | 9.3 mC | 10.3 µA | 1 590 / 160 | ~4 % |
+| 10 | −132 dBm | 146 dB | 616 / 412 ms | 17.2 mC | 19.1 µA | 875 / 87 | ~7 % |
+| 12 | −137 dBm | 151 dB | 2 466 / 1 647 ms | 68.4 mC | 76 µA | 219 / 22 | ~24 % |
+
+**Battery.** Against the board's ~74 µA idle (`doc/power-consumption.md`), the SF7 radio is
+~4 % of the budget. SF10 would add +26 %, and SF12 doubles the consumption. The old P2P
+(1 s RX1) spent 7.8 mC per confirmed SF7 uplink, so TOWER timing saves ~60 %. At SF7 the
+node's own duty is ~0.4 s/h (0.01 %).
+
+**Speed at SF7.** 5.5 kbit/s raw. A confirmed uplink with its ACK takes ≈ 190 ms. A 96 B
+downlink after `PENDING` adds 185 ms (P0 M6).
+
+**Range.** SF7 at 14 dBm gives ~137 dB, or ≈ 139 dB with boosted gateway RX. That is ~+20 dB
+over TOWER `fsk`. Indoors, +6 dB buys ≈ 1.4–1.6× range, so SF10 would give roughly 1.7–2× the
+range for 6× the energy and ⅙ of the gateway capacity. A site that does not close at SF7
+gets a second gateway (§6.3.1, D17) or a better Hub position, not a higher SF. Range per
+building type is measured in M9 / P2 HIL.
+
+**Configuration.** `p2p-frequency`, `p2p-spreading-factor` and `p2p-tx-power` stay shell-only
+(bench, range tests), with the values above as defaults; production never changes them.
+Proposed for P1 commit C:
+- `p2p-frequency` default 869.525 MHz; `fsk` sets 868.1 MHz (TOWER ch0) explicitly, D9;
+- `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit);
+- the `p2p-spreading-factor` help text without the SF sweep.
 
 ## 4. Frame layer — adopted verbatim
 
@@ -333,7 +387,7 @@ report confirmed); `radio-link-check-fail-rejoin` further failures →
 `lora` has no SF sweep (the SF is fixed for the whole fleet).
 
 No ADR on P2P (decision 2026-09-28): TX power and SF are fixed per network, with no adaptive
-data rate or power control. LoRaWAN ADR via ChirpStack is unaffected.
+data rate or power control. LoRaWAN ADR via ChirpStack is unaffected. The fixed values: §3.3.
 
 ### 7.5 Clock sync
 
@@ -521,8 +575,8 @@ refused, we keep it **off by default** behind a flag bit so the core stays compa
 |---|---|---|---|
 | `p2p-modulation` | `fsk` / `lora` | shell | new; reboot |
 | `p2p-frequency` | 863–870 MHz | shell | `fsk` default 868.1 (TOWER ch0) |
-| `p2p-spreading-factor` | 7..12 | shell | `lora` only |
-| `p2p-tx-power` | 2..22 dBm | shell | ≤ 14 dBm ERP |
+| `p2p-spreading-factor` | 7..12 | shell | `lora` only; fixed SF7 (§3.3) |
+| `p2p-tx-power` | 2..22 dBm (→ 2..14, §3.3) | shell | fixed 14 dBm (RFO_LP max) |
 | gateway address | `net_id` from the JoinAccept | read-only, `ats radio status` | persisted with the session |
 | address | derived from DevEUI | read-only, `ats radio status` | |
 
@@ -780,7 +834,7 @@ the message tables live only there. The address collision check runs at `node-ad
 | D4 | Default `p2p-modulation` | **Decided 2026-09-28: `lora`**; `fsk` for TOWER-mixed sites |
 | D5 | Northbridge ↔ Hub link | **Decided 2026-09-28:** our own protocol (today's HDLC link extended, §13.2 H2); TOWER compatibility only on air, no tower console |
 | D6 | Address derivation | low 32 bits of DevEUI if unique across the HARDWARIO range, else FNV-1a-32 |
-| D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2 |
+| D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2. §3.3 proposes the uplink on 869.525 MHz too (one channel, from P2) |
 | D8 | Envelope `0x81 ‖ port ‖ protobuf` | yes, pending E3 |
 | D9 | `fsk` frequency: free `p2p-frequency` or TOWER channel index 0..2 | keep frequency, validate against the TOWER plan in `fsk` |
 | D10 | TOWER `NodeCmd::Shell` on STICKER | drop and log |
