@@ -2657,7 +2657,11 @@ static struct {
 	uint16_t run_gap_ms;
 	uint8_t pt_len; /* payload of the next frame(s) */
 	bool confirmed;
-} m_twr = {.freq = TWR_FREQ_DEFAULT, .sf = 7, .reps = 3};
+	bool fast; /* confirmed frames: lora_send_recv_async(), no radio sleep TX->RX */
+} m_twr = {.freq = TWR_FREQ_DEFAULT,
+	   .sf = 7,
+	   .reps = 3,
+	   .fast = IS_ENABLED(CONFIG_LORA_SEND_RECV_ASYNC)};
 
 static struct {
 	uint32_t frames, tx, retx, acked, timeouts, ack_dropped, bad, stale, dl, pending;
@@ -2676,6 +2680,11 @@ static uint32_t twr_node_addr(void)
 {
 	return sys_get_be32(&g_app_config.radio_deveui[4]); /* low32(DevEUI) */
 }
+
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+/* The radio's last DIO interrupt, stamped by the fork driver's ISR */
+extern volatile uint32_t sx12xx_irq_cyc;
+#endif
 
 static uint32_t twr_us(uint32_t from_cyc, uint32_t to_cyc)
 {
@@ -2755,6 +2764,61 @@ static int twr_wait_frame(k_timepoint_t end, struct twr_rx *rx, struct twr_hdr *
 	return 0;
 }
 
+/* Fast mode, one try: the driver switches the radio from TX-done straight to
+ * reception (no sleep, TCXO kept on) and stamps both moments: `done` is the
+ * TX-done interrupt, `arm` reception running. On success the radio receives
+ * into twr_recv_cb() until lora_recv_async(dev, NULL, NULL). */
+static int twr_send_recv(uint8_t *frame, size_t flen, uint32_t air, uint32_t *start, uint32_t *done,
+			 uint32_t *arm)
+{
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+	static struct k_poll_signal sig;
+	struct k_poll_event evt =
+		K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &sig);
+	struct lora_turnaround tm = {0};
+	unsigned int signaled;
+	int result = 0;
+
+	/* RX first: the driver keeps it for the turnaround; TX last sets power. */
+	int ret = twr_radio(false);
+
+	if (ret == 0) {
+		ret = twr_radio(true);
+	}
+	if (ret) {
+		return ret;
+	}
+
+	k_poll_signal_init(&sig);
+	app_radio_air_begin();
+	*start = k_cycle_get_32();
+	ret = lora_send_recv_async(m_lora_dev, frame, (uint32_t)flen, twr_recv_cb, NULL, &sig, &tm);
+	if (ret == 0) {
+		ret = k_poll(&evt, 1, K_MSEC(2 * air + 50));
+		k_poll_signal_check(&sig, &signaled, &result);
+		ret = ret ? ret : result;
+	}
+	app_radio_duty_charge(air);
+	if (ret) {
+		(void)lora_recv_async(m_lora_dev, NULL, NULL);
+		app_radio_air_end();
+		LOG_ERR_CALL_FAILED_INT("lora_send_recv_async", ret);
+		return ret;
+	}
+	*done = tm.tx_done_cyc;
+	*arm = tm.rx_armed_cyc;
+	return 0;
+#else
+	ARG_UNUSED(frame);
+	ARG_UNUSED(flen);
+	ARG_UNUSED(air);
+	ARG_UNUSED(start);
+	ARG_UNUSED(done);
+	ARG_UNUSED(arm);
+	return -ENOSYS;
+#endif
+}
+
 /* One frame: seal under a fresh counter, send, and for a confirmed frame wait
  * for its ACK, resending the same bytes up to m_twr.reps times. Radio work
  * queue. Logs one line per frame (the bench RTT buffer is 384 B). */
@@ -2806,8 +2870,9 @@ static int twr_exchange(void)
 	}
 
 	uint8_t tries = m_twr.confirmed ? m_twr.reps : 1;
+	bool fast = m_twr.fast && m_twr.confirmed;
 	uint32_t t0 = (uint32_t)k_uptime_get();
-	uint32_t c_start = 0, c_done = 0, c_arm = 0, c_ack = 0, c_dl = 0;
+	uint32_t c_start = 0, c_done = 0, c_arm = 0, c_ack = 0, c_dl = 0, td = 0;
 	struct twr_hdr rh;
 	struct twr_ack ack = {0};
 	size_t rlen;
@@ -2831,40 +2896,56 @@ static int twr_exchange(void)
 		}
 
 		k_msgq_purge(&m_twr_rxq);
-		ret = twr_radio(true);
-		if (ret) {
-			return ret;
-		}
-		app_radio_air_begin();
-		c_start = k_cycle_get_32();
-		ret = lora_send(m_lora_dev, frame, (uint32_t)flen);
-		c_done = k_cycle_get_32();
-		app_radio_duty_charge(air);
-		if (ret) {
-			app_radio_air_end();
-			LOG_ERR_CALL_FAILED_INT("lora_send", ret);
-			return ret;
-		}
-		m_twr_st.tx++;
-		m_twr_st.retx += n > 1;
-		if (!m_twr.confirmed) {
-			app_radio_air_end();
-			break;
-		}
+		if (fast) {
+			ret = twr_send_recv(frame, flen, air, &c_start, &c_done, &c_arm);
+			if (ret) {
+				return ret;
+			}
+			m_twr_st.tx++;
+			m_twr_st.retx += n > 1;
+		} else {
+			ret = twr_radio(true);
+			if (ret) {
+				return ret;
+			}
+			app_radio_air_begin();
+			c_start = k_cycle_get_32();
+			ret = lora_send(m_lora_dev, frame, (uint32_t)flen);
+			c_done = k_cycle_get_32();
+#if defined(CONFIG_LORA_SEND_RECV_ASYNC)
+			/* lora_send() returns this long after the TX-done interrupt */
+			td = twr_us(sx12xx_irq_cyc, c_done);
+#endif
+			app_radio_duty_charge(air);
+			if (ret) {
+				app_radio_air_end();
+				LOG_ERR_CALL_FAILED_INT("lora_send", ret);
+				return ret;
+			}
+			m_twr_st.tx++;
+			m_twr_st.retx += n > 1;
+			if (!m_twr.confirmed) {
+				app_radio_air_end();
+				break;
+			}
 
-		ret = twr_radio(false);
-		if (ret == 0) {
-			ret = lora_recv_async(m_lora_dev, twr_recv_cb, NULL);
-		}
-		c_arm = k_cycle_get_32();
-		if (ret) {
-			app_radio_air_end();
-			LOG_ERR_CALL_FAILED_INT("lora_recv_async", ret);
-			return ret;
+			ret = twr_radio(false);
+			if (ret == 0) {
+				ret = lora_recv_async(m_lora_dev, twr_recv_cb, NULL);
+			}
+			c_arm = k_cycle_get_32();
+			if (ret) {
+				app_radio_air_end();
+				LOG_ERR_CALL_FAILED_INT("lora_recv_async", ret);
+				return ret;
+			}
 		}
 
 		bool got = false;
-		k_timepoint_t end = sys_timepoint_calc(K_MSEC(twr_ack_window_ms()));
+		/* The window runs from RX armed; fast mode learns of it a little later. */
+		uint32_t win_us = twr_ack_window_ms() * 1000U;
+		k_timepoint_t end = sys_timepoint_calc(
+			K_USEC(win_us - MIN(win_us, twr_us(c_arm, k_cycle_get_32()))));
 
 		while (twr_wait_frame(end, &rx, &rh, pt, &rlen)) {
 			if (rh.type != TWR_TYPE_ACK || twr_parse_ack(pt, rlen, &ack) ||
@@ -2918,9 +2999,10 @@ static int twr_exchange(void)
 	(void)twr_radio(true);
 	app_radio_heartbeat_feed();
 
-	LOG_INF("TWR c=%u n=%u L=%u sf=%u t0=%u %s tx=%u arm=%u ack=%u dl=%u/%u rs=%d sn=%d g=%d",
-		counter, MIN(n, tries), (unsigned int)flen, m_twr.sf, t0, st,
-		twr_us(c_start, c_done), c_arm ? twr_us(c_done, c_arm) : 0,
+	LOG_INF("TWR c=%u n=%u L=%u sf=%u f=%u t0=%u %s tx=%u td=%u arm=%u ack=%u dl=%u/%u rs=%d "
+		"sn=%d g=%d",
+		counter, MIN(n, tries), (unsigned int)flen, m_twr.sf, fast, t0, st,
+		twr_us(c_start, c_done), td, c_arm ? twr_us(c_done, c_arm) : 0,
 		c_ack ? twr_us(c_arm, c_ack) : 0, c_dl ? twr_us(c_ack, c_dl) : 0, dl_len, ack_rssi,
 		ack_snr, ack.rssi);
 	return 0;
@@ -3099,6 +3181,22 @@ static int cmd_twr_ack_drop(const struct shell *sh, size_t argc, char **argv)
 	return ret;
 }
 
+static int cmd_twr_fast(const struct shell *sh, size_t argc, char **argv)
+{
+	long v;
+	int ret = cmd_twr_set(sh, argv, 0, 1, &v);
+
+	if (ret == 0) {
+		if (v && !IS_ENABLED(CONFIG_LORA_SEND_RECV_ASYNC)) {
+			shell_error(sh, "driver has no lora_send_recv_async()");
+			return -ENOTSUP;
+		}
+		m_twr.fast = v;
+		shell_print(sh, "fast %u", m_twr.fast);
+	}
+	return ret;
+}
+
 /* The Northbridge counter restarts at 1 after its power cycle: reset the replay
  * lane here (0) instead of rebooting the node. */
 static int cmd_twr_gw_last(const struct shell *sh, size_t argc, char **argv)
@@ -3116,9 +3214,9 @@ static int cmd_twr_stats(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "stats reset");
 		return 0;
 	}
-	shell_print(sh, "node 0x%08x gw 0x%08x freq %u sf %u reps %u win %u dlwin %u ms",
+	shell_print(sh, "node 0x%08x gw 0x%08x freq %u sf %u reps %u win %u dlwin %u ms fast %u",
 		    twr_node_addr(), TWR_GW_ADDR, m_twr.freq, m_twr.sf, m_twr.reps,
-		    twr_ack_window_ms(), twr_dl_window_ms());
+		    twr_ack_window_ms(), twr_dl_window_ms(), m_twr.fast);
 	shell_print(sh, "frames %u tx %u retx %u acked %u timeouts %u ack_dropped %u",
 		    m_twr_st.frames, m_twr_st.tx, m_twr_st.retx, m_twr_st.acked, m_twr_st.timeouts,
 		    m_twr_st.ack_dropped);
@@ -3149,6 +3247,8 @@ SHELL_SUBCMD_ADD((tower_bench), window, NULL, "window <ms>, 0 = formula", cmd_tw
 SHELL_SUBCMD_ADD((tower_bench), dlwin, NULL, "dlwin <ms>, 0 = formula", cmd_twr_dlwin, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), reps, NULL, "reps <1..10>", cmd_twr_reps, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), ack_drop, NULL, "ack_drop <n>", cmd_twr_ack_drop, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), fast, NULL, "fast <0|1>: TX->RX without radio sleep", cmd_twr_fast,
+		 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), gw_last, NULL, "gw_last <n>, 0 = accept any", cmd_twr_gw_last, 2,
 		 0);
 SHELL_SUBCMD_ADD((tower_bench), stats, NULL, "stats [reset]", cmd_twr_stats, 1, 1);
