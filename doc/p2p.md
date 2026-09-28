@@ -241,7 +241,7 @@ below replaces an earlier design that rooted P2P in a *separate* `join_key`
 derived from `secret_key` (the NFC command channel's key) and registered
 with the central by the phone app after claiming. That intermediate key is
 gone. P2P's root secret is now the device's **existing LoRaWAN OTAA AppKey**
-(`lrw_appkey`) — the same key the network already needs for ordinary
+(`radio_appkey`) — the same key the network already needs for ordinary
 LoRaWAN OTAA join, and (assuming the P2P central has access to the same
 AppKey registry as the LoRaWAN join server — see the open question in §11)
 already known to it, with **no new app-mediated derivation/registration
@@ -252,7 +252,7 @@ the radio-side protocol.
 | Key | Who holds it | Origin / distribution |
 |---|---|---|
 | `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key only. **Never leaves the NFC/claim world — the central, gateways, and the P2P protocol never see it.** |
-| `lrw_appkey` (16 B, existing) | device, network/join-server infrastructure (already, via ordinary LoRaWAN OTAA provisioning) | Set at the tester (same provisioning step as any LoRaWAN-capable device), `persistent: [device_reset]` — **wiped by `factory_reset`, unlike `secret_key`** (§7 lifecycle table has the consequence). This is P2P's sole root secret; there is no P2P-specific enrollment credential any more. |
+| `radio_appkey` (16 B, existing) | device, network/join-server infrastructure (already, via ordinary LoRaWAN OTAA provisioning) | Set at the tester (same provisioning step as any LoRaWAN-capable device), `persistent: [device_reset]` — **wiped by `factory_reset`, unlike `secret_key`** (§7 lifecycle table has the consequence). This is P2P's sole root secret; there is no P2P-specific enrollment credential any more. |
 | `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake, directly under `app_key`: `session_key = AES128-CMAC(app_key, "HIO-P2P-SES" ‖ 0x01 ‖ dev_nonce(4 BE) ‖ central_nonce(4 BE) ‖ dev_eui(8, MSB-first) ‖ zeros(4))` — the trailing zero-pad brings the 28 B unpadded message up to 32 B (two full CMAC blocks); no `join_key` intermediate. Rotates on every re-join. |
 
 JoinRequest/JoinAccept (§5.3) authenticate under `app_key` directly too —
@@ -294,16 +294,16 @@ Properties this buys:
   ends" model from the epic is gone.
 
 **Zero-`app_key` guard.** Rooting everything in `app_key` makes an all-zero
-`lrw_appkey` dangerous rather than merely useless: it is a *publicly known*
+`radio_appkey` dangerous rather than merely useless: it is a *publicly known*
 key, so every tag and every `session_key` derived under it is forgeable by
 anyone in radio range — a forged JoinAccept would pair the node into a
 hostile network and hand the attacker the very `session_key` the node
 computes. Nor is it a theoretical state: all-zero is the config default, so
-any device switched to `radio-mode p2p` before `lrw_appkey` was provisioned
+any device switched to `radio-mode p2p` before `radio_appkey` was provisioned
 lands here — the ordinary case on a bench or a P2P-only build — and it is
 also what `factory_reset` leaves behind for a device later re-enabled into
 `radio-mode p2p` (§7). `app_radio_p2p_start()` therefore refuses
-to bring the radio up at all while `lrw_appkey` is all-zero, and
+to bring the radio up at all while `radio_appkey` is all-zero, and
 `app_radio_p2p_rejoin()` (the top-level `join` shell path) refuses for the same
 reason so the debug surface is not a way around it. The refusal is loud —
 `LOG_ERR` at boot, plus an `app_key: MISSING (radio refused to start)` line
@@ -321,7 +321,7 @@ Modeled on TOWER's pairing-request/ACK exchange, hardened to OTAA-grade.
 
 ### 5.1 Preconditions
 
-1. Device provisioned with `app_key` (`lrw_appkey`), and the central has
+1. Device provisioned with `app_key` (`radio_appkey`), and the central has
    access to it (§4 — via ordinary LoRaWAN OTAA provisioning, no separate
    enrollment step).
 2. Central pairing window **open** — bounded, default 120 s, auto-close,
@@ -386,7 +386,7 @@ operator action (shell `join`) or recovery (self-heal, `RejoinRequest`).
 - Network: an authenticated `RejoinRequest` (§5.4) starts a slow-policy
   episode.
 
-All four paths refuse to start a join while `lrw_appkey` or `lrw_deveui` is
+All four paths refuse to start a join while `radio_appkey` or `radio_deveui` is
 all-zero (§4, §5.3) — a node that cannot be registered at any central does
 not transmit.
 
@@ -411,12 +411,12 @@ device's own public identity), so it is authenticated only, not encrypted
   DevEUI on every transport; the serial number stays the printed/registry
   identity but is no longer sent over P2P. Body 10 → 14 B, frame 37 → 41 B.
   **Byte order is a protocol constant: MSB-first**, i.e. the order the hex
-  string reads and `g_app_config.lrw_deveui` stores — *not* the LoRaWAN
+  string reads and `g_app_config.radio_deveui` stores — *not* the LoRaWAN
   on-air LSB-first order (LoRaMac reverses internally). A width/order
   mismatch makes the join succeed and every data frame after it silently
   fail to decrypt. Pinned by the shared KAT fixture
   `tests/ccm/p2p_join_kat.json` (byte-identical in proximos-v2 and
-  `proximos/firmware`). A node with an all-zero `lrw_deveui` refuses to
+  `proximos/firmware`). A node with an all-zero `radio_deveui` refuses to
   start a join (an already persisted session keeps running).
 - `dev_nonce` is a **monotonic persisted counter** in NVS (LoRaWAN 1.0.4
   style), giving JoinRequest replay protection: the central stores the last
@@ -429,7 +429,7 @@ device's own public identity), so it is authenticated only, not encrypted
   stored high-water to near `UINT32_MAX`, after which no legitimate
   `dev_nonce` can ever be `>` it again. Whether this is still a *permanent*
   lock (as it was under the earlier `join_key` design) now depends on how
-  the central keys its stored high-water: `app_key` (`lrw_appkey`) IS wiped
+  the central keys its stored high-water: `app_key` (`radio_appkey`) IS wiped
   by `factory_reset` (§4, §7), so a fresh re-provisioning gives the device a
   new `app_key` and a fresh `dev_nonce` sequence — but that only unlocks the
   device if the central treats a re-registered `app_key` for a given
@@ -864,7 +864,7 @@ the wire values of `get_radio_state`'s `RadioState.state`, #446): `PAIRED` → H
 (session kept, the LoRaWAN link-check WARNING's counterpart), a boot/forced
 join → JOINING, a self-heal or `RejoinRequest` join (slow policy) →
 RECONNECT, `UNPAIRED` and not joining (after `Detach`) → IDLE, and a refused
-start (`lrw_appkey` or `lrw_deveui` all-zero) → DISABLED. `app_radio_is_ready()`
+start (`radio_appkey` or `radio_deveui` all-zero) → DISABLED. `app_radio_is_ready()`
 is true only while `PAIRED`, so the report cadence composes nothing while a
 re-join replaces the session.
 
@@ -882,8 +882,8 @@ isn't):
 
 | Trigger | Behavior |
 |---|---|
-| `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
-| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_radio_p2p_start()` is never called at all. (a) **The P2P pairing is cleared** since #449: every reset tier that resets the keys (`factory_reset`, `vendor_reset`, and `lrw_reset`) calls `app_radio_reset_link()`, which wipes the LoRaWAN NVM and the `p2pjoin/state` pairing (the `dev_nonce` anti-replay counter and the frame counter are kept). Before #449 the pairing survived (doc/code mismatch found 2026-08-24) and `join_settings_set()` restored it straight to `PAIRED` the moment someone set `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_radio_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
+| `radio_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
+| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_radio_p2p_start()` is never called at all. (a) **The P2P pairing is cleared** since #449: every reset tier that resets the keys (`factory_reset`, `vendor_reset`, and `lrw_reset`) calls `app_radio_reset_link()`, which wipes the LoRaWAN NVM and the `p2pjoin/state` pairing (the `dev_nonce` anti-replay counter and the frame counter are kept). Before #449 the pairing survived (doc/code mismatch found 2026-08-24) and `join_settings_set()` restored it straight to `PAIRED` the moment someone set `radio_mode p2p` again. (b) **`app_key` (`radio_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `radio_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_radio_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
 | Mute station (TX path wedged, telemetry perpetually skipped) | **M-2 on P2P too (#449):** paired but no telemetry uplink for 4 × `interval_report` → a self-heal re-join, unless the duty ledger has been holding sends (then it waits, up to 75 min). The policy (`app_radio_stale_check()`) is shared with LoRaWAN's M-2 (F29). Runs from the watchdog heartbeat, so builds without `CONFIG_WATCHDOG` (the debug bench) have no M-2 on either radio. |
 | Central DB loss/restore | Node's confirmed uplinks stop being ACKed (or ACK under an unknown session fails authentication). **Since decision #22 (§3.4):** a failed link check is a CONFIRMED frame with no Ack (or `0x56`) after its `P2P_ACK_MAX_RETRIES` retries; any authenticated downlink is a success. 3 failures in a row → WARNING (session kept, every report confirmed, each failed check steps a central-assigned TX power 2 dB up towards `p2p-tx-power`); `radio-link-check-fail-rejoin` (default 5) further failures in WARNING → the self-healing re-join. It runs the slow policy from the start (§5.2) on the configured SF (last-resort sweep after 24 h, §5.3) and backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. (Before: re-join after 8 fully-failed cycles, with an SF sweep.) Known devices' re-joins are accepted outside the pairing window. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered device. |
@@ -947,14 +947,14 @@ fiat.)
 **Revision (#118 phase 2 revision):** the app-mediated "derive + register"
 step this section originally described is gone along with `join_key` (§4).
 P2P enrollment now piggybacks entirely on ordinary LoRaWAN OTAA provisioning
-— `lrw_appkey` is written at the tester exactly like any LoRaWAN-capable
+— `radio_appkey` is written at the tester exactly like any LoRaWAN-capable
 device, and (per the §11 open question) is assumed already known to the P2P
 central through the same channel the LoRaWAN join server gets it from:
 
 ```
  tester                                                       central              device
    |  secret_key, claim_token,                                    |                    |
-   |  lrw_appkey  --------------------------------------------->  |                    |
+   |  radio_appkey  --------------------------------------------->  |                    |
    |  (ordinary provisioning; central already has app_key,        |                    |
    |   via the LoRaWAN join server registry or a synced copy)     |                    |
    |                                                               |  pairing window    |
@@ -981,7 +981,7 @@ phone app step is needed for P2P at all, one-time or otherwise.
   1 was bench-only, no central to migrate).
   **Superseded (#118 phase 2 revision, proximos-v2 MR!7 §7):** removed the
   `join_key` intermediate entirely — `session_key` now derives directly from
-  `app_key` (`lrw_appkey`), and JoinRequest/JoinAccept authenticate under
+  `app_key` (`radio_appkey`), and JoinRequest/JoinAccept authenticate under
   `app_key` with a full 16 B plain AES-CMAC tag over label‖header‖body,
   dropping AES-CCM (and the nonce/direction machinery it needed) from the
   handshake entirely — see §4/§5.3. JoinRequest's tag construction mirrors
@@ -991,9 +991,9 @@ phone app step is needed for P2P at all, one-time or otherwise.
   `join_key`-rooted design, accepted pre-ship for the same reason as before
   (bench-only, no central to migrate).
 - **Zero-`app_key` exposure** — **found and closed while reviewing the merge
-  of this revision.** Moving the root from `secret_key` to `lrw_appkey` made
+  of this revision.** Moving the root from `secret_key` to `radio_appkey` made
   an all-zero root key reachable for the first time (`factory_reset` wipes
-  `lrw_appkey` but preserves `secret_key`), and an all-zero root is publicly
+  `radio_appkey` but preserves `secret_key`), and an all-zero root is publicly
   known, so a bystander could have forged a JoinAccept and owned the session.
   Closed by §4's zero-`app_key` guard in `app_radio_p2p_start()`/`app_radio_p2p_rejoin()`.
   The related *availability* consequence — no self-healing back onto the air
@@ -1001,7 +1001,7 @@ phone app step is needed for P2P at all, one-time or otherwise.
   lifecycle table; it is a property of the key hierarchy change itself, not
   something the guard introduced.
 - **Central's access to `app_key`** — **new, unresolved.** §4/§8/§10 now
-  assume the P2P central can obtain a device's `app_key` (`lrw_appkey`)
+  assume the P2P central can obtain a device's `app_key` (`radio_appkey`)
   through the same channel the LoRaWAN join server already gets it from
   (shared registry, synced copy, or similar) — this removes the old
   design's app-mediated `join_key` registration step, but only holds if that
@@ -1268,12 +1268,12 @@ everything except real round-trip timing.
 - The zero-`app_key` guard (§4). This one has **no automated coverage at
   all** — `app_radio_p2p.c` needs the LoRa driver, so no native_sim suite reaches
   it — which makes the rig the only place it is ever exercised. On the DUT:
-  set `lrw-appkey 00000000000000000000000000000000`, `settings save` (which
-  reboots), and confirm the boot log carries `P2P not started: lrw_appkey is
+  set `radio-appkey 00000000000000000000000000000000`, `settings save` (which
+  reboots), and confirm the boot log carries `P2P not started: radio_appkey is
   all-zero`, that `ats radio status` reports `app_key: MISSING (radio
   refused to start)`, that device B hears no JoinRequest at all, and that
   `join` is refused rather than transmitting. Then restore a real
-  `lrw-appkey` and confirm the join proceeds normally. Worth running once
+  `radio-appkey` and confirm the join proceeds normally. Worth running once
   with a pairing already in NVS (§7's re-enable path) so the check ahead of
   `app_radio_p2p_start()`'s already-`PAIRED` shortcut is covered too.
 

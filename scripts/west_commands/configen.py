@@ -195,6 +195,24 @@ def filter_settings_key(name):
     return name.replace("_", "-")
 
 
+def filter_nvs_key(param):
+    """Settings (NVS) key the value is stored under. Normally the shell key; a
+    renamed parameter keeps its old key via `stored_as`, so a stored value
+    survives the rename (and a downgrade) without a migration."""
+    return filter_settings_key(param.get("stored_as", param["name"]))
+
+
+def check_nvs_keys(parameters):
+    """Two parameters stored under one settings key would load each other's value."""
+    owner = {}
+    for param in parameters:
+        key = filter_nvs_key(param)
+        if key in owner:
+            log.die(f"Parameters '{owner[key]}' and '{param['name']}' share the "
+                    f"settings key '{key}' (check 'stored_as')")
+        owner[key] = param["name"]
+
+
 def filter_c_type(param, module_name):
     """Get the C type for a parameter."""
     ptype = param.get("type")
@@ -1123,6 +1141,7 @@ class Configen(WestCommand):
         # Validate parameters
         for param in parameters:
             self._validate_param(param)
+        check_nvs_keys(parameters)
 
         # Derive the internal access flags (dump / no_shell / ...) from the
         # readable/writable transport lists before any model is built.
@@ -1143,6 +1162,7 @@ class Configen(WestCommand):
         # Register filters
         env.filters["c_name"] = filter_c_name
         env.filters["settings_key"] = filter_settings_key
+        env.filters["nvs_key"] = filter_nvs_key
         env.filters["c_type"] = filter_c_type
         env.filters["struct_field"] = filter_struct_field
         env.filters["printf_format"] = filter_printf_format
@@ -1401,6 +1421,13 @@ class Configen(WestCommand):
 
         if ptype == "enum" and not param.get("enum"):
             log.die(f"Parameter '{name}' of type 'enum' must have an 'enum' field")
+
+        stored_as = param.get("stored_as")
+        if stored_as is not None:
+            if not isinstance(stored_as, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", stored_as):
+                log.die(f"Parameter '{name}' 'stored_as' must be a snake_case name, got {stored_as!r}")
+            if stored_as == name:
+                log.die(f"Parameter '{name}' 'stored_as' repeats its own name")
 
         if "preserve_on_reset" in param:
             log.die(f"Parameter '{name}' uses removed 'preserve_on_reset' — "

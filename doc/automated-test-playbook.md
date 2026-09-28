@@ -501,7 +501,7 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   a provisioned debug device via `JLinkExe loadfile` (sector-erase, no `--erase`). After a real
   power cycle (see AT-BOOT-04's PPK2 correction below), the autonomous post-join GetInfo uplink
   decoded to `debug: false`, `serial_number: 2162199999` (unchanged) and a successful OTAA join
-  on the preserved `lrw_deveui`/`lrw_appkey` — full identity survived a real firmware-variant
+  on the preserved `radio_deveui`/`radio_appkey` — full identity survived a real firmware-variant
   swap, not just a same-image reflash. Since release has no shell/RTT, post-release verification
   had to go through LRW (autonomous GetInfo) — there is currently no way to inspect NFC state on
   a release device without a phone or external reader.
@@ -573,7 +573,7 @@ source of truth — read it before testing so parameter names/ranges are current
 
 ### AT-CFG-03 — transport access model (D, A; maps C1, C10, H-3)
 - **Steps:** attempt over `ats cmd lrw`: (a) SetParam on a `lorawan`-group field (e.g.
-  radio_mode, lrw_appkey); (b) GetParam of `lrw_appkey`. Then the same over `ats cmd nfc`.
+  radio_mode, radio_appkey); (b) GetParam of `radio_appkey`. Then the same over `ats cmd nfc`.
 - **Expect:** LRW transport: both refused (lorawan group is shell+nfc writable only; keys
   NFC-readable only). NFC transport: allowed. Any key readable over LRW = **CRIT** finding.
 
@@ -611,7 +611,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 
 ### AT-LRW-01 — OTAA join on ChirpStack (DR, A; maps L2)
 - **Pre:** provision OTAA creds (§ annex; shell: `config lrw-activation otaa`,
-  `config lrw-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
+  `config radio-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
 - **Steps:** reboot; poll `GetActivation` until DevAddr appears (≤ 2 min).
 - **Expect:** join accept; first uplink = autonomous GetInfo on fPort 85 (AT-LRW-04).
 - **Evidence:** DevAddr, join timestamp, RSSI/SNR of first uplink.
@@ -670,7 +670,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   ~35s after the ack — i.e. LRW also does response-before-reboot ordering, just via ordinary
   uplink-then-deferred-action sequencing rather than NFC's ack/backstop gate. Config diff
   matched `app_config_device_reset()`'s preserve-list exactly (`cap-w1-sensors`/
-  `interval-report` reset, `lrw-appkey`/secret_key/serial/nonce_counter preserved).
+  `interval-report` reset, `radio-appkey`/secret_key/serial/nonce_counter preserved).
 - **Evidence:** command → response-hex → decoded table. This is the core release-FW
   functional suite.
 
@@ -697,13 +697,13 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
   exists for it (the `p2p_logic` native_sim suite drives `app_radio_p2p.c` on a fake LoRa
   device, but not this start-up guard), so this is the only place it gets exercised. In `radio-mode p2p`, set
-  `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
+  `radio-appkey 00000000000000000000000000000000` + save: expect `P2P not started: radio_appkey
   is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
   status`, no JoinRequest on air, and `join` refused rather than transmitting.
-  Restore a real `lrw-appkey` and confirm the join proceeds.
+  Restore a real `radio-appkey` and confirm the join proceeds.
 - **Note:** `factory_reset` reverts `radio-mode` to its `OFF` default (#350; it is
   `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
-  so it never leaves a live P2P node behind — but it does wipe `lrw_appkey` while leaving
+  so it never leaves a live P2P node behind — but it does wipe `radio_appkey` while leaving
   the `p2pjoin/*` pairing intact, which is the state the guard above exists for
   (doc/p2p.md §7).
 - **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
@@ -825,7 +825,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
   (anti-brick bound holds).
 
 ### AT-NFC-07 — NFC-only key readback (D, SA; maps C10, #162)
-- **Steps:** encrypted GetParam of `lorawan.lrw-appkey` over NFC.
+- **Steps:** encrypted GetParam of `lorawan.radio-appkey` over NFC.
 - **Expect:** key returned over NFC; the identical request over LRW (AT-CFG-03) refused.
 
 ### AT-NFC-08 — paged history readout (DR, SA; maps #260)

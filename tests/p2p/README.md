@@ -35,7 +35,7 @@ p2p tx <frame_type> <hex_body> [counter] [dir 0|1]   # craft + send a frame
 
 `p2p key`'s `app_key`/`dev_eui` must match the device under test's own
 provisioned values — `app_key` is the DUT's existing LoRaWAN OTAA AppKey
-(read it off the DUT, e.g. `config lrw_appkey` or bench records), the sole
+(read it off the DUT, e.g. `config radio-appkey` or bench records), the sole
 root secret for the whole P2P transport (doc/p2p.md §4, #118 phase 2
 revision; there is no separate `join_key`/`secret_key` involved in P2P).
 Both sides compute the same tags/keys from the same inputs; nothing is

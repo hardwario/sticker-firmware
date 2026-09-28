@@ -844,18 +844,18 @@ ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
 {
 	uint8_t saved[8];
 
-	memcpy(saved, g_app_config.lrw_deveui, sizeof(saved));
+	memcpy(saved, g_app_config.radio_deveui, sizeof(saved));
 
 	p2p_test_join_setup(10);
 	p2p_test_set_paired();
-	memset(g_app_config.lrw_deveui, 0, sizeof(g_app_config.lrw_deveui));
+	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
 
 	app_radio_p2p_start();
 
 	zassert_true(app_radio_p2p_is_ready(),
 		     "a persisted session must survive an upgrade that added the DevEUI");
 
-	memcpy(g_app_config.lrw_deveui, saved, sizeof(saved));
+	memcpy(g_app_config.radio_deveui, saved, sizeof(saved));
 }
 
 /* doc/plan/439 T3: a P2P link coming up announces Info + settings-info through
@@ -1393,8 +1393,8 @@ static const uint8_t KAT_DEV_EUI[8] = {0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a,
 
 static void kat_provision(void)
 {
-	memcpy(g_app_config.lrw_appkey, KAT_APP_KEY, sizeof(KAT_APP_KEY));
-	memcpy(g_app_config.lrw_deveui, KAT_DEV_EUI, sizeof(KAT_DEV_EUI));
+	memcpy(g_app_config.radio_appkey, KAT_APP_KEY, sizeof(KAT_APP_KEY));
+	memcpy(g_app_config.radio_deveui, KAT_DEV_EUI, sizeof(KAT_DEV_EUI));
 	/* Deliberately a different value from anything in the fixture: since
 	 * #417 the serial must not reach the air or the KDF at all, so a test
 	 * that still depended on it would fail here. */
@@ -1440,7 +1440,7 @@ ZTEST(p2p_logic, test_session_key_matches_the_kat_fixture)
 	 * Without this the test would pass even if the memcpy were dropped. */
 	uint8_t other[P2P_KEY_LEN];
 
-	g_app_config.lrw_deveui[7] ^= 0x01;
+	g_app_config.radio_deveui[7] ^= 0x01;
 	p2p_test_derive_session_key(7, 0x22222222, other);
 	zassert_true(memcmp(key, other, sizeof(key)) != 0,
 		     "the dev_eui must be an input to the KDF");
@@ -1471,7 +1471,7 @@ ZTEST(p2p_logic, test_radio_state_mapping)
 
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, true);
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED,
-		      "unprovisioned: lrw_appkey / lrw_deveui all-zero");
+		      "unprovisioned: radio_appkey / radio_deveui all-zero");
 
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
@@ -1692,18 +1692,18 @@ ZTEST(p2p_logic, test_rejoin_op_self_heals_or_refuses_unprovisioned)
 {
 	const struct app_radio_backend *be = &app_radio_p2p_backend;
 
-	memset(g_app_config.lrw_appkey, 0, sizeof(g_app_config.lrw_appkey));
-	memset(g_app_config.lrw_deveui, 0x22, sizeof(g_app_config.lrw_deveui));
+	memset(g_app_config.radio_appkey, 0, sizeof(g_app_config.radio_appkey));
+	memset(g_app_config.radio_deveui, 0x22, sizeof(g_app_config.radio_deveui));
 	p2p_test_join_setup(7);
 	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
 	zassert_equal(be->rejoin(false), -ENOTSUP, "all-zero app_key: refused");
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "session kept");
 
-	memset(g_app_config.lrw_appkey, 0x11, sizeof(g_app_config.lrw_appkey));
-	memset(g_app_config.lrw_deveui, 0, sizeof(g_app_config.lrw_deveui));
+	memset(g_app_config.radio_appkey, 0x11, sizeof(g_app_config.radio_appkey));
+	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
 	zassert_equal(be->rejoin(true), -ENOTSUP, "all-zero DevEUI: refused");
 
-	memset(g_app_config.lrw_deveui, 0x22, sizeof(g_app_config.lrw_deveui));
+	memset(g_app_config.radio_deveui, 0x22, sizeof(g_app_config.radio_deveui));
 	zassert_equal(be->rejoin(false), 0, "provisioned: re-join");
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT,
 		      "a self-heal on the slow policy");

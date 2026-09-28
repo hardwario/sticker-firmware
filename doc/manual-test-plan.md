@@ -179,16 +179,16 @@ fPort-2 `Telemetry` frame and **no** fPort-85 response.
 **Goal:** `settings device-reset` (renamed from `settings reset`, #299) and the DeviceReset command
 (same wire id as the old, single FactoryReset; nfc/shell-only) restore application config + alarm
 rules to defaults but **keep** the device identity (`serial-number`, `secret-key`, `nonce-counter`,
-claim token + window state, `vendor-token`) and LoRaWAN provisioning (`lrw-deveui`, keys, region,
+claim token + window state, `vendor-token`) and LoRaWAN provisioning (`radio-deveui`, keys, region,
 …), so the unit stays provisioned and on the network (issue #108).
 **Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
 stays joined / rejoins with the same credentials.
 
 **Prompt for Claude:**
-> First capture the identity + a couple of app values via `config` (e.g. `config lrw-deveui`,
+> First capture the identity + a couple of app values via `config` (e.g. `config radio-deveui`,
 > `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
 > Then run `settings device-reset` over the RTT shell. After reboot confirm: `interval-report` is
-> back to default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
+> back to default, but `config radio-deveui` / `config serial-number` are **unchanged**, and the device
 > rejoins with the same DevEUI. Then send a DeviceReset as a fPort-85 downlink (`08094200`) and
 > confirm it is **refused** with `Error{NOT_READY}` and nothing is reset (it is nfc/shell-only like
 > `factory_reset`; a phone runs it over the mailbox, N9).
@@ -216,10 +216,10 @@ effect once it comes back (old key no longer decrypts); an all-zero key is rejec
 
 **Prompt for Claude:**
 > `settings factory-reset` over the RTT shell. Confirm:
-> - `config serial-number` / `secret-key` / `lrw-deveui` / `lrw-joineui` survive;
-> - `config lrw-appkey` and the other LoRaWAN keys and settings are back to defaults.
+> - `config serial-number` / `secret-key` / `radio-deveui` / `lrw-joineui` survive;
+> - `config radio-appkey` and the other LoRaWAN keys and settings are back to defaults.
 >
-> Re-provision the keys (`config lrw-appkey …` + `settings save`, or NFC `set_param`, N1) and
+> Re-provision the keys (`config radio-appkey …` + `settings save`, or NFC `set_param`, N1) and
 > confirm the device joins afresh. Then `config vendor-reset-allow false` + `settings save`, and confirm
 > `settings vendor-reset <32-hex-key>` is refused (shell reports failure, no reboot). Set
 > `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
@@ -291,7 +291,7 @@ the device no longer joins until re-provisioned.
 **Prompt for Claude:**
 > ⚠️ Destructive — confirm it's acceptable to un-provision this bench unit first (you'll need to
 > re-flash provisioning afterwards). Run `settings erase` over the RTT shell. After reboot confirm
-> `config lrw-deveui` and `config serial-number` are wiped and the device fails to join. Then
+> `config radio-deveui` and `config serial-number` are wiped and the device fails to join. Then
 > re-provision and confirm join works again.
 
 - [ ] Pass
@@ -303,7 +303,7 @@ re-flashing firmware keeps the device provisioned (issue #108 partition-map cont
 **Observable:** identity + LoRaWAN credentials survive a firmware re-flash.
 
 **Prompt for Claude:**
-> Capture `config lrw-deveui` / `config serial-number` / `config interval-report` (set the latter
+> Capture `config radio-deveui` / `config serial-number` / `config interval-report` (set the latter
 > to a non-default and `settings save`). Re-flash the firmware with a plain `west flash` (no
 > `--erase`). After reboot confirm all three values are **unchanged** and the device rejoins with
 > the same DevEUI — i.e. the flash preserved the `storage` partition at `0x3C000`.
@@ -633,7 +633,7 @@ the rejoin timer keeps running and the device rejoins.
 rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** in the first second.
 
 **Prompt for Claude:**
-> Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
+> Set `config radio-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
 > shows `skipping LoRaWAN bring-up (radio-silent, #98/#175)` (debug build) and **no** region /
 > `lorawan_start` / join lines follow — `app_radio_lrw_init` takes the radio-silent path. Confirm
 > `ats radio status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
@@ -2005,7 +2005,7 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 >    - confirm the `ack`, RTT `session end (deferred action)`, green + yellow 2 s, then the reboot;
 >    - right after the `ack`, send one more `get_info` in the same hold and confirm it gets no reply;
 >    - after the reboot, confirm `get_basic_info` answers with the nonce not reset, config/alarm
->      defaults are restored, `config serial-number` / `lrw-deveui` / `secret-key` are unchanged, and
+>      defaults are restored, `config serial-number` / `radio-deveui` / `secret-key` are unchanged, and
 >      the LoRaWAN session is intact.
 > 2. `factory_reset` (id 23):
 >    - confirm the same ordering, that the LoRaWAN keys/session reset and the device re-joins, and
@@ -2412,8 +2412,8 @@ cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 - [x] Pass
 
 > **HW-verified (2026-08-17, SN 2162199999, TTN)**: performed both a real `factory_reset` and a
-> real `vendor_reset` over NFC this session (see X12). Both correctly zeroed `lrw-appkey` (+
-> devaddr/nwkskey/appskey) while preserving `lrw-deveui`/`lrw-joineui`; after restoring the
+> real `vendor_reset` over NFC this session (see X12). Both correctly zeroed `radio-appkey` (+
+> devaddr/nwkskey/appskey) while preserving `radio-deveui`/`lrw-joineui`; after restoring the
 > original AppKey via NFC `SetParam{lorawan.appkey}+save=true`, the device rejoined OTAA cleanly
 > both times (fresh `devaddr`, `state: HEALTHY`) with no manual DevNonce flush and no "already
 > used" rejection. Caveat: TTN is known to be more tolerant of DevNonce reuse than ChirpStack

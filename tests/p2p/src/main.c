@@ -26,7 +26,7 @@
  * CMAC(app_key, label || header || body) -- NOT AES-CCM, no nonce involved
  * at all (neither frame carries an actual secret). `p2p key` sets app_key --
  * the DUT's existing LoRaWAN OTAA AppKey (read it off the DUT, e.g. `config
- * lrw_appkey`) -- so both sides compute identical tags. There is no longer a
+ * radio_appkey`) -- so both sides compute identical tags. There is no longer a
  * separate join_key/secret_key involved in P2P at all.
  *
  * Data plane (telemetry/alarm/response/ack, only once net_id/dev_addr are
