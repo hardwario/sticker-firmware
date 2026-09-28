@@ -19,7 +19,7 @@
 >
 > Surveyed reference: `hardwario/tower-firmware` @ `b7f3f4a`, `hardwario/tower-protocol` @
 > `2351ea0` (crate 1.3.x, `RADIO_SCHEMA_VERSION = 2`). The comparison that motivated this
-> is in `~/Documents/claude/2026-09-28 Tower 868 vs STICKER P2P.md` and #408 §1.1/§4.
+> is in #408 §1.1/§4.
 
 ---
 
@@ -489,7 +489,7 @@ a go/no-go.
 
 - KAT: `tests/ccm/tower_frame_kat.json` (9 vectors, upstream `tower-radio-core` /
   `tower-net-core` @ `24259e3`, cross-checked with pycryptodome). Generator:
-  `~/Documents/claude/Scripts/tower_kat_gen`.
+  `tests/ccm/tower_kat_gen`.
 - Turnaround is TOWER's fixed wait before the ACK TX, settable 20–60 ms on the Northbridge;
   M2 passes when the node's RX is armed before that wait ends. Today's node path measures
   ~22 ms (radio sleeps between ops, F-P2P-2); a standby-between-ops driver change only if M2
