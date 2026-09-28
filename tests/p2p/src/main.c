@@ -17,7 +17,9 @@
  * deliberately separate, minimal firmware (only app_ccm.c is shared), not a
  * common module, so a wire-format change in app_radio_p2p.c must be mirrored here:
  *
- *   header:  net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE)
+ *   header:  net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE)
+ *            (12 B; FCtrl since decision #22, 0 in join frames -- this sim
+ *            sends 0 and logs what it receives)
  *
  * Join handshake (JoinRequest 0xF0 / JoinAccept 0xF1, #118 phase 2 revision,
  * proximos-v2 MR!7 §7): CLEARTEXT body + a full 16 B plain AES-CMAC tag =
@@ -28,7 +30,7 @@
  * separate join_key/secret_key involved in P2P at all.
  *
  * Data plane (telemetry/alarm/response/ack, only once net_id/dev_addr are
- * join-assigned): AES-CCM (AES-128, 4 B tag) under session_key, 11 B header
+ * join-assigned): AES-CCM (AES-128, 4 B tag) under session_key, 12 B header
  * as AAD, nonce = counter(4 BE) | dev_addr(2 BE) | frame_type(1) |
  * direction(1) | 0*5. `p2p session <dev_nonce> <central_nonce>` derives
  * session_key from app_key + those nonces + dev_eui (see
@@ -57,14 +59,14 @@
 
 LOG_MODULE_REGISTER(p2p_gw_sim, LOG_LEVEL_INF);
 
-#define HDR_LEN   11
+#define HDR_LEN   12
 #define TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
 #define NONCE_LEN 13
 #define KEY_LEN   16
 #define DIR_TX    0x00 /* device -> network (what the DUT's own frames use) */
 #define DIR_RX    0x01 /* network -> device (this sim's default TX direction) */
 #define LORA_MTU  255
-#define MAX_BODY  (LORA_MTU - HDR_LEN - TAG_LEN) /* 240 */
+#define MAX_BODY  (LORA_MTU - HDR_LEN - TAG_LEN) /* 239 */
 #define FRAME_MAX (HDR_LEN + MAX_BODY + TAG_LEN)
 
 /* Join handshake constants -- see the file header comment above and
@@ -226,11 +228,12 @@ static void rx_work_handler(struct k_work *work)
 		uint32_t net_id = sys_get_be32(&msg.buf[0]);
 		uint16_t dev_addr = sys_get_be16(&msg.buf[4]);
 		uint8_t frame_type = msg.buf[6];
-		uint32_t counter = sys_get_be32(&msg.buf[7]);
+		uint8_t fctrl = msg.buf[7];
+		uint32_t counter = sys_get_be32(&msg.buf[8]);
 
 		LOG_INF("RX %u B, RSSI %d dBm, SNR %d dB: %s", msg.len, msg.rssi, msg.snr, hex);
-		LOG_INF("  net_id=%u dev_addr=%u frame_type=%u counter=%u", net_id, dev_addr,
-			frame_type, counter);
+		LOG_INF("  net_id=%u dev_addr=%u frame_type=%u fctrl=0x%02x counter=%u", net_id,
+			dev_addr, frame_type, fctrl, counter);
 
 		/* JoinRequest/JoinAccept: CLEARTEXT body + 16 B plain CMAC tag, no
 		 * CCM/nonce (see the file header comment). */
@@ -471,7 +474,8 @@ static int cmd_p2p_tx(const struct shell *sh, size_t argc, char **argv)
 				     * hard-coded DUT at the pre-join value (§5.3) */
 	sys_put_be16(0, &frame[4]); /* dev_addr: ditto */
 	frame[6] = (uint8_t)frame_type;
-	sys_put_be32(counter, &frame[7]);
+	frame[7] = 0; /* FCtrl */
+	sys_put_be32(counter, &frame[8]);
 	memcpy(&frame[HDR_LEN], body, body_len);
 
 	size_t wire_len;

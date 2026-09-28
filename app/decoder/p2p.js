@@ -1,7 +1,8 @@
 // Reference receiver / decoder for the raw-LoRa P2P transport (#118, doc/p2p.md).
 //
 // Mirrors the on-air frame app_radio_p2p.c produces:
-//   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE) ]  11 B header
+//   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE) ]  12 B header
+// FCtrl (decision #22): bit 0 CONFIRMED (uplink), bit 4 FPending, bit 5 ACK (downlink).
 //   [ AES-CCM ciphertext (= plaintext) ] [ AES-CCM tag (4 B) ]
 // The header is cleartext and fed as AAD; the body is AES-CCM (AES-128). The CCM
 // nonce is counter(4 BE) || dev_addr(2 BE) || frame_type(1) || direction(1) ||
@@ -10,7 +11,7 @@
 // response/ack) once a device is joined, keyed under `session_key`.
 //
 // The join handshake (JoinRequest/JoinAccept, doc/p2p.md §5.3, #118 phase 2
-// revision) is a DIFFERENT, simpler construction: the SAME 11 B header, but a
+// revision) is a DIFFERENT, simpler construction: the SAME 12 B header (FCtrl 0), but a
 // CLEARTEXT body followed by a full 16 B plain AES-CMAC tag (joinTag() below)
 // -- NOT AES-CCM, neither frame carries an actual secret. There is no manual
 // p2p_key config parameter and no separate join_key any more: the root secret
@@ -32,7 +33,10 @@
 const crypto = require("crypto");
 const ttn = require("./ttn.js");
 
-const P2P_HDR_LEN = 11;
+const P2P_HDR_LEN = 12;
+const P2P_FCTRL_CONFIRMED = 0x01;
+const P2P_FCTRL_FPENDING = 0x10;
+const P2P_FCTRL_ACK = 0x20;
 const P2P_TAG_LEN = 4; // data-plane (session_key) CCM tag length only
 const P2P_NONCE_LEN = 13;
 const P2P_DIR_TX = 0x00;
@@ -245,7 +249,8 @@ function decodeP2pFrame(frame, key, opts) {
   const netId = frame.readUInt32BE(0);
   const devAddr = frame.readUInt16BE(4);
   const frameType = frame[6];
-  const counter = frame.readUInt32BE(7);
+  const fctrl = frame[7];
+  const counter = frame.readUInt32BE(8);
   const header = frame.subarray(0, P2P_HDR_LEN);
   const ctLen = frame.length - P2P_HDR_LEN - P2P_TAG_LEN;
   const ct = frame.subarray(P2P_HDR_LEN, P2P_HDR_LEN + ctLen);
@@ -265,6 +270,8 @@ function decodeP2pFrame(frame, key, opts) {
     devAddr,
     frameType,
     frameTypeName: FRAME_TYPE_NAMES[frameType] || "unknown",
+    fctrl,
+    confirmed: (fctrl & P2P_FCTRL_CONFIRMED) !== 0,
     counter,
     body,
   };
@@ -297,7 +304,8 @@ function encodeP2pFrame(params) {
   header.writeUInt32BE((params.netId || 0) >>> 0, 0);
   header.writeUInt16BE((params.devAddr || 0) & 0xffff, 4);
   header[6] = params.frameType & 0xff;
-  header.writeUInt32BE((params.counter || 0) >>> 0, 7);
+  header[7] = (params.fctrl || 0) & 0xff;
+  header.writeUInt32BE((params.counter || 0) >>> 0, 8);
 
   const nonce = buildNonce(params.counter || 0, params.devAddr || 0, params.frameType, dir);
   const cipher = crypto.createCipheriv("aes-128-ccm", key, nonce, {
@@ -317,6 +325,9 @@ module.exports = {
   aes128Cmac,
   buildNonce,
   P2P_HDR_LEN,
+  P2P_FCTRL_CONFIRMED,
+  P2P_FCTRL_FPENDING,
+  P2P_FCTRL_ACK,
   P2P_TAG_LEN,
   P2P_NONCE_LEN,
   P2P_DIR_TX,

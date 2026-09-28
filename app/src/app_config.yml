@@ -592,8 +592,8 @@ parameters:
 
   # 2026-09-27: renamed from lrw_link_check_* -- carrier-neutral names for the
   # link supervision both radios are to share through app_radio (decision #22).
-  # Today only LoRaWAN reads them; P2P keeps its own fixed thresholds until its
-  # link-health machine lands. proto_group/proto_id are UNCHANGED (wire-compatible with the
+  # Both read them: LoRaWAN's link-check ladder and P2P's link supervision
+  # (decision #22 §3.4: N-th report confirmed, WARNING, re-join). proto_group/proto_id are UNCHANGED (wire-compatible with the
   # deployed LoRaWAN fleet; Hub/Portal only use field numbers on the wire).
   # No NVS migration: a value stored under the old name is not carried over
   # (the defaults 5 / 5 apply).
@@ -605,7 +605,7 @@ parameters:
     default: 5
     min: 0
     max: 255
-    help: "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet."
+    help: "Get/Set link-check cadence, both radios: every N-th report is the link check -- a LoRaWAN LinkCheckReq, a confirmed P2P telemetry (0 = disabled)."
 
   - name: radio_link_check_fail_rejoin
     proto_group: lorawan
@@ -615,7 +615,7 @@ parameters:
     default: 5
     min: 1
     max: 255
-    help: "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet."
+    help: "Get/Set link-check failures (while degraded) before the link is re-established: a LoRaWAN OTAA rejoin, a P2P re-join."
 
   - name: cap_hall_left
     proto_group: sensors
@@ -953,11 +953,11 @@ parameters:
     writable: [shell]
     proto_id: 2
     type: int
-    default: 10
+    default: 7  # decision #22 §3.1: one network default on Node and Hub; no sweep on join
     min: 6
     max: 12
     persistent: [device_reset]
-    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate)."
+    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept)."
 
   - name: p2p_tx_power
     proto_group: p2p

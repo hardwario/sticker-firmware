@@ -48,7 +48,7 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
-	.p2p_spreading_factor = 10,
+	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 };
 
@@ -83,7 +83,7 @@ static struct app_config m_app_config = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
-	.p2p_spreading_factor = 10,
+	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 };
 
@@ -1875,11 +1875,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_datarate, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-interval, NULL,
-	              "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet.",
+	              "Get/Set link-check cadence, both radios: every N-th report is the link check -- a LoRaWAN LinkCheckReq, a confirmed P2P telemetry (0 = disabled).",
 	              cmd_radio_link_check_interval, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-fail-rejoin, NULL,
-	              "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet.",
+	              "Get/Set link-check failures (while degraded) before the link is re-established: a LoRaWAN OTAA rejoin, a P2P re-join.",
 	              cmd_radio_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
@@ -1967,7 +1967,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_p2p_frequency, 1, 1),
 
 	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
-	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate).",
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept).",
 	              cmd_p2p_spreading_factor, 1, 1),
 
 	SHELL_CMD_ARG(p2p-tx-power, NULL,

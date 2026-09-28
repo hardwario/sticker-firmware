@@ -286,7 +286,7 @@ ZTEST(ccm, test_cmac_rfc4493_vectors)
  * 24 -> 28 octets and is still padded to 32, so it is still two CMAC blocks.
  *
  * These are the bytes of tests/ccm/p2p_join_kat.json (sha256
- * 14c4efbd40520d2a48ab3004ba07411e91a4775c87fb93f4663dccf92a8361a5), the
+ * 9269a529618d4a3bbf27d70e3e28db616a5d10f4e4ece8fbdf1c8a2bf1f1bb64), the
  * fixture shared byte-for-byte with proximos-v2 control-radio and the
  * NorthBridge Python replica. It was produced by an independent PyCryptodome
  * oracle -- CMAC.new(key, ciphermod=AES) -- whose selftest first re-derives
@@ -316,34 +316,34 @@ ZTEST(ccm, test_session_key_known_answer)
  * P2P_JOIN_TAG_LABEL comment).
  *
  * Same fixture as test_session_key_known_answer above:
- * tests/ccm/p2p_join_kat.json, sha256 14c4efbd40520d2a48ab3004ba07411e91a477
- * 5c87fb93f4663dccf92a8361a5. The JoinRequest body carries dev_eui(8,
+ * tests/ccm/p2p_join_kat.json, sha256 9269a529618d4a3bbf27d70e3e28db616a5d10
+ * f4e4ece8fbdf1c8a2bf1f1bb64. Decision #22 added FCtrl (0 in join frames) to
+ * the header, so both tags moved with it. The JoinRequest body carries dev_eui(8,
  * MSB-first) instead of serial_number(4 BE) since #417, so the tag now covers
- * 25 B of header+body rather than 21. The JoinAccept vector below is
- * deliberately UNCHANGED -- that frame carries no identity field at all, so
- * it is the control that says only the identity moved. */
+ * 26 B of header+body (25 before FCtrl, 21 before #417). The JoinAccept
+ * carries no identity field at all: #417 left its tag alone, FCtrl moved it. */
 ZTEST(ccm, test_join_tag_known_answer)
 {
 	/* JoinRequest: label "HIO-P2P-JOIN" (12 B) || header (net_id=0,
-	 * dev_addr=0, frame_type=0xF0, counter=7) || body (product_type=1,
+	 * dev_addr=0, frame_type=0xF0, FCtrl=0, counter=7) || body (product_type=1,
 	 * proto_version=1, dev_eui=70b3d57ed0000abe, fw=1.4.0, reserved=0). */
-	static const uint8_t msg_req[37] = {
+	static const uint8_t msg_req[38] = {
 		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'J',  'O',  'I',  'N',  0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x07, 0x01, 0x01, 0x70,
-		0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x07, 0x01, 0x01,
+		0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
 	};
-	static const uint8_t expected_req[16] = {0x68, 0x97, 0x96, 0x7e, 0x0f, 0xb2, 0x6f, 0xf1,
-						 0xf5, 0x96, 0x1f, 0xf4, 0x35, 0x7f, 0x29, 0x19};
+	static const uint8_t expected_req[16] = {0xfb, 0xab, 0x37, 0xb9, 0x7c, 0x7d, 0xeb, 0xb4,
+						 0xef, 0xc2, 0x81, 0x1f, 0x47, 0x3c, 0xc3, 0x7f};
 	/* JoinAccept: label "HIO-P2P-ACC" (11 B) || header (net_id=0,
-	 * dev_addr=0, frame_type=0xF1, counter=7) || body (net_id=100,
+	 * dev_addr=0, frame_type=0xF1, FCtrl=0, counter=7) || body (net_id=100,
 	 * dev_addr=5, central_nonce=0x22222222, rx1_delay_s=1, reserved=0). */
-	static const uint8_t msg_acc[37] = {
+	static const uint8_t msg_acc[38] = {
 		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'A',  'C',  'C',  0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x64,
-		0x00, 0x05, 0x22, 0x22, 0x22, 0x22, 0x01, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+		0x64, 0x00, 0x05, 0x22, 0x22, 0x22, 0x22, 0x01, 0x00, 0x00, 0x00, 0x00,
 	};
-	static const uint8_t expected_acc[16] = {0xca, 0x91, 0xd3, 0x0e, 0x19, 0x5f, 0x4f, 0x38,
-						 0xbf, 0x2a, 0xf3, 0x8f, 0xc4, 0xea, 0xd0, 0xe0};
+	static const uint8_t expected_acc[16] = {0x41, 0x2a, 0xd4, 0x32, 0x71, 0x50, 0xf1, 0x24,
+						 0xff, 0xbe, 0xdb, 0x3e, 0xdd, 0xf2, 0xb0, 0x5a};
 	uint8_t out[16];
 
 	zassert_ok(app_ccm_cmac(KEY, msg_req, sizeof(msg_req), out));
@@ -358,7 +358,8 @@ ZTEST(ccm, test_join_tag_known_answer)
  * ever disagree on one KDF byte, the join still succeeds and this is the test
  * that fails instead of a silent bench full of DECRYPT FAILED lines.
  *
- * Both frames are from tests/ccm/p2p_join_kat.json: header(11) is the CCM AAD,
+ * Both frames are from tests/ccm/p2p_join_kat.json: header(12, FCtrl CONFIRMED
+ * uplink / ACK downlink since decision #22) is the CCM AAD,
  * the nonce is counter(4 BE)|dev_addr(2 BE)|frame_type(1)|direction(1)|0*5, and
  * the tag is the truncated 4 B data-plane tag (P2P_TAG_LEN), not the join
  * frames' full CMAC. */
@@ -367,24 +368,24 @@ ZTEST(ccm, test_first_frames_under_the_kat_session_key)
 	static const uint8_t session_key[16] = {0x51, 0x28, 0x94, 0xff, 0xc3, 0x9f, 0xd4, 0x45,
 						0x9d, 0x4f, 0x65, 0x55, 0x3c, 0x87, 0x0e, 0xed};
 
-	/* Uplink telemetry: frame_type 0x02, counter 0, direction 0 (TX).
-	 * frame = 0000006400050200000000 196bd1 d6350158 (aad | ct | tag). */
-	static const uint8_t up_aad[11] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
-					   0x02, 0x00, 0x00, 0x00, 0x00};
+	/* Uplink telemetry: frame_type 0x02, FCtrl 0x01, counter 0, direction 0 (TX).
+	 * frame = 000000640005020100000000 196bd1 b23118a0 (aad | ct | tag). */
+	static const uint8_t up_aad[12] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
+					   0x02, 0x01, 0x00, 0x00, 0x00, 0x00};
 	static const uint8_t up_nonce[13] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x02,
 					     0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 	static const uint8_t up_ct[3] = {0x19, 0x6b, 0xd1};
-	static const uint8_t up_tag[4] = {0xd6, 0x35, 0x01, 0x58};
+	static const uint8_t up_tag[4] = {0xb2, 0x31, 0x18, 0xa0};
 	static const uint8_t up_pt[3] = {0x01, 0x08, 0x2a};
 
-	/* Downlink Ack: frame_type 0xFA, counter 0, direction 1 (RX).
-	 * frame = 000000640005fa00000000 f966c0 334dc095 (aad | ct | tag). */
-	static const uint8_t dn_aad[11] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
-					   0xfa, 0x00, 0x00, 0x00, 0x00};
+	/* Downlink Ack: frame_type 0xFA, FCtrl 0x20, counter 0, direction 1 (RX).
+	 * frame = 000000640005fa2000000000 f966c0 e0dd7d6a (aad | ct | tag). */
+	static const uint8_t dn_aad[12] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
+					   0xfa, 0x20, 0x00, 0x00, 0x00, 0x00};
 	static const uint8_t dn_nonce[13] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xfa,
 					     0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
 	static const uint8_t dn_ct[3] = {0xf9, 0x66, 0xc0};
-	static const uint8_t dn_tag[4] = {0x33, 0x4d, 0xc0, 0x95};
+	static const uint8_t dn_tag[4] = {0xe0, 0xdd, 0x7d, 0x6a};
 	static const uint8_t dn_pt[3] = {0x00, 0xc4, 0x07};
 
 	uint8_t pt[3];

@@ -92,9 +92,9 @@ test("deriveSessionKey: distinct app_key, nonces or dev_eui gives a distinct ses
 });
 
 test("joinTag: known-answer vectors for JoinRequest and JoinAccept (cross-checked against a reference AES-CMAC implementation)", () => {
-  // JoinRequest: header(11 B) net_id=0|dev_addr=0|frame_type=0xF0|counter=7,
+  // JoinRequest: header(12 B) net_id=0|dev_addr=0|frame_type=0xF0|FCtrl=0|counter=7,
   // body(14 B) product_type=1|proto_version=1|dev_eui(8 B MSB-first)|fw=1.4.0.0.
-  // tag = AES-128-CMAC(app_key, "HIO-P2P-JOIN" || header || body), covering 25 B.
+  // tag = AES-128-CMAC(app_key, "HIO-P2P-JOIN" || header || body), covering 26 B.
   // The bytes are the shared KAT fixture's (#417 / GitLab #73).
   const appKey = KAT.app_key;
   const headerReq = hex(KAT.join_request.header);
@@ -108,9 +108,9 @@ test("joinTag: known-answer vectors for JoinRequest and JoinAccept (cross-checke
 
   assert.equal(tagReq.length, p2p.P2P_JOIN_TAG_LEN);
   assert.equal(toHex(tagReq), KAT.join_request.tag);
-  assert.equal(toHex(tagReq), "6897967e0fb26ff1f5961ff4357f2919");
+  assert.equal(toHex(tagReq), "fbab37b97c7debb4efc2811f473cc37f");
 
-  // JoinAccept: header(11 B) net_id=0|dev_addr=0|frame_type=0xF1|counter=7
+  // JoinAccept: header(12 B) net_id=0|dev_addr=0|frame_type=0xF1|FCtrl=0|counter=7
   // (echoed dev_nonce), body(15 B) net_id=100|dev_addr=5|central_nonce=
   // 0x22222222|rx1_delay_s=1|reserved=0. tag = AES-128-CMAC(app_key,
   // "HIO-P2P-ACC" || header || body).
@@ -124,9 +124,9 @@ test("joinTag: known-answer vectors for JoinRequest and JoinAccept (cross-checke
 
   assert.equal(tagAcc.length, p2p.P2P_JOIN_TAG_LEN);
   assert.equal(toHex(tagAcc), KAT.join_accept.tag);
-  // Unchanged by #417: the JoinAccept carries neither serial nor DevEUI, so
-  // this is the control that says only the identity field moved.
-  assert.equal(toHex(tagAcc), "ca91d30e195f4f38bf2af38fc4ead0e0");
+  // The JoinAccept carries neither serial nor DevEUI: #417 left its tag
+  // alone, the FCtrl byte (decision #22) moved it.
+  assert.equal(toHex(tagAcc), "412ad4327150f124ffbedb3eddf2b05a");
 
   // The two labels domain-separate: the same header+body under the WRONG
   // label must not produce either frame's real tag.
@@ -148,9 +148,9 @@ test("telemetry round-trip: header parsed, body recovered and decoded", () => {
     key: KEY,
   });
 
-  // Header is 11 B cleartext; body is the same length as plaintext; +4 B tag.
+  // Header is 12 B cleartext; body is the same length as plaintext; +4 B tag.
   assert.equal(frame.length, p2p.P2P_HDR_LEN + hex(body).length + p2p.P2P_TAG_LEN);
-  assert.equal(toHex(frame.subarray(0, p2p.P2P_HDR_LEN)), "000000000000" + "0200000007");
+  assert.equal(toHex(frame.subarray(0, p2p.P2P_HDR_LEN)), "000000000000" + "020000000007");
 
   const got = p2p.decodeP2pFrame(frame, KEY);
   assert.equal(got.netId, 0);
@@ -261,4 +261,36 @@ test("wrong key fails authentication", () => {
 
 test("runt frame is rejected", () => {
   assert.throws(() => p2p.decodeP2pFrame(hex("deadbeef0042"), KEY));
+});
+
+test("data-frame KAT (decision #22): the 12 B header with FCtrl, both directions", () => {
+  const DATA_KAT = require("../../tests/ccm/p2p_data_kat.json");
+
+  for (const name of ["telemetry_confirmed", "telemetry_unconfirmed", "ack", "command_ack_fpending"]) {
+    const v = DATA_KAT[name];
+    const frame = p2p.encodeP2pFrame({
+      netId: DATA_KAT.net_id,
+      devAddr: DATA_KAT.dev_addr,
+      frameType: v.frame_type,
+      fctrl: v.fctrl,
+      counter: v.counter,
+      dir: v.direction,
+      body: v.plaintext,
+      key: DATA_KAT.key,
+    });
+    assert.equal(toHex(frame), v.frame, name);
+    assert.equal(toHex(frame.subarray(0, p2p.P2P_HDR_LEN)), v.header, name);
+
+    const got = p2p.decodeP2pFrame(v.frame, DATA_KAT.key, { dir: v.direction });
+    assert.equal(got.fctrl, v.fctrl, name);
+    assert.equal(got.counter, v.counter, name);
+    assert.equal(toHex(got.body), v.plaintext, name);
+  }
+
+  // The vector the plan (p2p_link_check.md section 3.2) quotes.
+  assert.equal(DATA_KAT.telemetry_confirmed.frame, "6d249662000202010000001047259cc84d88a99a");
+  // FCtrl is in the AAD: flipping CONFIRMED breaks the tag.
+  const tampered = hex(DATA_KAT.telemetry_confirmed.frame);
+  tampered[7] ^= p2p.P2P_FCTRL_CONFIRMED;
+  assert.throws(() => p2p.decodeP2pFrame(tampered, DATA_KAT.key));
 });
