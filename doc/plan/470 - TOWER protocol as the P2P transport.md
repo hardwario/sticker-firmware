@@ -619,6 +619,8 @@ vs after: M2, M2b, M3 SF7.
 | M2 | Northbridge gate 20.00–20.01 ms. Node TX-done → RX armed: 22.29 ms (old path, sleep between ops) → **0.658 ms** with `lora_send_recv_async` (hardwario/sticker-zephyr#2, merged) |
 | M2b | turnaround 20 / 25 / 30 ms, both paths: 50/50 each |
 | M3 | fast path, 0 retransmits: SF7 500/500, SF9 300/300, SF10 200/200, SF12 50/50 (after the window fix below). ACK after RX armed: 90.1 / 254.4 / 446.9 / 1729.8 ms |
+| M3 window | SF7 ACK window shrink, 50 frames each: 100/95/92/91 ms 50/50; 90 ms fails (3 TO / 53). Minimal window = turnaround + ToA(ACK) + 3.3 ms |
+| M5 | dropped ACKs: SF7 drop 1 ×100 → 100 OK (NB ok 100, dup 100); drop all 3 ×20 → 20 TO, NB delivered 20 once (dup 40); SF10 drop 1 ×30 → 30 OK. Resends byte-identical, counters strictly increasing, 0 replay / MIC fails |
 | ToA | ACK 28 B at SF7: 66.95 ms measured vs 66.82 ms calculated (+0.2 %) |
 
 **Finding — ACK window:** TX-done → ACK RxDone = turnaround + ToA(ACK) + ~2 symbols +
