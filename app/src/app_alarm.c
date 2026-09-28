@@ -336,6 +336,8 @@ static void alarm_batch_flush(void)
 		}
 		return;
 	}
+	bool was_held = m_batch_held;
+
 	m_batch_held = false;
 
 	size_t cap = ALARM_FRAME_MAX;
@@ -409,7 +411,7 @@ static void alarm_batch_flush(void)
 	uint32_t room = app_radio_tx_alarm_free();
 
 	if (pages > room && room < APP_RADIO_TX_QUEUE_DEPTH) {
-		if (!m_batch_held) {
+		if (!was_held) {
 			LOG_INF("Alarm batch held: %u page(s), %u alarm slot(s) free", pages,
 				(unsigned)room);
 		}
