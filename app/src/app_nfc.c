@@ -227,7 +227,10 @@ static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
  * Timers only, so nothing blocks the NFC path. The helpers are called from the
  * poll thread, the GPO ISR (detected) and the timer handlers, so each one runs
  * under irq_lock; app_led_set is a plain gpio write and k_timer calls are
- * ISR-safe. Every state sets all three channels, so no two states can blend. */
+ * ISR-safe. Every state sets all three channels, so no two states can blend.
+ * Every lit state also holds the indicator (app_led_hold) until the LED is off and
+ * the keep-awake window has closed, so the boot carousel, heartbeat, status and
+ * alarm blinks never cut into an NFC interaction. */
 #define NFC_LED_BLINK_MS  90   /* session blink half-period */
 #define NFC_LED_DETECT_MS 5000 /* "phone detected" cap when no session starts */
 #define NFC_LED_RESULT_MS 2000 /* session result (OK / error) */
@@ -270,6 +273,9 @@ static void nfc_led_off(void)
 	k_timer_stop(&m_led_hold_timer);
 	nfc_led_set3(false, false, false);
 	atomic_set(&m_led_state, APP_NFC_LED_OFF);
+	if (!atomic_get(&m_awake_held)) {
+		app_led_hold(false);
+	}
 	irq_unlock(key);
 }
 
@@ -277,6 +283,7 @@ static void nfc_led_detected(void)
 {
 	unsigned int key = irq_lock();
 	k_timer_stop(&m_led_blink_timer);
+	app_led_hold(true);
 	nfc_led_set3(false, true, false);
 	atomic_set(&m_led_state, APP_NFC_LED_DETECTED);
 	k_timer_start(&m_led_hold_timer, K_MSEC(NFC_LED_DETECT_MS), K_NO_WAIT);
@@ -288,6 +295,7 @@ static void nfc_led_session(void)
 	unsigned int key = irq_lock();
 	k_timer_stop(&m_led_hold_timer);
 	m_led_blink_on = true;
+	app_led_hold(true);
 	nfc_led_set3(false, true, false);
 	atomic_set(&m_led_state, APP_NFC_LED_SESSION);
 	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
@@ -298,6 +306,7 @@ static void nfc_led_result(bool ok)
 {
 	unsigned int key = irq_lock();
 	k_timer_stop(&m_led_blink_timer);
+	app_led_hold(true);
 	nfc_led_set3(!ok, ok, ok);
 	atomic_set(&m_led_state, ok ? APP_NFC_LED_RESULT_OK : APP_NFC_LED_RESULT_ERR);
 	k_timer_start(&m_led_hold_timer, K_MSEC(NFC_LED_RESULT_MS), K_NO_WAIT);

@@ -11,7 +11,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | Radio: P2P | **New** — the raw-LoRa point-to-point transport is complete on the node (#118): `radio-mode p2p` pairs with a Proximos `Control.radio.P2P` central over a FIBER modem, with an acknowledged data plane, downlink commands, network-initiated pairing control, per-node TX power, and strict EU868 duty compliance. LoRaWAN is unaffected — both stacks link into the same image and the choice is made at boot. |
-| LED | **Changed** — red and green are plain GPIO again, as in v1.4.0. The PWM path from #301 is removed, mainly to save ~2 KB of flash; it also froze in Stop mode on release builds, so the heartbeat and the boot fades were broken. The boot carousel is the v1.4.0 hard blink (§3). |
+| LED | **Changed** — red and green are plain GPIO again, as in v1.4.0. The PWM path from #301 is removed, mainly to save ~2 KB of flash; it also froze in Stop mode on release builds, so the heartbeat and the boot fades were broken. The boot carousel is the v1.4.0 hard blink and no longer holds up the boot; the NFC interaction LED holds the indicator (§3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
@@ -154,6 +154,26 @@ removed again. All three LEDs are plain GPIO, as in v1.4.0.
   with 250 ms gaps.
 - The heartbeat is the v1.4.0 one again: a 5 ms green blink every 3 s at full brightness
   (#390: about +6 µA average, accepted).
+
+### Boot carousel no longer blocks; NFC holds the indicator
+
+`main()` used to sleep 5 s after queueing the 3 s carousel. The sleep came with the move of
+the LED to its own thread (`847327f7`); before that the carousel blocked for its own 3 s. It is
+gone now:
+
+- The init chain runs while the carousel plays. On the debug P2P bench, NFC serves a phone
+  **1.19 s** after reset instead of 6.19 s, which matters most for a phone kept on the tag
+  across an NFC-triggered reboot.
+- A heartbeat or status blink requested during the carousel goes stale behind it and is
+  dropped silently; the next one follows within 3 s. `app_led` no longer logs stale drops or
+  a full queue: every request is a periodic or best-effort indication.
+- `app_led_hold()` hands the pins to the NFC interaction LED:
+  - In every lit NFC state (detected, session, result), `app_nfc.c` takes the hold.
+  - It releases the hold once the LED is off and the keep-awake window has closed.
+  - While held, the LED thread writes no pin, cuts a running carousel or blink short, and
+    drops requests: new ones return `-EBUSY`, and queued ones are discarded.
+  - The result: the carousel, heartbeat, status and alarm blinks never mix into a tap.
+- Cost: +336 B flash and +24 B RAM on release.
 
 ---
 
@@ -804,9 +824,10 @@ resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) an
 continues in the same tap; after a reboot it re-reads `get_basic_info`.
 
 **NFC starts last in the boot.** The NFC init and the poll thread run at the end
-of the init chain, after the boot LED carousel and every component a command can
-reach (clock, history, alarm rules, LoRaWAN, battery, sensors, counters) — ~8 s
-after boot — and just before the LoRaWAN join. Until then the chip stays
+of the init chain, after every component a command can reach (clock, history,
+alarm rules, LoRaWAN, battery, sensors, counters) — ~1.2 s after reset, while the
+boot carousel may still be playing (a tap cuts it short, §3) — and just before
+the LoRaWAN join. Until then the chip stays
 unpowered (`VCC_ON = 0`), so no phone command can act on uninitialised state (the
 #340 M8 class: a `reset_counters` saved before the counters were restored wiped
 every totalizer). A phone kept on the tag across an NFC-triggered reboot does not
@@ -884,6 +905,10 @@ so the production tester rejects it.
 | Session ended, **last** exchange OK | green + yellow, 2 s |
 | Session ended, last exchange failed | red, 2 s |
 | Otherwise / afterwards | off |
+
+From the first lit state until the LED is off and the keep-awake window has closed, the NFC
+LED holds the indicator (`app_led_hold`, §3). A tap during the boot carousel cuts it short, and
+no heartbeat, status or alarm blink mixes into the tap.
 
 "Failed" means the last request was rejected (wrong key or nonce, unknown channel — no reply
 is sent), its reply could not be written or was never read by the phone, or the session aborted
