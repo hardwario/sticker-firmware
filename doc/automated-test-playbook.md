@@ -485,7 +485,8 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 ### AT-BOOT-02 — boot LED carousel (DR; SA on release; maps G2)
 - **Steps:** reboot; debug: confirm carousel timing vs log; release: §18 assist "watch the
   LEDs after I reset the device".
-- **Expect:** R→Y→G carousel ~5 s after boot, then idle. See `version 1.4.md` §16 for the
+- **Expect:** R→Y→G carousel (3 s) right after boot, no heartbeat before it ends, and no
+  `app_led` ERR/WRN in the boot log; then idle. See `version 1.4.md` §16 for the
   full LED reference.
 
 ### AT-BOOT-03 — identity preserved across factory reset & reflash (D; maps G6, G6c)
