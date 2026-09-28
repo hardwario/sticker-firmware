@@ -17,6 +17,7 @@
 #endif
 
 #include <zephyr/devicetree.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
@@ -26,6 +27,34 @@
 #include <errno.h>
 
 LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
+
+/* The radio work queue (doc/plan/439 T2a). Only one backend runs, so the two
+ * 4 KB stacks they had became one. 4096 B covers the deepest paths of both:
+ * lorawan_send -> LoRaMac -> nanopb encode -> AES-CCM (#187), and a P2P 0x56
+ * command -- recv_ack -> app_cmd_handle -> nanopb decode/encode, ~1000 B before
+ * nanopb touches the stack. Release builds carry no stack canary, so an
+ * overflow here would corrupt RAM silently. */
+#define RADIO_WQ_STACK_SIZE 4096
+
+static K_THREAD_STACK_DEFINE(m_wq_stack, RADIO_WQ_STACK_SIZE);
+static struct k_work_q m_wq;
+
+struct k_work_q *app_radio_work_q(void)
+{
+	return &m_wq;
+}
+
+static int radio_wq_init(void)
+{
+	const struct k_work_queue_config cfg = {.name = "radio_wq"};
+
+	k_work_queue_init(&m_wq);
+	k_work_queue_start(&m_wq, m_wq_stack, K_THREAD_STACK_SIZEOF(m_wq_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, &cfg);
+	return 0;
+}
+
+SYS_INIT(radio_wq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 /* Fleet pre-send jitter (#267), one policy for both radios. The cap keeps a
  * long interval_report (e.g. 900 s) from delaying a report by 90 s. */

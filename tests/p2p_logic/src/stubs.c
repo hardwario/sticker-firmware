@@ -21,6 +21,7 @@
 #include "app_settings.h"
 
 #include <zephyr/init.h>
+#include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/toolchain.h>
 
@@ -233,6 +234,26 @@ int app_radio_send_info(uint32_t seq)
 	p2p_test_send_info_seq = seq;
 	return 0;
 }
+
+/* The radio work queue app_radio.c owns (doc/plan/439 T2a), started before the
+ * tests the same way. */
+static K_THREAD_STACK_DEFINE(m_radio_wq_stack, 4096);
+static struct k_work_q m_radio_wq;
+
+struct k_work_q *app_radio_work_q(void)
+{
+	return &m_radio_wq;
+}
+
+static int radio_wq_init(void)
+{
+	k_work_queue_init(&m_radio_wq);
+	k_work_queue_start(&m_radio_wq, m_radio_wq_stack, K_THREAD_STACK_SIZEOF(m_radio_wq_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+	return 0;
+}
+
+SYS_INIT(radio_wq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 /* RadioState push API (app_radio.c is not built here): record what the backend
  * reports so tests can check it (#446). */

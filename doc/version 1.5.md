@@ -36,6 +36,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P / LoRaWAN | **New** — P2P retry backoff and a per-node uplink phase: retry n waits a random 1..2^n s (was a fixed ~2.3 s rhythm), and a periodic report is sent at a stable DevEUI-derived offset inside min(interval − jitter − 1 s, 60 s), on both radios, so nodes rebooted together no longer collide every interval (F-P2P-4 / F-P2P-5). See §27. |
 | Radio: P2P | **Changed (wire, flag day)** — decision #22: a `FCtrl` byte in the header (11 → 12 B); telemetry is **unconfirmed and sent once**, except the link check (first report after link-up and every `radio-link-check-interval`-th, every report while WARNING); alarms / answers / history stay confirmed; the RX1 opens after every uplink for a `0x56` of up to 64 B; LoRaWAN-like link supervision (WARNING after 3 failed checks, TX-power step, re-join after `radio-link-check-fail-rejoin`); `p2p-spreading-factor` default 7, join without an SF sweep (last resort after 24 h). See §28. |
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
+| LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
 
 ---
 
@@ -1442,6 +1443,20 @@ checks. Design: ProXimos `plan/control/radio/p2p_link_check.md` §3.1–3.4.
   both ends. A join / re-join stays on it; the SF7..12 sweep runs only as a last
   resort, one pass after 24 h without a JoinAccept.
 - Updates `radio-link-check-*` (§26): P2P reads them now too.
+
+## 29. One radio work queue (doc/plan/439 T2a)
+
+First step of moving the policy both radios share into `app_radio`
+(`doc/plan/439 - Radio transport layer.md`, decisions of 2026-09-27 in §3a).
+
+- `app_radio` owns one work queue, `app_radio_work_q()` (thread `radio_wq`,
+  4096 B stack, lowest application priority). It is started before `main()`, so
+  calibration mode, which brings LoRaWAN up on its own, runs on it too.
+- The LoRaWAN and the P2P backend run all their work on it. Each had its own
+  4096 B queue before, although only one of them runs.
+- No behaviour change. The release image, which has both radios, needs 4352 B
+  less RAM (60 296 → 55 944 B, 92.0 → 85.4 %). The debug and P2P bench images
+  have only one radio each, so they stay the same.
 
 ---
 

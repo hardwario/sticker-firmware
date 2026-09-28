@@ -291,7 +291,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_RX1_TRAILING_MARGIN_MS 120
 #define P2P_RX1_DELAY_DEFAULT_S    1
 /* A JoinAccept's rx1_delay_s outside 1..P2P_RX1_DELAY_MAX_S is refused (review
- * of #400): p2p_rx_window() sleeps it on m_work_q, and one near the 30 s
+ * of #400): p2p_rx_window() sleeps it on the radio work queue, and one near the 30 s
  * watchdog would reset the node on every uplink -- persisted, a boot loop. */
 #define P2P_RX1_DELAY_MAX_S        15
 
@@ -339,28 +339,14 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * real silicon). Fixed by making the wait itself ASYNCHRONOUS instead of
  * capped: schedule_ack_retry() reschedules a dedicated work item
  * (m_ack_retry_work) for whenever the duty cycle actually clears, however
- * long that is, rather than blocking m_work_q with a k_sleep(). No cap
+ * long that is, rather than blocking the radio work queue with a k_sleep(). No cap
  * needed because nothing blocks while waiting -- see send_confirmed(). */
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
-/* 4096 B, the same as app_radio_lrw.c's own m_work_q -- and for the same reason: both
- * queues run app_cmd_handle().
- *
- * This was 2048 B while the queue only did raw lora_send()/lora_config(),
- * AES-CCM (app_ccm) and app_compose_budget() (whose Telemetry frame is a module
- * static, not stack-allocated). B4 made that sizing wrong by putting command
- * dispatch here: a 0x56 runs recv_ack() -> dispatch_p2p_command() ->
- * app_cmd_handle() plus nanopb decode/encode on this stack, and the deferred
- * action it schedules (m_post_cmd_work) runs here too.
- *
- * Measured frames on that path: recv_ack 612 B (it holds buf[P2P_FRAME_MAX] and
- * body[P2P_MAX_BODY]) + app_cmd_handle 32 B + the get_param handler 356 B, so
- * ~1000 B before nanopb touches the stack at all. On 2048 B that overflowed on
- * the first downlink command -- app_cmd_handle's memset of the generated
- * Command/Response structs wrote past the guard and the node halted. */
-static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
-static struct k_work_q m_work_q;
+/* All work runs on the radio work queue, app_radio_work_q() (doc/plan/439 T2a). Its
+ * 4096 B stack is sized for this module's deepest path, a 0x56 command:
+ * recv_ack() -> dispatch_p2p_command() -> app_cmd_handle() and nanopb (app_radio.c). */
 static struct k_work m_send_work;               /* compose + send telemetry */
 static struct k_work_delayable m_tx_work;       /* drain response/alarm queue, retries on -EAGAIN */
 static struct k_work_delayable m_join_work;     /* JoinRequest attempt + retry (#118 phase 2) */
@@ -389,12 +375,12 @@ static uint32_t m_report_count;
 static bool m_warning;
 static uint16_t m_warning_fails;
 /* A report waits for the TX queue (answers, alarms) to drain first -- the
- * P2P side of LoRaWAN's priority drain. m_work_q only. */
+ * P2P side of LoRaWAN's priority drain. Radio work queue only. */
 static bool m_telemetry_after_tx;
 
 /* M-2 stale-uplink watchdog (app_radio_stale_check(), shared with LoRaWAN):
  * uptime of the last telemetry uplink (0 = none since the last join) and the
- * duty-cycle hold streak. m_work_q only. */
+ * duty-cycle hold streak. Radio work queue only. */
 static int64_t m_last_uplink_ms;
 static struct app_radio_stale_dc m_dc;
 static bool m_dc_hold_logged;
@@ -486,7 +472,7 @@ static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episo
  * configured SF -- then one at each further step until the order is exhausted.
  * m_join_episode_fresh makes join_work_handler, not start_join_episode(), do
  * the per-episode seeding: the shell `join` command calls start_join_episode()
- * from its own thread, and every m_sf write has to happen on m_work_q. */
+ * from its own thread, and every m_sf write has to happen on the radio work queue. */
 static uint8_t m_join_sweep_step;  /* sweep step the next JoinRequest uses */
 static int64_t m_join_sweep_epoch; /* uptime ms since which no last-resort sweep ran */
 static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
@@ -522,7 +508,7 @@ static void publish_link(void)
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
 /* clock_sync (app_radio_p2p_clock_sync()): answer with an Info carrying this
  * seq once the next Ack (and its time tail) has been processed. Set from a
- * command thread, consumed on m_work_q. */
+ * command thread, consumed on the radio work queue. */
 static atomic_t m_clock_sync_pending;
 static atomic_t m_clock_sync_seq;
 static int8_t m_last_ack_rssi;
@@ -874,7 +860,7 @@ static int queue_frame(uint8_t type, const uint8_t *buf, size_t len);
  * a central that accepted it would jump its high-water ahead (review of #400,
  * H1). Answers and alarms go back to the TX queue for a fresh counter under
  * the new session; a telemetry or history frame is dropped (the next report /
- * the replay's own retry covers it). m_work_q only. */
+ * the replay's own retry covers it). Radio work queue only. */
 static void ack_retry_drop_old_session(void)
 {
 	struct p2p_ack_retry_state st;
@@ -1096,11 +1082,11 @@ P2P_TESTABLE uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len)
  * (uptime ms), sleeping until it opens then blocking on lora_recv() for
  * p2p_rx1_timeout_ms(expected_frame_len) -- shared by JoinAccept and §6's
  * data-plane Ack (each passes its own expected frame length). Runs on
- * m_work_q like everything else here; the whole call blocks that queue for
+ * the radio work queue like everything else here; the whole call blocks that queue for
  * up to ~rx1_delay_s (dominant) + the frame's ToA (#118 phase 2 HW finding,
  * see p2p_rx1_timeout_ms()) -- an explicit watchdog feed covers this (and
  * any caller's own backoff sleep) since the periodic heartbeat_work_handler
- * can't run until this returns (single-threaded m_work_q). Restores TX radio
+ * can't run until this returns (the radio work queue is single-threaded). Restores TX radio
  * config before returning either way. Returns the received length (>=0) or a
  * negative errno (notably a timeout if nothing arrived within the window). */
 static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expected_frame_len,
@@ -1518,9 +1504,9 @@ static void duty_charge(uint32_t air_ms)
 	app_radio_set_airtime(duty_used_ms(&m_duty));
 }
 
-/* Retune the radio to `sf` for the next JoinRequest. m_work_q ONLY: it writes
+/* Retune the radio to `sf` for the next JoinRequest. Radio work queue ONLY: it writes
  * m_sf, which every radio path reads, and reconfigures the modem -- doing that
- * from another thread while m_work_q is inside lora_recv() would leave the two
+ * from another thread while the radio work queue is inside lora_recv() would leave the two
  * disagreeing about what the radio is tuned to. */
 static void join_set_sf(int sf)
 {
@@ -1528,7 +1514,7 @@ static void join_set_sf(int sf)
 	(void)radio_configure(true);
 }
 
-/* Open a join episode on m_work_q: back to sweep step 0 (the configured SF)
+/* Open a join episode on the radio work queue: back to sweep step 0 (the configured SF)
  * with a clean attempt count. Separate from start_join_episode() because that
  * one may run on the shell thread -- see join_set_sf(). */
 static void join_episode_begin(void)
@@ -1627,8 +1613,8 @@ P2P_TESTABLE int p2p_join_adopt_sf(uint8_t joined_sf)
 static void start_join_episode(bool slow)
 {
 	/* The sweep state and m_sf are seeded by join_work_handler instead, on
-	 * m_work_q: app_radio_p2p_rejoin() reaches here from the shell thread, which
-	 * may be running while m_work_q sits blocked in lora_recv(), and a
+	 * the radio work queue: app_radio_p2p_rejoin() reaches here from the shell thread, which
+	 * may be running while the radio work queue sits blocked in lora_recv(), and a
 	 * retune from under it would leave the radio and m_sf disagreeing. */
 	m_join_episode_fresh = true;
 	m_join_slow = slow;
@@ -1642,7 +1628,7 @@ static void start_join_episode(bool slow)
 	 * an hour, and k_work_schedule_for_queue() is a no-op while the item is
 	 * already scheduled -- the state rewritten just above would then sit
 	 * unread until that timer fired. The operator's join must pre-empt it. */
-	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_join_work, K_NO_WAIT);
 }
 
 /* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
@@ -1818,7 +1804,7 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	int64_t gap_ms = m_link_idle_at - k_uptime_get();
 
 	if (gap_ms > 0) {
-		k_sleep(K_MSEC(gap_ms)); /* m_work_q; at most P2P_TX_GAP_MS */
+		k_sleep(K_MSEC(gap_ms)); /* radio work queue; at most P2P_TX_GAP_MS */
 	}
 	if (m_link_state != P2P_LINK_PAIRED) {
 		/* Callers gate on app_radio_p2p_is_ready(), so this should never happen --
@@ -1935,7 +1921,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
 			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
 			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
-		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
 					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
 		return;
 	}
@@ -1993,7 +1979,7 @@ static void page_stream_work_handler(struct k_work *work)
 		return;
 	}
 	if (k_msgq_num_free_get(&m_tx_msgq) < P2P_TX_QUEUE_DEPTH) {
-		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 		return;
 	}
@@ -2014,7 +2000,7 @@ static void page_stream_work_handler(struct k_work *work)
 		return;
 	}
 	(void)app_radio_p2p_queue_response(0, buf, len);
-	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 }
 
@@ -2062,7 +2048,7 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 
 	if (action == APP_CMD_ACTION_PAGE_STREAM) {
 		/* #425: the remaining pages follow page 0 by themselves. */
-		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 		action = APP_CMD_ACTION_NONE;
 	}
@@ -2074,20 +2060,21 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 	if (action != APP_CMD_ACTION_NONE) {
 		m_post_cmd_action = action;
 		m_post_cmd_deferrals = 0;
-		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
 					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
 		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
 			POST_CMD_DRAIN_WAIT_SEC);
 	}
 
 #if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
-	/* The deepest thing this queue ever does (see m_work_stack's comment),
-	 * so this is where its real high-water shows. Same probe app_radio_lrw.c keeps
+	/* The deepest thing the radio work queue does on P2P (see the comment
+	 * on RADIO_WQ_STACK_SIZE in app_radio.c), so this is where its real
+	 * high-water shows. Same probe app_radio_lrw.c keeps
 	 * at the end of its own command handler. */
 	size_t unused;
 
 	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
-		LOG_INF("m_work_q stack: %zu B unused after cmd handle", unused);
+		LOG_INF("Radio work queue stack: %zu B unused after cmd handle", unused);
 	}
 #endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
 }
@@ -2354,7 +2341,8 @@ static void reschedule_ack_retry_work(void)
 	int64_t wait_ms = duty_wait_ms_for(P2P_HDR_LEN + head.body_len + P2P_TAG_LEN);
 	uint32_t backoff = p2p_ack_retry_backoff_ms(head.attempt, sys_rand32_get());
 
-	k_work_reschedule_for_queue(&m_work_q, &m_ack_retry_work, K_MSEC(wait_ms + backoff));
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_ack_retry_work,
+				    K_MSEC(wait_ms + backoff));
 }
 
 /* Queue an asynchronous Ack retry for `counter` (doc/p2p.md §6) -- NOT a
@@ -2518,7 +2506,7 @@ static void send_work_handler(struct k_work *work)
  * P2P_FRAME_MAX_RETRIES times; then the rest of the snapshot is abandoned with
  * app_compose_reset(), so the next report starts a fresh one instead of
  * continuing a stale one. Without a session it is abandoned at once: the next
- * JoinAccept kicks a fresh report. m_work_q only. */
+ * JoinAccept kicks a fresh report. Radio work queue only. */
 /* Decision #22 §3.2: telemetry is unconfirmed and sent once, except the N-th
  * report since link-up (N = radio-link-check-interval), which is CONFIRMED and
  * so the P2P link check -- the first report after a link-up included, as on
@@ -2604,7 +2592,7 @@ static void telemetry_send(void)
 			delay_ms = duty_wait_ms_for(P2P_HDR_LEN + m_frame_len + P2P_TAG_LEN) +
 				   P2P_TX_RETRY_MARGIN_MS;
 		}
-		k_work_reschedule_for_queue(&m_work_q, &m_frame_work, K_MSEC(delay_ms));
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_frame_work, K_MSEC(delay_ms));
 		return;
 	}
 }
@@ -2618,7 +2606,7 @@ static void frame_work_handler(struct k_work *work)
 	if (m_hist_active || g_app_config.calibration) {
 		/* The radio is busy with a replay / calibration: try again later
 		 * rather than leave the frame stranded. */
-		k_work_reschedule_for_queue(&m_work_q, &m_frame_work,
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_frame_work,
 					    K_SECONDS(P2P_FRAME_RETRY_SEC));
 		return;
 	}
@@ -2634,7 +2622,7 @@ static void tx_drained(void)
 	}
 	if (m_telemetry_after_tx) {
 		m_telemetry_after_tx = false;
-		k_work_submit_to_queue(&m_work_q, &m_send_work);
+		k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
 	}
 }
 
@@ -2673,7 +2661,7 @@ static void tx_work_handler(struct k_work *work)
 
 			int64_t delay_ms = duty_wait_ms_for(P2P_HDR_LEN + msg.len + P2P_TAG_LEN);
 
-			k_work_reschedule_for_queue(&m_work_q, dwork,
+			k_work_reschedule_for_queue(app_radio_work_q(), dwork,
 						    K_MSEC(delay_ms + P2P_TX_RETRY_MARGIN_MS));
 			return;
 		}
@@ -2776,7 +2764,7 @@ static void p2p_recv_cb(const struct device *dev, uint8_t *data, uint16_t size, 
 		LOG_WRN("RX queue full; dropping frame");
 		return;
 	}
-	k_work_submit_to_queue(&m_work_q, &m_rx_work);
+	k_work_submit_to_queue(app_radio_work_q(), &m_rx_work);
 }
 
 int app_radio_p2p_listen(bool enable)
@@ -2838,10 +2826,10 @@ static void mark_ready(void)
 
 	/* Link up (boot with a persisted pairing, or a fresh JoinAccept): the
 	 * common Info + settings-info announce, as after a LoRaWAN join. Queued on
-	 * m_work_q ahead of the telemetry the ready callback kicks. */
+	 * the radio work queue ahead of the telemetry the ready callback kicks. */
 	app_radio_announce();
 	/* Frames parked while unpaired leave now, under this session. */
-	k_work_schedule_for_queue(&m_work_q, &m_tx_work, K_NO_WAIT);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
 	m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
 	if (m_ready_cb) {
 		m_ready_cb();
@@ -3162,11 +3150,11 @@ static void join_work_handler(struct k_work *work)
 		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}
 
-	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms));
+	k_work_reschedule_for_queue(app_radio_work_q(), dwork, K_MSEC(wait_ms));
 }
 
 /* ======================================================================== */
-/* Watchdog heartbeat (mirrors app_radio_lrw.c's m_work_q liveness pattern)        */
+/* Watchdog heartbeat (mirrors app_radio_lrw.c's queue liveness pattern)    */
 /* ======================================================================== */
 
 #if defined(CONFIG_WATCHDOG)
@@ -3175,7 +3163,7 @@ static void heartbeat_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 	app_wdog_ping(m_wdog_channel);
 
-	/* M-2, as on LoRaWAN: the ping only proves m_work_q drains. Paired but no
+	/* M-2, as on LoRaWAN: the ping only proves the radio work queue drains. Paired but no
 	 * telemetry out for APP_RADIO_STALE_FACTOR report intervals -> the station is
 	 * mute: re-join (self-heal policy), unless the duty cycle explains it. */
 	if (m_started && m_link_state == P2P_LINK_PAIRED) {
@@ -3205,7 +3193,7 @@ static void heartbeat_work_handler(struct k_work *work)
 		}
 	}
 
-	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
+	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work,
 				  K_SECONDS(P2P_HEARTBEAT_PERIOD_SEC));
 }
 #endif /* defined(CONFIG_WATCHDOG) */
@@ -3229,12 +3217,12 @@ static struct k_work_delayable m_hist_work;
  * waiting (duty cycle, replay pace) at its own time. */
 static void kick_waiting_uplinks(void)
 {
-	k_work_schedule_for_queue(&m_work_q, &m_tx_work, K_NO_WAIT);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
 	if (m_frame_pending) {
-		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_NO_WAIT);
+		k_work_schedule_for_queue(app_radio_work_q(), &m_frame_work, K_NO_WAIT);
 	}
 	if (m_hist_active) {
-		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
+		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
 	}
 }
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
@@ -3342,7 +3330,7 @@ static void hist_work_handler(struct k_work *work)
 			p2p_history_finish();
 			return;
 		}
-		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
 					  K_SECONDS(P2P_HIST_FRAME_RETRY_SEC));
 		return;
 	}
@@ -3368,7 +3356,7 @@ static void hist_work_handler(struct k_work *work)
 	 * carrying the window's last record ends the replay here — no trailing
 	 * empty attempt (H-4, as app_radio_lrw). */
 	if (m_hist_cursor < m_hist_end) {
-		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
+		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
 					  K_SECONDS(P2P_HIST_FRAME_GAP_SEC));
 	} else {
 		LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
@@ -3429,7 +3417,7 @@ bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, ui
 
 	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
 		from_unix, to_unix, seq);
-	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
 	return true;
 }
 
@@ -3438,9 +3426,9 @@ bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, ui
  * item the way app_radio_p2p_init() does, mark P2P ready, and read back the replay
  * cursor so a test can see whether a second start disturbed a stream already in
  * flight. */
-/* Bring up the work queue and its work items once per test binary, the way
- * app_radio_p2p_init() does. Shared by every setup hook below: k_work_queue_start()
- * on an already-running queue is undefined, and the suite runs many tests. */
+/* Initialise the work items once per test binary, the way app_radio_p2p_init()
+ * does; the suite's stub of app_radio_work_q() provides the queue. Shared by
+ * every setup hook below, as the suite runs many tests. */
 static void test_queue_start_once(void)
 {
 	static bool started;
@@ -3448,8 +3436,6 @@ static void test_queue_start_once(void)
 	if (started) {
 		return;
 	}
-	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
-			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
@@ -3647,7 +3633,7 @@ void p2p_test_drop_old_session(void)
  * without spending a real pass to get there. */
 void p2p_test_join_arm_retry(int64_t ms)
 {
-	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_MSEC(ms));
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_join_work, K_MSEC(ms));
 }
 
 /* Re-enter start_join_episode() the way the shell `join` verb does. */
@@ -3767,10 +3753,6 @@ int app_radio_p2p_init(void)
 		return ret;
 	}
 
-	k_work_queue_init(&m_work_q);
-	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
-			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
-
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
@@ -3791,7 +3773,7 @@ int app_radio_p2p_init(void)
 		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
 	}
 	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
-	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_NO_WAIT);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
 #endif /* defined(CONFIG_WATCHDOG) */
 
 	app_compose_reset();
@@ -3886,7 +3868,7 @@ uint8_t app_radio_p2p_get_max_payload(void)
 
 void app_radio_p2p_send_telemetry(void)
 {
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
 }
 
 static int queue_frame(uint8_t type, const uint8_t *buf, size_t len)
@@ -3909,7 +3891,7 @@ static int queue_frame(uint8_t type, const uint8_t *buf, size_t len)
 	/* If a retry is already scheduled (deferred frame waiting out a duty-cycle
 	 * block), this is a no-op — the queue drains in order once that retry
 	 * fires, same as an immediate submit would have. */
-	k_work_schedule_for_queue(&m_work_q, &m_tx_work, K_NO_WAIT);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
 	return 0;
 }
 
@@ -3992,7 +3974,7 @@ static void announce_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	if (app_radio_announce_run()) {
-		k_work_reschedule_for_queue(&m_work_q, &m_announce_work,
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
 					    K_SECONDS(P2P_ANNOUNCE_RETRY_SEC));
 	}
 }
@@ -4004,7 +3986,7 @@ bool app_radio_p2p_tx_idle(void)
 
 void app_radio_p2p_announce_kick(void)
 {
-	k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
 }
 
 size_t app_radio_p2p_response_cap(size_t buf_size)
@@ -4020,7 +4002,7 @@ int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len)
 
 void app_radio_p2p_page_stream_kick(void)
 {
-	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 }
 
@@ -4056,8 +4038,8 @@ void app_radio_p2p_debug_drop_acks(uint32_t count)
 	LOG_WRN("Debug: forcing next %u Ack(s) to appear dropped", count);
 }
 
-/* Runs on m_work_q, same as a real send (app_compose.c's "solely on
- * m_work_q" invariant -- see app_ats.c's `ats radio compose` for the
+/* Runs on the radio work queue, same as a real send (app_compose.c's "solely on
+ * the radio work queue" invariant -- see app_ats.c's `ats radio compose` for the
  * LoRaWAN side of the same rule). Previews the frame under the CURRENT fcnt
  * WITHOUT advancing it, so a dry-run can never desync the real data-plane
  * sequence with the peer. */
@@ -4096,7 +4078,7 @@ int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, 
 {
 	struct p2p_compose_result *res = &m_debug_compose_result;
 
-	int ret = k_work_submit_to_queue(&m_work_q, &m_debug_compose_work);
+	int ret = k_work_submit_to_queue(app_radio_work_q(), &m_debug_compose_work);
 
 	if (ret < 0) {
 		return ret;

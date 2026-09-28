@@ -130,7 +130,7 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 /* True if a group carries any data in the snapshot (any of its fields present). */
 static bool group_present(const Telemetry *s, enum tlm_group g)
 {
-	/* Compose runs solely on m_work_q; static keeps this large struct off the
+	/* Compose runs solely on the radio work queue; static keeps this large struct off the
 	 * tight work-queue stack (it grew with the w1_sensors array). */
 	static Telemetry probe;
 
@@ -312,13 +312,13 @@ static bool m_boot_pending = true;
 
 /* True while the in-progress snapshot belongs to the shell's debug probe
  * (app_compose_ex()) rather than the real TX path. Both paths run their
- * multi-frame sessions as separate per-frame work items on m_work_q, so they
+ * multi-frame sessions as separate per-frame work items on the radio work queue, so they
  * can interleave — without this tag the real report would silently drain the
  * remainder of a debug session's snapshot over the air (and vice versa). */
 static bool m_active_debug;
 
 /* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
- * solely on m_work_q. `consume_boot` is true only for the real report path
+ * solely on the radio work queue. `consume_boot` is true only for the real report path
  * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
  * one-shot marker for the real uplink that hasn't happened yet. */
 static void fill_snapshot(bool consume_boot)
@@ -341,7 +341,7 @@ static void fill_snapshot(bool consume_boot)
 void app_compose_reset(void)
 {
 	/* Drop the in-progress snapshot; the next app_compose() takes a fresh one.
-	 * These run solely on m_work_q (as does the join path that calls this), so
+	 * These run solely on the radio work queue (as does the join path that calls this), so
 	 * no lock is needed. */
 	m_active = false;
 	m_pending = 0;
@@ -397,7 +397,7 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 	/* Greedily pack whole pending groups, highest priority first, that fit.
 	 * Static for the same reason as the snapshot: app_compose runs solely on
-	 * m_work_q and the struct is too big for that stack. */
+	 * the radio work queue and the struct is too big for that stack. */
 	static Telemetry frame;
 	memset(&frame, 0, sizeof(frame));
 	uint16_t frame_groups = 0;
