@@ -41,6 +41,7 @@ extern int g_stream_pages;
 extern int g_stream_next_calls;
 extern int g_stream_cancel_calls;
 extern int g_run_action_calls;
+extern int g_announce_builds; /* Info + settings-info frames built */
 extern int g_run_action_last;
 extern int64_t g_run_action_at_ms;
 

@@ -808,6 +808,8 @@ bool app_radio_ack_pending(void)
 	return m_ack_pending;
 }
 
+static void stale_note_hold(int64_t hold_ms);
+
 /* m_be->send() under the confirmed ladder. Returns the backend's result, or
  * TX_ACK_RETRY: the caller keeps the frame, byte for byte, and sends it again
  * after res->wait_ms. */
@@ -832,7 +834,7 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 
 	if (hold > 0) {
 		LOG_WRN("TX duty-cycle blocked for %lld ms", hold);
-		app_radio_note_send(false, true);
+		stale_note_hold(hold);
 		res->wait_ms = (uint32_t)hold + TX_DUTY_MARGIN_MS;
 		ret = -EAGAIN;
 	} else {
@@ -1186,6 +1188,12 @@ void app_radio_note_send(bool sent, bool duty_held)
 	if (sent) {
 		m_dc_hold_logged = false;
 	}
+}
+
+/* The duty ledger holds the frame for `hold_ms`: the M-2 excuse lasts until then. */
+static void stale_note_hold(int64_t hold_ms)
+{
+	app_radio_stale_note_hold(&m_dc, k_uptime_get(), hold_ms);
 }
 
 void app_radio_note_uplink(void)
@@ -2259,7 +2267,9 @@ static bool announce_run(void)
 		return true; /* run again when the running page stream ends */
 	}
 
-	if (atomic_get(&m_announce) & ANNOUNCE_INFO) {
+	/* No room in the answer queue (a long duty-cycle hold keeps it full):
+	 * retry without encoding a frame it would refuse. */
+	if ((atomic_get(&m_announce) & ANNOUNCE_INFO) && app_radio_tx_answer_free() > 0) {
 		if (announce_frame(false, 0) == 0) {
 			atomic_and(&m_announce, ~ANNOUNCE_INFO);
 			LOG_INF("Info announced");
@@ -2268,7 +2278,7 @@ static bool announce_run(void)
 			return true; /* settings-info follows once these pages are out */
 		}
 	}
-	if (atomic_get(&m_announce) & ANNOUNCE_SETTINGS) {
+	if ((atomic_get(&m_announce) & ANNOUNCE_SETTINGS) && app_radio_tx_answer_free() > 0) {
 		if (announce_frame(true, 0) == 0) {
 			atomic_and(&m_announce, ~ANNOUNCE_SETTINGS);
 			LOG_INF("Settings-info announced");

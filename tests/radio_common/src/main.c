@@ -1371,6 +1371,73 @@ static void stale_duty_hold_waits(void)
 }
 BOTH_PROFILES(stale_duty_hold_waits)
 
+/* T2d on the bench (EU868 DR0): the ledger held a frame for 41 min and nothing
+ * was tried meanwhile. The excuse must last as long as the known hold, not just
+ * one interval + margin past the single held attempt. */
+ZTEST(radio_common, test_stale_known_hold_lasts_until_its_end)
+{
+	const int64_t iv = 60 * 1000;
+	const int64_t margin = iv + APP_RADIO_STALE_DC_RECENT_MARGIN_MS;
+	const int64_t hold = 41 * 60 * 1000;
+	const int64_t t0 = 10 * 60 * 1000; /* the hold starts 10 min after the uplink */
+	struct app_radio_stale_dc dc = {0};
+
+	app_radio_stale_note_hold(&dc, t0, hold);
+	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60),
+		      APP_RADIO_STALE_HOLD_DC, "past one interval + margin, still held");
+	zassert_equal(app_radio_stale_check(t0 + hold, 1, &dc, 60), APP_RADIO_STALE_HOLD_DC,
+		      "the hold ends");
+	zassert_equal(app_radio_stale_check(t0 + hold + margin, 1, &dc, 60),
+		      APP_RADIO_STALE_HOLD_DC, "one interval + margin after its end");
+	zassert_equal(app_radio_stale_check(t0 + hold + margin + 1000, 1, &dc, 60),
+		      APP_RADIO_STALE_REJOIN, "nothing went after the hold: rejoin");
+
+	/* A later, shorter hold never shortens the known end. */
+	app_radio_stale_note_hold(&dc, t0 + 60 * 1000, 1000);
+	zassert_equal(dc.until_ms, t0 + hold);
+
+	/* A send ends it. */
+	app_radio_stale_note(&dc, true, false, t0 + 2 * 60 * 1000);
+	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60),
+		      APP_RADIO_STALE_REJOIN, "the streak is gone");
+
+	/* The cap still bounds a hold longer than the window plus its margin. */
+	app_radio_stale_note_hold(&dc, t0, 2 * APP_RADIO_STALE_DC_HOLD_MAX_MS);
+	zassert_equal(app_radio_stale_check(t0 + APP_RADIO_STALE_DC_HOLD_MAX_MS - 1, 1, &dc, 60),
+		      APP_RADIO_STALE_HOLD_DC);
+	zassert_equal(app_radio_stale_check(t0 + APP_RADIO_STALE_DC_HOLD_MAX_MS, 1, &dc, 60),
+		      APP_RADIO_STALE_REJOIN, "no hold explains more than the cap");
+}
+
+/* The same through the TX path: a frame the ledger holds for half an hour
+ * keeps M-2 quiet the whole time; once the hold is past, a mute node rejoins. */
+static void stale_ledger_hold_keeps_m2_quiet(void)
+{
+	const int64_t hold = 30 * 60 * 1000;
+
+	app_radio_link_up();
+	app_radio_duty_init(APP_RADIO_DUTY_1PCT_MS);
+	fk.air_ms = 1000;
+	/* A full hour's allowance that leaves the window in 30 min. */
+	app_radio_test_duty_charge_at(k_uptime_get() - APP_RADIO_DUTY_WINDOW_MS + hold,
+				      APP_RADIO_DUTY_1PCT_MS);
+
+	int64_t t0 = k_uptime_get();
+
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xd2);
+	k_sleep(K_MSEC(500));
+	zassert_equal(fk.n, 0, "held by the ledger");
+
+	app_radio_test_stale_tick(t0 + STALE_MS + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS);
+	zassert_equal(fk.rejoin_calls, 0, "held: no rejoin past one interval + margin");
+	app_radio_test_stale_tick(t0 + hold);
+	zassert_equal(fk.rejoin_calls, 0, "held: no rejoin up to its end");
+	app_radio_test_stale_tick(t0 + hold + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS +
+				  5000);
+	zassert_equal(fk.rejoin_calls, 1, "mute after the hold: rejoin");
+}
+BOTH_PROFILES(stale_ledger_hold_keeps_m2_quiet)
+
 /* A telemetry report that left, or a history frame, refreshes the clock. */
 static void uplinks_refresh_the_stale_clock(void)
 {
@@ -1703,7 +1770,8 @@ static void announce_waits_for_a_page_stream(void)
 }
 BOTH_PROFILES(announce_waits_for_a_page_stream)
 
-/* A frame the answer queue refused goes on the 5 s retry. */
+/* A full answer queue puts the announce on the 5 s retry, without building
+ * the frames it would refuse (T2d: 470 drops in a 41 min hold). */
 static void announce_retries_when_the_queue_is_full(void)
 {
 	g_app_config.interval_report = 2;
@@ -1712,8 +1780,10 @@ static void announce_retries_when_the_queue_is_full(void)
 		queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb0 + i);
 	}
 	app_radio_announce();
-	k_sleep(K_SECONDS(3));
+	k_sleep(K_SECONDS(12));
 	zassert_true(app_radio_announce_pending(), "nothing fit yet");
+	zassert_equal(g_announce_builds, 0, "no frame is built for a full queue (%d)",
+		      g_announce_builds);
 
 	fk.ready = true;
 	app_radio_tx_kick();
@@ -1722,6 +1792,7 @@ static void announce_retries_when_the_queue_is_full(void)
 	zassert_equal(fk.log[APP_RADIO_TX_QUEUE_DEPTH].tag, APP_RADIO_TAG_INFO);
 	zassert_equal(fk.log[APP_RADIO_TX_QUEUE_DEPTH + 1].tag, APP_RADIO_TAG_SETTINGS);
 	zassert_false(app_radio_announce_pending());
+	zassert_equal(g_announce_builds, 2, "each built once, when it fit");
 }
 BOTH_PROFILES(announce_retries_when_the_queue_is_full)
 

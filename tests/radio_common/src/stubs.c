@@ -41,6 +41,7 @@ int g_alarm_pending_left;
 int g_alarm_pending_calls;
 
 int g_cmd_handle_calls;
+int g_announce_builds;
 int g_cmd_transport;
 size_t g_cmd_out_cap;
 size_t g_cmd_resp_len;
@@ -76,6 +77,7 @@ void stubs_reset(void)
 	g_alarm_pending_left = 0;
 	g_alarm_pending_calls = 0;
 	g_cmd_handle_calls = 0;
+	g_announce_builds = 0;
 	g_cmd_transport = -1;
 	g_cmd_out_cap = 0;
 	g_cmd_resp_len = 0;
@@ -189,6 +191,7 @@ void app_cmd_stream_cancel(void)
 
 int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
+	g_announce_builds++;
 	if (out_cap < 2) {
 		return -ENOSPC;
 	}
@@ -201,6 +204,7 @@ int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *o
 
 int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
+	g_announce_builds++;
 	if (out_cap < 2) {
 		return -ENOSPC;
 	}

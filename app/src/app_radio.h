@@ -212,9 +212,10 @@ void app_radio_reset_link(void);
  * A joined station whose telemetry has not left for APP_RADIO_STALE_FACTOR x
  * interval_report is mute although its work queue drains: force a rejoin.
  * Unless the duty cycle explains it -- sends held by the duty cycle recently
- * (within one interval + margin) and for no longer than the 1 h window plus a
- * margin: the radio is alive and throttled, and a rejoin would only reset the
- * LoRaMac band credits (F29). Pure, so both backends and the tests share it. */
+ * (within one interval + margin, or a hold of known length still running) and
+ * for no longer than the 1 h window plus a margin: the radio is alive and
+ * throttled, and a rejoin would only reset the LoRaMac band credits (F29).
+ * Pure, so both backends and the tests share it. */
 #define APP_RADIO_STALE_FACTOR              4
 #define APP_RADIO_STALE_DC_HOLD_MAX_MS      (75LL * 60 * 1000)
 #define APP_RADIO_STALE_DC_RECENT_MARGIN_MS (3LL * 60 * 1000)
@@ -225,10 +226,12 @@ enum app_radio_stale {
 	APP_RADIO_STALE_REJOIN,  /* stale with no duty-cycle excuse: force rejoin */
 };
 
-/* Duty-cycle hold streak: first and most recent held send (uptime ms, 0 = none). */
+/* Duty-cycle hold streak: first and most recent held send, and the end of the
+ * latest hold of known length (uptime ms, 0 = none). */
 struct app_radio_stale_dc {
 	int64_t since_ms;
 	int64_t last_ms;
+	int64_t until_ms;
 };
 
 /* Record a send attempt: `held` = refused / deferred by the duty cycle extends the
@@ -239,11 +242,24 @@ static inline void app_radio_stale_note(struct app_radio_stale_dc *dc, bool sent
 	if (sent) {
 		dc->since_ms = 0;
 		dc->last_ms = 0;
+		dc->until_ms = 0;
 	} else if (held) {
 		if (dc->since_ms == 0) {
 			dc->since_ms = now_ms;
 		}
 		dc->last_ms = now_ms;
+	}
+}
+
+/* A send the duty ledger holds for `hold_ms`: nothing is tried again until the
+ * hold ends, so the streak stays recent until then (T2d: a DR0 hold lasts up to
+ * the hour, far past one interval + margin). */
+static inline void app_radio_stale_note_hold(struct app_radio_stale_dc *dc, int64_t now_ms,
+					     int64_t hold_ms)
+{
+	app_radio_stale_note(dc, false, true, now_ms);
+	if (now_ms + hold_ms > dc->until_ms) {
+		dc->until_ms = now_ms + hold_ms;
 	}
 }
 
@@ -262,8 +278,10 @@ static inline enum app_radio_stale app_radio_stale_check(int64_t now_ms, int64_t
 	if (now_ms - last_uplink_ms <= interval_ms * APP_RADIO_STALE_FACTOR) {
 		return APP_RADIO_STALE_OK;
 	}
-	if (dc->since_ms != 0 && dc->last_ms != 0 &&
-	    now_ms - dc->last_ms <= interval_ms + APP_RADIO_STALE_DC_RECENT_MARGIN_MS &&
+	int64_t recent_ms = dc->until_ms > dc->last_ms ? dc->until_ms : dc->last_ms;
+
+	if (dc->since_ms != 0 && recent_ms != 0 &&
+	    now_ms - recent_ms <= interval_ms + APP_RADIO_STALE_DC_RECENT_MARGIN_MS &&
 	    now_ms - dc->since_ms < APP_RADIO_STALE_DC_HOLD_MAX_MS) {
 		return APP_RADIO_STALE_HOLD_DC;
 	}
