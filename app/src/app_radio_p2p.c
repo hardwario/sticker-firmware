@@ -2631,6 +2631,10 @@ static const uint8_t m_twr_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 
 #define TWR_ACK_FRAME_LEN  (TWR_HDR_LEN + TWR_ACK_PAYLOAD_LEN + TWR_TAG_LEN)
 #define TWR_BACKOFF_MAX_MS 100
 #define TWR_REPS_MAX       10
+/* sx12xx_lora_config() arms the radio's TX timeout at a fixed 4000 ms: a longer
+ * frame is cut mid-air and lora_send() then blocks forever (HC finding). Keep
+ * 50 ms of it: SF12 <= 100 B, SF11 <= 198 B frames. */
+#define TWR_TOA_MAX_MS     3950U
 
 struct twr_rx {
 	uint32_t cyc; /* k_cycle_get_32() in the RxDone callback */
@@ -2657,7 +2661,7 @@ static struct {
 
 static struct {
 	uint32_t frames, tx, retx, acked, timeouts, ack_dropped, bad, stale, dl, pending;
-	uint32_t duty_held;
+	uint32_t duty_held, limit;
 	uint32_t arm_min, arm_max, ack_min, ack_max; /* us */
 	uint64_t arm_sum, ack_sum;
 	uint32_t arm_n, ack_n;
@@ -2760,8 +2764,17 @@ static int twr_exchange(void)
 	static uint8_t pt[TWR_FRAME_MAX];
 	static uint8_t frame[TWR_FRAME_MAX];
 	static struct twr_rx rx;
-	size_t flen;
+	size_t flen = TWR_HDR_LEN + m_twr.pt_len + TWR_TAG_LEN;
 	uint32_t counter;
+	uint32_t air = p2p_toa_ms(m_twr.sf, (uint8_t)flen);
+
+	if (air > TWR_TOA_MAX_MS) {
+		/* Checked before the counter is spent; an SF change after `run`. */
+		m_twr_st.limit++;
+		LOG_WRN("TWR L=%u sf=%u LIMIT toa=%u > %u ms (driver TX timeout)",
+			(unsigned int)flen, m_twr.sf, air, TWR_TOA_MAX_MS);
+		return 0;
+	}
 
 	/* Plan §4 (U1): the counter is spent before the TX, never after. It comes
 	 * from the p2pfc reservation, so it survives a reboot. */
@@ -2792,7 +2805,6 @@ static int twr_exchange(void)
 		return ret;
 	}
 
-	uint32_t air = p2p_toa_ms(m_twr.sf, (uint8_t)flen);
 	uint8_t tries = m_twr.confirmed ? m_twr.reps : 1;
 	uint32_t t0 = (uint32_t)k_uptime_get();
 	uint32_t c_start = 0, c_done = 0, c_arm = 0, c_ack = 0, c_dl = 0;
@@ -2957,6 +2969,14 @@ static int cmd_twr_send(const struct shell *sh, size_t argc, char **argv, uint32
 		shell_error(sh, "busy (run active: `ats tower stop`)");
 		return -EBUSY;
 	}
+	uint32_t flen = TWR_HDR_LEN + (uint32_t)len + TWR_TAG_LEN;
+	uint32_t air = p2p_toa_ms(m_twr.sf, (uint8_t)flen);
+
+	if (air > TWR_TOA_MAX_MS) {
+		shell_error(sh, "LIMIT: %u B frame at SF%u = %u ms > %u ms (driver TX timeout)",
+			    flen, m_twr.sf, air, TWR_TOA_MAX_MS);
+		return -EMSGSIZE;
+	}
 	m_twr.pt_len = (uint8_t)len;
 	m_twr.confirmed = argc > 1 && argv[1][0] == 'c';
 	m_twr.run_left = count > 1 ? count : 0;
@@ -3079,6 +3099,16 @@ static int cmd_twr_ack_drop(const struct shell *sh, size_t argc, char **argv)
 	return ret;
 }
 
+/* The Northbridge counter restarts at 1 after its power cycle: reset the replay
+ * lane here (0) instead of rebooting the node. */
+static int cmd_twr_gw_last(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	m_twr_gw_last = (uint32_t)strtoul(argv[1], NULL, 0);
+	shell_print(sh, "gw_last %u", m_twr_gw_last);
+	return 0;
+}
+
 static int cmd_twr_stats(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc > 1 && strcmp(argv[1], "reset") == 0) {
@@ -3092,9 +3122,10 @@ static int cmd_twr_stats(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "frames %u tx %u retx %u acked %u timeouts %u ack_dropped %u",
 		    m_twr_st.frames, m_twr_st.tx, m_twr_st.retx, m_twr_st.acked, m_twr_st.timeouts,
 		    m_twr_st.ack_dropped);
-	shell_print(sh, "bad %u stale %u pending %u dl %u duty_held %u run_left %u gw_last %u",
+	shell_print(sh,
+		    "bad %u stale %u pending %u dl %u duty_held %u limit %u run_left %u gw_last %u",
 		    m_twr_st.bad, m_twr_st.stale, m_twr_st.pending, m_twr_st.dl, m_twr_st.duty_held,
-		    m_twr.run_left, m_twr_gw_last);
+		    m_twr_st.limit, m_twr.run_left, m_twr_gw_last);
 	shell_print(sh, "arm us min %u avg %u max %u | ack us min %u avg %u max %u",
 		    m_twr_st.arm_min,
 		    m_twr_st.arm_n ? (uint32_t)(m_twr_st.arm_sum / m_twr_st.arm_n) : 0,
@@ -3118,6 +3149,8 @@ SHELL_SUBCMD_ADD((tower_bench), window, NULL, "window <ms>, 0 = formula", cmd_tw
 SHELL_SUBCMD_ADD((tower_bench), dlwin, NULL, "dlwin <ms>, 0 = formula", cmd_twr_dlwin, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), reps, NULL, "reps <1..10>", cmd_twr_reps, 2, 0);
 SHELL_SUBCMD_ADD((tower_bench), ack_drop, NULL, "ack_drop <n>", cmd_twr_ack_drop, 2, 0);
+SHELL_SUBCMD_ADD((tower_bench), gw_last, NULL, "gw_last <n>, 0 = accept any", cmd_twr_gw_last, 2,
+		 0);
 SHELL_SUBCMD_ADD((tower_bench), stats, NULL, "stats [reset]", cmd_twr_stats, 1, 1);
 
 static void twr_start(void)
