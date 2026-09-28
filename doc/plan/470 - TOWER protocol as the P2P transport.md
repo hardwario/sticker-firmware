@@ -448,8 +448,9 @@ fragments. Replaces the per-feature paging for P2P.
 
 - **Northbridge firmware** (proximos/firmware, STM32WL55, 64 KB RAM): FSK + LoRa profile;
   TOWER gateway net layer — peer table (≫ TOWER's 16, e.g. 256), per-peer replay lanes
-  persisted, TX counter, auto-ACK within 20 ms, pending flags, RAM downlink queue with TTL,
-  keyed + legacy join, duty ledger counting ACKs, `RadioStat`. Keys in flash, RDP on.
+  and session keys in RAM only (D15, restored by the central after a boot), TX counter from
+  central-assigned blocks, auto-ACK within 20 ms, pending flags, RAM downlink queue with TTL,
+  joins forwarded raw, duty ledger counting ACKs, `RadioStat`. RDP on. Work breakdown: §13.2.
 - **Host link (D5, recommended):** replace the CRC16 UART protocol (`TX_PACKET`/`ENTER_RX`/…)
   with the tower-protocol console subset (`Hello`, `MgmtRequest/Response`, `Uplink`,
   `RadioStat`). Then a TOWER Radio Dongle on USB and a Northbridge on UART are the same
@@ -458,10 +459,11 @@ fragments. Replaces the per-feature paging for P2P.
   registry DevEUI ↔ addr ↔ AppKey → `node_key`; `NodeAdd`/`NodeRemove` on every managed
   gateway; decodes port-2/3/85 with the existing Rust decoder; `QueuePush` for commands;
   MQTT surface unchanged.
-- **Security trade-off (accepted with T3):** a compromised Northbridge leaks the keys of its
-  nodes. Mitigation: RDP, per-hub key sets (new AppKeys / rejoin after a Hub is lost).
-- **Multi-gateway (later):** all gateways hold the keys; one "home" gateway per node ACKs and
-  owns the replay lane, others only forward `Uplink`s for dedup at the central.
+- **Security trade-off (accepted with T3):** a compromised Northbridge leaks the session keys
+  of its nodes (never the AppKeys). Mitigation: RDP, keys in RAM only, rejoin / new AppKeys
+  after a Hub is lost.
+- **Multi-gateway (later):** §6.3.1 — session keys on every gateway, one home gateway per node
+  ACKs (D17 A), the others only forward `Uplink`s for dedup at the central.
 
 ## 10. What is removed from the current P2P
 
@@ -635,6 +637,79 @@ window that keeps the energy advantage over today's RX1.
 Per-step verification as usual (STICKER side): three build configs, `bash tests/run_native.sh`,
 clang-format, configen pytest + decoder tests on yml/proto changes; flash/RAM baseline
 re-measured (release budget `0x34000`).
+
+### 13.2 Hub-side work (P2–P3)
+
+TOWER replaces only the P2P **wire**. Enrollment, the registry, the decoded data, commands,
+alarms and the MQTT surface stay as they are, so the Portal changes are small (H4). The work
+sits in the Northbridge firmware (H1), the console link (H2) and the central's `p2p` module
+(H3). P2P is pre-deployment: flag day, no dual-wire period, no session migration (nodes
+rejoin).
+
+**H0 — P0 close-out.** NB `TWR_*` log summary (turnaround, ToA, duty ledger) into §13.1;
+rollback to 0.2.2-rxsens when the node runs end.
+
+**H1 — Northbridge gateway firmware** (proximos/firmware, from the P0 bench branch):
+
+| # | Item |
+|---|---|
+| H1.1 | RAM peer table (≥ 256): `addr → {session_key, last_seen}`; `NodeAdd` / `NodeRemove` / `NodeList` from the central. Nothing in flash (D15) |
+| H1.2 | Known `src`: CCM open, strict `>` replay; `==` → re-ACK without re-delivery; ACK after the turnaround (20 ms, settable); forward `Uplink{addr, counter, flags, plaintext, rssi, snr, t_rx}` |
+| H1.3 | Unknown `src` or `dest = 0` (joins): forward the raw frame + RSSI/SNR/`t_rx`, no ACK |
+| H1.4 | Timed TX for the JoinAccept: the central sends a sealed frame + TX time (`t_rx + rx_delay`); the NB never holds a `join_key` |
+| H1.5 | TX counter from a central-assigned block (`CounterBlock{start, len}`); no TX when exhausted, ask for the next block early |
+| H1.6 | Per-node DL queue with TTL: `QueuePush` → `PENDING` in the ACK, DL 20 ms after the ACK TxDone, outcome `DELIVERED / NOT_DELIVERED / EXPIRED` |
+| H1.7 | `RadioConfig` from the central (modulation, frequency, SF, BW, CR, preamble, sync word, TX power); `lora` only, `fsk` refused until P5 |
+| H1.8 | `boot` announce (FW version, capabilities, empty table) → the central restores the table and a fresh counter block (§6.6) |
+| H1.9 | Duty ledger incl. ACKs, `RadioStat`, `stats`; frame ≤ ToA cap of the SX12xx 4 s TX timeout (§17) |
+
+**H2 — Console link (D5).** Message set = tower-protocol console semantics (`Hello`, `Mgmt*`,
+`Uplink`, `RawFrame`, `TxAt`, `RadioStat`, `Boot`); the framing (today's HDLC on ttyAMA3 or
+the tower console framing) is the Hub controller's call. The message set is frozen and
+written into this section **before** H1/H3 code, because both sides and the host harness
+depend on it.
+
+**H3 — Central** (proximos-v2 `control-radio`, `p2p/`):
+
+| # | Item |
+|---|---|
+| H3.1 | `frame.rs` → TOWER frame codec; tests against `tests/ccm/tower_frame_kat.json` |
+| H3.2 | `crypto.rs`: labels `HIO-TWR-JOIN` / `HIO-TWR-SES` (same construction as today); tests against `tests/ccm/tower_join_kat.json` |
+| H3.3 | `session.rs`: the `dev_addr` allocator goes away, `addr = low32(DevEUI)`; collision check at `node-add` (reject with a clear error); dedup key `(addr: u32, counter)` |
+| H3.4 | Join: raw frame → `addr` → DevEUI → verify → `central_nonce` → session → `NodeAdd` → sealed JoinAccept via `TxAt` |
+| H3.5 | Persistence (`sessions.db`, new schema, old rows dropped): `addr`, `session_key`, `last_seen`, `dev_nonce`, per-NB counter block (persisted **before** it is handed out) |
+| H3.6 | NB `boot` → re-send every `NodeAdd` with the exact `last_seen` + a new counter block |
+| H3.7 | `0x81` → the existing decoder by port (2/3/85); uplink event shape unchanged plus the transport |
+| H3.8 | `0x91`: `Capabilities` / `Hello` (store FW + caps), `LinkCheckAns` (margin from RSSI/SNR, gateway count), `TimeAns` (unix ms) — queued as DL |
+| H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ the `lora` MTU (D14), longer → the existing paging |
+| H3.10 | `P2pRadio` config: add `modulation` (`lora`), `sync_word`, `tx_power`; drop what only the old wire needed |
+| H3.11 (P3) | `node-remove` → `Detach` (`0x91 03`) then `NodeRemove`; `RejoinReq` (`0x91 04`); `DevStatus` |
+
+**H4 — Portal (minimal).** No change to the node-add form (serial, DevEUI, AppKey,
+`radio = p2p`), decoded data, alarms or the command UI.
+
+- `dev_addr` shows the 32-bit TOWER address (8 hex digits) instead of the 16-bit allocation;
+  `net_id` and `session_state` unchanged.
+- `node-add` can fail with an address collision → show the central's error.
+- Hub radio settings: `modulation` shown (read-only `lora` until P5).
+
+**H5 — Tests and HIL.**
+- Rust unit tests against both KATs.
+- NB + 0413 (SC's P1 FW): join → telemetry → MQTT decoded; `TimeAns` / `LinkCheckAns`;
+  replay / duplicate; NB power cycle → recovery without a rejoin (§6.6).
+- P3: Portal GetParam / SetParam E2E over P2P.
+
+**Order and dependencies.**
+1. H2 message set, frozen.
+2. H1.1–H1.3 + H3.1–H3.4, in parallel.
+3. The integration point: SC's P1 join.
+4. H1.4–H1.9 + H3.5–H3.10 → P2 exit (§13).
+5. H3.11 + H4 → P3.
+
+**Gating.**
+- NB flashes need Hynek's OK in the Hub controller's chat.
+- The Hub leaves P2P only via Nodes test.
+- Branches are local or draft MRs; merges need Hynek's OK.
 
 ## 14. Test plan (outline)
 
