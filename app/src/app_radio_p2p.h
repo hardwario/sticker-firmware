@@ -358,9 +358,9 @@ void app_radio_p2p_debug_drop_acks(uint32_t count);
 int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
 #endif
 
-#if defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST)
-/* TOWER-over-LoRa P0 bench (doc/plan "TOWER protocol as the P2P transport" §4,
- * §13.1). Throw-away: the TOWER frame verbatim -- ver_type(1) flags(1) src(4)
+#if defined(CONFIG_ZTEST)
+/* TOWER frame codec (doc/plan "TOWER protocol as the P2P transport" §4), kept
+ * from the P0 bench for the KAT tests: the TOWER frame -- ver_type(1) flags(1) src(4)
  * dest(4) counter(4), all little-endian and all CCM AAD, then the ciphertext
  * and an 8 B tag. Nonce src(4) counter(4) bulk_idx(3) 0x0000. */
 #define TWR_VERSION         1
@@ -387,7 +387,7 @@ struct twr_ack {
 	int8_t rssi; /* the gateway's RSSI of the acked frame; 0 if absent */
 	bool pending;
 };
-#endif /* defined(CONFIG_APP_P2P_TOWER_BENCH) || defined(CONFIG_ZTEST) */
+#endif /* defined(CONFIG_ZTEST) */
 
 #if defined(CONFIG_ZTEST)
 /* Pure decision-logic helpers, internal to app_radio_p2p.c (static in the firmware),

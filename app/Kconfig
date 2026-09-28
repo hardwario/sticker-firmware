@@ -53,17 +53,6 @@ config RADIO_P2P
 	  reclaims flash on builds that never need P2P — the flash-tight
 	  debug overlay does exactly that (doc/p2p.md §11).
 
-config APP_P2P_TOWER_BENCH
-	bool "TOWER-over-LoRa P0 bench node (throw-away)"
-	depends on RADIO_P2P && SHELL
-	imply LORA_SEND_RECV_ASYNC
-	help
-	  Bench only (doc/plan "TOWER protocol as the P2P transport" §13.1, P0):
-	  the P2P link stays off and `ats tower` sends TOWER frames under a
-	  static key to the bench Northbridge. Never in a release build.
-	  With a Zephyr tree that has lora_send_recv_async() (sticker fork),
-	  confirmed frames switch from TX to RX without a radio sleep.
-
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"
 	default y

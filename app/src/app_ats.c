@@ -1675,11 +1675,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      1, 0),
 	SHELL_SUBCMD_SET_END);
 
-#if defined(CONFIG_APP_P2P_TOWER_BENCH)
-/* Filled by app_radio_p2p.c (SHELL_SUBCMD_ADD((tower_bench), ...)). */
-SHELL_SUBCMD_SET_CREATE(sub_tower, (tower_bench));
-#endif
-
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_ats, SHELL_CMD(device, &sub_device, "Device info & control.", NULL),
 	SHELL_CMD(claim, &sub_claim, "Claim-lifecycle test commands (#247/#351).", NULL),
@@ -1688,9 +1683,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
 	SHELL_CMD(radio, &sub_radio, "Radio (LoRaWAN/P2P) commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P) */
-#if defined(CONFIG_APP_P2P_TOWER_BENCH)
-	SHELL_CMD(tower, &sub_tower, "TOWER-over-LoRa P0 bench.", NULL),
-#endif
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
