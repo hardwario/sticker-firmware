@@ -13,6 +13,9 @@
 > | **T2** | The network side is the **ProXimos Hub**: Northbridge (STM32WL55, dumb modem today) + central (proximos-v2 `control-radio`). |
 > | **T3** | **Keys live on the gateway and it ACKs locally** (TOWER model, ~20 ms turnaround). The central feeds the gateway's peer table; the gateway is no longer keyless. |
 > | **T4** | The **modulation is selectable**: `fsk` (TOWER-native GFSK, bit-exact with SPIRIT1) or `lora` (the same TOWER frames over LoRa). Same frames, same crypto, same state machines; only the PHY and the timing constants differ. |
+> | **T5** | **First stage: no TOWER wire change at all.** STICKER data ride in the application envelope **`0x81`**, control signals (time, link check, device status, detach, …) in a second envelope **`0x91`** (§8). Both are opaque to a TOWER gateway. |
+> | **T6** | **Later stage:** the control commands move **natively into the TOWER protocol** (own frame type, piggyback on ACK/Data — §11 N1), keeping the `0x91` command IDs and TLV codec. |
+> | **T7** | **Phase 0 is a physical verification on the LoRa modulation** (TOWER frames and timing on SX126x LoRa, §13.1). The FSK bit-exact interop with TOWER hardware moves to a later phase. |
 >
 > Surveyed reference: `hardwario/tower-firmware` @ `b7f3f4a`, `hardwario/tower-protocol` @
 > `2351ea0` (crate 1.3.x, `RADIO_SCHEMA_VERSION = 2`). The comparison that motivated this
@@ -39,7 +42,7 @@
 **Non-goals (this plan)**
 
 - US915 FHSS and EU LBT+AFA access modes (TOWER has them; STICKER P2P stays EU868 single
-  channel for now — §13 phase 6 picks them up).
+  channel for now — §13 P7 picks them up).
 - Multi-gateway macro-diversity (T3 makes it a gateway-coordination problem; §9.4 sketches it,
   implementation later).
 - Radio FOTA (bulk makes it possible; out of scope).
@@ -196,8 +199,10 @@ replaces JoinRequest/JoinAccept (`0xF0`/`0xF1`).
 
 The node persists `gw_addr` (+ assignment); a reboot does not re-join (like P2P `PAIRED`).
 
-Fallback without the extension: `p2p-gw-addr` configured over shell (and later NFC,
-Manager-App release needed) = TOWER's `Provision` op. Then no join frames at all.
+**Stage 1 (T5) uses no join frames at all:** `p2p-gw-addr` is configured over shell (and
+later NFC, Manager-App release needed) = TOWER's `Provision` op; the key is derived (§6.2)
+and the central installs it with `NodeAdd`. The keyed join is a wire change and comes with
+the native stage (P5/P6).
 
 ### 6.4 Legacy TOWER pairing
 
@@ -207,10 +212,9 @@ Manager-App release needed) = TOWER's `Provision` op. Then no join frames at all
 
 ### 6.5 Unpairing
 
-- Central: `NodeRemove` on the gateway → the node's confirmed uplinks stop being ACKed →
-  supervision (§7.4). Before removing, the central may queue an app-level `unpair`
-  command (authenticated by CCM like any downlink) so the node goes silent at once — the
-  successor of `Detach 0xFD`.
+- Central: queues `Detach` (`0x91` cmd 0x03) so the node goes silent at once, then
+  `NodeRemove` on the gateway → any further confirmed uplinks stop being ACKed →
+  supervision (§7.4).
 
 ## 7. Uplink
 
@@ -240,17 +244,17 @@ report confirmed, TX power steps up); `radio-link-check-fail-rejoin` further fai
 **keyed re-join** (rediscovers the gateway). Last resort after 24 h: `lora` sweeps SF
 (as today), `fsk` sweeps the three TOWER channels.
 
-### 7.5 Clock sync (upstream extension E1)
+### 7.5 Clock sync
 
-ACK flag **`TIME`** (bit 1) + `unix_time(4 LE)` appended after `flags`: TOWER nodes ignore
-extra ACK bytes (the ≥ 4 B rule), but the bit must be reserved upstream. The gateway sets it
-on the first ACK after boot / join and whenever the node's `clock_sync` is pending
-(central-signalled). Replaces the B5 Unix-time tail of `0xFA`.
+Stage 1 (T5): `TimeReq` / `TimeAns` in the `0x91` control envelope (§8.2), answered by the
+central through the downlink queue. Stage 2 (T6): the same command piggybacked on the
+gateway's ACK (§11 N1), which also makes it precise to a few ms. Replaces the B5 Unix-time
+tail of `0xFA`.
 
 ### 7.6 What is lost vs. the current P2P ACK
 
-- Uplink **SNR** (the ACK carries RSSI only). `RadioState.ul_snr` becomes "not available"
-  in P2P, or E5 appends `snr(i8)` as another optional ACK byte.
+- Uplink **SNR** (the TOWER ACK carries RSSI only) — returned by `LinkCheckAns` in `0x91`
+  (the central has RSSI/SNR of every uplink from the gateway's `Uplink` record).
 - `pending_frame_len` — not needed: the downlink window is fixed per profile (§5).
 
 ## 8. Application payload
@@ -259,20 +263,70 @@ TOWER envelope = `[RADIO_SCHEMA_VERSION] ‖ postcard(NodeMsg | NodeCmd)`, ≤ 7
 never looks inside, but the TOWER host rejects an unknown schema byte.
 
 **Upstream extension E3:** reserve leading bytes `0x80..0xFF` as *foreign application
-envelopes* that TOWER hosts forward raw (e.g. MQTT `…/raw`) instead of rejecting.
-STICKER envelope:
+envelopes* that TOWER hosts forward raw (e.g. MQTT `…/raw`) instead of rejecting. The net
+layer and the gateway need no change — only the TOWER host's schema check. STICKER uses two
+envelopes (T5), one per frame:
+
+| Byte | Envelope | Body |
+|---|---|---|
+| **`0x81`** | STICKER **data** | `port(1) ‖ protobuf` |
+| **`0x91`** | STICKER **control** | TLV list (§8.2) |
+
+### 8.1 Data envelope `0x81`
 
 ```
-0x81 (HIO-STICKER) ‖ port(1) ‖ protobuf body (≤ 72 B)
+0x81 ‖ port(1) ‖ protobuf body (≤ 72 B with the 96 B frame)
 port: 2 telemetry · 3 alarm · 85 response/announce · 86 command (downlink) — the current frame_type values
 ```
 
 - 72 B per frame: responses are already paged for 64 B (#425); `app_compose` splits
-  telemetry against a budget, which becomes 72 B for P2P.
-- Optional nicety (phase 5): also emit a TOWER `NodeMsg::Info` (postcard) at boot so
+  telemetry against a budget, which becomes 72 B for P2P (larger in `lora` if D14).
+- Optional nicety (later): also emit a TOWER `NodeMsg::Info` (postcard) at boot so
   `tower-cli nodes` names a STICKER natively.
 - `NodeCmd::Shell` is **not** supported — STICKER keeps typed commands with the M-3 field
   gate. A TOWER shell downlink is dropped and logged.
+
+### 8.2 Control envelope `0x91`
+
+```
+0x91 ‖ { cmd(1) ‖ len(1) ‖ value(len) } × n        (little-endian values, like TOWER)
+```
+
+- **TLV with an explicit length**: a receiver skips an unknown `cmd` by `len` and processes
+  the rest — forward compatible, unlike LoRaWAN MAC commands.
+- ID space: `0x00–0x3F` core (future TOWER-native, T6), `0x40–0x7F` reserved,
+  `0x80–0xFF` vendor.
+- **Stage 1 semantics — end to end, node ↔ central.** The gateway stays a transparent TOWER
+  bridge: uplink `0x91` frames reach the central as `Uplink` records, downlink ones are
+  `QueuePush`ed like commands and delivered through the pending flag (§9.1). Everything the
+  answer needs (RSSI/SNR, gateway count, time) the central has.
+- Authenticated and encrypted by the frame's CCM like any payload.
+- A `0x91` frame is sent confirmed when it asks for an answer, unconfirmed otherwise; an
+  uplink may carry `0x81` **or** `0x91`, not both (piggybacking is stage 2, N1).
+- The `app_radio` link-check machine counts a `LinkCheckAns` as an explicit check result; a
+  plain TOWER ACK still counts as "link alive".
+
+Stage 1 command set (IDs final — they carry over to N1 unchanged):
+
+| ID | Command | Dir | Value | Replaces / purpose |
+|---|---|---|---|---|
+| 0x01 | `Capabilities` | ↑↓ | proto version(1), MTU(1), profiles(1), cmd bitmap(8), power class(1) | what each side understands; sent at boot/join announce |
+| 0x02 | `Hello` | ↑ | session_id(4), reset_reason(1), fw version(4) | reboot on the link level (today: boot `Info`) |
+| 0x03 | `Detach` | ↓ | reason(1) | `0xFD` |
+| 0x04 | `RejoinReq` | ↓ | kind(1): rediscover / rekey | `0xFE` |
+| 0x10 | `LinkCheckReq` / `Ans` | ↑↓ | Ans: rssi(i8), snr(i8), margin(i8), gw_count(1) | link check with numbers; uplink SNR |
+| 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment, adaptive power (#443); auto-revert if no ACK |
+| 0x14 | `LinkPolicy` | ↓ | confirm_every(1), warn_after(1), rejoin_after(1) | network-set supervision parameters |
+| 0x15 | `Backoff` | ↓ | seconds(2) | gateway/central congestion or duty relief |
+| 0x20 | `TimeReq` / `TimeAns` | ↑↓ | Ans: unix(4) ‖ fraction(1, 1/256 s) at the end of the requesting uplink | B5 Unix-time tail, `clock_sync` |
+| 0x21 | `Poll` | ↑ | — | "anything for me?" without data |
+| 0x30 | `DevStatusReq` / `Ans` | ↓↑ | battery mV(2), battery %(1), MCU temp(i8), uptime(4), dl rssi/snr(2) | LoRaWAN DevStatus (#419 gap) |
+
+Later (stage 2 or when needed): `RekeyReq/Conf` (0x05), `HomeGateway` (0x06),
+`RxParamSetup` (0x12), `ChannelPlan` (0x13), `PendingInfo` (0x22), `PowerMode` (0x23),
+`Ping` (0x31), `RadioStats` (0x32).
+
+Not control (stays in `0x81`): configuration, sensors, alarms, history, typed commands.
 
 ## 9. Downlink
 
@@ -298,7 +352,7 @@ ask for `force_send`-style polling via the link-check interval if needed.
 `post_cmd_work_handler()` semantics unchanged (reboot/settings_save only after the response
 was acknowledged).
 
-### 9.3 Large transfers — TOWER bulk (phase 5)
+### 9.3 Large transfers — TOWER bulk (P6)
 
 Node-initiated pull (`BULK_ANNOUNCE` → `BulkReq(i)` → `BulkData`), streamed, constant RAM:
 history readout over the radio (#260/#265), full ConfigDump without paging, later FOTA
@@ -346,10 +400,13 @@ dual-protocol period.
 |---|---|---|---|
 | **U1** | `afa_send`: spend the TX counter right after sealing (as `send` does) | cancel → (key, nonce) reuse | none (bug fix) |
 | **U2** | Duty governor: sliding-hour ledger instead of token bucket | bucket allows ~2 % in the worst sliding hour | none |
-| **E1** | ACK flag `TIME` (bit 1) + `unix_time(4 LE)` | clock sync for sleeping nodes | additive, ≥ 4 B rule |
-| **E3** | Schema bytes `0x80..0xFF` = foreign app envelopes, forwarded raw | third-party node apps (STICKER `0x81`) | additive |
-| **E4** | `KEYED` join (flag bit 1): JOIN frames under the per-node key, `JOIN_RESP` without the key | no key on air, mutual auth | additive; stock dongles ignore |
-| **E5** (opt.) | ACK `snr(i8)` byte | LoRa-profile link diagnostics | additive |
+| **E3** | Schema bytes `0x80..0xFF` = foreign app envelopes, forwarded raw | STICKER `0x81` data + `0x91` control (stage 1) | host-side only |
+| **N1** | **Native control channel** (T6): frame type `Ctrl = 8` carrying the `0x91` TLV list; ACK flag `CTRL` (bit 1) with a TLV tail after `flags`; Data flag `CTRL` (bit 4) with `ctrl_len(1) ‖ TLV` before the app envelope. Core IDs `0x00–0x3F` = the §8.2 table | gateway answers time/link check in its ACK (ms-precise time, no downlink round), piggyback saves airtime | additive: unknown frame type is dropped by stock parsers (`BadType`), ACK tail ignored (≥ 4 B rule); gated by `Capabilities` |
+| **E4** | `KEYED` join (Join flag bit 1): JOIN frames under the per-node key, `JOIN_RESP` without the key | no key on air, mutual auth | additive; stock dongles ignore |
+
+N1 replaces the earlier single-purpose proposals E1 (time bit in ACK) and E5 (SNR byte in
+ACK). Moving from stage 1 to N1 is a carrier change only: same command IDs, same TLV codec,
+so node and central keep one command implementation.
 | **D5** | Gateway console spoken by non-TOWER gateways (Northbridge) | interchangeable gateways | none (reuse) |
 
 Owner/contact on the TOWER side and acceptance are an open point (D12). If an extension is
@@ -373,14 +430,55 @@ New proto_ids need the manual collision check (memory: proto_id collision gotcha
 
 | Phase | Content | Exit criterion |
 |---|---|---|
-| **P0 — PHY spike (go/no-go)** | FSK access on SX126x (driver decision with #408 B7); STICKER ↔ TOWER Core Module running `radio_beacon` / `net_secure_ping`, both directions; decide HW vs SW CRC/whitening | bit-exact frames both ways, RSSI sane |
-| **P1 — Upstream** (parallel) | U1, U2, E1, E3, E4 proposals to tower-firmware/-protocol | agreed or explicitly flagged-off |
-| **P2 — Node net layer** | rewrite `app_radio_p2p.c`: PHY shim (fsk/lora), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK parsing; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); static `p2p-gw-addr` + derived key | STICKER (fsk) delivers confirmed uplinks to a **stock Radio Dongle** with the key added via `tower-cli`/`NodeAdd` |
-| **P3 — Hub gateway** | Northbridge TOWER gateway net layer + console link (D5); central registry, `NodeAdd`, uplink decode | STICKER fsk + lora → Hub → MQTT decoded |
-| **P4 — Downlink & lifecycle** | pending/queue, commands/responses, chaining, supervision, TIME ACK, unpair | Portal GetParam/SetParam E2E over P2P, both profiles |
-| **P5 — Join & extras** | keyed join, legacy pairing on Hub for TOWER nodes, bulk (history), optional `NodeMsg::Info` | zero-touch join; TOWER push-button on Hub; history over radio |
-| **P6 — Later** | 869.525 downlink channel for `lora` (if D7), LBT+AFA / FHSS, multi-gateway, radio FOTA | — |
-| **P7 — Cleanup** | remove old frames/KAT/decoder paths, rewrite `doc/p2p.md`, Manager-App params via NFC (if agreed) | docs = code |
+| **P0 — LoRa physical verification (go/no-go, T7)** | TOWER frames + TOWER timing on SX126x LoRa, STICKER ↔ STICKER, bench build (§13.1) | M1–M8 pass; §5 timing table replaced by measured values |
+| **P1 — Node net layer + envelopes** | rewrite `app_radio_p2p.c`: PHY shim (lora first, fsk stub), frame/CCM/nonce, counters, replay, confirmed send + reps, ACK/pending, `0x81` data + `0x91` control codec; KAT from Rust; native ztests (TESTABLE pattern, `tests/p2p_logic`); static `p2p-gw-addr` + derived key; a bench **gateway role** on a second STICKER | STICKER ↔ STICKER-gateway: telemetry, alarms, responses in `0x81`; `Capabilities`/`Hello`/`LinkCheck`/`Time` in `0x91` |
+| **P2 — Hub gateway** | Northbridge TOWER gateway net layer (lora) + console link (D5); central registry, `NodeAdd`, `0x81` decode, `0x91` handling | STICKER lora → Hub → MQTT decoded; `TimeAns`/`LinkCheckAns` from the central |
+| **P3 — Downlink & lifecycle** | pending/queue, commands/responses, chaining, supervision on `LinkCheckAns`, `RadioParamReq`, `Detach`/`RejoinReq`, `DevStatus` | Portal GetParam/SetParam E2E over P2P |
+| **P4 — Upstream** (from P1 in parallel) | U1, U2, E3 now; N1, E4 drafted with the P1–P3 experience | E3 agreed; N1/E4 proposals submitted |
+| **P5 — FSK profile** | FSK access on SX126x (driver decision with #408 B7), bit-exact vs TOWER Core Module / Radio Dongle (HW vs SW CRC/whitening) | STICKER fsk ↔ stock Radio Dongle via `tower-cli` `NodeAdd` |
+| **P6 — Native control + join** | N1 (control in the TOWER protocol), keyed join E4, legacy pairing on Hub for TOWER nodes, bulk (history) | control piggybacked on ACK; zero-touch join; TOWER push-button on Hub |
+| **P7 — Later** | 869.525 downlink channel for `lora` (D7), LBT+AFA / FHSS, multi-gateway, radio FOTA | — |
+| **P8 — Cleanup** | remove old frames/KAT/decoder paths, rewrite `doc/p2p.md`, Manager-App params via NFC (if agreed) | docs = code |
+
+### 13.1 Phase 0 — physical verification on LoRa
+
+**Question answered:** do TOWER frames with TOWER-style timing (20 ms turnaround, short ACK
+window, pending downlink window) work on the SX126x in LoRa, and what are the real
+constants per SF? Nothing is decided on the wire here; the output is measured numbers and
+a go/no-go.
+
+**Setup**
+
+- Two STICKERs from the bench (0413 via J-Link 822005110, 5722 via J-Link EDU 801053710 —
+  both need a debug build; 5722 is currently the release range-test node, reflash only
+  after coordinating the bench).
+- Throw-away bench branch off `feat-p2p`, layered on `debug_p2p_bench.conf` (P2P without
+  LoRaWAN — RAM budget). Minimal code: TOWER frame codec + CCM nonce, static key and
+  addresses, a **gateway role** (continuous RX, auto-ACK, optional pending + 1 queued
+  downlink) and a **node role**, shell `ats tower …` (`role`, `tx <len> [c]`, `pend <len>`,
+  `stats`, `sf`, `window`).
+- KAT generator: a small Rust tool over `tower-radio-core` / `tower-net-core` / `frame.rs`
+  emitting `tests/ccm/tower_*_kat.json` (kept for P1).
+- PPK2 on the node for energy; timestamps via `k_cycle_get_32()` around radio events (and a
+  GPIO toggle + logic analyzer if the numbers are borderline).
+
+**Measurements**
+
+| # | What | Pass |
+|---|---|---|
+| M1 | Codec + CCM + nonce vs Rust KAT (native ztest) | byte-identical |
+| M2 | Turnaround: gateway RX-done → ACK TX start; node TX-done → RX armed | gateway ≤ 20 ms; node RX armed before the ACK preamble |
+| M3 | ACK success per SF 7 / 9 / 10 / 12, 500 confirmed frames each, close range; shrink the window until it fails | ≥ 99 %; minimal working window recorded → §5 |
+| M4 | Frame lengths 14…96 B (and 255 B for D14) at SF7 and SF12; measured vs computed ToA | ToA within 2 % |
+| M5 | Retransmit path (`ack_drop`): byte-identical resend → re-ACK, no re-delivery; counter/replay | no duplicate delivery, strict monotonic counters |
+| M6 | Pending: ACK with `PENDING` → node window → 96 B downlink at SF7 / SF10 | ≥ 99 % received; window formula confirmed |
+| M7 | Energy per confirmed uplink cycle (30 B + ACK) at SF7 / SF10 vs today's P2P RX1 (1 s) | reported (expected clearly lower) |
+| M8 | Duty ledger on both roles incl. ACKs over a 1 h run | ≤ 1 % every sliding hour |
+| M9 (opt.) | Range at 2 dBm: TOWER-over-LoRa vs current P2P | reported |
+
+**Go / no-go:** M1–M6 pass → P1. If M2 misses 20 ms, the `lora` constants just grow (timing
+is not on the wire); a no-go only if confirmed delivery cannot be made reliable within a
+window that keeps the energy advantage over today's RX1.
 
 Per-step verification as usual: three build configs, `bash tests/run_native.sh`,
 clang-format, configen pytest + decoder tests on yml/proto changes; flash/RAM baseline
@@ -421,6 +519,7 @@ re-measured (release budget `0x34000`).
 | D11 | Legacy public-key pairing on the Hub for stock TOWER nodes | allowed, user-initiated, short window, documented as insecure |
 | D12 | TOWER-side owner for the upstream work | ? |
 | D13 | PR: reuse #410 (retitle, rebase on current `feat-p2p`) or a new PR | reuse #410 |
+| D14 | MTU per profile: `fsk` 96 B frame (72 B data), `lora` up to 255 B frame (231 B data)? | measure in P0 (M4), decide before P1 |
 
 ## 16. Cross-repo impact
 
@@ -430,7 +529,7 @@ re-measured (release budget `0x34000`).
 | sticker Zephyr fork (`v4.3.0-sticker2`) | FSK access / sx126x sync-CRC-whitening (with #408 B7) |
 | proximos/firmware (Northbridge) | TOWER gateway net layer, FSK, console link |
 | proximos-v2 (central) | `tower-protocol` dependency, registry/key derivation, gateway mgmt, decode |
-| tower-firmware / tower-protocol | U1, U2, E1, E3, E4 (E5) |
+| tower-firmware / tower-protocol | U1, U2, E3 (stage 1); N1, E4 (native stage) |
 | Manager-App | later: P2P params over NFC; decoder of the new frame |
 
 ## 17. Risks
