@@ -1581,36 +1581,57 @@ ZTEST(p2p_logic, test_stale_time_ans_is_dropped)
 	zassert_equal(p2p_test_time_events, events);
 }
 
-/* No Poll (plan H3.8): an answer the central queued comes on the next PENDING,
- * so up to three reports go confirmed to fetch it, then the cadence again. */
-ZTEST(p2p_logic, test_answer_fetch_confirms_at_most_three_reports)
+/* Plan §7.2 (F6): every report goes CONFIRMED, link check or not, whatever
+ * answer is outstanding -- a queued downlink waits one report at most. */
+ZTEST(p2p_logic, test_every_report_goes_confirmed)
 {
 	const struct app_radio_backend *be = &app_radio_p2p_backend;
 
 	paired();
 	g_app_config.radio_link_check_interval = 0;
-	p2p_test_time_wanted = true;
-	p2p_test_set_time_req(7, k_uptime_get());
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 5; i++) {
 		zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED, "report %d", i);
 	}
-	zassert_equal(be->report_flags(false), 0, "the 4th is back to the cadence");
-
-	/* The time landed (app_radio clears the want): the cadence at once. */
-	p2p_test_link_reset();
-	p2p_test_set_time_req(8, k_uptime_get());
-	p2p_test_time_wanted = false;
-	zassert_equal(be->report_flags(false), 0);
+	p2p_test_time_wanted = true;
+	p2p_test_set_time_req(7, k_uptime_get());
+	for (int i = 0; i < 5; i++) {
+		zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED,
+			      "report %d with a TimeAns outstanding", i);
+	}
+	zassert_equal(p2p_test_ctrl_pending(), 0, "no LinkCheckReq off the cadence");
 }
 
-/* §3.2: a report the cadence made a link check goes CONFIRMED and asks the
- * central for the numbers (LinkCheckReq), the others go unconfirmed. */
+/* No Poll (plan H3.8): a LinkCheckAns still missing after three reports is
+ * lost, so the next link check may ask again. */
+ZTEST(p2p_logic, test_lost_link_check_ans_frees_the_next_request)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	paired();
+	gw.ack = true;
+	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");
+	p2p_test_ctrl_run(); /* acknowledged, no answer yet */
+	zassert_equal(p2p_test_ctrl_pending(), 0);
+
+	/* Outstanding: a due report does not ask again. */
+	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(p2p_test_ctrl_pending(), 0, "the earlier one is unanswered");
+	(void)be->report_flags(false);
+	(void)be->report_flags(false);
+	(void)be->report_flags(false); /* the 4th since the request: lost */
+	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "asked again");
+}
+
+/* §3.2: a report the cadence made a link check also asks the central for the
+ * numbers (LinkCheckReq); both go CONFIRMED. */
 ZTEST(p2p_logic, test_link_check_report_goes_confirmed)
 {
 	const struct app_radio_backend *be = &app_radio_p2p_backend;
 
 	paired();
-	zassert_equal(be->report_flags(false), 0);
+	zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED);
 	zassert_equal(p2p_test_ctrl_pending(), 0);
 	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
 	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");

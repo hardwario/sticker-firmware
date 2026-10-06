@@ -527,9 +527,9 @@ struct app_radio_backend {
 	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
 	int (*rejoin)(bool forced);
 	/* A network time is wanted (app_radio_time_request()): LoRaWAN queues a
-	 * DeviceTimeReq onto the next uplink, P2P sets FCtrl TIME_REQ on its
-	 * confirmed uplinks and sends its next reports (at most 3) confirmed so
-	 * an Ack brings the time tail. Neither sends an uplink of its own. The
+	 * DeviceTimeReq onto the next uplink, P2P a TimeReq onto its next 0x91
+	 * control uplink, the TimeAns rides a later report's PENDING. Neither
+	 * sends a report of its own. The
 	 * backend calls app_radio_time_event() when the time lands. */
 	void (*time_request)(void);
 	/* Time on air (ms) of an uplink carrying `len` payload bytes now, for the
@@ -728,9 +728,9 @@ int app_radio_send_info(uint32_t seq);
 /* clock_sync with an empty body: re-sync the RTC from the network and answer
  * with an Info carrying `seq` once the time has landed -- the same shape on
  * both radios, no extra uplink: LoRaWAN's DeviceTimeReq rides on the next
- * uplink and the answer comes in its downlink; P2P sends its next report
- * CONFIRMED (at most 3 of them) with FCtrl TIME_REQ and the time comes in the
- * Ack's tail (app_radio_time_request()). A network
+ * uplink and the answer comes in its downlink; P2P sends a TimeReq in a 0x91
+ * control uplink and the TimeAns rides a later report's PENDING
+ * (app_radio_time_request()). A network
  * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2).
  * A newer request before the time lands takes over the seq. Any thread. */
 void app_radio_clock_sync(uint32_t seq);

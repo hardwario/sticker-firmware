@@ -153,9 +153,9 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 /* A LinkCheckReq follows a report the cadence made a link check, after the
  * report's own frames. */
 #define P2P_LINK_CHECK_DELAY_MS  5000
-/* The central queues a TimeAns / LinkCheckAns for the next PENDING, so after
- * a request goes out this many reports are sent confirmed to fetch the answer
- * (there is no Poll, plan H3.8). */
+/* The central queues a TimeAns / LinkCheckAns for the next PENDING (there is
+ * no Poll, plan H3.8); a LinkCheckAns still missing after this many reports is
+ * taken as lost. */
 #define P2P_ANSWER_REPORTS_MAX   3
 /* A TimeAns applies to the TX-done of its TimeReq; one older than this is a
  * stale answer and dropped. */
@@ -1800,28 +1800,17 @@ static void p2p_deliver_xfer(const struct p2p_xfer *x)
 	}
 }
 
-/* Decision #22 §3.2: telemetry is unconfirmed and sent once, except a report
- * app_radio's cadence picked as a link check (`due`: the first after a link-up
- * and every radio-link-check-interval-th, every one in WARNING), which is
- * CONFIRMED -- alarms and answers are always confirmed and judge the link on
- * their own. Decided once per snapshot, kept for all its frames. */
-static bool telemetry_report_confirmed(bool due)
+/* An answer the central queued (TimeAns, LinkCheckAns) rides the next report's
+ * PENDING. A LinkCheckAns still missing after P2P_ANSWER_REPORTS_MAX reports
+ * is lost and must not block the next LinkCheckReq; a late TimeAns is still
+ * taken (time_ans() caps its age). */
+static void answer_fetch_count(void)
 {
-	/* An answer the central queued (TimeAns, LinkCheckAns) comes on the next
-	 * PENDING, so the next reports go confirmed to fetch it -- at most
-	 * P2P_ANSWER_REPORTS_MAX per request (no Poll, plan H3.8). */
 	bool answer_wanted = (m_time_req_valid && app_radio_time_wanted()) || m_lc_outstanding;
 
-	if (answer_wanted) {
-		if (atomic_inc(&m_answer_reports) < P2P_ANSWER_REPORTS_MAX) {
-			return true;
-		}
-		/* Unanswered after P2P_ANSWER_REPORTS_MAX fetches: a lost
-		 * LinkCheckAns must not block the next LinkCheckReq. A late TimeAns
-		 * is still taken (time_ans() caps its age). */
+	if (answer_wanted && atomic_inc(&m_answer_reports) >= P2P_ANSWER_REPORTS_MAX) {
 		m_lc_outstanding = false;
 	}
-	return due;
 }
 
 /* struct app_radio_backend.time_request: a TimeReq in the next 0x91 uplink;
@@ -1907,16 +1896,18 @@ static uint32_t p2p_tx_airtime_ms(size_t len)
 	return frame_toa_ms(TWR_HDR_LEN + P2P_ENV_LEN + len + TWR_TAG_LEN);
 }
 
-/* Once per report, at its first frame, kept for all its frames. A report the
- * cadence made a link check also asks the central for the numbers
- * (LinkCheckReq) after its frames, unless an earlier one is still
- * unanswered. */
+/* Once per report, at its first frame, kept for all its frames. Plan §7.2
+ * (F6): every report goes CONFIRMED, so a downlink the central queued waits at
+ * most one report interval for its PENDING. A report the cadence made a link
+ * check (`due`) also asks the central for the numbers (LinkCheckReq) after
+ * its frames, unless an earlier one is still unanswered. */
 static uint8_t p2p_tx_report_flags(bool due)
 {
 	if (due && !m_lc_outstanding) {
 		ctrl_request(P2P_CTRL_BIT_LINK_CHECK, P2P_LINK_CHECK_DELAY_MS);
 	}
-	return telemetry_report_confirmed(due) ? APP_RADIO_FRAME_CONFIRMED : 0;
+	answer_fetch_count();
+	return APP_RADIO_FRAME_CONFIRMED;
 }
 
 const struct app_radio_backend app_radio_p2p_backend = {
@@ -1929,8 +1920,8 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.rejoin = p2p_tx_rejoin,
 	.time_request = p2p_time_request,
 	.airtime_ms = p2p_tx_airtime_ms,
-	/* §7.2: answers and history frames are confirmed; telemetry only the N-th
-	 * report (report_flags); alarms as radio-alarm-ack says (app_radio). */
+	/* §7.2: answers and history frames are confirmed, telemetry too
+	 * (report_flags); alarms as radio-alarm-ack says (app_radio). */
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0, /* P2P_TX_GAP_MS after an exchange is taken in p2p_exchange() */
 	.cmd_transport = APP_CMD_TRANSPORT_P2P,
