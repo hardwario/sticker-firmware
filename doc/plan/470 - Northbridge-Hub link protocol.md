@@ -198,7 +198,7 @@ sends `last_seen = 0` without the flag.
 | `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | best-effort | `dest == 0` (JoinReq) or an unknown `src`; no ACK |
 | `0x82` | `EVT_TX_DONE` | `tx_id, status, t_actual_ms` | best-effort | the `TX_SCHEDULE` outcome only |
 | `0x83` | `EVT_LOG` | ASCII | best-effort | all builds, rate-limited |
-| `0x84` | `EVT_TWR_UPLINK` | `t_ms u64, rssi i16, snr i8, frame_flags u8, addr u32, counter u32, ack u8, len u8, plaintext` | ring | fresh frames only; `ack`: 0 none, 1 sent, 2 sent + `PENDING`, 3 late, 4 no counter, **5 suppressed (ring full, §4.1)** |
+| `0x84` | `EVT_TWR_UPLINK` | `t_ms u64, rssi i16, snr i8, frame_flags u8, addr u32, counter u32, ack u8, len u8, plaintext` | ring | fresh frames only; `ack`: 0 none, 1 sent, 2 sent + `PENDING`, 3 late, 4 no counter, 5 reserved. A frame suppressed because the ring is full produces **no event** (§4.1): there is no ring slot for it, and the node resends the data on a fresh counter, so an event would risk a northbound duplicate. `acks_suppressed` in `GET_INFO` is the only trace |
 | `0x85` | `EVT_TWR_TX` | `addr, item, outcome, gw_counter, node_ack_counter, ack_rssi` | ring | outcome `DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER` |
 | `0x86` | `EVT_TWR_CTR_LOW` | `next u32, last u32` | best-effort, once per block; the host also checks `ctr_next`/`ctr_last` in every `GET_INFO` | below 25 % left; fail-closed when the block is used up |
 
@@ -229,7 +229,7 @@ without an outcome.
 ### 6.3 Host service restart (NB keeps running)
 
 `GET_INFO`:
-- `uptime_ms` shows no reboot;
+- `now_ms` shows no reboot (it did not go backwards);
 - the NB is in `GATEWAY`, so no reconfiguration is needed.
 
 Then:
