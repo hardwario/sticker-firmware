@@ -838,14 +838,15 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 | T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps |
 | T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap |
 | T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes — **PASS 2026-10-06** (c65, CLI) |
+| T8 | Broker down (c67): stop the local MQTT broker for ≥ 30 s during a 10 s stream | the outbox fills and drains after the broker is back; 0 lost, 0 duplicates northbound; a full outbox stops the ACKs (the node backfills from history) |
 | T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
 
 **C3 deviations from the link doc (to review; fold into C5):**
 1. A freshly started central learns the start `seq` during a 1 s window.
-2. A gap of 2 s with no event → relearn the expected `seq`. Any skipped `seq` must be counted, never silent.
+2. A gap of 2 s with no event → relearn the expected `seq`. Skipped `seq`s are counted in `evt_seq_gap` (northbridge stats, c67).
 3. GET_INFO `now_ms` going backwards → treated as a missed NB reboot.
 4. `evt_ring_max == 0` (NB 0.3.0) → no `EVT_ACK`, so a mixed deploy keeps working. This departs from the flag day.
-5. A failed northbound publish is still ACKed. **Open:** the frame is lost unless the publish path has a persistent outbox.
+5. A failed northbound publish is still ACKed. Fixed for c67: the frame goes to a bounded persistent outbox on disk before the ACK is owed. The drainer publishes at QoS 1 and deletes an entry only after its PUBACK, pending entries are replayed after a restart, and a full outbox stops the ACKs. "Don't ACK" alone would not work, because the counter is already persisted and the resend would be rejected as a replay. c66 is valid for T1–T5 while the broker is up.
 6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal does not read yet.
 7. A persistent storage failure stalls the ring, so the NB suppresses ACKs and the node keeps its data in history.
 
@@ -856,7 +857,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 4. C5.
 5. The P2 result goes into the #470 body.
 
-**P2 is done when:** C1–C6 and T1–T6 have passed. T7 moves to P3 if 0413 has no probe yet.
+**P2 is done when:** C1–C6, T1–T6 and T8 have passed. T7 moves to P3 if 0413 has no probe yet.
 
 ## 14. Test plan (outline)
 
