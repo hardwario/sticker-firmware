@@ -875,6 +875,20 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 
 **P2 is done when:** C1–C6, T1–T6 and T8 have passed. T7 moves to P3 if 0413 has no probe yet.
 
+### 13.4 P3 command checks run early (c66, 2026-10-06, NT)
+
+Each command DL went `PENDING` on the next confirmed uplink, and the fPort-85 answer cleared the queue. No WARNING, no join and no given-up report during the run.
+
+| Check | Result |
+|---|---|
+| force-send (Portal) | **PASS**: DL on 2104, forced report 2106 |
+| GetSettings (Portal refresh-config) | **PASS**: 57 B answer |
+| SetParam `interval_report` 60 → 120 → 60 (CLI) | **PASS**: 29 B answers; save + reboot → `Hello` (reset 3) + `Capabilities`, `TimeReq` → RTC synced; counter jumps from the NVS reserve |
+| GetConfig paging | **PASS**: 6 pages of 47–64 B, ~2 s apart, all ACKed, the Hub config is complete |
+| clock-sync | **PASS**: `TimeReq` → `TimeAns` on the next uplink, RTC synced |
+
+Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq, supervision (outage → WARNING → rejoin) and history replay over the radio.
+
 ## 14. Test plan (outline)
 
 - **KAT**: generated from the Rust crates (`tower-radio-core` CCM, `tower-net-core` nonce/ACK/
