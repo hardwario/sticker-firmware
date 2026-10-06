@@ -852,6 +852,8 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 
 **c67 (`01555825`, central `e39f01d6` D, `6150a7a7` A/B/C, `abbb8d12` outbox, `bb3f2369` docs; control-radio 726 tests green):** the outbox lives at `/data/proximos/radio/p2p/outbox/<id>.json` (fsync + rename), max 1000 messages; a separate QoS 1 drainer deletes an entry only after its PUBACK; overflow → the event is neither processed nor ACKed. New stats: `evt_relearn`, `evt_seq_gap`, `evt_seq_gap_seen`, `outbox_pending`, `outbox_overflow`. Delivery is at least once in three crash windows (PUBACK → delete, lost PUBACK, outbox append → sessions.db save), so northbound consumers dedup by DevEUI + frame counter.
 
+**T3 pre-run on c66 (2026-10-06) — blocker E, fixed in c68:** the central restarted with a full ring (32) in the middle of an NB resend pass. In the learning window (deviation 1) it processed events in arrival order: fcnt 1997..2015 first, then dropped 1986..1996 as replays ("not above last seen 2015") and ACKed them, so **11 frames were lost**. Fix E: buffer the learning window (at least one full pass, or until a `seq` repeats), sort by `seq` with the start after the largest mod-256 gap, then process in order; the gap relearn (deviation 2) works the same way. **T3 needs c68** (= c67 + E).
+
 **C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
 - A: the first ring event after `EVT_BOOT` is ACKed ~1 s late.
 - B: the `KEEP_NEWER` flag sent to NB 0.3.0 gets `BAD_PARAM` in a loop, which breaks deviation 4. Fix: send it only when `evt_ring_max > 0`.
