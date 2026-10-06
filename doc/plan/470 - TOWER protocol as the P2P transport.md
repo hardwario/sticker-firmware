@@ -832,7 +832,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 
 | # | Test | Pass |
 |---|---|---|
-| T1 | Central down **≥ 30 s** (`systemctl stop`, then `start`) during a 10 s stream of confirmed uplinks, so that frames land in the gap and go through the NB ring | 0 frames lost, 0 duplicates northbound; no rejoin. Baseline on c65 (NB 0.3.0), 2026-10-06: two `restart`s, ~15 ms down, 62 frames (cnt 1837..1898), 0 lost, 0 dup, resync < 25 ms. No frame fell in the gap, so the result shows nothing about the ring and does not count as a PASS — **PASS 2026-10-06** (c66 + NB 0.3.1 HIL: central down 45 s, the 5 fPort-2 frames replayed from the ring 60 ms after resync, cnt 1924..1962 contiguous, `rx_replay` 0, `acks_suppressed` 0, `evt_resent` 466) |
+| T1 | Central down **≥ 30 s** (`systemctl stop`, then `start`) during a 10 s stream of confirmed uplinks, so that frames land in the gap and go through the NB ring | 0 frames lost, 0 duplicates northbound; no rejoin. Baseline on c65 (NB 0.3.0), 2026-10-06: two `restart`s, ~15 ms down, 62 frames (cnt 1837..1898), 0 lost, 0 dup, resync < 25 ms. No frame fell in the gap, so the result shows nothing about the ring and does not count as a PASS — **PASS at the transport level 2026-10-06**, data timestamps open (T1-F1) (c66 + NB 0.3.1 HIL: central down 45 s, the 5 fPort-2 frames replayed from the ring 60 ms after resync, cnt 1924..1962 contiguous, `rx_replay` 0, `acks_suppressed` 0, `evt_resent` 466) |
 | T2 | NB reset (J-Link reset or power) | restore per §6.2 without a rejoin; the node's counters continue; `rx_replay` 0 — **PASS 2026-10-06** (c65, NB 0.3.0: resync 58 ms after `EVT_BOOT`, cnt 1285..1351 complete) |
 | T3 | Central stopped longer than the ring (~6 min at 10 s ≈ 36 uplinks: 32 ring-ACKed + a few suppressed) | the 32 ring events arrive after the restart; then the NB stops ACKing (`acks_suppressed`), the node keeps the rest in history (`history-enable` on; it stays on for 5722 after the test) and backfills, nothing lost; no rejoin (only link-check reports count, `f4e7a464`) |
 | T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps |
@@ -853,7 +853,8 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 **C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
 - A: the first ring event after `EVT_BOOT` is ACKed ~1 s late.
 - B: the `KEEP_NEWER` flag sent to NB 0.3.0 gets `BAD_PARAM` in a loop, which breaks deviation 4. Fix: send it only when `evt_ring_max > 0`.
-- C: the steady-state ACK latency sometimes exceeds 300 ms → 2 needless resends.
+- C: the steady-state ACK latency sometimes exceeds 300 ms → 2 needless resends (NT T1-F2).
+- **T1-F1 (major):** a ring-replayed uplink is stamped with the replay time, not the air time (`received_at = now_unix`). The 5 frames from the T1 gap (air 12:30:03–:44Z) all carry 12:30:45Z, and the Portal chart shows one point instead of five. Fix: derive `received_at` from the `EVT_TWR_UPLINK` rx `t_ms` through the same `t_ms` → wall mapping `TimeAns` uses. T1 passes fully only when this is fixed; T3 runs on c67, otherwise ~32 readings collapse onto one timestamp.
 
 **Order:**
 1. C1–C4 in parallel.
