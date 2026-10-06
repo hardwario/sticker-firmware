@@ -910,6 +910,11 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 **Northbridge (gateway).** For a fresh confirmed `0x91` uplink that contains `LinkCheckReq` (0x10) and/or `TimeReq` (0x20), the NB builds the answers itself inside the 20 ms turnaround and appends them to the ACK:
 - `LinkCheckAns` 0x10: `rssi i8, snr i8 (dB, floored), margin i8 (floored), gw_count u8 = 1`. The margin uses the same formula the central uses today (SNR minus the SF demodulation floor), moved to the NB. `gw_count` = 1 because only the home gateway ACKs (P7 limit, documented).
 - `TimeAns` 0x20: `unix(4) ‖ fraction(1/256 s) ‖ req_counter(4)` = the wall time at the end of **this** received frame, from the time anchor (link `TWR_TIME_SYNC`). Without an anchor the NB omits the `TimeAns` TLV; the node re-asks later.
+- Worst-case ACK (both answers + `PENDING`): 45 B, i.e. +17 B: SF7 92.4 ms (+25.6), SF8 164.4 ms (+41.0), SF12 2138 ms (+491.5). The tail is sealed at RX, before the turnaround gate (+2 AES blocks, < 1 ms).
+- No anchor: a `TimeReq` gets no `TimeAns` (with an LC only `0x10`; alone a plain 6 B ACK). An unconfirmed request gets no tail. A time outside 1970..2106 counts as no anchor. `TimeAns` has ms resolution, `fraction` floored.
+- `TWR_TIME_SYNC`: RSP status only; `BAD_PARAM` if the length is not 16 or `now_ms` is ahead of the NB clock; a new anchor replaces the old one; the anchor is lost at an NB reset (the restore sequences resend it).
+- `EVT_TWR_UPLINK` `ack` bit 7 = a `CTRL` tail went out with this ACK; the low bits keep their meaning. The central counts and publishes "answered in ACK" per uplink from it.
+- Counters: `ack_ctrl_sent` = ACKs with a tail on air (late ones too); `ack_time_no_anchor` = `TimeReq`s sealed without an anchor.
 - The tail order is fixed: `0x10`, then `0x20`. A request whose TLV list is truncated gets no tail. `TimeAns` is the time of the uplink's RxDone.
 - A net-layer repetition (`== last_seen`) is re-ACKed with a freshly built tail; `TimeAns` then refers to the end of that repetition.
 - Other TLVs of the same `0x91` uplink (`Capabilities`, `Hello`, …) still go to the central in `EVT_TWR_UPLINK`, which carries the whole plaintext as today.
