@@ -818,8 +818,8 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 
 | # | Item | Owner | Verified by |
 |---|---|---|---|
-| C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests |
-| C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests |
+| C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests — **done** 2026-10-06 (`hynek/nb-evt-ack` 0b820280, twister 98/98 incl. `tower_evq`; ring 32, resend 300 ms, first seq after BOOT = 1) |
+| C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests — **done** 2026-10-06 (8388366e) |
 | C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) |
 | C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
 | C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
