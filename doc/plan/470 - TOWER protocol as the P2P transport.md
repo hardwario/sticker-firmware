@@ -806,6 +806,48 @@ the message tables live only there. The address collision check runs at `node-ad
 - The Hub leaves P2P only via Nodes test.
 - Branches are local or draft MRs; merges need Hynek's OK.
 
+### 13.3 P2 close-out (planned 2026-10-06)
+
+**Done:**
+- the P2 exit (STICKER lora → Hub → MQTT decoded; `TimeAns` / `LinkCheckAns` from the
+  central) passed on 2026-10-06, with 5722, the Northbridge 0.3.0 and the central in c64/c65;
+- a Hub reboot without a rejoin.
+
+What is left makes the gateway safe against link and service failures. The references are to
+the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub%20link%20protocol.md)).
+
+| # | Item | Owner | Verified by |
+|---|---|---|---|
+| C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests |
+| C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests |
+| C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences | HC | tests with a scripted NB (link §9) |
+| C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
+| C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
+| C6 | Integration image (NB 0.4.0 + central) deployed | HC | NB flash: Hynek's OK in the HC chat |
+
+**HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
+needs RTT. NT watches the Portal. A short `interval_report` (10–15 s, a signed `SetParam`
+by NT with Hynek's OK) speeds the tests up and is restored afterwards.
+
+| # | Test | Pass |
+|---|---|---|
+| T1 | `systemctl restart` of the central during a stream of confirmed uplinks | 0 frames lost, 0 duplicates northbound; no rejoin |
+| T2 | NB reset (J-Link reset or power) | restore per §6.2 without a rejoin; the node's counters continue; `rx_replay` 0 |
+| T3 | Central stopped longer than the ring (> 32 uplinks) | the NB stops ACKing (`acks_suppressed`); the node keeps its data and catches up after the restart, nothing lost |
+| T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps |
+| T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap |
+| T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes (signed write: Hynek's OK in the NT chat) |
+| T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
+
+**Order:**
+1. C1–C4 in parallel.
+2. C6.
+3. T1–T6. T1 and T3 need C1–C3, while T2, T5 and T6 can run on today's image first.
+4. C5.
+5. The P2 result goes into the #470 body.
+
+**P2 is done when:** C1–C6 and T1–T6 have passed. T7 moves to P3 if 0413 has no probe yet.
+
 ## 14. Test plan (outline)
 
 - **KAT**: generated from the Rust crates (`tower-radio-core` CCM, `tower-net-core` nonce/ACK/
