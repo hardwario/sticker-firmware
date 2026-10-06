@@ -102,11 +102,13 @@ envelope (`P2P_MAX_BODY`, the budget `app_compose` bin-packs against). An ACK
 frame is 28 B:
 
 ```
-ACK payload: acked(4 LE) | rssi(i8) | flags(1)      flags bit 0 = PENDING
+ACK payload: acked(4 LE) | rssi(i8) | flags(1) [| TLV...]
+             flags bit 0 = PENDING, bit 1 = CTRL
 ```
 
-Receivers accept an ACK payload of ≥ 4 B and ignore any appended fields. `rssi` is
-the receiver's RSSI of the acknowledged frame.
+Receivers accept an ACK payload of ≥ 4 B. Without CTRL they ignore any appended
+fields. With CTRL the bytes after the flags are a `0x91` TLV list, the **ACK tail**
+(plan §13.5, §6.5). `rssi` is the receiver's RSSI of the acknowledged frame.
 
 ### 3.2 STICKER envelopes (plan §8)
 
@@ -175,6 +177,10 @@ Windows, measured from TX-done (`p2p_twr_window_ms()`):
 
 - **ACK window** = turnaround 20 ms + ACK ToA + 3 symbols + 20 ms margin, never
   under 200 ms. That is SF7 200 ms, SF10 479 ms, SF12 1786 ms.
+- **ACK window of a request** (a `0x91` frame with a LinkCheckReq or TimeReq): the
+  same formula for the ACK plus the 17 B the answers can add (`TWR_ACK_TAIL_MAX`,
+  LinkCheckAns 2 + 4 B, TimeAns 2 + 9 B). That is SF7 200 ms, SF10 643 ms, SF12
+  2278 ms.
 - **Downlink window** after PENDING: the same formula for a 100 B frame. That is
   SF7 221 ms, SF12 4080 ms.
 - **JoinAccept window** (`p2p_rx1_timeout_ms()`) opens `rx_delay` (1 s) after the
@@ -327,8 +333,10 @@ Frames are spaced ≥ 200 ms apart.
 | Telemetry | always | plan §7.2, F6 (Hynek 2026-10-06); the link-check report (every `radio-link-check-interval`-th and the first after link-up) also queues a LinkCheckReq |
 | `0x91` control | always | up to 3 tries, 30 s apart, then dropped |
 
-There is no Poll (plan H3.8): whatever the central queued for the node — a command,
-a TimeAns, a LinkCheckAns — rides the PENDING of the next confirmed uplink. With every
+There is no Poll (plan H3.8): whatever the central queued for the node rides the
+PENDING of the next confirmed uplink. A LinkCheckAns and a TimeAns come sooner: the
+gateway answers them in the ACK of the request itself (§6.5). Only an older gateway
+leaves them to the central's queue. With every
 report confirmed, a downlink waits **at most one report interval**. With the
 link-check-only policy it waited for the link-check report, up to 5 × 900 s (finding
 F6). A LinkCheckAns still missing after 3 reports is taken as lost, so the next link
@@ -342,6 +350,8 @@ downlink window, §3.4).
 - **`0x81` port 86:** handed to `app_radio_downlink()`, the common command path,
   once the radio is released.
 - **`0x91`:** its TLVs are applied (LinkCheckAns, TimeAns, Detach, RejoinReq).
+  An ACK tail is applied first, then the downlink: one exchange can carry both
+  answers and a command.
 - **Anything else:** dropped.
 - **A confirmed downlink** is ACKed by the node 20 ms after RxDone, under its own
   next counter. The node's ACK carries `acked` = the downlink's counter and the
@@ -364,9 +374,15 @@ downlink window, §3.4).
 
 ### 6.5 Control requests and answers
 
-- **TimeReq** (`time_request` backend op, when app_radio wants the time). The central
-  answers with a TimeAns that carries the time at the TimeReq's TX-done and its
-  counter. The node:
+**Answers in the ACK (plan §13.5).** The gateway answers a LinkCheckReq and a
+TimeReq in the ACK of the request, as a CTRL tail: LinkCheckAns first, then TimeAns.
+The node reads the tail with the `0x91` downlink handlers. A tail answers requests
+only, so any other TLV in it (Detach, RejoinReq, unknown) is skipped. A `0x91`
+downlink after PENDING still carries any answer, for an older gateway.
+
+- **TimeReq** (`time_request` backend op, when app_radio wants the time). The TimeAns
+  carries the time at the end of the received TimeReq and its counter. The node
+  takes that as the TX-done of the request's latest transmission. The node:
   1. drops an answer to any other counter, or one older than 2 h;
   2. adds the time elapsed since TX-done, rounded to the second, and sets the clock
      (`app_clock_set_network_time()`);
@@ -522,9 +538,12 @@ net layer) is this implementation. P2 onwards is the Hub side.
   upstream Rust crates (`tests/ccm/tower_kat_gen`).
 - `tests/ccm/tower_join_kat.json`: the keys and join frames. It is cross-checked by
   `tower_join_kat.py`.
+- `tests/ccm/p2p_tower_ack_ctrl_kat.txt`: ACKs with a CTRL tail (plan §13.5). It is
+  the Northbridge's file, copied verbatim (`gen_ack_ctrl_kat.py` in
+  fiber-northbridge `tests/tower_gateway`).
 
-Each vector is compiled into a header (`tests/p2p_logic/src/tower_kat.h`,
-`tower_join_kat.h`) that records the JSON's sha256.
+Each vector file is compiled into a header (`tests/p2p_logic/src/tower_kat.h`,
+`tower_join_kat.h`, `tower_ack_ctrl_kat.h`) that records the file's sha256.
 
 **Native tests.** `tests/p2p_logic` runs `app_radio_p2p.c` against a fake LoRa
 device (`emul_lora.c`). A gateway emulator in the suite answers every frame. The
@@ -535,6 +554,8 @@ suite covers:
 - the join end to end, under the KAT;
 - the retry policy;
 - confirmed repetitions, ACK/PENDING/downlink/node-ACK, replay;
+- the ACK tail: every KAT ACK end to end, the longer window, a tail with a
+  command, skipped TLVs;
 - the backend result mapping;
 - the control TLVs.
 

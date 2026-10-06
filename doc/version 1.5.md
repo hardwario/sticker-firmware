@@ -1605,6 +1605,12 @@ transport.md`; node behaviour: `doc/p2p.md`.
   does not load, so every node joins afresh after the update.
 - **Time:** a TimeReq in the `0x91` frame. The TimeAns carries the time at the TimeReq's
   TX-done and names its counter; answers to another counter or older than 2 h are dropped.
+- **Answers in the ACK** (plan §13.5, Hynek 2026-10-06): the gateway answers a
+  LinkCheckReq / TimeReq in the request's own ACK. ACK flags bit 1 (CTRL) marks a `0x91`
+  TLV tail after the flags: LinkCheckAns, then TimeAns. The request's ACK window grows
+  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only; any other
+  TLV there is skipped. Clock sync no longer waits a report interval for the next
+  PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
 - **Confirmed uplinks:** every telemetry report is confirmed, like answers and
   history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
   downlink rides the next report's PENDING, so it waits at most one report interval.
@@ -1622,15 +1628,17 @@ transport.md`; node behaviour: `doc/p2p.md`.
 - **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
   P5: P2P refuses to start with it.
 - **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
-  `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`. The
+  `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`.
+  `tests/ccm/p2p_tower_ack_ctrl_kat.txt` (ACK tails) is the Northbridge's file, copied
+  verbatim. The
   `tests/p2p` gw-sim firmware (old wire only) is removed.
 - **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
 - **Cost:** release 185 556 B flash / 56 036 B RAM. About +2.3 KB of it is the new
   config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
 - **Tests:**
-  - `tests/p2p_logic` is rewritten (69 cases). It runs against a gateway emulator on
-    the fake radio: codec and join KATs byte for byte, repetitions, ACK / PENDING /
-    node ACK, replay, control TLVs.
+  - `tests/p2p_logic` is rewritten (77 cases). It runs against a gateway emulator on
+    the fake radio: codec, join and ACK-tail KATs byte for byte, repetitions, ACK /
+    PENDING / node ACK, ACK tails and their window, replay, control TLVs.
   - All 14 native suites pass.
 
 ---
