@@ -820,10 +820,10 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 |---|---|---|---|
 | C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests |
 | C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests |
-| C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences | HC | tests with a scripted NB (link §9) |
+| C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) |
 | C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
 | C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
-| C6 | Integration image (NB 0.4.0 + central) deployed | HC | NB flash: Hynek's OK in the HC chat |
+| C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat |
 
 **HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
 needs RTT. NT watches the Portal. `interval_report` stays at its 60 s minimum (the FW and Portal
@@ -833,11 +833,11 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 | # | Test | Pass |
 |---|---|---|
 | T1 | `systemctl restart` of the central during a stream of confirmed uplinks | 0 frames lost, 0 duplicates northbound; no rejoin |
-| T2 | NB reset (J-Link reset or power) | restore per §6.2 without a rejoin; the node's counters continue; `rx_replay` 0 |
-| T3 | Central stopped longer than the ring (> 32 uplinks) | the NB stops ACKing (`acks_suppressed`); the node keeps its data and catches up after the restart, nothing lost |
+| T2 | NB reset (J-Link reset or power) | restore per §6.2 without a rejoin; the node's counters continue; `rx_replay` 0 — **PASS 2026-10-06** (c65, NB 0.3.0: resync 58 ms after `EVT_BOOT`, cnt 1285..1351 complete) |
+| T3 | Central stopped longer than the ring (~6 min at 10 s ≈ 36 uplinks: 32 ring-ACKed + a few suppressed) | the 32 ring events arrive after the restart; then the NB stops ACKing (`acks_suppressed`), the node keeps the rest in history (`history-enable` on for the test) and backfills, nothing lost; no rejoin (only link-check reports count, `f4e7a464`) |
 | T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps |
 | T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap |
-| T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes (signed write: Hynek's OK in the NT chat) |
+| T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes — **PASS 2026-10-06** (c65, CLI) |
 | T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
 
 **Order:**
