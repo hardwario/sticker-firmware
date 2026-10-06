@@ -890,6 +890,10 @@ Each command DL went `PENDING` on the next confirmed uplink, and the fPort-85 an
 | GetConfig paging | **PASS**: 6 pages of 47–64 B, ~2 s apart, all ACKed, the Hub config is complete |
 | clock-sync | **PASS**: `TimeReq` → `TimeAns` on the next uplink, RTC synced |
 
+**c68 rerun (2026-10-06, NT): PASS.** All 6 command DLs (force-send, GetSettings, SetParam 120 and back to 60, GetConfig paging, clock-sync) were delivered and confirmed; `not_delivered` 0, `expired` 0, outbox 0. The node ran at its 60 s interval, so the DL latency is one report interval.
+
+- P3-F1 (latency, not loss): a pending `0x91` answer takes the single DL slot ahead of a queued command, so force-send and SetParam each waited one extra interval (70 s and 66 s at 60 s). **Kept as is:** a `LinkCheckAns` or `TimeAns` pushed behind a command would count as a missed link-check on the node (supervision) or leave the RTC unsynced. The proper fix is N1 in P6 (the answer rides in the ACK), so a command waits at most 2 intervals until then.
+
 Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq, supervision (outage → WARNING → rejoin) and history replay over the radio.
 
 ## 14. Test plan (outline)
