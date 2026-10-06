@@ -820,10 +820,10 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 |---|---|---|---|
 | C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests — **done** 2026-10-06 (`hynek/nb-evt-ack` 0b820280, twister 98/98 incl. `tower_evq`; ring 32, resend 300 ms, first seq after BOOT = 1) |
 | C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests — **done** 2026-10-06 (8388366e) |
-| C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) |
+| C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) — **done** 2026-10-06 (central `hynek/p2p-tower-central-main` 31f60cc1 / 43853713 / df822bbf / 78ddedeb; control-radio 536 + make check 3758 green) |
 | C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
 | C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
-| C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat |
+| C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat — in progress 2026-10-06: c66 `5e16bacc` (c65 + C3), NB 0.3.1 HIL build `8a87edfe` with `RX_INJECT`, sha256 24d5f445 |
 
 **HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
 needs RTT. NT watches the Portal. `interval_report` stays at its 60 s minimum (the FW and Portal
@@ -839,6 +839,15 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 | T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap |
 | T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes — **PASS 2026-10-06** (c65, CLI) |
 | T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
+
+**C3 deviations from the link doc (to review; fold into C5):**
+1. A freshly started central learns the start `seq` during a 1 s window.
+2. A gap of 2 s with no event → relearn the expected `seq`. Any skipped `seq` must be counted, never silent.
+3. GET_INFO `now_ms` going backwards → treated as a missed NB reboot.
+4. `evt_ring_max == 0` (NB 0.3.0) → no `EVT_ACK`, so a mixed deploy keeps working. This departs from the flag day.
+5. A failed northbound publish is still ACKed. **Open:** the frame is lost unless the publish path has a persistent outbox.
+6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal does not read yet.
+7. A persistent storage failure stalls the ring, so the NB suppresses ACKs and the node keeps its data in history.
 
 **Order:**
 1. C1–C4 in parallel.
