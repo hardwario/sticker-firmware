@@ -1605,7 +1605,11 @@ transport.md`; node behaviour: `doc/p2p.md`.
   does not load, so every node joins afresh after the update.
 - **Time:** a TimeReq in the `0x91` frame. The TimeAns carries the time at the TimeReq's
   TX-done and names its counter; answers to another counter or older than 2 h are dropped.
-- **Link check:** the link-check report is confirmed and queues a LinkCheckReq. The
+- **Confirmed uplinks:** every telemetry report is confirmed, like answers and
+  history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
+  downlink rides the next report's PENDING, so it waits at most one report interval.
+  With the link-check-only policy a command waited up to 5 × 900 s.
+- **Link check:** the link-check report also queues a LinkCheckReq. The
   LinkCheckAns fills the uplink RSSI / SNR / margin in `RadioState`.
 - **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
   rung; the SF sweep and adoption are gone.
@@ -1615,10 +1619,10 @@ transport.md`; node behaviour: `doc/p2p.md`.
   `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`. The
   `tests/p2p` gw-sim firmware (old wire only) is removed.
 - **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
-- **Cost:** release 185 588 B flash / 56 036 B RAM. About +2.3 KB of it is the new
+- **Cost:** release 185 556 B flash / 56 036 B RAM. About +2.3 KB of it is the new
   config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
 - **Tests:**
-  - `tests/p2p_logic` is rewritten (68 cases). It runs against a gateway emulator on
+  - `tests/p2p_logic` is rewritten (69 cases). It runs against a gateway emulator on
     the fake radio: codec and join KATs byte for byte, repetitions, ACK / PENDING /
     node ACK, replay, control TLVs.
   - All 14 native suites pass.

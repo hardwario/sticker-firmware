@@ -322,10 +322,17 @@ Frames are spaced ≥ 200 ms apart.
 
 | Frame | Confirmed | Note |
 |---|---|---|
-| Alarms, answers (port 85), history | always | app_radio's queues |
-| Telemetry | on the link-check report | every `radio-link-check-interval`-th report and the first after link-up, as on LoRaWAN; that report also queues a LinkCheckReq |
-| Telemetry, answer fetch | ≤ 3 reports | while a TimeAns or LinkCheckAns is awaited; no Poll (plan H3.8) |
+| Alarms | per `radio-alarm-ack` | as on LoRaWAN (§30 of `version 1.5.md`) |
+| Answers (port 85), history | always | app_radio's queues |
+| Telemetry | always | plan §7.2, F6 (Hynek 2026-10-06); the link-check report (every `radio-link-check-interval`-th and the first after link-up) also queues a LinkCheckReq |
 | `0x91` control | always | up to 3 tries, 30 s apart, then dropped |
+
+There is no Poll (plan H3.8): whatever the central queued for the node — a command,
+a TimeAns, a LinkCheckAns — rides the PENDING of the next confirmed uplink. With every
+report confirmed, a downlink waits **at most one report interval**. With the
+link-check-only policy it waited for the link-check report, up to 5 × 900 s (finding
+F6). A LinkCheckAns still missing after 3 reports is taken as lost, so the next link
+check may ask again.
 
 ### 6.3 ACK with PENDING — the downlink (plan §9.1)
 
@@ -466,12 +473,12 @@ No phone step is needed for P2P. The `hio.stck:clm` claiming flow is orthogonal 
 
 ## 11. Build size and limitations
 
-Measured 2026-09-28 on the TOWER node:
+Measured 2026-10-06 on the TOWER node:
 
 | Image | Flash | RAM |
 |---|---|---|
-| release | 185 588 B (of 212 992 B code) | 56 036 B |
-| `debug.conf` + `debug_p2p_bench.conf` | 219 336 B (the debug budget is relaxed) | — |
+| release | 185 556 B (of 212 992 B code) | 56 036 B |
+| `debug.conf` + `debug_p2p_bench.conf` | 219 312 B (the debug budget is relaxed) | 56 112 B |
 | `debug.conf` | 237 072 B (P2P off) | 63 772 B |
 
 Release has room. The plain debug image has no headroom for the dual stack and keeps
