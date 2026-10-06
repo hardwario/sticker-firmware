@@ -850,6 +850,8 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal does not read yet.
 7. A persistent storage failure stalls the ring, so the NB suppresses ACKs and the node keeps its data in history.
 
+**c67 (`01555825`, central `e39f01d6` D, `6150a7a7` A/B/C, `abbb8d12` outbox, `bb3f2369` docs; control-radio 726 tests green):** the outbox lives at `/data/proximos/radio/p2p/outbox/<id>.json` (fsync + rename), max 1000 messages; a separate QoS 1 drainer deletes an entry only after its PUBACK; overflow → the event is neither processed nor ACKed. New stats: `evt_relearn`, `evt_seq_gap`, `evt_seq_gap_seen`, `outbox_pending`, `outbox_overflow`. Delivery is at least once in three crash windows (PUBACK → delete, lost PUBACK, outbox append → sessions.db save), so northbound consumers dedup by DevEUI + frame counter.
+
 **C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
 - A: the first ring event after `EVT_BOOT` is ACKed ~1 s late.
 - B: the `KEEP_NEWER` flag sent to NB 0.3.0 gets `BAD_PARAM` in a loop, which breaks deviation 4. Fix: send it only when `evt_ring_max > 0`.
