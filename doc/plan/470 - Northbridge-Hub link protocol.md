@@ -96,7 +96,7 @@ stats command):
 
 | Group | Fields (LE, in byte order) |
 |---|---|
-| Identity | `fw_ver u8[3]`, `git_sha u8[4]` (first 4 commit bytes, display order), `reset_cause u8`, `build_flags u8` (b0 `BENCH_RTT_BRIDGE`, b1 debug) |
+| Identity | `fw_ver u8[3]`, `git_sha u8[4]` (first 4 commit bytes, display order), `reset_cause u8`, `build_flags u8` (b0 `BENCH_RTT_BRIDGE`, b1 debug, b2 `RX_INJECT` bench shell `twr rx_inject`, off in production) |
 | Clock | `now_ms u64` (NB `k_uptime_get()`: the `TimeAns` anchor, and a drop means a reboot, §6.3) |
 | State | `state u8` (0 `BOOT`, 1 `CONFIGURED`, 2 `GATEWAY`), `net_id u32`, `turnaround_ms u8`, `dl_gap_ms u8` |
 | Radio | `modulation u8` (0 lora) ‖ the `SET_RADIO_CONFIG` body (`freq_hz u32, sf u8, bw u8, cr u8, preamble u16, tx_power_dbm i8, flags u8`) |
