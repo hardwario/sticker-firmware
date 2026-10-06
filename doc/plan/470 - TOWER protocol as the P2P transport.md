@@ -559,7 +559,7 @@ KAT and decoder paths are removed as part of P1/P2 (the P8 cleanup is folded in)
 | **U1** | `afa_send`: spend the TX counter right after sealing (as `send` does) | cancel → (key, nonce) reuse | none (bug fix) |
 | **U2** | Duty governor: sliding-hour ledger instead of token bucket | bucket allows ~2 % in the worst sliding hour | none |
 | **E3** | Schema bytes `0x80..0xFF` = foreign app envelopes, forwarded raw | STICKER `0x81` data + `0x91` control (stage 1) | host-side only |
-| **N1** | **Native control channel** (T6): frame type `Ctrl = 8` carrying the `0x91` TLV list; ACK flag `CTRL` (bit 1) with a TLV tail after `flags`; Data flag `CTRL` (bit 4) with `ctrl_len(1) ‖ TLV` before the app envelope. Core IDs `0x00–0x3F` = the §8.2 table | gateway answers time/link check in its ACK (ms-precise time, no downlink round), piggyback saves airtime | additive: unknown frame type is dropped by stock parsers (`BadType`), ACK tail ignored (≥ 4 B rule); gated by `Capabilities` |
+| **N1** | **Native control channel** (T6): frame type `Ctrl = 8` carrying the `0x91` TLV list; ACK flag `CTRL` (bit 1) with a TLV tail after `flags`; Data flag `CTRL` (bit 4) with `ctrl_len(1) ‖ TLV` before the app envelope. Core IDs `0x00–0x3F` = the §8.2 table | gateway answers time/link check in its ACK (ms-precise time, no downlink round), piggyback saves airtime | additive: unknown frame type is dropped by stock parsers (`BadType`), ACK tail ignored (≥ 4 B rule); gated by `Capabilities`. **Part A (the answer in the ACK) is pulled into P3, §13.5** |
 | **E4** | `KEYED` join (Join flag bit 1): JOIN frames under the per-node key, `JOIN_RESP` without the key | no key on air, mutual auth | additive; stock dongles ignore |
 
 N1 replaces the earlier single-purpose proposals E1 (time bit in ACK) and E5 (SNR byte in
@@ -894,9 +894,35 @@ Each command DL went `PENDING` on the next confirmed uplink, and the fPort-85 an
 
 **c68 rerun (2026-10-06, NT): PASS.** All 6 command DLs (force-send, GetSettings, SetParam 120 and back to 60, GetConfig paging, clock-sync) were delivered and confirmed; `not_delivered` 0, `expired` 0, outbox 0. The node ran at its 60 s interval, so the DL latency is one report interval.
 
-- P3-F1 (latency, not loss): a pending `0x91` answer takes the single DL slot ahead of a queued command, so force-send and SetParam each waited one extra interval (70 s and 66 s at 60 s). **Kept as is:** a `LinkCheckAns` or `TimeAns` pushed behind a command would count as a missed link-check on the node (supervision) or leave the RTC unsynced. The proper fix is N1 in P6 (the answer rides in the ACK), so a command waits at most 2 intervals until then.
+- P3-F1 (latency, not loss): a pending `0x91` answer takes the single DL slot ahead of a queued command, so force-send and SetParam each waited one extra interval (70 s and 66 s at 60 s). **Kept as is:** a `LinkCheckAns` or `TimeAns` pushed behind a command would count as a missed link-check on the node (supervision) or leave the RTC unsynced. Fixed by §13.5 (N1 part A pulled into P3: the answer rides in the ACK).
 
 Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq, supervision (outage → WARNING → rejoin) and history replay over the radio.
+
+### 13.5 P3: `LinkCheckAns` / `TimeAns` in the ACK (N1 part A, Hynek 2026-10-06)
+
+**Why.** Today these answers are queued as `0x91` DLs. Each one costs a whole DL frame (~40 ms at SF7) plus the node's ACK of it, and it takes the single DL slot ahead of a queued command (P3-F1: the command waits one extra interval). As a 6–17 B tail of the ACK the answer costs ~9–25 ms of airtime only on the uplinks that asked, and the DL slot stays free for commands.
+
+**Wire (flag day, no capability gate).**
+- ACK plaintext: `acked_counter(4) ‖ rssi(i8) ‖ flags(1) [‖ TLV…]`. Flags bit 1 `CTRL` = a TLV tail follows up to the end of the plaintext, in the `0x91` codec (`id(1) ‖ len(1) ‖ body`, §8.2 IDs). Bit 0 `PENDING` is unchanged; both bits may be set.
+- Receivers that do not know `CTRL` ignore the tail (the ≥ 4 B ACK rule), so upstream TOWER parsers stay compatible.
+- An ACK without a request carries no tail: **a normal uplink's ACK and window are unchanged.**
+
+**Northbridge (gateway).** For a fresh confirmed `0x91` uplink that contains `LinkCheckReq` (0x10) and/or `TimeReq` (0x20), the NB builds the answers itself inside the 20 ms turnaround and appends them to the ACK:
+- `LinkCheckAns` 0x10: `rssi i8, snr i8 (dB, rounded), margin i8, gw_count u8 = 1`. The margin uses the same formula the central uses today (SNR minus the SF demodulation floor), moved to the NB. `gw_count` = 1 because only the home gateway ACKs (P7 limit, documented).
+- `TimeAns` 0x20: `unix(4) ‖ fraction(1/256 s) ‖ req_counter(4)` = the wall time at the end of **this** received frame, from the time anchor (link `TWR_TIME_SYNC`). Without an anchor the NB omits the `TimeAns` TLV; the node re-asks later.
+- A net-layer repetition (`== last_seen`) is re-ACKed with a freshly built tail; `TimeAns` then refers to the end of that repetition.
+- Other TLVs of the same `0x91` uplink (`Capabilities`, `Hello`, …) still go to the central in `EVT_TWR_UPLINK`, which carries the whole plaintext as today.
+
+**Central.** It no longer queues `LinkCheckAns` / `TimeAns`, and it drops fix F's answer handling for them. It sends `TWR_TIME_SYNC` after every `GET_INFO` in the restore sequences and every 10 min. It still decodes the requests for statistics.
+
+**Node (STICKER).** After a confirmed uplink that carried `LinkCheckReq` or `TimeReq`, the ACK window grows by ToA(17 B), to turnaround + ToA(28 + 17 B) + 60 ms. It parses a `CTRL` tail and feeds it to the same handlers as a `0x91` DL answer (link-check machine, RTC). The `TimeAns` is applied relative to the TX-done of the transmission this ACK answered. A `0x91` DL answer is still accepted (harmless).
+
+**Tests.**
+- native: ACK tail codec (with and without `PENDING`, unknown TLV skipped), node window, NB answer builder incl. the margin formula and no anchor → no `TimeAns`;
+- golden link vector for `TWR_TIME_SYNC` + ACK-tail KAT frames shared by node and NB;
+- HIL: LC every 5th report answered in the ACK (no `0x91` DL on air), clock-sync RTC error < 10 ms, P3-F1 re-run (a command plus an LC in the same exchange → the command arrives on that uplink).
+
+**Owners:** NB + central → Hub controller; node → Sticker controller. P3-F1 closes with this.
 
 ## 14. Test plan (outline)
 

@@ -189,6 +189,7 @@ sends `last_seen = 0` without the flag.
 | `0x15` | `TWR_QUEUE_DROP` | `addr u32, item u16` (0 = all) | yes | no `EVT_TWR_TX` for dropped items |
 | `0x17` | `TWR_NODE_LIST` | `start u16` | yes | paged `{addr, last_seen, flags}`, max 24 per RSP, **never keys** |
 | `0x18` | `TWR_EVT_ACK` | `seq u8` | yes | cumulative; no RSP (saves the link) |
+| `0x19` | `TWR_TIME_SYNC` | `now_ms u64, unix_ms u64` | yes | time anchor: at NB `now_ms` the wall time was `unix_ms`. Sent after every `GET_INFO` in §6.2/§6.3 and every 10 min. Without one the NB answers no `TimeReq` in the ACK (#470 §13.5) |
 
 ### 5.2 Events (NB → host)
 
@@ -258,6 +259,11 @@ central (proximos-v2 `p2p_tower_gateway.md` §3.2).
 
 - **Uplink:** air → NB (ACK after 20 ms) → `EVT_TWR_UPLINK` → the central persists
   `last_seen`, decodes, sends `TWR_EVT_ACK`.
+- **Answers in the ACK (#470 §13.5):** a fresh confirmed `0x91` uplink with `LinkCheckReq` /
+  `TimeReq` gets `LinkCheckAns` / `TimeAns` as a `CTRL` TLV tail on its ACK, built by the NB
+  (margin formula on the NB, `TimeAns` from the `TWR_TIME_SYNC` anchor). The central does not
+  queue these answers. NB counters (appended to `GET_INFO`): `ack_ctrl_sent u32`,
+  `ack_time_no_anchor u32`.
 - **Downlink:** `TWR_QUEUE_PUSH` → on the next confirmed uplink of the node the NB sets
   `PENDING` in the ACK → the DL goes out `dl_gap_ms` after the ACK TxDone →
   `EVT_TWR_TX` → the central correlates `seq` / answers.
