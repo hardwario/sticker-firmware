@@ -876,7 +876,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 4. C5.
 5. The P2 result goes into the #470 body.
 
-**P2 is done when:** C1–C6, T1–T6 and T8 have passed . T8 counts on the central side; the broker → consumer hop (T8-F1) is a separate issue. T7 moves to P3 if 0413 has no probe yet.
+**P2 is done when:** C1–C6, T1–T6 and T8 have passed. T8 counts on the central side; the broker → consumer hop (T8-F1) is a separate issue. T7 moves to P3 if 0413 has no probe yet.
 
 ### 13.4 P3 command checks run early (c66, 2026-10-06, NT)
 
