@@ -823,7 +823,7 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 | C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) — **done** 2026-10-06 (central `hynek/p2p-tower-central-main` 31f60cc1 / 43853713 / df822bbf / 78ddedeb; control-radio 536 + make check 3758 green) |
 | C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
 | C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
-| C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat — in progress 2026-10-06: c66 `5e16bacc` (c65 + C3), NB 0.3.1 HIL build `8a87edfe` with `RX_INJECT`, sha256 24d5f445 |
+| C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat — **done** 2026-10-06 (NB flashed 12:21:46Z): c66 `5e16bacc` (c65 + C3), NB 0.3.1 HIL build `8a87edfe` with `RX_INJECT`, sha256 24d5f445 |
 
 **HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
 needs RTT. NT watches the Portal. `interval_report` stays at its 60 s minimum (the FW and Portal
@@ -832,7 +832,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 
 | # | Test | Pass |
 |---|---|---|
-| T1 | Central down **≥ 30 s** (`systemctl stop`, then `start`) during a 10 s stream of confirmed uplinks, so that frames land in the gap and go through the NB ring | 0 frames lost, 0 duplicates northbound; no rejoin. Baseline on c65 (NB 0.3.0), 2026-10-06: two `restart`s, ~15 ms down, 62 frames (cnt 1837..1898), 0 lost, 0 dup, resync < 25 ms. No frame fell in the gap, so the result shows nothing about the ring and does not count as a PASS |
+| T1 | Central down **≥ 30 s** (`systemctl stop`, then `start`) during a 10 s stream of confirmed uplinks, so that frames land in the gap and go through the NB ring | 0 frames lost, 0 duplicates northbound; no rejoin. Baseline on c65 (NB 0.3.0), 2026-10-06: two `restart`s, ~15 ms down, 62 frames (cnt 1837..1898), 0 lost, 0 dup, resync < 25 ms. No frame fell in the gap, so the result shows nothing about the ring and does not count as a PASS — **PASS 2026-10-06** (c66 + NB 0.3.1 HIL: central down 45 s, the 5 fPort-2 frames replayed from the ring 60 ms after resync, cnt 1924..1962 contiguous, `rx_replay` 0, `acks_suppressed` 0, `evt_resent` 466) |
 | T2 | NB reset (J-Link reset or power) | restore per §6.2 without a rejoin; the node's counters continue; `rx_replay` 0 — **PASS 2026-10-06** (c65, NB 0.3.0: resync 58 ms after `EVT_BOOT`, cnt 1285..1351 complete) |
 | T3 | Central stopped longer than the ring (~6 min at 10 s ≈ 36 uplinks: 32 ring-ACKed + a few suppressed) | the 32 ring events arrive after the restart; then the NB stops ACKing (`acks_suppressed`), the node keeps the rest in history (`history-enable` on; it stays on for 5722 after the test) and backfills, nothing lost; no rejoin (only link-check reports count, `f4e7a464`) |
 | T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps |
@@ -849,6 +849,11 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 5. A failed northbound publish is still ACKed. Fixed for c67: the frame goes to a bounded persistent outbox on disk before the ACK is owed. The drainer publishes at QoS 1 and deletes an entry only after its PUBACK, pending entries are replayed after a restart, and a full outbox stops the ACKs. "Don't ACK" alone would not work, because the counter is already persisted and the resend would be rejected as a replay. c66 is valid for T1–T5 while the broker is up.
 6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal does not read yet.
 7. A persistent storage failure stalls the ring, so the NB suppresses ACKs and the node keeps its data in history.
+
+**C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
+- A: the first ring event after `EVT_BOOT` is ACKed ~1 s late.
+- B: the `KEEP_NEWER` flag sent to NB 0.3.0 gets `BAD_PARAM` in a loop, which breaks deviation 4. Fix: send it only when `evt_ring_max > 0`.
+- C: the steady-state ACK latency sometimes exceeds 300 ms → 2 needless resends.
 
 **Order:**
 1. C1–C4 in parallel.
