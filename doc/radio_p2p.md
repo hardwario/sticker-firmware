@@ -260,7 +260,7 @@ the link would lose the data, hence:
 ### 3.7 Time
 
 - The central takes a clock anchor (`now_ms` ↔ host time) at every `GET_INFO` and sends
-  `TWR_TIME_SYNC` after it and at least every 10 min; earlier (rate-limited to 60 s) when
+  `TWR_TIME_SYNC` after it (with the 60 s reconcile probe, in practice every 60 s) and at least every 10 min; earlier (rate-limited to 60 s) when
   an ACK went out without a TimeAns.
 - The same anchor stamps `received_at` of every uplink with its **air time** (`t_ms`),
   also for uplinks replayed from the ring.

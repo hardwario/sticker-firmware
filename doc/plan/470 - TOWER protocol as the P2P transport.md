@@ -919,7 +919,7 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 - A net-layer repetition (`== last_seen`) is re-ACKed with a freshly built tail; `TimeAns` then refers to the end of that repetition.
 - Other TLVs of the same `0x91` uplink (`Capabilities`, `Hello`, …) still go to the central in `EVT_TWR_UPLINK`, which carries the whole plaintext as today.
 
-**Central.** It no longer queues `LinkCheckAns` / `TimeAns`, and it drops fix F's answer handling for them. It sends `TWR_TIME_SYNC` after every `GET_INFO` in the restore sequences and every 10 min. It still decodes the requests for statistics.
+**Central.** It no longer queues `LinkCheckAns` / `TimeAns`, and it drops fix F's answer handling for them. It sends `TWR_TIME_SYNC` after every `GET_INFO` (the restore sequences and the 60 s reconcile probe, so in practice every 60 s), and at least every 10 min. It still decodes the requests for statistics.
 
 **Node (STICKER).** After a confirmed uplink that carried `LinkCheckReq` or `TimeReq`, the ACK window grows by ToA(17 B), to turnaround + ToA(28 + 17 B) + 60 ms. It parses a `CTRL` tail and feeds it to the same handlers as a `0x91` DL answer (link-check machine, RTC). The `TimeAns` is applied relative to the TX-done of the transmission this ACK answered. A `0x91` DL answer is still accepted (harmless).
 
@@ -941,6 +941,8 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 | NB counters | `ack_ctrl_sent` 26 (LC 23, time 4, 1 shared), `acks_late` 0, `ack_time_no_anchor` 0; the anchor refreshed every 60 s |
 | Commands (NT) | force-send, clock-sync, SetParam 120 / 60 with reboots, GetConfig: all received, ACKed and answered |
 | P3-F1 re-run (command + LC in one exchange) | not seen on air: the `LinkCheckReq` goes 5 s after the report, so commands ride the report ACKs and no longer queue behind an answer. The combined case is covered natively; an air run needs NT to queue a DL inside that 5 s gap. P3-F1 is closed. |
+
+NT confirmation (Portal side, same run): 0 LC answers pushed by the central, the only `0x91` DLs were 2 × `Capabilities` after node reboots; `TimeAns` 124–134 ms after TX-done; command DL latency pushed → delivered 0.3–6.7 s at a 10 s stream; a central restart at 16:39:00 sent `TWR_TIME_SYNC` with the `GET_INFO` 175 ms after SIGTERM, started at head seq 159 without learning and resynced the peer.
 
 Node lists: SC `~/Documents/claude/tower-p1/ack_node.txt`.
 
