@@ -370,7 +370,7 @@ below; the net layer does TOWER reps (byte-identical, same counter).
 | Profile | Policy |
 |---|---|
 | `fsk` | **All uplinks confirmed** (an ACK costs ~16 ms; this is what a TOWER node does, and it gives every uplink a downlink opportunity). |
-| `lora` | Decision #22 policy unchanged: link check every N-th report, answers/announce/history confirmed, alarms per `radio-alarm-ack`, other telemetry unconfirmed. |
+| `lora` | **All uplinks confirmed too** (Hynek 2026-10-06, finding F6): with unconfirmed telemetry a downlink waited for the link-check report, up to 5 × 900 s ≈ 75 min. A TOWER ACK at SF7 costs ~0.5 µA on average, and 30 nodes × 4 ACKs/h is far below the gateway's ACK budget (§3.3). Alarms still follow `radio-alarm-ack`. |
 
 ### 7.3 Retries
 
@@ -497,8 +497,8 @@ Not control (stays in `0x81`): configuration, sensors, alarms, history, typed co
 5. Gateway reports the outcome as `RadioStat::Tx` (`DELIVERED/NOT_DELIVERED/…/EXPIRED`);
    central `seq` correlation and redelivery stay as today.
 
-Latency: `fsk` — next uplink (all confirmed). `lora` — next confirmed uplink; the central can
-ask for `force_send`-style polling via the link-check interval if needed.
+Latency: the next uplink on both profiles (all confirmed), i.e. at most one report interval. A
+`0x91` answer queued after the uplink that asked for it rides the following uplink.
 
 ### 9.2 Deferred actions
 
