@@ -104,9 +104,9 @@ stats command):
 | Counters | 25 × `u32` since boot: `rx_total, rx_fresh, rx_dup, rx_replay, rx_mic_fail, rx_unknown_src, rx_join_fwd, rx_not_for_us, rx_bad_hdr, radio_crc_err, radio_hdr_err, rx_overrun, rx_rearm_fail, tx_total, tx_radio_err, acks_sent, acks_late, acks_suppressed, dl_sent, dl_delivered, dl_not_delivered, dl_expired, link_crc_err, link_err, evt_resent` |
 | Timing | `ack_turnaround_last_us u16`, `ack_turnaround_max_us u16` |
 | Duty | `airtime_ms_last_hour u32` |
-| Tables | `peers u16, peers_max u16, queue_used u16, queue_max u16, evt_ring_used u8, evt_ring_max u8, ctr_next u32, ctr_last u32, evt_head_seq u8` (`evt_head_seq`: the delivery `seq` of the oldest unacked ring event; with an empty ring, the `seq` the next ring event will carry; NB 0.3.1 final, §4.1) |
+| Tables | `peers u16, peers_max u16, queue_used u16, queue_max u16, evt_ring_used u8, evt_ring_max u8, ctr_next u32, ctr_last u32, evt_head_seq u8, ack_ctrl_sent u32, ack_time_no_anchor u32` (the last two: NB 0.3.2, #470 §13.5; `evt_head_seq`: the delivery `seq` of the oldest unacked ring event; with an empty ring, the `seq` the next ring event will carry; NB 0.3.1 final, §4.1) |
 
-172 B after the status byte (171 B before NB 0.3.1 final, without `evt_head_seq`). `EVT_BOOT` = `fw_ver[3] ‖ git_sha[4] ‖ reset_cause` (8 B).
+180 B after the status byte (NB 0.3.2). Older images: 172 B (0.3.1 final, no ACK counters) and 171 B (no `evt_head_seq`). The central accepts all three and falls back accordingly: no `evt_head_seq` → learning; ≤ 172 B → `LinkCheckAns` / `TimeAns` queued as `0x91` DLs instead of riding in the ACK. That is a deliberate exception to the flag day, so a Hub keeps working across an NB reflash. Canonical spec: proximos-v2 `plan/control/radio/p2p_tower_gateway.md`. `EVT_BOOT` = `fw_ver[3] ‖ git_sha[4] ‖ reset_cause` (8 B).
 Byte layout frozen by the Hub controller 2026-09-28; the Hub's NB status document
 (`northbridge_diagnostics.md`) shows these fields.
 
