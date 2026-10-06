@@ -908,8 +908,9 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 - An ACK without a request carries no tail: **a normal uplink's ACK and window are unchanged.**
 
 **Northbridge (gateway).** For a fresh confirmed `0x91` uplink that contains `LinkCheckReq` (0x10) and/or `TimeReq` (0x20), the NB builds the answers itself inside the 20 ms turnaround and appends them to the ACK:
-- `LinkCheckAns` 0x10: `rssi i8, snr i8 (dB, rounded), margin i8, gw_count u8 = 1`. The margin uses the same formula the central uses today (SNR minus the SF demodulation floor), moved to the NB. `gw_count` = 1 because only the home gateway ACKs (P7 limit, documented).
+- `LinkCheckAns` 0x10: `rssi i8, snr i8 (dB, floored), margin i8 (floored), gw_count u8 = 1`. The margin uses the same formula the central uses today (SNR minus the SF demodulation floor), moved to the NB. `gw_count` = 1 because only the home gateway ACKs (P7 limit, documented).
 - `TimeAns` 0x20: `unix(4) ‖ fraction(1/256 s) ‖ req_counter(4)` = the wall time at the end of **this** received frame, from the time anchor (link `TWR_TIME_SYNC`). Without an anchor the NB omits the `TimeAns` TLV; the node re-asks later.
+- The tail order is fixed: `0x10`, then `0x20`. A request whose TLV list is truncated gets no tail. `TimeAns` is the time of the uplink's RxDone.
 - A net-layer repetition (`== last_seen`) is re-ACKed with a freshly built tail; `TimeAns` then refers to the end of that repetition.
 - Other TLVs of the same `0x91` uplink (`Capabilities`, `Hello`, …) still go to the central in `EVT_TWR_UPLINK`, which carries the whole plaintext as today.
 
@@ -919,7 +920,7 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 
 **Tests.**
 - native: ACK tail codec (with and without `PENDING`, unknown TLV skipped), node window, NB answer builder incl. the margin formula and no anchor → no `TimeAns`;
-- golden link vector for `TWR_TIME_SYNC` + ACK-tail KAT frames shared by node and NB;
+- golden link vector for `TWR_TIME_SYNC` + ACK-tail KAT frames shared by node and NB (single source: proximos-v2 `plan/control/radio/p2p_tower_ack_ctrl_kat.txt`, `hynek/nb-ack-ctrl` `483d3a65`);
 - HIL: LC every 5th report answered in the ACK (no `0x91` DL on air), clock-sync RTC error < 10 ms, P3-F1 re-run (a command plus an LC in the same exchange → the command arrives on that uplink).
 
 **Owners:** NB + central → Hub controller; node → Sticker controller. P3-F1 closes with this.
