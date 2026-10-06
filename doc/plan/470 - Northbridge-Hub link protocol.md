@@ -104,9 +104,9 @@ stats command):
 | Counters | 25 × `u32` since boot: `rx_total, rx_fresh, rx_dup, rx_replay, rx_mic_fail, rx_unknown_src, rx_join_fwd, rx_not_for_us, rx_bad_hdr, radio_crc_err, radio_hdr_err, rx_overrun, rx_rearm_fail, tx_total, tx_radio_err, acks_sent, acks_late, acks_suppressed, dl_sent, dl_delivered, dl_not_delivered, dl_expired, link_crc_err, link_err, evt_resent` |
 | Timing | `ack_turnaround_last_us u16`, `ack_turnaround_max_us u16` |
 | Duty | `airtime_ms_last_hour u32` |
-| Tables | `peers u16, peers_max u16, queue_used u16, queue_max u16, evt_ring_used u8, evt_ring_max u8, ctr_next u32, ctr_last u32` |
+| Tables | `peers u16, peers_max u16, queue_used u16, queue_max u16, evt_ring_used u8, evt_ring_max u8, ctr_next u32, ctr_last u32, evt_head_seq u8` (`evt_head_seq`: the delivery `seq` of the oldest unacked ring event; with an empty ring, the `seq` the next ring event will carry; NB 0.3.1 final, §4.1) |
 
-171 B after the status byte. `EVT_BOOT` = `fw_ver[3] ‖ git_sha[4] ‖ reset_cause` (8 B).
+172 B after the status byte (171 B before NB 0.3.1 final, without `evt_head_seq`). `EVT_BOOT` = `fw_ver[3] ‖ git_sha[4] ‖ reset_cause` (8 B).
 Byte layout frozen by the Hub controller 2026-09-28; the Hub's NB status document
 (`northbridge_diagnostics.md`) shows these fields.
 
@@ -143,6 +143,14 @@ problem, because the ACK comes from the central.
     again later.
   - An outage of the host service therefore costs no data, only a delay, the same as an
     NB outage (#470 §6.6).
+- **Host start (no learning):** on a fresh start, and on every `GET_INFO` that shows no
+  reboot, the host sets its expected `seq` to `evt_head_seq`. It then processes the ring
+  events strictly in `seq` order from there, whatever point of a resend pass it joins at.
+  It must never order the events by arrival: the T3 pre-run on c66 (2026-10-06) lost 11
+  frames that way, because the newer frames arrived first and the older ones were then
+  dropped as replays. A status without `evt_head_seq` (171 B, an older NB) falls back to the
+  learning window: buffer at least one full pass (or until a `seq` repeats), then sort by
+  `seq` with the start after the largest mod-256 gap.
 - Residual window (accepted, same class as D15): an NB reset after the ACK but before the
   host ack loses those frames (RAM).
 - `EVT_BOOT`, `EVT_RX`, `EVT_TWR_CTR_LOW`, `EVT_TX_DONE` and `EVT_LOG` stay best-effort; they carry
@@ -228,7 +236,8 @@ Then:
 1. `TWR_CTR_BLOCK` with a new block (the host does not know how far the NB got).
 2. `TWR_NODE_ADD` + `KEEP_NEWER` for all nodes (§4.2).
 3. `TWR_QUEUE_PUSH` of the DLs without an outcome (idempotent by `item`).
-4. The NB resends the unconfirmed events from the ring (§4.1).
+4. Expected delivery `seq` = `evt_head_seq` from this `GET_INFO` (§4.1). The NB then resends
+   the unconfirmed events from the ring and the host processes them in `seq` order.
 
 ### 6.4 Join
 
