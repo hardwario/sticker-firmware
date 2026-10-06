@@ -5,12 +5,11 @@
  * Native unit tests for app_radio_p2p.c on the TOWER wire (doc/plan/470): the
  * time-on-air and window arithmetic, the TOWER frame codec and the join, both
  * pinned byte for byte to the shared KATs (tests/ccm/tower_frame_kat.json,
- * tower_join_kat.json), the join retry policy, and the exchange -- confirmed
- * repetitions, the ACK, a PENDING downlink and its ACK, the 0x81/0x91
- * envelopes. app_radio_p2p.c is compiled directly, with a fake LoRa device
- * (src/emul_lora.c) and thin stubs (src/stubs.c); its internals are reached
- * via the CONFIG_ZTEST hooks in app_radio_p2p.h. The gateway side of every
- * exchange is played by gw_respond() below, answering from the fake radio.
+ * tower_join_kat.json, p2p_tower_ack_ctrl_kat.txt), the join retry policy, and the exchange --
+ * confirmed repetitions, the ACK, a PENDING downlink and its ACK, the 0x81/0x91 envelopes.
+ * app_radio_p2p.c is compiled directly, with a fake LoRa device (src/emul_lora.c) and thin stubs
+ * (src/stubs.c); its internals are reached via the CONFIG_ZTEST hooks in app_radio_p2p.h. The
+ * gateway side of every exchange is played by gw_respond() below, answering from the fake radio.
  */
 
 #include "app_ccm.h"
@@ -18,6 +17,7 @@
 #include "app_radio.h"
 #include "app_radio_p2p.h"
 #include "emul_lora.h"
+#include "tower_ack_ctrl_kat.h"
 #include "tower_join_kat.h"
 #include "tower_kat.h"
 
@@ -66,9 +66,13 @@ static struct {
 	uint8_t key[16];
 	uint32_t counter; /* its last TX counter */
 	bool ack;
-	uint8_t ack_from;     /* ACK from this transmission of a frame on (0/1 = the first) */
-	int32_t acked_offset; /* ACK a counter this far off the uplink's */
-	bool bad_tag;         /* break the ACK's tag */
+	uint8_t ack_from;        /* ACK from this transmission of a frame on (0/1 = the first) */
+	int32_t acked_offset;    /* ACK a counter this far off the uplink's */
+	bool bad_tag;            /* break the ACK's tag */
+	const uint8_t *ack_tail; /* a CTRL tail for every ACK (plan §13.5) */
+	size_t ack_tail_len;
+	bool ack_time;          /* append a TimeAns for the acked frame ... */
+	uint32_t ack_time_unix; /* ... at this time, frac 0 */
 	const uint8_t *dl;
 	size_t dl_len;
 	bool dl_confirmed;
@@ -134,12 +138,28 @@ static void gw_respond(const uint8_t *frame, uint32_t len)
 		return;
 	}
 
-	uint8_t ack[TWR_ACK_PAYLOAD_LEN];
+	uint8_t ack[TWR_PAYLOAD_MAX];
+	size_t n = TWR_ACK_PAYLOAD_LEN;
 
 	sys_put_le32(h.counter + gw.acked_offset, &ack[0]);
 	ack[4] = (uint8_t)(int8_t)-57;
 	ack[5] = gw.dl_len ? TWR_ACK_PENDING : 0;
-	gw_push(TWR_TYPE_ACK, 0, ++gw.counter, ack, sizeof(ack), -60, 8);
+	if (gw.ack_tail_len) {
+		memcpy(&ack[n], gw.ack_tail, gw.ack_tail_len);
+		n += gw.ack_tail_len;
+	}
+	if (gw.ack_time) {
+		ack[n++] = P2P_CTRL_TIME;
+		ack[n++] = P2P_TIME_ANS_LEN;
+		sys_put_le32(gw.ack_time_unix, &ack[n]);
+		ack[n + 4] = 0;
+		sys_put_le32(h.counter, &ack[n + 5]);
+		n += P2P_TIME_ANS_LEN;
+	}
+	if (n > TWR_ACK_PAYLOAD_LEN) {
+		ack[5] |= TWR_ACK_CTRL;
+	}
+	gw_push(TWR_TYPE_ACK, 0, ++gw.counter, ack, n, -60, 8);
 
 	if (gw.dl_len) {
 		uint32_t c = gw.dl_counter ? gw.dl_counter : ++gw.counter;
@@ -274,6 +294,11 @@ ZTEST(p2p_logic, test_twr_windows)
 	zassert_equal(p2p_twr_window_ms(12, TWR_ACK_FRAME_LEN), 1786u);
 	zassert_equal(p2p_twr_window_ms(7, P2P_FRAME_MAX), 221u);
 	zassert_equal(p2p_twr_window_ms(12, P2P_FRAME_MAX), 4080u);
+
+	/* A request's ACK may carry the answers (plan §13.5). */
+	zassert_equal(p2p_twr_window_ms(7, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 200u);
+	zassert_equal(p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 643u);
+	zassert_equal(p2p_twr_window_ms(12, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 2278u);
 
 	for (int sf = 7; sf <= 12; sf++) {
 		zassert_true(p2p_twr_window_ms(sf, TWR_ACK_FRAME_LEN) >=
@@ -455,6 +480,104 @@ ZTEST(p2p_logic, test_tower_ack_payload)
 	zassert_ok(twr_parse_ack(longer, sizeof(longer), &ack));
 	zassert_equal(ack.rssi, -60);
 	zassert_true(ack.pending);
+	zassert_equal(ack.tail_len, 0, "trailing bytes without CTRL are no tail");
+	zassert_is_null(ack.tail);
+}
+
+/* Plan §13.5: with CTRL (flags bit 1) the bytes after the flags are a 0x91 TLV
+ * list, with or without PENDING; CTRL with nothing after it is no tail. */
+ZTEST(p2p_logic, test_tower_ack_ctrl_tail)
+{
+	const uint8_t ctrl[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL, P2P_CTRL_LINK_CHECK,
+				4,    1, 2, 3, 4};
+	const uint8_t both[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL | TWR_ACK_PENDING, 0x3f, 0};
+	const uint8_t empty[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL};
+	struct twr_ack ack;
+
+	zassert_ok(twr_parse_ack(ctrl, sizeof(ctrl), &ack));
+	zassert_equal(ack.acked, 5);
+	zassert_false(ack.pending);
+	zassert_equal_ptr(ack.tail, &ctrl[TWR_ACK_PAYLOAD_LEN]);
+	zassert_equal(ack.tail_len, 6);
+
+	zassert_ok(twr_parse_ack(both, sizeof(both), &ack));
+	zassert_true(ack.pending);
+	zassert_equal_ptr(ack.tail, &both[TWR_ACK_PAYLOAD_LEN]);
+	zassert_equal(ack.tail_len, 2);
+
+	zassert_ok(twr_parse_ack(empty, sizeof(empty), &ack));
+	zassert_false(ack.pending);
+	zassert_is_null(ack.tail);
+	zassert_equal(ack.tail_len, 0);
+}
+
+/* The Northbridge's ACK CTRL-tail KAT (p2p_tower_ack_ctrl_kat.txt): every ACK
+ * opens under the session key to the KAT plaintext, acks the uplink, and its
+ * tail holds LinkCheckAns before TimeAns -- or, hand-built, exactly the listed
+ * ids, unknown ones included. The node seals the KAT uplinks byte for byte. */
+ZTEST(p2p_logic, test_ack_ctrl_kat_frames)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_ack_ctrl_kat); i++) {
+		const struct tower_ack_ctrl_kat *v = &tower_ack_ctrl_kat[i];
+		uint8_t pt[P2P_FRAME_MAX];
+		struct twr_hdr h;
+		struct twr_ack ack;
+		size_t pt_len;
+
+		zassert_ok(twr_open(tower_kat_key, v->ack_frame, v->ack_frame_len, &h, pt,
+				    sizeof(pt), &pt_len),
+			   "%s: ACK does not open", v->name);
+		zassert_equal(h.type, TWR_TYPE_ACK, "%s", v->name);
+		zassert_equal(h.src, TOWER_KAT_GW_ADDR, "%s", v->name);
+		zassert_equal(h.dest, TOWER_KAT_NODE_ADDR, "%s", v->name);
+		zassert_equal(h.counter, v->ack_ctr, "%s", v->name);
+		zassert_equal(pt_len, v->ack_pt_len, "%s", v->name);
+		zassert_mem_equal(pt, v->ack_pt, pt_len, "%s", v->name);
+
+		zassert_ok(twr_parse_ack(pt, pt_len, &ack), "%s", v->name);
+		zassert_equal(ack.tail_len > 0, pt_len > TWR_ACK_PAYLOAD_LEN, "%s: CTRL iff a tail",
+			      v->name);
+
+		struct p2p_tlv t;
+		size_t off = 0;
+		size_t n = 0;
+		uint8_t last = 0;
+		int ret;
+
+		while ((ret = p2p_tlv_next(ack.tail, ack.tail_len, &off, &t)) > 0) {
+			if (v->tail_line) {
+				zassert_true(n < v->tlv_count, "%s: extra TLV", v->name);
+				zassert_equal(t.cmd, v->tlvs[n], "%s: TLV %zu", v->name, n);
+			} else {
+				zassert_true(t.cmd == P2P_CTRL_LINK_CHECK || t.cmd == P2P_CTRL_TIME,
+					     "%s: 0x%02x", v->name, t.cmd);
+				zassert_true(t.cmd > last, "%s: LinkCheckAns first", v->name);
+			}
+			last = t.cmd;
+			n++;
+		}
+		zassert_equal(ret, 0, "%s: tail malformed", v->name);
+		if (v->tail_line) {
+			zassert_equal(n, v->tlv_count, "%s", v->name);
+			continue;
+		}
+
+		zassert_equal(ack.acked, v->up_ctr, "%s", v->name);
+		zassert_equal(ack.pending, v->pending, "%s", v->name);
+
+		const struct twr_hdr up = {.type = TWR_TYPE_DATA,
+					   .flags = TWR_FLAG_CONFIRMED,
+					   .src = TOWER_KAT_NODE_ADDR,
+					   .dest = TOWER_KAT_GW_ADDR,
+					   .counter = v->up_ctr};
+		uint8_t frame[P2P_FRAME_MAX];
+		size_t flen;
+
+		zassert_ok(twr_seal(tower_kat_key, &up, v->up_pt, v->up_pt_len, frame,
+				    sizeof(frame), &flen));
+		zassert_equal(flen, v->up_frame_len, "%s", v->name);
+		zassert_mem_equal(frame, v->up_frame, flen, "%s: the KAT uplink", v->name);
+	}
 }
 
 /* ---- replay lane, TLV list, JoinAccept, TimeAns --------------------------- */
@@ -1726,6 +1849,224 @@ ZTEST(p2p_logic, test_ctrl_downlink_in_pending)
 	zassert_true(info.lc_valid);
 	zassert_equal(info.lc_rssi, -90);
 	zassert_equal(info.lc_gw_count, 2);
+}
+
+/* ---- answers in the ACK (plan §13.5) ------------------------------------- */
+
+/* The KAT vector the gateway answers with: its ACK frame, as sealed by the
+ * Northbridge, to the node's first transmission. */
+static const struct tower_ack_ctrl_kat *m_kat;
+static bool m_kat_pushed;
+
+static void kat_gateway(const uint8_t *frame, uint32_t len)
+{
+	ARG_UNUSED(frame);
+	ARG_UNUSED(len);
+	if (!m_kat_pushed) {
+		m_kat_pushed = true;
+		test_lora_rx_push(m_kat->ack_frame, m_kat->ack_frame_len, -60, 8);
+	}
+}
+
+/* Every KAT ACK, end to end: the node sends the KAT uplink (or, for a
+ * hand-built one, any request under the acked counter), takes the
+ * Northbridge's ACK and applies what its tail answers -- the LinkCheckAns
+ * numbers, the TimeAns time -- and nothing else: an unknown TLV is skipped,
+ * an ACK without a tail leaves both alone. */
+ZTEST(p2p_logic, test_ack_ctrl_kat_answers_apply)
+{
+	static const uint8_t req[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0, P2P_CTRL_TIME, 0};
+
+	for (size_t i = 0; i < ARRAY_SIZE(tower_ack_ctrl_kat); i++) {
+		const struct tower_ack_ctrl_kat *v = &tower_ack_ctrl_kat[i];
+		uint32_t up_ctr = v->tail_line ? sys_get_le32(v->ack_pt) : v->up_ctr;
+		int events = p2p_test_time_events;
+		struct app_radio_p2p_info info;
+		const uint8_t *lc = NULL;
+		const uint8_t *time = NULL;
+		struct twr_ack ack;
+		struct p2p_tlv t;
+		size_t off = 0;
+
+		zassert_ok(twr_parse_ack(v->ack_pt, v->ack_pt_len, &ack));
+		while (p2p_tlv_next(ack.tail, ack.tail_len, &off, &t) > 0) {
+			if (t.cmd == P2P_CTRL_LINK_CHECK) {
+				lc = t.val;
+			} else if (t.cmd == P2P_CTRL_TIME) {
+				time = t.val;
+			}
+		}
+
+		paired();
+		m_kat = v;
+		m_kat_pushed = false;
+		test_lora_responder = kat_gateway;
+		p2p_test_set_fcnt(up_ctr, up_ctr + 256);
+		p2p_test_set_time_req(up_ctr, k_uptime_get());
+		g_test_network_time = 0;
+
+		zassert_ok(p2p_test_uplink_tail(v->tail_line ? req : v->up_pt,
+						v->tail_line ? sizeof(req) : v->up_pt_len, true,
+						TWR_ACK_TAIL_MAX),
+			   "%s: not ACKed", v->name);
+		if (!v->tail_line) {
+			zassert_mem_equal(test_lora_sent_frame(test_lora_send_count - 1)->buf,
+					  v->up_frame, v->up_frame_len, "%s: the KAT uplink",
+					  v->name);
+		}
+
+		app_radio_p2p_get_info(&info);
+		zassert_equal(info.gw_last, v->ack_ctr, "%s", v->name);
+		zassert_equal(info.lc_valid, lc != NULL, "%s: LinkCheckAns", v->name);
+		if (lc != NULL) {
+			zassert_equal(info.lc_rssi, (int8_t)lc[0], "%s", v->name);
+			zassert_equal(info.lc_snr, (int8_t)lc[1], "%s", v->name);
+			zassert_equal(info.lc_margin, (int8_t)lc[2], "%s", v->name);
+			zassert_equal(info.lc_gw_count, lc[3], "%s", v->name);
+		}
+		if (time != NULL) {
+			uint32_t unix_s = sys_get_le32(time);
+
+			zassert_equal(sys_get_le32(&time[5]), up_ctr, "%s: TimeAns req", v->name);
+			zassert_equal(p2p_test_time_events, events + 1, "%s: TimeAns", v->name);
+			zassert_between_inclusive(g_test_network_time, unix_s, unix_s + 1, "%s",
+						  v->name);
+		} else {
+			zassert_equal(p2p_test_time_events, events, "%s: no TimeAns", v->name);
+			zassert_equal(g_test_network_time, 0, "%s", v->name);
+		}
+	}
+}
+
+/* The ACK of a request may carry the answers, so its window is longer by
+ * their airtime: at SF10 an ACK arriving between the plain and the longer
+ * window's end is missed by a data frame's wait, caught by a request's. */
+ZTEST(p2p_logic, test_ack_ctrl_window_waits_for_the_tail)
+{
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	uint32_t plain = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN);
+	uint32_t longer = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX);
+	uint32_t sends;
+
+	zassert_true(longer >= plain + 100, "SF10: %u vs %u ms", longer, plain);
+	p2p_test_join_setup(10);
+	p2p_test_join_stop();
+	paired();
+	gw.ack = true;
+	test_lora_rx_delay_ms = (plain + longer) / 2;
+
+	sends = test_lora_send_count;
+	zassert_equal(p2p_test_uplink_tail(up, sizeof(up), true, 0), -ETIMEDOUT);
+	zassert_equal(test_lora_send_count, sends + 3, "every ACK late for the plain window");
+
+	sends = test_lora_send_count;
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
+	zassert_equal(test_lora_send_count, sends + 1, "caught at the first transmission");
+}
+
+/* A due link check end to end: the LinkCheckReq's ACK answers it, so the
+ * link check passes at once and the next due report may ask again. */
+ZTEST(p2p_logic, test_link_check_answered_in_the_ack)
+{
+	static const uint8_t lc[] = {P2P_CTRL_LINK_CHECK, 4, (uint8_t)-77, 6, 13, 1};
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+	struct app_radio_p2p_info info;
+	int ok = p2p_test_link_ok_calls;
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = lc;
+	gw.ack_tail_len = sizeof(lc);
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	p2p_test_ctrl_run();
+	zassert_mem_equal(gw.up_pt, ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0}), 3);
+
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -77);
+	zassert_equal(info.lc_margin, 13);
+	zassert_equal(p2p_test_link_ok_calls, ok + 2, "the ACK and the answer: passed");
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "answered: the next one asks again");
+}
+
+/* A TimeReq end to end: its ACK carries the TimeAns for its counter. */
+ZTEST(p2p_logic, test_time_ans_in_the_ack_sets_the_clock)
+{
+	int events = p2p_test_time_events;
+
+	paired();
+	gw.ack = true;
+	gw.ack_time = true;
+	gw.ack_time_unix = 1790000000u;
+	g_test_network_time = 0;
+	p2p_test_time_wanted = true;
+	app_radio_p2p_backend.time_request();
+	p2p_test_ctrl_run();
+	zassert_mem_equal(gw.up_pt, ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_TIME, 0}), 3);
+	zassert_equal(p2p_test_time_events, events + 1, "the time landed");
+	zassert_between_inclusive(g_test_network_time, 1790000000u, 1790000001u);
+}
+
+/* An ACK tail and a PENDING command in one exchange: both are delivered. */
+ZTEST(p2p_logic, test_ack_tail_and_pending_command)
+{
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	static const uint8_t lc[] = {P2P_CTRL_LINK_CHECK, 4, (uint8_t)-70, 7, 14, 1};
+	static const uint8_t cmd[] = {P2P_ENV_DATA, P2P_PORT_COMMAND, 0x01, 0x0a, 0x0b};
+	struct app_radio_p2p_info info;
+	int dls = p2p_test_downlinks;
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = lc;
+	gw.ack_tail_len = sizeof(lc);
+	gw.dl = cmd;
+	gw.dl_len = sizeof(cmd);
+	gw.dl_confirmed = true;
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
+
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -70);
+	zassert_equal(p2p_test_downlinks, dls + 1, "the command too");
+	zassert_mem_equal(p2p_test_downlink_buf, &cmd[P2P_ENV_LEN], 3);
+	zassert_equal(gw.node_acks, 1, "the command ACKed");
+}
+
+/* An ACK tail answers requests only: a Detach, a RejoinReq or an unknown entry
+ * there is skipped (the node stays paired), the answers around it apply. */
+ZTEST(p2p_logic, test_ack_tail_skips_all_but_answers)
+{
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	static const uint8_t tail[] = {P2P_CTRL_DETACH,
+				       1,
+				       2,
+				       P2P_CTRL_REJOIN_REQ,
+				       1,
+				       0,
+				       0x7f,
+				       1,
+				       0,
+				       P2P_CTRL_LINK_CHECK,
+				       4,
+				       (uint8_t)-66,
+				       1,
+				       2,
+				       1};
+	struct app_radio_p2p_info info;
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = tail;
+	gw.ack_tail_len = sizeof(tail);
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
+
+	zassert_true(app_radio_p2p_is_ready(), "still paired");
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "no Detach, no rejoin");
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -66);
 }
 
 /* ---- frame counter (B9) --------------------------------------------------------- */

@@ -64,6 +64,8 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * transmissions (same counter), each followed by a short ACK window armed at
  * TX-done. An ACK with PENDING keeps the receiver on for one gateway Data
  * frame -- a command or a control answer, ACKed back when it is confirmed.
+ * An ACK with CTRL carries the answers to a LinkCheckReq / TimeReq itself, as a
+ * TLV tail (plan §13.5); their ACK window is longer by TWR_ACK_TAIL_MAX.
  * An app_radio retry of a frame that got no ACK is a new send under a new
  * counter (TOWER semantics, plan §7.3).
  */
@@ -153,9 +155,9 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 /* A LinkCheckReq follows a report the cadence made a link check, after the
  * report's own frames. */
 #define P2P_LINK_CHECK_DELAY_MS  5000
-/* The central queues a TimeAns / LinkCheckAns for the next PENDING (there is
- * no Poll, plan H3.8); a LinkCheckAns still missing after this many reports is
- * taken as lost. */
+/* An older gateway leaves a TimeAns / LinkCheckAns to the central, which
+ * queues it for the next PENDING (there is no Poll, plan H3.8); a LinkCheckAns
+ * still missing after this many reports is taken as lost. */
 #define P2P_ANSWER_REPORTS_MAX   3
 /* A TimeAns applies to the TX-done of its TimeReq; one older than this is a
  * stale answer and dropped. */
@@ -284,13 +286,20 @@ static struct p2p_rx m_rx_scratch; /* p2p_recv_cb()'s copy: the driver's one con
  * radio is released (p2p_deliver()). Radio work queue only. */
 static uint8_t m_dl[TWR_PAYLOAD_MAX];
 
+/* An ACK tail kept for p2p_deliver_xfer(): room for the answers the gateway
+ * builds today (TWR_ACK_TAIL_MAX) and a few more; a longer one is cut here and
+ * its last entry reported malformed. */
+#define P2P_ACK_TAIL_BUF 32
+
 /* What one exchange (p2p_exchange()) did. */
 struct p2p_xfer {
 	uint32_t counter; /* the frame's counter */
 	int64_t done_ms;  /* uptime of the TX-done of its last transmission */
 	uint8_t sent;     /* transmissions */
 	bool acked;
-	bool pending; /* the ACK announced a downlink */
+	bool pending;                       /* the ACK announced a downlink */
+	uint8_t ack_tail[P2P_ACK_TAIL_BUF]; /* the ACK's CTRL tail (plan §13.5) */
+	uint8_t ack_tail_len;
 	int16_t rssi; /* this node's RSSI/SNR of the ACK */
 	int8_t snr;
 	uint8_t dl_len; /* bytes waiting in m_dl, 0 = none */
@@ -1028,8 +1037,10 @@ P2P_TESTABLE int twr_open(const uint8_t key[16], const uint8_t *frame, size_t fr
 	return 0;
 }
 
-/* acked(4 LE) | rssi(i8) | flags(PENDING bit 0). Any payload of at least 4 B is
- * an ACK: the rule that keeps appended fields interop-safe. */
+/* acked(4 LE) | rssi(i8) | flags(PENDING bit 0, CTRL bit 1) [| TLV...]. Any
+ * payload of at least 4 B is an ACK: the rule that keeps appended fields
+ * interop-safe. With CTRL the rest is a 0x91 TLV list (plan §13.5), pointed to
+ * in `pt`; without it trailing bytes are ignored. */
 P2P_TESTABLE int twr_parse_ack(const uint8_t *pt, size_t pt_len, struct twr_ack *ack)
 {
 	if (pt_len < 4) {
@@ -1038,6 +1049,12 @@ P2P_TESTABLE int twr_parse_ack(const uint8_t *pt, size_t pt_len, struct twr_ack 
 	ack->acked = sys_get_le32(pt);
 	ack->rssi = pt_len > 4 ? (int8_t)pt[4] : 0;
 	ack->pending = pt_len > 5 && (pt[5] & TWR_ACK_PENDING);
+	ack->tail = NULL;
+	ack->tail_len = 0;
+	if (pt_len > TWR_ACK_PAYLOAD_LEN && (pt[5] & TWR_ACK_CTRL)) {
+		ack->tail = &pt[TWR_ACK_PAYLOAD_LEN];
+		ack->tail_len = pt_len - TWR_ACK_PAYLOAD_LEN;
+	}
 	return 0;
 }
 
@@ -1307,12 +1324,15 @@ static int p2p_wait_frame(k_timepoint_t end, struct p2p_rx *rx, struct twr_hdr *
 	return -ETIMEDOUT;
 }
 
-/* The ACK window of the transmission whose receiver ran at `arm_cyc`: true
- * once a fresh ACK of `counter` arrived. */
-static bool p2p_wait_ack(uint32_t counter, uint32_t arm_cyc, struct p2p_rx *rx, struct twr_ack *ack)
+/* The ACK window of the transmission whose receiver ran at `arm_cyc`, longer
+ * by `tail` bytes of airtime when the ACK may carry answers: true once a fresh
+ * ACK of `counter` arrived. `ack->tail` points into a buffer kept until the next
+ * call. */
+static bool p2p_wait_ack(uint32_t counter, uint32_t arm_cyc, uint8_t tail, struct p2p_rx *rx,
+			 struct twr_ack *ack)
 {
 	static uint8_t pt[TWR_PAYLOAD_MAX];
-	k_timepoint_t end = window_end(p2p_twr_window_ms(m_sf, TWR_ACK_FRAME_LEN), arm_cyc);
+	k_timepoint_t end = window_end(p2p_twr_window_ms(m_sf, TWR_ACK_FRAME_LEN + tail), arm_cyc);
 	struct twr_hdr h;
 	size_t len;
 	int v;
@@ -1419,11 +1439,14 @@ static void p2p_auto_ack(const struct p2p_xfer *x)
 /* One exchange (plan §7.1): seal `pt` under a fresh counter and send it; a
  * confirmed frame is sent up to P2P_REPS times (byte-identical, random backoff)
  * until its ACK arrives, then an announced downlink is received and ACKed. The
- * downlink stays in m_dl for p2p_deliver(), after the radio is released.
+ * downlink stays in m_dl for p2p_deliver(), after the radio is released, and an
+ * ACK's CTRL tail in `x` -- `ack_tail` is the extra ACK airtime a request
+ * (LinkCheckReq, TimeReq) waits for, 0 otherwise (plan §13.5).
  * Returns 0 when the frame went out at least once (`x->acked` for a confirmed
  * one), -EAGAIN (duty held, nothing sent), -EBUSY (listen mode), -ENOTCONN
  * (not paired), -EMSGSIZE, or a counter / radio error. Radio work queue. */
-static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, struct p2p_xfer *x)
+static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_t ack_tail,
+			struct p2p_xfer *x)
 {
 	/* Radio work queue only, one exchange at a time: off its 4 KB stack. */
 	static uint8_t frame[P2P_FRAME_MAX];
@@ -1503,9 +1526,11 @@ static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, struct
 		app_radio_count(APP_RADIO_CNT_TX);
 
 		if (confirmed) {
-			if (p2p_wait_ack(counter, arm_cyc, &rx, &ack)) {
+			if (p2p_wait_ack(counter, arm_cyc, ack_tail, &rx, &ack)) {
 				x->acked = true;
 				x->pending = ack.pending;
+				x->ack_tail_len = (uint8_t)MIN(ack.tail_len, sizeof(x->ack_tail));
+				memcpy(x->ack_tail, ack.tail, x->ack_tail_len);
 				x->rssi = rx.rssi;
 				x->snr = rx.snr;
 				m_last_ack_rssi = ack.rssi;
@@ -1532,9 +1557,9 @@ static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, struct
 
 	app_radio_note_send(true, false);
 	publish_link();
-	LOG_INF("TX counter %u, %zu B, %u ms air, n=%u%s%s%s", counter, flen, air, x->sent,
-		!confirmed ? "" : (x->acked ? " ACK" : " no ACK"), x->pending ? " PENDING" : "",
-		x->dl_len ? " +DL" : "");
+	LOG_INF("TX counter %u, %zu B, %u ms air, n=%u%s%s%s%s", counter, flen, air, x->sent,
+		!confirmed ? "" : (x->acked ? " ACK" : " no ACK"), x->ack_tail_len ? " +CTRL" : "",
+		x->pending ? " PENDING" : "", x->dl_len ? " +DL" : "");
 	if (x->acked) {
 		LOG_INF("ACK rssi=%d (gateway) dl_rssi=%d dl_snr=%d", m_last_ack_rssi, x->rssi,
 			x->snr);
@@ -1592,8 +1617,9 @@ static size_t ctrl_build(uint32_t bits, uint8_t *pt)
 	return n;
 }
 
-/* A request of `bits` was acknowledged by the gateway: the central answers it
- * through the gateway's queue, on a later PENDING. */
+/* A request of `bits` was acknowledged by the gateway: the answer rides that
+ * ACK's CTRL tail (plan §13.5, delivered after this) or, from an older gateway,
+ * the central's queue on a later PENDING. */
 static void ctrl_sent(uint32_t bits, const struct p2p_xfer *x)
 {
 	if (bits & P2P_CTRL_BIT_TIME) {
@@ -1639,7 +1665,9 @@ static void ctrl_work_handler(struct k_work *work)
 
 	size_t len = ctrl_build(bits, pt);
 	struct p2p_xfer x;
-	int ret = p2p_exchange(pt, len, true, &x);
+	/* The gateway answers these requests in the ACK (plan §13.5). */
+	bool asks = bits & (P2P_CTRL_BIT_LINK_CHECK | P2P_CTRL_BIT_TIME);
+	int ret = p2p_exchange(pt, len, true, asks ? TWR_ACK_TAIL_MAX : 0, &x);
 
 	if (ret == -EAGAIN) {
 		k_work_reschedule_for_queue(
@@ -1720,14 +1748,20 @@ static void link_check_ans(const uint8_t *val)
 		m_lc.gw_count);
 }
 
-/* A 0x91 downlink: the TLV list after the envelope byte. */
-static void ctrl_downlink(const uint8_t *buf, size_t len)
+/* A 0x91 downlink: the TLV list after the envelope byte -- or, `in_ack`, an
+ * ACK's CTRL tail (plan §13.5), which answers requests only: anything but a
+ * LinkCheckAns or TimeAns there is skipped, a command stays a downlink's. */
+static void ctrl_downlink(const uint8_t *buf, size_t len, bool in_ack)
 {
 	struct p2p_tlv t;
 	size_t off = 0;
 	int ret;
 
 	while ((ret = p2p_tlv_next(buf, len, &off, &t)) > 0) {
+		if (in_ack && t.cmd != P2P_CTRL_LINK_CHECK && t.cmd != P2P_CTRL_TIME) {
+			LOG_INF("ACK control 0x%02x (%u B): not an answer, skipped", t.cmd, t.len);
+			continue;
+		}
 		switch (t.cmd) {
 		case P2P_CTRL_CAPABILITIES:
 			if (t.len >= 2) {
@@ -1771,7 +1805,7 @@ static void ctrl_downlink(const uint8_t *buf, size_t len)
 		}
 	}
 	if (ret < 0) {
-		LOG_WRN("Control downlink malformed at byte %zu", off);
+		LOG_WRN("Control %s malformed at byte %zu", in_ack ? "ACK tail" : "downlink", off);
 	}
 }
 
@@ -1781,7 +1815,7 @@ static void ctrl_downlink(const uint8_t *buf, size_t len)
 static void p2p_deliver(const uint8_t *pt, size_t len)
 {
 	if (len >= 1 && pt[0] == P2P_ENV_CTRL) {
-		ctrl_downlink(&pt[1], len - 1);
+		ctrl_downlink(&pt[1], len - 1, false);
 		return;
 	}
 	if (len > P2P_ENV_LEN && pt[0] == P2P_ENV_DATA && pt[1] == P2P_PORT_COMMAND) {
@@ -1795,6 +1829,11 @@ static void p2p_deliver(const uint8_t *pt, size_t len)
 
 static void p2p_deliver_xfer(const struct p2p_xfer *x)
 {
+	/* First: a TimeAns here dates from x->done_ms, the TX-done of the
+	 * transmission it answers -- ctrl_sent() has already recorded that. */
+	if (x->ack_tail_len) {
+		ctrl_downlink(x->ack_tail, x->ack_tail_len, true);
+	}
 	if (x->dl_len) {
 		p2p_deliver(m_dl, x->dl_len);
 	}
@@ -1855,7 +1894,7 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 	pt[1] = port;
 	memcpy(&pt[P2P_ENV_LEN], f->buf, f->len);
 
-	int ret = p2p_exchange(pt, P2P_ENV_LEN + f->len, confirmed, &x);
+	int ret = p2p_exchange(pt, P2P_ENV_LEN + f->len, confirmed, 0, &x);
 
 	switch (ret) {
 	case 0:
@@ -2490,10 +2529,10 @@ uint32_t p2p_test_get_gw_last(void)
 /* One exchange as p2p_tx_send() runs it, for a payload the test composed:
  * 0, -ETIMEDOUT (confirmed, no ACK) or the exchange's errno; a downlink is
  * delivered. */
-int p2p_test_uplink(const uint8_t *pt, size_t pt_len, bool confirmed)
+int p2p_test_uplink_tail(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_t ack_tail)
 {
 	struct p2p_xfer x;
-	int ret = p2p_exchange(pt, pt_len, confirmed, &x);
+	int ret = p2p_exchange(pt, pt_len, confirmed, ack_tail, &x);
 
 	if (ret) {
 		return ret;
@@ -2505,9 +2544,14 @@ int p2p_test_uplink(const uint8_t *pt, size_t pt_len, bool confirmed)
 	return 0;
 }
 
+int p2p_test_uplink(const uint8_t *pt, size_t pt_len, bool confirmed)
+{
+	return p2p_test_uplink_tail(pt, pt_len, confirmed, 0);
+}
+
 void p2p_test_ctrl_downlink(const uint8_t *val, size_t len)
 {
-	ctrl_downlink(val, len);
+	ctrl_downlink(val, len, false);
 }
 
 uint32_t p2p_test_ctrl_pending(void)

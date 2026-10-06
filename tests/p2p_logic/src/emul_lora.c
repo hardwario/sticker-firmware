@@ -6,7 +6,8 @@
  * resolves on native_sim. It records every frame sent, and a test-installed
  * responder -- the suite's gateway -- can answer one: the frames it pushes are
  * handed to the next receiver armed, lora_recv() (the JoinAccept window) or
- * lora_recv_async() (the TOWER ACK and downlink windows), at once.
+ * lora_recv_async() (the TOWER ACK and downlink windows), at once or
+ * test_lora_rx_delay_ms after the receiver was armed.
  */
 
 #define DT_DRV_COMPAT hardwario_lora_emul
@@ -31,6 +32,10 @@ struct test_lora_frame test_lora_sent[TEST_LORA_SENT_MAX];
 /* Called with every frame sent; may push the answer with test_lora_rx_push(). */
 test_lora_responder_t test_lora_responder;
 
+/* Queued frames reach an armed receiver this long after it was armed (0 = at
+ * once): an answer late for a short window but inside a long one. */
+uint32_t test_lora_rx_delay_ms;
+
 #define RX_FIFO_DEPTH 4
 
 static struct test_lora_frame m_rx_fifo[RX_FIFO_DEPTH];
@@ -50,10 +55,36 @@ void test_lora_rx_push(const uint8_t *buf, size_t len, int16_t rssi, int8_t snr)
 	m_rx_count++;
 }
 
+static const struct device *m_rx_dev;
+static lora_recv_cb m_rx_cb;
+static void *m_rx_user;
+
+static void rx_deliver(void)
+{
+	for (size_t i = 0; i < m_rx_count; i++) {
+		m_rx_cb(m_rx_dev, m_rx_fifo[i].buf, m_rx_fifo[i].len, m_rx_rssi[i], m_rx_snr[i],
+			m_rx_user);
+	}
+	m_rx_count = 0;
+}
+
+static void rx_delay_expired(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	if (m_rx_cb != NULL) {
+		rx_deliver();
+	}
+}
+
+K_TIMER_DEFINE(m_rx_delay_timer, rx_delay_expired, NULL);
+
 void test_lora_reset(void)
 {
+	k_timer_stop(&m_rx_delay_timer);
 	test_lora_send_ret = 0;
 	test_lora_responder = NULL;
+	test_lora_rx_delay_ms = 0;
+	m_rx_cb = NULL;
 	m_rx_count = 0;
 }
 
@@ -126,14 +157,19 @@ static int emul_recv(const struct device *dev, uint8_t *data, uint8_t size, k_ti
 
 static int emul_recv_async(const struct device *dev, lora_recv_cb cb, void *user_data)
 {
+	k_timer_stop(&m_rx_delay_timer);
+	m_rx_dev = dev;
+	m_rx_cb = cb;
+	m_rx_user = user_data;
 	if (cb == NULL) {
 		m_rx_count = 0; /* receiver off: what it did not take is gone */
 		return 0;
 	}
-	for (size_t i = 0; i < m_rx_count; i++) {
-		cb(dev, m_rx_fifo[i].buf, m_rx_fifo[i].len, m_rx_rssi[i], m_rx_snr[i], user_data);
+	if (test_lora_rx_delay_ms > 0) {
+		k_timer_start(&m_rx_delay_timer, K_MSEC(test_lora_rx_delay_ms), K_NO_WAIT);
+		return 0;
 	}
-	m_rx_count = 0;
+	rx_deliver();
 	return 0;
 }
 

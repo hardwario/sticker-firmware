@@ -34,7 +34,8 @@ extern "C" {
 #define TWR_TYPE_DATA       0
 #define TWR_TYPE_ACK        1
 #define TWR_FLAG_CONFIRMED  0x01
-#define TWR_ACK_PENDING     0x01 /* ACK payload flags */
+#define TWR_ACK_PENDING     0x01 /* ACK payload flags: a downlink follows */
+#define TWR_ACK_CTRL        0x02 /* a 0x91 TLV tail follows the flags (plan §13.5) */
 #define TWR_ACK_PAYLOAD_LEN 6    /* acked(4) rssi(1) flags(1); receivers accept >= 4 */
 #define TWR_ACK_FRAME_LEN   (TWR_HDR_LEN + TWR_ACK_PAYLOAD_LEN + TWR_TAG_LEN) /* 28 */
 #define TWR_ADDR_NONE       0x00000000u /* reserved; the JoinRequest's dest */
@@ -52,7 +53,13 @@ struct twr_ack {
 	uint32_t acked;
 	int8_t rssi; /* the gateway's RSSI of the acked frame; 0 if absent */
 	bool pending;
+	const uint8_t *tail; /* CTRL: the TLV list after the flags, in the parsed buffer */
+	size_t tail_len;     /* 0 = no tail */
 };
+
+/* The answers a gateway puts in the ACK of a request (plan §13.5): LinkCheckAns
+ * (2 + 4 B) and TimeAns (2 + 9 B). The request's ACK window grows by these. */
+#define TWR_ACK_TAIL_MAX 17
 
 /* The lora profile's MTU (D14, P1 decision D-g): a frame of at most 100 B, so a
  * 78 B payload -- the STICKER envelope (2 B) and a 76 B body, the LoRaWAN fPort
@@ -349,6 +356,7 @@ uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);
 uint32_t p2p_test_get_gw_last(void);
 int p2p_test_uplink(const uint8_t *pt, size_t pt_len, bool confirmed);
+int p2p_test_uplink_tail(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_t ack_tail);
 void p2p_test_ctrl_downlink(const uint8_t *val, size_t len);
 uint32_t p2p_test_ctrl_pending(void);
 void p2p_test_ctrl_run(void);

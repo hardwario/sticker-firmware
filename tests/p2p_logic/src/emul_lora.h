@@ -25,6 +25,7 @@ extern uint8_t test_lora_last_frame[255];
 extern uint32_t test_lora_last_len;
 extern uint32_t test_lora_send_count;
 extern test_lora_responder_t test_lora_responder;
+extern uint32_t test_lora_rx_delay_ms;
 
 /* Queue a frame for the next receiver the module arms. */
 void test_lora_rx_push(const uint8_t *buf, size_t len, int16_t rssi, int8_t snr);
