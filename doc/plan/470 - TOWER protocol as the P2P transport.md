@@ -826,8 +826,9 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 | C6 | Integration image (NB 0.4.0 + central) deployed | HC | NB flash: Hynek's OK in the HC chat |
 
 **HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
-needs RTT. NT watches the Portal. A short `interval_report` (10–15 s, a signed `SetParam`
-by NT with Hynek's OK) speeds the tests up and is restored afterwards.
+needs RTT. NT watches the Portal. `interval_report` stays at its 60 s minimum (the FW and Portal
+range is 60–86400). For a denser stream, SC triggers uplinks over the RTT shell on the debug
+image (force-send); T3 at 60 s alone takes > 32 min.
 
 | # | Test | Pass |
 |---|---|---|
