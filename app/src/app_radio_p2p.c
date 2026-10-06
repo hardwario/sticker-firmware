@@ -98,9 +98,9 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_PRODUCT_TYPE_STICKER 1
 
 /* Link supervision (decision #22 §3.4) is app_radio's, one machine for both
- * radios (doc/plan/460 F2). A failed link check is a CONFIRMED frame with no
- * ACK after its APP_RADIO_ACK_MAX_RETRIES retries; any authenticated
- * downlink is a success. WARNING has no rung on P2P: TX power and SF are fixed
+ * radios (doc/plan/460 F2). A failed link check is a link-check report
+ * (report_flags) with no ACK after its APP_RADIO_ACK_MAX_RETRIES retries;
+ * any authenticated downlink is a success. WARNING has no rung on P2P: TX power and SF are fixed
  * per network, with no adaptive data rate or power control (plan §7.4), so
  * the rejoin budget is all there is. A rejoin is a self-healing re-join on the
  * configured SF which, unlike the never-paired boot join (§5.2), skips the
@@ -1898,16 +1898,17 @@ static uint32_t p2p_tx_airtime_ms(size_t len)
 
 /* Once per report, at its first frame, kept for all its frames. Plan §7.2
  * (F6): every report goes CONFIRMED, so a downlink the central queued waits at
- * most one report interval for its PENDING. A report the cadence made a link
- * check (`due`) also asks the central for the numbers (LinkCheckReq) after
- * its frames, unless an earlier one is still unanswered. */
+ * most one report interval for its PENDING. Only a report the cadence made a
+ * link check (`due`) is flagged as one: unacknowledged, it alone is a failed
+ * check. It also asks the central for the numbers (LinkCheckReq) after its
+ * frames, unless an earlier one is still unanswered. */
 static uint8_t p2p_tx_report_flags(bool due)
 {
 	if (due && !m_lc_outstanding) {
 		ctrl_request(P2P_CTRL_BIT_LINK_CHECK, P2P_LINK_CHECK_DELAY_MS);
 	}
 	answer_fetch_count();
-	return APP_RADIO_FRAME_CONFIRMED;
+	return APP_RADIO_FRAME_CONFIRMED | (due ? APP_RADIO_FRAME_LINK_CHECK : 0);
 }
 
 const struct app_radio_backend app_radio_p2p_backend = {

@@ -1581,6 +1581,9 @@ ZTEST(p2p_logic, test_stale_time_ans_is_dropped)
 	zassert_equal(p2p_test_time_events, events);
 }
 
+/* A report the cadence made a link check. */
+#define LC_REPORT (APP_RADIO_FRAME_CONFIRMED | APP_RADIO_FRAME_LINK_CHECK)
+
 /* Plan §7.2 (F6): every report goes CONFIRMED, link check or not, whatever
  * answer is outstanding -- a queued downlink waits one report at most. */
 ZTEST(p2p_logic, test_every_report_goes_confirmed)
@@ -1609,23 +1612,24 @@ ZTEST(p2p_logic, test_lost_link_check_ans_frees_the_next_request)
 
 	paired();
 	gw.ack = true;
-	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(be->report_flags(true), LC_REPORT);
 	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");
 	p2p_test_ctrl_run(); /* acknowledged, no answer yet */
 	zassert_equal(p2p_test_ctrl_pending(), 0);
 
 	/* Outstanding: a due report does not ask again. */
-	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(be->report_flags(true), LC_REPORT);
 	zassert_equal(p2p_test_ctrl_pending(), 0, "the earlier one is unanswered");
 	(void)be->report_flags(false);
 	(void)be->report_flags(false);
 	(void)be->report_flags(false); /* the 4th since the request: lost */
-	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(be->report_flags(true), LC_REPORT);
 	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "asked again");
 }
 
-/* §3.2: a report the cadence made a link check also asks the central for the
- * numbers (LinkCheckReq); both go CONFIRMED. */
+/* §3.2: every report goes CONFIRMED, only the one the cadence made a link
+ * check is flagged as one (its lost ACK alone is a failed check) and asks the
+ * central for the numbers (LinkCheckReq). */
 ZTEST(p2p_logic, test_link_check_report_goes_confirmed)
 {
 	const struct app_radio_backend *be = &app_radio_p2p_backend;
@@ -1633,7 +1637,7 @@ ZTEST(p2p_logic, test_link_check_report_goes_confirmed)
 	paired();
 	zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED);
 	zassert_equal(p2p_test_ctrl_pending(), 0);
-	zassert_equal(be->report_flags(true), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(be->report_flags(true), LC_REPORT);
 	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");
 }
 

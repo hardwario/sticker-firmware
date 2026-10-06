@@ -463,8 +463,10 @@ enum app_radio_frame_tag {
 	APP_RADIO_TAG_SETTINGS,     /* autonomous settings-info (#412) */
 };
 
-#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: P2P FCtrl, LoRaWAN MType */
-#define APP_RADIO_FRAME_LINK_CHECK BIT(1) /* LoRaWAN: ride a LinkCheckReq on it */
+#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: TOWER flags, LoRaWAN MType */
+/* A link check: LoRaWAN rides a LinkCheckReq on it; on P2P it is confirmed and
+ * its Ack is the check, so only this frame unacknowledged is a failed one. */
+#define APP_RADIO_FRAME_LINK_CHECK BIT(1)
 #define APP_RADIO_FRAME_MORE       BIT(2) /* telemetry: more frames of this report follow */
 
 /* Slot size of the answer and alarm queues. */

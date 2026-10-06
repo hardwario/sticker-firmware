@@ -861,7 +861,12 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 				"up",
 				f->kind, APP_RADIO_ACK_MAX_RETRIES);
 			ack_release(f->kind);
-			app_radio_link_result(false);
+			/* Only a frame sent as a link check judges the link (Hynek
+			 * 2026-10-06): a lost alarm, answer or plain report does not
+			 * count towards WARNING and the rejoin. */
+			if (f->flags & APP_RADIO_FRAME_LINK_CHECK) {
+				app_radio_link_result(false);
+			}
 			return 0;
 		}
 		m_ack_pending = true;

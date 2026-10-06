@@ -224,7 +224,8 @@ static const struct app_radio_backend be_p2p = {
 static const struct profile PROFILE_LRW = {&be_lrw, 51, 0, APP_RADIO_FRAME_LINK_CHECK,
 					   APP_CMD_TRANSPORT_LRW};
 static const struct profile PROFILE_P2P = {&be_p2p, 239, APP_RADIO_FRAME_CONFIRMED,
-					   APP_RADIO_FRAME_CONFIRMED, APP_CMD_TRANSPORT_P2P};
+					   APP_RADIO_FRAME_CONFIRMED | APP_RADIO_FRAME_LINK_CHECK,
+					   APP_CMD_TRANSPORT_P2P};
 
 static void use_profile(const struct profile *p)
 {
@@ -616,7 +617,8 @@ static void confirmed_alarm_retried_until_acked(void)
 BOTH_PROFILES(confirmed_alarm_retried_until_acked)
 
 /* Unacknowledged after its retries, the frame is given up as sent -- it went
- * out -- and is a failed link check; the next frame goes then. */
+ * out -- and the next frame goes then. An alarm is no link check: the streak
+ * stays (only a link-check report judges the link, Hynek 2026-10-06). */
 static void confirmed_frame_given_up_after_its_retries(void)
 {
 	struct app_radio_link l;
@@ -635,9 +637,42 @@ static void confirmed_frame_given_up_after_its_retries(void)
 	zassert_equal(fk.log[4].attempt, 0);
 	zassert_false(app_radio_ack_pending());
 	app_radio_get_link(&l);
-	zassert_equal(l.fail_streak, 1, "a failed link check");
+	zassert_equal(l.fail_streak, 0, "an alarm is no link check");
 }
 BOTH_PROFILES(confirmed_frame_given_up_after_its_retries)
+
+/* P2P (F6): every report goes confirmed, but only the link-check one, lost
+ * after its retries, is a failed check. */
+ZTEST(radio_common, test_only_a_lost_link_check_report_fails_the_link)
+{
+	const size_t lens[] = {20};
+	struct app_radio_link l;
+
+	use_profile(&PROFILE_P2P);
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	g_app_config.radio_link_check_interval = 5;
+	app_radio_link_up(); /* report #1 is a check, #2 is not */
+
+	script_fill(-ETIMEDOUT, 1 + APP_RADIO_ACK_MAX_RETRIES);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(20)); /* > 2 + 4 + 8 s of spread */
+	zassert_true(fk.log[0].flags & APP_RADIO_FRAME_LINK_CHECK);
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 1, "the link-check report was lost");
+
+	size_t n = fk.n;
+
+	script_fill(-ETIMEDOUT, n + 1 + APP_RADIO_ACK_MAX_RETRIES);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(20));
+	zassert_equal(fk.n, n + 1 + APP_RADIO_ACK_MAX_RETRIES, "a confirmed report, retried");
+	zassert_false(fk.log[n].flags & APP_RADIO_FRAME_LINK_CHECK);
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 1, "a lost plain report is no failed check");
+	g_app_config.radio_link_check_interval = 0;
+}
 
 /* A duty-cycle hold of a retry takes a fresh spread on top of its wait, or the
  * nodes it held would retry together again; the held send is no retry. */
