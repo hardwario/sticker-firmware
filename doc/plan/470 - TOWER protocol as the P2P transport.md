@@ -824,6 +824,7 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 | C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
 | C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner |
 | C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat — **done** 2026-10-06 (NB flashed 12:21:46Z): c66 `5e16bacc` (c65 + C3), NB 0.3.1 HIL build `8a87edfe` with `RX_INJECT`, sha256 24d5f445 |
+| C7 | **Proposed, needs Hynek's decision (T8-F1):** a persistent MQTT session for every northbound consumer on the Hub (Portal, fiber-export): `clean_session = false`, a fixed client id, QoS 1 subscriptions; mosquitto `persistence true` on `/data` with a moderate `autosave_interval` (flash wear) so the queued QoS 1 messages survive a broker restart; an outbox drain log line in the central | HC | T8 repeated end-to-end |
 
 **HIL (H5)**, with 5722 as the node. SC is on standby and swaps to the debug image when a test
 needs RTT. NT watches the Portal. `interval_report` stays at its 60 s minimum (the FW and Portal
@@ -838,7 +839,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 | T4 | Replay / duplicate | net-layer reps counted as `rx_dup` with a re-ACK and no northbound duplicate; a replayed old frame → `rx_replay`, dropped. Use a debug-image hook if SC has one, otherwise native coverage + the natural reps — duplicate part **PASS 2026-10-06** (c66: `ack_drop 2`, NB `rx_dup` +2 with re-ACKs, `rx_replay` 0, northbound and Portal one point per frame); replay part **PASS** (NB 0.3.1 HIL `09f429fa`: frame 2080 captured with `twr rx_last`, re-injected after 2081 → `rx_replay` +1, no ACK, ring and northbound unchanged) |
 | T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap — **PASS 2026-10-06** (c66, block 64: 3 `CTR_LOW` refills contiguous, 6/6 DLs delivered, `no_counter` 0, `link_err` 0) |
 | T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes — **PASS 2026-10-06** (c65, CLI) |
-| T8 | Broker down (c67): stop the local MQTT broker for ≥ 30 s during a 10 s stream | the outbox fills and drains after the broker is back; 0 lost, 0 duplicates northbound; a full outbox stops the ACKs (the node backfills from history) |
+| T8 | Broker down (c67): stop the local MQTT broker for ≥ 30 s during a 10 s stream | the outbox fills and drains after the broker is back; 0 lost, 0 duplicates northbound; a full outbox stops the ACKs (the node backfills from history) — c68 2026-10-06: central **PASS** (the outbox held 2794/2795 and drained at 14:12:00.31 on the broker start, overflow 0), **end-to-end FAIL** (T8-F1) |
 | T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
 
 **C3 deviations from the link doc (to review; fold into C5):**
@@ -860,6 +861,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 - T3-F3 (DL waste): the ring replay queued 3 stale `LinkCheckAns` plus the live one, which cost 4 consecutive `0x91` DLs. Fix (central): keep at most one pending `LinkCheckAns` per peer, the answer to the newest request; drop answers to older replayed requests.
 - T3-F4 (resolved, no loss): fcnt 2044 was never ACKed; its retry 3 went out on a fresh counter as 2046 and was ACKed at 12:50:09Z (2045 is the link-check). The NB still suppressed at 12:50:00–01 because the restarted central was in its 1 s learning window and had not ACKed the full ring yet, which is correct backpressure. `evt_head_seq` (c68 + NB 0.3.1 final) removes that window.
 - T3-F5 (Portal): the backfill fires only on a gap > 2 × `interval_report`. A single given-up report leaves a gap of exactly 2 × interval, so it is never backfilled. Proposal: trigger at > 1.5 × interval (owner: Portal / NT).
+- **T8-F1 (end-to-end loss):** the outbox covers only central → broker. The broker PUBACKed the drained 2794/2795 at 14:12:00.31, the Portal reconnected 2 s later (30 s backoff) with `clean_session = true`, and mosquitto has no persistence, so nobody was subscribed and both uplinks are lost for the Portal. This is not TOWER-specific: any broker restart loses northbound data for every radio (LoRaWAN too). Fix = C7.
 
 **C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
 - A: the first ring event after `EVT_BOOT` is ACKed ~1 s late.
@@ -874,7 +876,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 4. C5.
 5. The P2 result goes into the #470 body.
 
-**P2 is done when:** C1–C6, T1–T6 and T8 have passed. T7 moves to P3 if 0413 has no probe yet.
+**P2 is done when:** C1–C6, T1–T6 and T8 have passed (with C7 if Hynek approves it). T7 moves to P3 if 0413 has no probe yet.
 
 ### 13.4 P3 command checks run early (c66, 2026-10-06, NT)
 
