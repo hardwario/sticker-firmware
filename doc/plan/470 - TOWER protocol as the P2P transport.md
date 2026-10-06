@@ -821,8 +821,8 @@ the link doc ([470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub
 | C1 | NB: event ring ≥ 32 + `TWR_EVT_ACK`, go-back-N resend, ring full → no ACK and no `last_seen` update (link §4.1) | HC | native tests — **done** 2026-10-06 (`hynek/nb-evt-ack` 0b820280, twister 98/98 incl. `tower_evq`; ring 32, resend 300 ms, first seq after BOOT = 1) |
 | C2 | NB: `TWR_NODE_ADD` `KEEP_NEWER` (link §4.2) | HC | native tests — **done** 2026-10-06 (8388366e) |
 | C3 | Central: `TWR_EVT_ACK` after persisting, dedup by delivery `seq` (window 128), `KEEP_NEWER` on every restore, the §6.2 / §6.3 sequences; command downlinks (port 86) sent `CONFIRMED` and re-pushed on `NOT_DELIVERED` (T2 finding: an unconfirmed DL lost on air goes unnoticed); `0x91` answers stay unconfirmed (the node re-asks); debug-only counter block size for T5 | HC | tests with a scripted NB (link §9) — **done** 2026-10-06 (central `hynek/p2p-tower-central-main` 31f60cc1 / 43853713 / df822bbf / 78ddedeb; control-radio 536 + make check 3758 green) |
-| C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 |
-| C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner — **done** 2026-10-06: proximos-v2 `hynek/p2p-tower-link-doc` `b2817d8e` (`plan/control/radio/p2p_tower_gateway.md`: Part A link, Part B central), reviewed and approved by the planner; the MR waits for Hynek. The sticker copy becomes a pointer once that MR is merged |
+| C4 | Golden link vectors (JSON shared by the NB native_sim and the central) + deframer fuzzing | HC | link §9 — **done** 2026-10-06. 117 vectors in `plan/control/radio/p2p_tower_link_vectors.txt`, byte-identical on both sides, 24 of them hand-built from the doc tables (GET_INFO checked against the §3 offsets). Seeded fuzz: central 20k + 2k noise, NB 10k + 2k noise, no panic, resync OK. Findings fixed: the encoder refuses reserved addr/net_id 0 and 0xFFFFFFFF (`be831912`); NB `P2P_MAX_ENCODED_LEN` 566 → 570 for a fully escaped 280 B body (`732725fd`, latent; must be in the NB 0.3.1 production build); `ack` 5 dropped and counted (`bad932a7`); drain log (`0f225cf8`). Central `f988320f` (569 lib tests), NB `6b6139b8` (twister 133/133) |
+| C5 | Fold the link doc into proximos-v2 `p2p_tower_gateway.md`; this copy then only points there | HC | review by the planner — **done** 2026-10-06: proximos-v2 `hynek/p2p-tower-link-doc` `cbb8ac7e` (doc gaps found by the C4 vectors fixed) (`plan/control/radio/p2p_tower_gateway.md`: Part A link, Part B central), reviewed and approved by the planner; the MR waits for Hynek. The sticker copy becomes a pointer once that MR is merged |
 | C6 | Integration image (NB 0.3.1 + central) deployed | HC | NB flash: Hynek's OK in the HC chat — **done** 2026-10-06 (NB flashed 12:21:46Z): c66 `5e16bacc` (c65 + C3), NB 0.3.1 HIL build `8a87edfe` with `RX_INJECT`, sha256 24d5f445 |
 | C7 | T8-F1 (persistent MQTT sessions for the Hub consumers, mosquitto persistence): **out of P2**, tracked in a separate issue (Hynek 2026-10-06) | — | — |
 
@@ -877,6 +877,8 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 5. The P2 result goes into the #470 body.
 
 **P2 is done when:** C1–C6, T1–T6 and T8 have passed. T8 counts on the central side; the broker → consumer hop (T8-F1) is a separate issue. T7 moves to P3 if 0413 has no probe yet.
+
+**P2 result (2026-10-06): DONE.** C1–C6 and T1–T6 + T8 (central side) passed on c66/c68 + NB 0.3.1 HIL. Left for Hynek: the proximos-v2 MRs (central `hynek/p2p-tower-central-main`, NB `hynek/nb-evt-ack`, doc `hynek/p2p-tower-link-doc`) and the NB 0.3.1 production build with `732725fd`. T7 moves to P3; T8-F1 is a separate issue.
 
 ### 13.4 P3 command checks run early (c66, 2026-10-06, NT)
 
