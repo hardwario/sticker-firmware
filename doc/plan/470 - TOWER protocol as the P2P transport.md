@@ -930,6 +930,20 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 
 **Owners:** NB + central → Hub controller; node → Sticker controller. P3-F1 closes with this.
 
+**HIL result (2026-10-06 16:17–16:37Z, SC + HC): PASS.** 5722 on p2pb `d6d0a969`, NB 0.3.2 (`hynek/nb-ack-ctrl` `17af0c83`), central c69 `bd2b8db0`.
+
+| Check | Result |
+|---|---|
+| Uplinks | 144/144 ACKed; no failed link check, no WARNING |
+| LC answered in the ACK | **PASS**: all 22 `LinkCheckAns` arrived in the ACK tail, none as a `0x91` DL |
+| `TimeAns` in the ACK | **PASS**: all 4 in the tail; a clock-sync `TimeReq` + LC (uplink 3632) got one shared tail |
+| Clock | **PASS**: RTC offset at set −0.30 / +0.41 / +0.20 / −0.48 s (criterion ±1 s) |
+| NB counters | `ack_ctrl_sent` 26 (LC 23, time 4, 1 shared), `acks_late` 0, `ack_time_no_anchor` 0; the anchor refreshed every 60 s |
+| Commands (NT) | force-send, clock-sync, SetParam 120 / 60 with reboots, GetConfig: all received, ACKed and answered |
+| P3-F1 re-run (command + LC in one exchange) | not seen on air: the `LinkCheckReq` goes 5 s after the report, so commands ride the report ACKs and no longer queue behind an answer. The combined case is covered natively; an air run needs NT to queue a DL inside that 5 s gap. P3-F1 is closed. |
+
+Node lists: SC `~/Documents/claude/tower-p1/ack_node.txt`.
+
 ## 14. Test plan (outline)
 
 - **KAT**: generated from the Rust crates (`tower-radio-core` CCM, `tower-net-core` nonce/ACK/

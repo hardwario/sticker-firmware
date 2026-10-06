@@ -342,4 +342,6 @@ the link would lose the data, hence:
   - P0: KAT, ACK turnaround 20 ms, 0 retransmits at SF7–SF12, downlink after PENDING;
   - P2: join, confirmed uplinks, `0x91`, Portal commands, ring replay, NB/central
     restarts, backfill beyond the ring (T1–T6, T8 central side): **PASS**;
-  - P3: command checks PASS; answers in the ACK on NB 0.3.2 + c69: **pending**.
+  - P3: command checks PASS; answers in the ACK on NB 0.3.2 + c69: **PASS** (144/144
+    uplinks ACKed, 22 LinkCheckAns + 4 TimeAns all in the ACK tail, no `0x91` DL, RTC
+    within ±0.5 s).
