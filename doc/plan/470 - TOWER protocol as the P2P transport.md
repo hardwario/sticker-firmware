@@ -926,7 +926,7 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 **Tests.**
 - native: ACK tail codec (with and without `PENDING`, unknown TLV skipped), node window, NB answer builder incl. the margin formula and no anchor → no `TimeAns`;
 - golden link vector for `TWR_TIME_SYNC` + ACK-tail KAT frames shared by node and NB (single source: proximos-v2 `plan/control/radio/p2p_tower_ack_ctrl_kat.txt`, `hynek/nb-ack-ctrl` `483d3a65`);
-- HIL: LC every 5th report answered in the ACK (no `0x91` DL on air), clock-sync RTC error < 10 ms, P3-F1 re-run (a command plus an LC in the same exchange → the command arrives on that uplink).
+- HIL: LC every 5th report answered in the ACK (no `0x91` DL on air), clock-sync: the node RTC (whole seconds) within ±1 s of the Hub, rounded correctly (the `fraction` is used for rounding; a sub-second RTC set is not needed, since every application timestamp is in seconds), P3-F1 re-run (a command plus an LC in the same exchange → the command arrives on that uplink).
 
 **Owners:** NB + central → Hub controller; node → Sticker controller. P3-F1 closes with this.
 
