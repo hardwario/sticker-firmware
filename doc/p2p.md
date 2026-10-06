@@ -409,8 +409,11 @@ accepted; persisting it would cost an NVS write per frame.
 session is being replaced.
 
 **Link supervision** is app_radio's single machine for both radios. A failed link
-check is a confirmed frame with no ACK after its retries; any authenticated downlink
-is a success.
+check is a **link-check report** (`APP_RADIO_FRAME_LINK_CHECK`: the cadence's report,
+every one in WARNING) with no ACK after its retries. A lost alarm, answer or plain
+report does not count (Hynek 2026-10-06): with every report confirmed (F6), counting
+them would turn an outage of 8 reports, however short, into a rejoin. Any
+authenticated downlink is a success.
 
 - 3 failures in a row → **WARNING**. P2P has **no rung** here (`warning_step` returns
   false: no power or SF control, plan §7.4).

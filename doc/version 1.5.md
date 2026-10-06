@@ -1471,7 +1471,7 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.6.
   - `true` sends alarms confirmed on both radios. On LoRaWAN that is a confirmed uplink, retried as below.
 - **One retry ladder** in `app_radio`:
   - A confirmed frame without its Ack goes again after a random 1..2^n s (n = the retry), on top of any duty-cycle wait, at most 3 times. Nothing else is sent meanwhile.
-  - Given up, the frame counts as sent and as a failed link check (link supervision, §28).
+  - Given up, the frame counts as sent. Only a link-check report given up is a failed link check (§35); an alarm, answer or plain report is not.
   - P2P resends the same counter (a byte-identical frame). LoRaWAN takes a new FCnt, with LoRaMac NbTrans left at 1.
   - A deferred command action (reboot, settings save) waits for a pending retry on either radio.
 - Answers and history frames stay confirmed on P2P and unconfirmed on LoRaWAN; telemetry is unchanged.
@@ -1611,6 +1611,12 @@ transport.md`; node behaviour: `doc/p2p.md`.
   With the link-check-only policy a command waited up to 5 × 900 s.
 - **Link check:** the link-check report also queues a LinkCheckReq. The
   LinkCheckAns fills the uplink RSSI / SNR / margin in `RadioState`.
+- **Failed link check:** only a link-check report left unacknowledged after its
+  retries counts towards WARNING and the rejoin (Hynek 2026-10-06), on both radios.
+  A lost alarm, answer or plain report no longer does. This keeps F6 from shortening
+  the outage a node rides out: the link-check cadence and WARNING set it, as before. On
+  LoRaWAN it only changes `radio-alarm-ack true`: a lost confirmed alarm is no failed
+  check; LoRaWAN's link check itself is the LinkCheckAns, as before.
 - **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
   rung; the SF sweep and adoption are gone.
 - **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
