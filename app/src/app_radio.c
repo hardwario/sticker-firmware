@@ -187,6 +187,9 @@ static K_WORK_DELAYABLE_DEFINE(m_seq_deadline_work, seq_deadline_work_handler);
  * (doc/plan/460 §2.5, F3). */
 static void announce_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_announce_work, announce_work_handler);
+/* The periodic re-announce (#445), on the system work queue. */
+static void periodic_announce_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_periodic_announce_work, periodic_announce_work_handler);
 static void page_stream_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_page_stream_work, page_stream_work_handler);
 static void post_cmd_work_handler(struct k_work *work);
@@ -2234,6 +2237,63 @@ static void announce_jitter_work_handler(struct k_work *work)
 	announce_kick();
 }
 
+/* Periodic announce (#445): every interval_announce hours the node re-sends the
+ * boot/join Info + settings-info, so the network's retained identity and config
+ * heal without a reboot (a local config change, a node re-registration, a DB
+ * restore). The period runs from the last announce -- boot, join or a previous
+ * periodic one -- and a boot/join announce restarts it. Each period ends at a
+ * random point of its last 10 %, so a fleet powered on together drifts apart
+ * and a node still announces at least once per period. Not a boot/join
+ * sequence: data is not held, the frames just queue as answers ahead of the
+ * next telemetry. A link that is down when the period ends needs no retry:
+ * every return to a ready link (LoRaWAN join, P2P paired) runs
+ * app_radio_announce(), which announces and restarts the period. 0 = off; a
+ * changed value takes effect at the next arming (settings save reboots). */
+#define PERIODIC_ANNOUNCE_JITTER_DIV 10
+
+uint32_t app_radio_periodic_announce_delay_ms(uint32_t hours, uint32_t rnd)
+{
+	if (hours == 0) {
+		return 0;
+	}
+	uint32_t period_ms = MIN(hours, 168U) * 3600U * 1000U;
+	uint32_t span_ms = period_ms / PERIODIC_ANNOUNCE_JITTER_DIV;
+
+	return period_ms - span_ms + rnd % span_ms;
+}
+
+static void periodic_announce_arm(void)
+{
+	uint32_t delay_ms = app_radio_periodic_announce_delay_ms(
+		(uint32_t)MAX(g_app_config.interval_announce, 0), sys_rand32_get());
+
+	if (delay_ms == 0) {
+		(void)k_work_cancel_delayable(&m_periodic_announce_work);
+		return;
+	}
+	k_work_reschedule(&m_periodic_announce_work, K_MSEC(delay_ms));
+}
+
+static void periodic_announce_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (g_app_config.interval_announce <= 0) {
+		return;
+	}
+
+	enum app_radio_state state = app_radio_get_state();
+
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
+		LOG_INF("Periodic announce deferred to the next link-up");
+		return; /* its app_radio_announce() announces and re-arms */
+	}
+	LOG_INF("Periodic announce");
+	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
+	announce_kick();
+	periodic_announce_arm();
+}
+
 void app_radio_announce(void)
 {
 	/* Fleet de-correlation for the announce too: nodes rebooted by one batch
@@ -2247,6 +2307,7 @@ void app_radio_announce(void)
 	k_work_reschedule(&m_seq_deadline_work, K_MSEC(delay_ms + ANNOUNCE_HOLD_MAX_MS));
 	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
 	k_work_reschedule(&m_announce_jitter_work, K_MSEC(delay_ms));
+	periodic_announce_arm(); /* the period restarts at every boot/join announce */
 }
 
 bool app_radio_announce_pending(void)
@@ -2323,6 +2384,7 @@ void app_radio_test_cmd_reset(void)
 	(void)k_work_cancel_delayable_sync(&m_announce_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_announce_jitter_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_seq_deadline_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_periodic_announce_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_jitter_work, &sync);
 	m_post_cmd_action = APP_CMD_ACTION_NONE;
 	m_post_cmd_deferrals = 0;

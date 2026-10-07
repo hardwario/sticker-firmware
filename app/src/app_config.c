@@ -39,6 +39,7 @@ static const struct app_config m_app_config_defaults = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
@@ -75,6 +76,7 @@ static struct app_config m_app_config = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
@@ -150,6 +152,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		     sizeof(m_app_config.vendor_reset_allow));
+	SETTINGS_SET("interval-announce", &m_app_config.interval_announce,
+		     sizeof(m_app_config.interval_announce));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -307,6 +311,12 @@ static int h_commit(void)
 	if (m_app_config.battery_level > 3600) {
 		m_app_config.battery_level = 3600;
 	}
+	if (m_app_config.interval_announce < 1 && m_app_config.interval_announce != 0) {
+		m_app_config.interval_announce = 1;
+	}
+	if (m_app_config.interval_announce > 168) {
+		m_app_config.interval_announce = 168;
+	}
 	if (m_app_config.alarm_limit < 0) {
 		m_app_config.alarm_limit = 0;
 	}
@@ -403,6 +413,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		    sizeof(m_app_config.vendor_reset_allow));
+	EXPORT_FUNC("interval-announce", &m_app_config.interval_announce,
+		    sizeof(m_app_config.interval_announce));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -696,6 +708,11 @@ static void print_vendor_reset_allow(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " vendor-reset-allow %s",
 		    m_app_config.vendor_reset_allow ? "true" : "false");
+}
+
+static void print_interval_announce(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " interval-announce %d", m_app_config.interval_announce);
 }
 
 static void print_alarm_limit(const struct shell *shell)
@@ -1083,6 +1100,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_sensors(shell);
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
+	print_interval_announce(shell);
 	print_alarm_limit(shell);
 	print_lrw_region(shell);
 	print_radio_mode(shell);
@@ -1321,6 +1339,36 @@ static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char *
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
 			print_vendor_reset_allow);
+}
+
+static int cmd_interval_announce(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_interval_announce(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	int a = strtol(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (a != 0 && (a < 1 || a > 168)) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.interval_announce = a;
+
+	return 0;
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1835,6 +1883,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(vendor-reset-allow, NULL,
 	              "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel.",
 	              cmd_vendor_reset_allow, 1, 1),
+
+	SHELL_CMD_ARG(interval-announce, NULL,
+	              "Get/Set periodic Info + settings-info announce interval (range 1 to 168 hours; 0 = off).",
+	              cmd_interval_announce, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",

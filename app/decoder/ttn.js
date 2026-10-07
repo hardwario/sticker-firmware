@@ -110,7 +110,7 @@ var _RESET_CAUSES = [
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
   4: "history_enable", 5: "history_sensors", 6: "battery_level",
-  7: "vendor_reset_allow"
+  7: "vendor_reset_allow", 8: "interval_announce"
 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
