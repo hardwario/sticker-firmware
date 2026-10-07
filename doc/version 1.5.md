@@ -42,6 +42,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
+| LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §35. |
 
 ---
 
@@ -1604,6 +1605,49 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **Join:** `app_radio_link_up()` queued the DeviceTimeReq, and the DeviceTimeAns set the RTC 33 s later, on the next uplink, to host UTC.
   - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
   - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
+
+## 35. Periodic Info + settings-info announce (#445)
+
+The network side (LNS, Hub central, Portal) keeps a retained copy of each
+node's identity, firmware and effective configuration. Until now it was
+refreshed only by the boot/join announce (§4, §23) or by polling (GetInfo,
+`GetSettings`, §14). The copy went stale after a config change without
+a reboot (Hub, 2026-09-26: `interval_sample` stayed 60 after a set-config to
+45), after a node-remove / node-add or a DB restore, and on a node that never
+reboots.
+
+- **New parameter `interval-announce`** (`application.interval_announce`,
+  proto_id 8): hours, default **24**, range 1..168, **0 = off**. Writable over
+  shell, NFC and the radio, like the other intervals.
+- **Behaviour** (`app_radio.c`, one path for both radios):
+  - every boot/join announce (`app_radio_announce()`) also arms the periodic
+    one; a re-join therefore restarts the period;
+  - the period ends at a random point of its last 10 % (24 h: 21.6–24 h), so
+    a fleet powered on together drifts apart and every node still announces
+    at least once per period; the next period is anchored on this announce;
+  - it sends the same frames as the boot/join announce: `Info` (seq 0), then
+    the settings-info `ConfigDump` (seq 0), paged (#425), deferred while the
+    answer queue is full or a page stream runs, re-armed when the budget drops
+    under a queued frame. A duty-cycle hold delays it like any queued answer;
+    nothing is dropped;
+  - unlike the boot/join announce it holds no data: there is no spread, and
+    alarms and telemetry are not held (the frames simply queue as answers,
+    which go ahead of telemetry);
+  - when the link is not ready at the end of the period (joining,
+    reconnecting, unpaired) nothing is sent and nothing retries: every return
+    to a ready link runs `app_radio_announce()`, which announces and restarts
+    the period anyway;
+  - nothing is reset: counters, history and the link state stay as they are.
+- **A changed value** takes effect at the next arming. `settings save` reboots,
+  so a persisted change applies at once; a staged change without save applies
+  at the end of the running period (from 0, only at the next boot/join).
+- **Cost:** release +456 B flash, +64 B RAM. Two answers per period, i.e. ~2 frames per day at the default
+  (more when paged at a low LoRaWAN DR).
+- **Tests:** `tests/radio_common`, both profiles: repeats within [0.9, 1.0] of
+  the period, off at 0, deferred to the link-up while the link is down,
+  restarted by a re-join; the delay bounds. `ttn.test.js`: the
+  `set_param application.interval_announce` round-trip. Manual: L4d.
+- **Not covered yet:** HIL on the bench (L4d, both radios).
 
 ---
 

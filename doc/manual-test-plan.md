@@ -455,6 +455,31 @@ interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_sl
 
 - [x] Pass (EU868 one-frame answer)
 
+### L4d — Periodic Info + settings-info announce (v1.5.0, #445)
+
+**Goal:** A node that runs without a reboot re-announces its Info + settings-info every
+`interval_announce` hours, so the network's retained identity/config heals by itself. LoRaWAN and
+P2P behave the same.
+**Observable:** RTT `Periodic announce`, then `Info announced` and `Settings-info announced`, and
+on the network side a fPort-85 (P2P: `0x55`) `Info` seq 0 followed by the settings-info
+`ConfigDump` seq 0, between 0.9 and 1.0 × `interval_announce` after the previous announce. No
+reboot, no re-join, no counter / history reset; telemetry keeps its cadence.
+
+**Prompt for Claude:**
+> On a joined (LoRaWAN) or paired (P2P) bench node set `config interval-announce 1` and
+> `settings save`; note the time of the boot/join announce. Leave RTT attached (debug: keep the
+> 20 min keepalive). Within 54–60 min confirm `Periodic announce` and the two frames on the network
+> side, decoded with `app/decoder/ttn.js`, and that the next one follows 54–60 min after it. Change
+> a setting over the shell **without** a reboot (`config interval-sample 30`, no save) and confirm
+> the next periodic settings-info carries the staged value. Then (a) set `interval-announce 0` +
+> save: after the boot announce no periodic one for > 1 h; (b) with `interval-announce 1`, take the
+> link down at the 50 min mark (LoRaWAN: gateway off; P2P: Hub off) so the period ends while the
+> link is down: RTT `Periodic announce deferred to the next link-up`, nothing sent; after the
+> re-join the join announce goes and the next periodic one comes ~1 h after it. Run on both radios.
+> Restore `interval-announce 24`.
+
+- [ ] Pass
+
 
 **Goal:** Telemetry is sent on the configured interval.
 **Observable:** fPort 2 uplinks every `interval_report` seconds; RTT `Snapshot complete; next

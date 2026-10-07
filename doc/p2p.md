@@ -817,6 +817,11 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   a retry keeps its place. This is one path in `app_radio`
   shared with LoRaWAN's join announce; the central decodes an unsolicited
   `0x55` (its correlation keeps the queue head when the seq does not match).
+- **Periodic announce (#445):** every `interval-announce` hours (default 24,
+  0 = off) the same Info + settings-info go again, at a random point of the
+  period's last 10 %, anchored on the previous announce; every link-up
+  announce restarts the period. No data is held and nothing retries while the
+  link is down (the next link-up announces anyway). Same path as LoRaWAN.
 - **Command correlation (`seq`)**: the `0x56` body is the same fPort-85
   `Command` protobuf, and the central stamps every structured one with a
   nonzero `seq` from its per-node allocator. The node echoes it without doing
