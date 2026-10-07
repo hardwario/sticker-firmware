@@ -403,18 +403,25 @@ static inline uint32_t app_radio_duty_budget_ms(uint32_t freq_hz)
 	return APP_RADIO_DUTY_1PCT_MS / 10;
 }
 
-/* Ring capacity: one entry per transmission still inside the window. When the
- * ring is full the two OLDEST entries are folded into one (summed air, the
- * later end time) instead of making the frame wait for a slot, so the air-time
- * budget, not the entry count, is the only limit (F-P2P-1). The folded entry
- * leaves the window a little later than its older half would have, which can
- * only over-count air, never under-count it: every sliding hour still stays
- * within the limit. doc/p2p.md §6. */
-#define APP_RADIO_DUTY_LEDGER_ENTRIES 48
+/* The ledger keeps one entry per SLOT, not per frame: a frame that ends in the
+ * same fixed APP_RADIO_DUTY_SLOT_MS slot (uptime / slot) as the newest entry is
+ * added to it, and the entry's end moves to the frame's. An entry therefore
+ * never spans more than one slot, its air leaves the window at most a slot
+ * later than the frame's own would have (over-count only, never under-count),
+ * and the live entries of an hour sit in distinct slots: at most
+ * WINDOW / SLOT + 1 = 49, the ring size. A per-frame ring folded its two oldest
+ * entries once full (F-P2P-1), and above 48 frames/h every frame folded again:
+ * the folded entry rode ~48 frames behind, never left the window and summed
+ * all air since, so a 60 s cadence hit the 1 % allowance after ~6 h and went
+ * silent ~21 min until it aged out (TOWER bench 2026-10-07). The fold stays
+ * as a fallback for the one extra slot the 32-bit uptime wrap can add.
+ * doc/p2p.md §6. */
+#define APP_RADIO_DUTY_SLOT_MS        (APP_RADIO_DUTY_WINDOW_MS / 48U) /* 75 s */
+#define APP_RADIO_DUTY_LEDGER_ENTRIES (APP_RADIO_DUTY_WINDOW_MS / APP_RADIO_DUTY_SLOT_MS + 1U)
 
 struct app_radio_duty_entry {
-	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
-	uint32_t air_ms; /* its time on air; a folded entry holds the sum of two */
+	uint32_t end_ms; /* uptime (ms, truncated) at which its last frame finished */
+	uint32_t air_ms; /* the air of every frame of its slot (or of a fold) */
 };
 
 struct app_radio_duty {

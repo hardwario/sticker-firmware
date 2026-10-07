@@ -96,11 +96,12 @@ central that predates it.
 | P2E-21 | Wrong key | central registered with a different `app_key`; `ats radio unjoin` | `JoinRequest sent …` repeating, never `Joined`; window expires → `state: UNPAIRED` | `JoinRequest tag INVALID for serial … — dropping (forged, corrupt, or wrong app_key)` |
 | P2E-22 | Tampered / replayed downlink | rig B (DUT + `tests/p2p` gw-sim, FIBER idle): inject a corrupted-tag JoinAccept, a stale-counter Ack, and a tampered Ack body | `JoinAccept: auth failed`; stale counter silently ignored then `Uplink retry 1/3 sent`; tampered body → `Ack auth failed (counter N)`. A tampered Detach/RejoinRequest gives `Detach/RejoinRequest auth failed (counter N)` and the pairing survives | — (the central's own replay logic is a separate F-row) |
 
-**P2E-16 cadence.** The ledger holds one entry per transmission still inside the
-hour, `APP_RADIO_DUTY_LEDGER_ENTRIES` = 48. Since F-P2P-1 a full ring folds its
-two oldest entries instead of blocking, so the entry count no longer limits the
-frame rate and any `interval-report` works; only the air-time budget of the
-`p2p-frequency` sub-band holds frames. doc/p2p.md §6 describes the ledger.
+**P2E-16 cadence.** The ledger holds one entry per 75 s slot still inside the
+hour (`APP_RADIO_DUTY_LEDGER_ENTRIES` = 49), however many frames the slot had, so
+the entry count never limits the frame rate and any `interval-report` works;
+only the air-time budget of the `p2p-frequency` sub-band holds frames. A 60 s
+cadence must run past 7 h without a hold (the F-P2P-1 fold went silent ~21 min
+every ~6 h). doc/p2p.md §6 describes the ledger.
 
 ### 3.2 Added for B8 — device-driven history replay over P2P
 
