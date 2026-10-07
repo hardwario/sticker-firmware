@@ -450,7 +450,7 @@ authenticated downlink is a success.
 | Normal reboot | the persisted pairing is resumed: no JoinRequest, the announce runs |
 | `factory_reset` / `vendor_reset` / `lrw_reset` | `app_radio_reset_link()` clears `p2pjoin/state` (the dev_nonce and TX counter are kept). `radio_mode` and `radio_appkey` revert to their defaults, so the radio stays off, and a re-enable without re-provisioning is refused (§4) |
 | `ats radio unjoin` | clears `p2pjoin/state`, reboot required. Simulates a never-paired boot |
-| Mute station (M-2) | paired but no telemetry for 4 × `interval_report` → self-heal re-join (`app_radio_stale_check()`, shared with LoRaWAN) |
+| Mute station (M-2) | paired but no telemetry for 4 × `interval_report` → self-heal re-join (`app_radio_stale_check()`, shared with LoRaWAN). Telemetry that went on air counts even when its ACK never came (given up after 3 retries), so an RF outage is left to the link-check supervision |
 | Detach / RejoinReq | §5.4 |
 | Firmware changing the pairing record | a record of another length does not load: `UNPAIRED`, one automatic re-join (the old wire's 24 B record → TOWER's 22 B) |
 
@@ -577,6 +577,7 @@ The common core is covered by `tests/radio_common`. Run both with
 | `compose` | build one telemetry frame under the current session without sending it; dump hex |
 | `listen on\|off` | continuous RX: log the TOWER header, RSSI and SNR of every frame on the channel (no key, so nothing is opened). Uplinks get `-EBUSY` while it runs |
 | `ack_drop <n>` | make the next n valid ACKs appear lost, to exercise the repetitions and app_radio's retries |
+| `tx_mute on\|off` | every telemetry frame fails before the air while the queue drains, to drive the M-2 rejoin (needs `CONFIG_WATCHDOG`; LoRaWAN has it too). An `ack_drop` storm never trips M-2: an unanswered frame was still sent |
 | `unjoin` | clear the pairing (reboot) |
 | top-level `join` | force a fresh join now |
 
