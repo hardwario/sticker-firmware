@@ -467,7 +467,10 @@ trace by its TX burst (airtime and TX current):
 | 15:09:55 | `WARNING` | 824 ms, 57 mA | DR1/SF11 |
 | 15:12:02 | `WARNING` | 1483 ms, 57 mA | DR0/SF12 telemetry — the floor |
 | 15:12:12 | → `RECONNECT` | — | check failed at the floor, 5th failure in `WARNING` |
-| 15:13:01, 15:15:16, 15:18:34, 15:26:57, … | `RECONNECT` | 1483 ms, 57 mA | SF12 JoinRequests, gaps 59 / 135 / 198 / 503 s (60 s × 2ⁿ + jitter, cap 3600 s) |
+| 15:13:01, 15:15:16, 15:18:34, 15:26:57, 15:46:14, 16:21:16 | `RECONNECT` | 1483 ms, 57 mA | SF12 JoinRequests, gaps 59 / 135 / 198 / 503 / 1157 / 2102 s (60 s × 2ⁿ + jitter, cap 3600 s) |
+| 17:11:47 | — | — | device re-enabled on ChirpStack |
+| 17:16:15 | → `HEALTHY` | 1483 ms + 2 × 2303 ms | next scheduled join (+3299 s) accepted; Info + ConfigDump at SF12, then ADR back to DR5 |
+| 17:18–17:31 | `HEALTHY` | 78 ms, 28 mA | 120 s reports at SF7 again |
 
 - The ladder runs to the end: every rung is taken before the rejoin, which comes only at the floor with the
   rejoin budget spent (`app_lrw.c` `on_lc_failure`). The M-2 stale-uplink watchdog did not fire — the device
@@ -476,9 +479,18 @@ trace by its TX burst (airtime and TX current):
   report). At the default 900 s this scales to ≈ 2.5 h + 1.25 h.
 - Charge of the TX part of a report: SF7 ≈ 1.7 mC → SF8 6.8 → SF9 12.3 → SF10 24.6 → SF11 47 → SF12 85 mC
   (×50 from DR5 at reduced power to DR0 at full power), plus ≈ 8–11 mC of RX windows. A JoinRequest costs
-  ≈ 87 mC + ≈ 12 mC for its RX1/RX2 windows (the two small bursts ~5–6 s after each join). Between bursts the
-  idle band is unchanged (70.5 µA healthy).
-- Recovery after re-enabling the device: pending (run in progress).
+  ≈ 87 mC + ≈ 12 mC for its RX1/RX2 windows (the two small bursts ~5–6 s after each join). In `WARNING` the
+  idle band between bursts is unchanged (70.5 µA healthy).
+- In `RECONNECT` the floor rises from ≈ 76 µA to ≈ 149 µA: the status LED blinks yellow 10 ms + red 80 ms
+  every 3 s (`main.c`, `BLINK_INTERVAL_SECONDS`), ≈ 0.23 mC per blink, ≈ +1.75 mAh/day for as long as the
+  network is gone — about as much as the whole healthy idle budget.
+- Average excluding the NFC probe windows: healthy 155.6 µA (560 mC/h at 120 s reports); outage hours with
+  rejoins every 35–55 min 148–212 µA (534–763 mC/h). At the 120 s grid the outage costs little more than
+  the healthy hour; the LED, not the radio, dominates once the rejoin back-off is at its cap.
+- Recovery: the network comes back only at the next scheduled join — 4.5 min here, up to ≈ 1 h once the
+  back-off has reached its cap. The join was accepted at once, Info and ConfigDump went out at SF12, ADR
+  brought the device back to DR5 within two reports, and the last 10 min averaged 159 µA (idle 67.7 µA) — the
+  healthy profile.
 
 See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
 

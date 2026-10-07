@@ -1337,7 +1337,11 @@ integrated. Report per scenario: idle avg excluding bursts, floor median, min, a
     default power: ≈ 1.7 → 85 mC, ×50); the idle band between reports is unchanged.
   - At the floor: JoinRequests follow the rejoin back-off (60 s × 2ⁿ + jitter, cap 3600 s) and the
     EU868 duty cycle — no back-to-back join storm, and no rejoin forced while the duty cycle refuses sends (F29).
-  - Recovery: rejoin, then the normal report cadence; the idle band returns to the healthy one.
+  - `RECONNECT` idle floor ≈ 2× the healthy one — the status LED blink every 3 s (≈ 0.23 mC each);
+    an idle band *above* that points at something else awake.
+  - Recovery: the device rejoins at its next scheduled join (up to ≈ 1 h after the LNS is back once the
+    back-off is capped), sends Info + ConfigDump, returns to DR5 via ADR; the idle band returns to the
+    healthy one and the LED stops.
 - **Evidence:** table DR × {mC per report, airtime}; state timeline from the NFC probes;
   outage hour vs healthy hour (mC/h) as the battery-life cost of a lost network; LNS frame log
   aligned to the trace.
