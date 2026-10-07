@@ -296,7 +296,7 @@ the link would lose the data, hence:
   `0x81 ‖ 86 ‖ protobuf` (body ≤ 76 B; longer responses use paging).
 - The answer comes back as a port-85 uplink and is correlated by `seq`.
 - After 5 failed attempts the central publishes `{kind: "undelivered", attempts: 5, …}`.
-  The Portal does not read it yet; it closes the request on its own timeout.
+  The Portal ends the command with this result (H4, proximos-v2 `b357e231`, not merged yet).
 
 ### 4.4 Status and diagnostics
 
@@ -313,7 +313,8 @@ the link would lose the data, hence:
 - If uplinks are lost beyond the ring (≥ 32 frames), the Portal sees a gap and requests
   history; the Node replays it at **sample** resolution. Report resolution of the gap is
   lost; no rejoin is needed (criterion T3).
-- The Portal triggers backfill only on a gap > 2 × `interval_report` (T3-F5).
+- The Portal triggers backfill only on a gap > 2 × `interval_report`, batched, as on LoRaWAN
+  (decided 2026-10-07): a single lost report is not backfilled.
 
 ---
 
@@ -326,8 +327,7 @@ the link would lose the data, hence:
 | — | An NB reset after the ACK and before the central's ack loses those frames (RAM). |
 | — | A JoinAccept lost on air after the commit: the Node keeps its old pairing until the next JoinRequest. |
 | — | TimeAns runs late by the `GET_INFO` transfer (~16 ms), uncompensated. |
-| T3-F5 | Portal backfill ignores a single lost report (gap ≤ 2 × interval). |
-| — | The Portal does not read `undelivered` command documents. |
+| — | A single lost report is not backfilled (gap ≤ 2 × interval), as on LoRaWAN. |
 | §3.3 | Single channel 869.525 MHz, RX boost and FW defaults: pending decision. |
 
 ---

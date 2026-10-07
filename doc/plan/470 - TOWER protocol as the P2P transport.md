@@ -788,6 +788,8 @@ the message tables live only there. The address collision check runs at `node-ad
 - `node-add` can fail with an address collision → show the central's error.
 - Hub radio settings: `modulation` shown (read-only `lora` until P5).
 
+**H4 status (2026-10-07, NT, Hynek's OK): done in proximos-v2 `nodes-test/p2p-portal-h4` `b357e231`** (base `hynek/p2p-ack-ctrl` `46945a4b`, not pushed yet). Collision pre-check from the local registry on node-add and move → p2p (names both DevEUIs and the addr), the Hub's `AddressCollision` shown as `address_collision`; `modulation` read-only on the Hub System tab when the Hub runs P2P; the `undelivered` command document ends the command as its own result (a late answer still completes it). Portal tests 1297 pass, clippy + fmt clean. Pending: HW collision test (signed node-add, needs Hynek's OK). Gateway doc amendments `eb7559c1` (§10.5, §15, §18).
+
 **H5 — Tests and HIL.**
 - Rust unit tests against both KATs.
 - NB + 0413 (SC's P1 FW): join → telemetry → MQTT decoded; `TimeAns` / `LinkCheckAns`;
@@ -848,7 +850,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 3. GET_INFO `now_ms` going backwards → treated as a missed NB reboot.
 4. `evt_ring_max == 0` (NB 0.3.0) → no `EVT_ACK`, so a mixed deploy keeps working. This departs from the flag day.
 5. A failed northbound publish is still ACKed. Fixed for c67: the frame goes to a bounded persistent outbox on disk before the ACK is owed. The drainer publishes at QoS 1 and deletes an entry only after its PUBACK, pending entries are replayed after a restart, and a full outbox stops the ACKs. "Don't ACK" alone would not work, because the counter is already persisted and the resend would be rejected as a replay. c66 is valid for T1–T5 while the broker is up.
-6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal does not read yet.
+6. Command DLs get up to 5 chances (`NOT_DELIVERED` / `RADIO_ERR` each use one). After that the central publishes a command document of kind `undelivered`, which the Portal reads since H4 (`b357e231`).
 7. A persistent storage failure stalls the ring, so the NB suppresses ACKs and the node keeps its data in history.
 
 **c67 (`01555825`, central `e39f01d6` D, `6150a7a7` A/B/C, `abbb8d12` outbox, `bb3f2369` docs; control-radio 726 tests green):** the outbox lives at `/data/proximos/radio/p2p/outbox/<id>.json` (fsync + rename), max 1000 messages; a separate QoS 1 drainer deletes an entry only after its PUBACK; overflow → the event is neither processed nor ACKed. New stats: `evt_relearn`, `evt_seq_gap`, `evt_seq_gap_seen`, `outbox_pending`, `outbox_overflow`. Delivery is at least once in three crash windows (PUBACK → delete, lost PUBACK, outbox append → sessions.db save), so northbound consumers dedup by DevEUI + frame counter.
@@ -860,7 +862,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 - T3-F2 (capacity): 36 uplinks overflow the 32-entry ring by design. The criterion is restated (lossless up to the ring, history beyond it) instead of growing the ring, because the ring is shared by all nodes and no fixed size covers every outage.
 - T3-F3 (DL waste): the ring replay queued 3 stale `LinkCheckAns` plus the live one, which cost 4 consecutive `0x91` DLs. Fix (central): keep at most one pending `LinkCheckAns` per peer, the answer to the newest request; drop answers to older replayed requests.
 - T3-F4 (resolved, no loss): fcnt 2044 was never ACKed; its retry 3 went out on a fresh counter as 2046 and was ACKed at 12:50:09Z (2045 is the link-check). The NB still suppressed at 12:50:00–01 because the restarted central was in its 1 s learning window and had not ACKed the full ring yet, which is correct backpressure. `evt_head_seq` (c68 + NB 0.3.1 final) removes that window.
-- T3-F5 (Portal): the backfill fires only on a gap > 2 × `interval_report`. A single given-up report leaves a gap of exactly 2 × interval, so it is never backfilled. Proposal: trigger at > 1.5 × interval (owner: Portal / NT).
+- T3-F5 (Portal): the backfill fires only on a gap > 2 × `interval_report`. A single given-up report leaves a gap of exactly 2 × interval, so it is never backfilled. **Dropped (Hynek 2026-10-07):** the backfill stays as on LoRaWAN (gap > 2 × interval, batched); a single given-up report is not backfilled.
 - **T8-F1 (end-to-end loss):** the outbox covers only central → broker. The broker PUBACKed the drained 2794/2795 at 14:12:00.31, the Portal reconnected 2 s later (30 s backoff) with `clean_session = true`, and mosquitto has no persistence, so nobody was subscribed and both uplinks are lost for the Portal. This is not TOWER-specific: any broker restart loses northbound data for every radio (LoRaWAN too). Out of P2, tracked in a separate issue (Hynek 2026-10-06).
 
 **C3 bugs found on HIL (T1), fixed in c67 with the outbox and `evt_seq_gap`:**
