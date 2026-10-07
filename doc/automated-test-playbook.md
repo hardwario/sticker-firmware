@@ -1306,15 +1306,43 @@ integrated. Report per scenario: idle avg excluding bursts, floor median, min, a
   ladder (link check on every report; one rung per report: TX power to max, then DR down to
   DR0) and the rejoin attempts at the floor, ≥ 30 min past the first JoinRequest. (4) Re-enable
   the device; capture until rejoined and two telemetry uplinks are seen.
+- **Setting the interval on a release image (no shell):** NFC `SetParam`
+  `app.interval-report = 120` (Manager-App debug server: `POST /command
+  {"op":"setparam","params":{"app.interval-report":120}}`); read it back with `getparam`. The
+  write reboots the unit → it rejoins; start step (1) after the first two 120 s reports.
+- **Observing the state during the outage:** ChirpStack logs no frames for a disabled device and a
+  release image has no RTT, so read the state over NFC: an encrypted `GetInfo` through the FTM
+  mailbox every 5 min returns `lrw_state` (`HEALTHY`/`WARNING`/`RECONNECT`), `last_dl_age_s`,
+  `uptime_s` (no reboot) and `battery`. The Manager-App debug server's `getinfo` drops these
+  fields, so drive the mailbox directly: nfc-proxy-app (`com.hardwario.nfcproxy`, `adb forward
+  tcp:8730`) with a host script that sends the ST25DV custom commands (`[0x02, cmd, 0x02, …]`:
+  `0xAE 0D 01` MB_EN, `0xAA` write message `[0x01 chan][CCM wire]`, poll `0xAD 0D` for
+  HOST_PUT, `0xAB`/`0xAC` read the reply, `0xAE 0D 00`). Phone gotchas: turn NFC on
+  (`cmd nfc enable-nfc`) *before* resuming the proxy activity (reader mode registered with NFC
+  off never sees the tag); disable any app that claims the tag's NDEF intent (Manager-App), or
+  the NDEF dispatch pulls it to the front and pauses the proxy; keep the screen on (`svc power
+  stayon true`); NFC off between probes. Log each probe's start/end next to the PPK2 capture
+  and drop those windows (≈ 47 mC each) from the outage average.
+- **Identifying the rungs on the trace:** the TX burst alone (bins > 25 mA) gives airtime and TX
+  current per report — SF7 61 ms → SF12 1483 ms for an 11 B telemetry frame; the TX-power rung
+  shows as a jump of the TX current (EU868 at 3.0 V: ≈ 28 mA ADR-reduced → ≈ 60 mA default).
+  An SF12 telemetry frame and a JoinRequest have the same airtime: tell them apart by timing
+  (reports keep the 120 s grid, joins follow the rejoin backoff) and by `lrw_state`.
 - **Expect:**
-  - Charge per report grows rung by rung with airtime (DR5 → DR0: roughly ×20 at SF12 vs SF7);
-    the idle band between reports is unchanged.
-  - At the floor: JoinRequests follow the LoRaMac join back-off and the EU868 duty cycle — no
-    back-to-back join storm, and no rejoin forced while the duty cycle refuses sends (F29).
+  - Outage → `WARNING` after 3 unanswered checks at every `lrw-link-check-interval`-th report
+    (≈ 21 min at 120 s / 5), taking the first rung at once; then one rung per report (check on
+    every report): default TX power + DR4, DR3, DR2, DR1, DR0; `RECONNECT` only when the check
+    fails at the floor (DR0 = 5th failure in `WARNING` at defaults) — no rung skipped.
+  - Charge per report grows rung by rung with airtime (TX part DR5 at reduced power → DR0 at
+    default power: ≈ 1.7 → 85 mC, ×50); the idle band between reports is unchanged.
+  - At the floor: JoinRequests follow the rejoin back-off (60 s × 2ⁿ + jitter, cap 3600 s) and the
+    EU868 duty cycle — no back-to-back join storm, and no rejoin forced while the duty cycle refuses sends (F29).
   - Recovery: rejoin, then the normal report cadence; the idle band returns to the healthy one.
-- **Evidence:** table DR × {mC per report, airtime}; outage hour vs healthy hour (mC/h) as the
-  battery-life cost of a lost network; LNS frame log aligned to the trace.
-- **Cleanup:** `interval-report 900`; device enabled on ChirpStack.
+- **Evidence:** table DR × {mC per report, airtime}; state timeline from the NFC probes;
+  outage hour vs healthy hour (mC/h) as the battery-life cost of a lost network; LNS frame log
+  aligned to the trace.
+- **Cleanup:** `interval-report 900` (NFC `SetParam`); device enabled on ChirpStack; phone
+  restored (re-enable the disabled app, `svc power stayon false`, NFC on).
 
 ### AT-PWR-15 — buzzer alarm melodies (R, SA; #397 — buzzer HW variant only)
 - **Pre:** a unit with the buzzer variant (operator confirms; unreworked R10/R11 caps the

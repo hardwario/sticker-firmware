@@ -451,6 +451,35 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - The release image passed too.
 - Not HW-tested: the US915/AU915 sub-band fix (no 915 MHz gateway), code review only.
 
+**Power trace of a full link loss (AT-PWR-14, 2026-10-07, release CI `68bf48f`, EU868, ChirpStack v4 at 10.0.0.52, PPK2 3.0 V):**
+`interval-report 120` (set over NFC; link-check defaults 5 / 5), ADR on, device disabled on ChirpStack at 14:41:13.
+The LNS logs nothing for a disabled device, so the state was read over NFC every 5 min (mailbox `GetInfo`:
+`lrw_state`, `last_dl_*`, `uptime_s`; see AT-PWR-14 in the playbook) and each rung was identified on the PPK2
+trace by its TX burst (airtime and TX current):
+
+| Time | State | TX on air | What it is |
+|---|---|---|---|
+| 14:28–15:00 | `HEALTHY` → outage | 61 ms, 28 mA | DR5/SF7 at the ADR-reduced TX power; link check every 5th report (unanswered from 14:41) |
+| 15:02:01 | 3rd failed check | 62 ms, 32 mA | → `WARNING`, first rung taken at once |
+| 15:03:55 | `WARNING` | 114 ms, 59 mA | default (max) TX power + DR4/SF8 |
+| 15:06:03 | `WARNING` | 206 ms, 60 mA | DR3/SF9 |
+| 15:07:55 | `WARNING` | 412 ms, 60 mA | DR2/SF10 |
+| 15:09:55 | `WARNING` | 824 ms, 57 mA | DR1/SF11 |
+| 15:12:02 | `WARNING` | 1483 ms, 57 mA | DR0/SF12 telemetry — the floor |
+| 15:12:12 | → `RECONNECT` | — | check failed at the floor, 5th failure in `WARNING` |
+| 15:13:01, 15:15:16, 15:18:34, 15:26:57, … | `RECONNECT` | 1483 ms, 57 mA | SF12 JoinRequests, gaps 59 / 135 / 198 / 503 s (60 s × 2ⁿ + jitter, cap 3600 s) |
+
+- The ladder runs to the end: every rung is taken before the rejoin, which comes only at the floor with the
+  rejoin budget spent (`app_lrw.c` `on_lc_failure`). The M-2 stale-uplink watchdog did not fire — the device
+  transmitted throughout.
+- Outage → `WARNING` took 21 min (3 checks at every 5th report), `WARNING` → `RECONNECT` 10 min (one rung per
+  report). At the default 900 s this scales to ≈ 2.5 h + 1.25 h.
+- Charge of the TX part of a report: SF7 ≈ 1.7 mC → SF8 6.8 → SF9 12.3 → SF10 24.6 → SF11 47 → SF12 85 mC
+  (×50 from DR5 at reduced power to DR0 at full power), plus ≈ 8–11 mC of RX windows. A JoinRequest costs
+  ≈ 87 mC + ≈ 12 mC for its RX1/RX2 windows (the two small bursts ~5–6 s after each join). Between bursts the
+  idle band is unchanged (70.5 µA healthy).
+- Recovery after re-enabling the device: pending (run in progress).
+
 See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
 
 ---
