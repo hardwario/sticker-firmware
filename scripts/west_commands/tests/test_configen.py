@@ -201,7 +201,8 @@ def test_build_proto_model_structure():
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
     assert ids["vendor_reset_allow"] == 7  # NFC vendor_reset gate (#299)
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
+    assert ids["interval_announce"] == 8  # periodic announce (#445)
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7, 8]  # contiguous
 
 
 # #340 M23: a float/double param with no explicit min/max must NOT take the
