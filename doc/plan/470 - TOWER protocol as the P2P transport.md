@@ -842,7 +842,7 @@ image (force-send); T3 at 60 s alone takes > 32 min.
 | T5 | Counter block refill | with a small test block the NB sends `CTR_LOW`, the central hands out the next block, no `NO_COUNTER` gap — **PASS 2026-10-06** (c66, block 64: 3 `CTR_LOW` refills contiguous, 6/6 DLs delivered, `no_counter` 0, `link_err` 0) |
 | T6 | Address collision | `node-add` of a DevEUI with the same low 32 bits as 5722 → exit 16 `address_collision`, nothing changes — **PASS 2026-10-06** (c65, CLI) |
 | T8 | Broker down (c67): stop the local MQTT broker for ≥ 30 s during a 10 s stream | the outbox fills and drains after the broker is back; 0 lost, 0 duplicates northbound; a full outbox stops the ACKs (the node backfills from history) — c68 2026-10-06: central **PASS** (the outbox held 2794/2795 and drained at 14:12:00.31 on the broker start, overflow 0), **end-to-end FAIL** (T8-F1, out of P2). For P2, T8 counts on the central side: **PASS** |
-| T7 | Second node (0413), optional for P2 | two nodes joined at once, independent counters and queues; needs a probe on 0413 |
+| T7 | Second node, optional for P2 | two nodes joined at once, independent counters and queues — **PASS 2026-10-07** (P3, NT, c69 + NB 0.3.2) with 2162165625 instead of 0413: DevAddr `00005625` / `00005722`; force-send to 5625 and GetSettings to 5722 pushed together, each delivered only to its node (5722 13:49:13Z + fPort-85 answer, 5625 13:50:00Z + extra measurement), no cross-delivery, the NB resend seq 195 dropped as a duplicate; Portal 12:28–13:45Z 0 gaps, 0 duplicates |
 
 **C3 deviations from the link doc (to review; fold into C5):**
 1. A freshly started central learns the start `seq` during a 1 s window.
