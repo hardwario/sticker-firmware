@@ -1103,6 +1103,19 @@ static int64_t m_last_uplink_ms;
 static struct app_radio_stale_dc m_dc;
 static bool m_dc_hold_logged;
 
+#if defined(CONFIG_SHELL) || defined(CONFIG_ZTEST)
+/* ats radio tx_mute: telemetry fails before it reaches the air (M-2 on the bench). */
+static bool m_debug_tx_mute;
+
+void app_radio_debug_tx_mute(bool on)
+{
+	m_debug_tx_mute = on;
+	LOG_WRN("Debug: telemetry TX %s", on ? "muted" : "unmuted");
+}
+#else
+#define m_debug_tx_mute false
+#endif
+
 static void link_set_streak(uint32_t n)
 {
 	m_link.fail_streak = n;
@@ -1410,7 +1423,7 @@ static void tlm_step(void)
 		.buf = m_tlm_buf,
 	};
 	struct app_radio_tx_result res = {0};
-	int ret = tx_send(&f, &res);
+	int ret = m_debug_tx_mute ? -EIO : tx_send(&f, &res);
 
 	switch (ret) {
 	case 0:
@@ -1809,6 +1822,7 @@ void app_radio_test_tx_reset(void)
 	m_tlm_frame = false;
 	m_hist_active = false;
 	m_ack_pending = false;
+	m_debug_tx_mute = false;
 	m_ready_cb = NULL;
 	app_radio_duty_init(0); /* no limit unless a test sets one */
 }

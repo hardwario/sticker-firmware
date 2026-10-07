@@ -934,6 +934,24 @@ static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
 }
 #endif /* defined(CONFIG_RADIO_P2P) */
 
+/* Debug: telemetry never reaches the air while the radio work queue drains,
+ * to exercise the M-2 stale-uplink rejoin (needs CONFIG_WATCHDOG). */
+static int cmd_radio_tx_mute(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool on = strcmp(argv[1], "on") == 0;
+
+	if (!on && strcmp(argv[1], "off") != 0) {
+		shell_error(shell, "Usage: tx_mute on|off");
+		return -EINVAL;
+	}
+
+	app_radio_debug_tx_mute(on);
+	shell_print(shell, "Telemetry TX %s", on ? "muted" : "unmuted");
+	return 0;
+}
+
 /* Universal `compose`, same dispatch idiom as cmd_radio_status(): a name
  * collision would otherwise be unavoidable on a dual-stack build, since both
  * cmd_lrw_compose() and cmd_p2p_compose() would need to register under the
@@ -967,6 +985,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Build a telemetry frame without sending; dump hex. "
 		      "Usage: compose [budget] (budget: LoRaWAN only)",
 		      cmd_radio_compose, 1, 1),
+	SHELL_CMD_ARG(tx_mute, NULL,
+		      "Debug: telemetry fails before the air (M-2 test). Usage: tx_mute on|off",
+		      cmd_radio_tx_mute, 2, 0),
 #if defined(CONFIG_LORAWAN)
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,

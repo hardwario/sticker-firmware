@@ -660,6 +660,13 @@ void app_radio_heartbeat_start(void);
  * feeds the liveness channel itself, as the heartbeat cannot run meanwhile. */
 void app_radio_heartbeat_feed(void);
 
+#if defined(CONFIG_SHELL) || defined(CONFIG_ZTEST)
+/* Debug (ats radio tx_mute): every telemetry frame fails with -EIO before it
+ * reaches the air while the work queue goes on draining -- the mute node M-2
+ * rejoins after APP_RADIO_STALE_FACTOR report intervals. Not in release. */
+void app_radio_debug_tx_mute(bool on);
+#endif
+
 #if defined(CONFIG_ZTEST)
 /* Run the common TX path on `be` (tests/radio_common). */
 void app_radio_test_set_backend(const struct app_radio_backend *be);

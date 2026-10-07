@@ -1500,6 +1500,62 @@ static void uplinks_refresh_the_stale_clock(void)
 }
 BOTH_PROFILES(uplinks_refresh_the_stale_clock)
 
+/* An outage: confirmed telemetry goes on air but no Ack comes back. Given up,
+ * it still counts as sent, so M-2 stays quiet and supervision alone judges the
+ * link by the reports that carried a link check: WARNING after 3, the rejoin
+ * (not forced) radio-link-check-fail-rejoin later. */
+static void outage_leaves_the_link_to_supervision(void)
+{
+	const size_t lens[] = {20};
+
+	g_app_config.radio_link_check_interval = 1;
+	g_app_config.radio_link_check_fail_rejoin = 5;
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	script_fill(-ETIMEDOUT, LOG_MAX);
+	app_radio_link_up();
+
+	for (int i = 0; i < 8; i++) {
+		frames(lens, 1);
+		app_radio_send_telemetry_now();
+		k_sleep(K_SECONDS(60));
+		zassert_equal(fk.n, 4 * (i + 1), "report %d: sent and retried 3 times", i);
+		zassert_equal(app_radio_get_state(),
+			      i < 2 ? APP_RADIO_STATE_HEALTHY : APP_RADIO_STATE_WARNING,
+			      "report %d", i);
+		app_radio_test_stale_tick(k_uptime_get());
+		zassert_equal(fk.rejoin_calls, i < 7 ? 0 : 1, "report %d", i);
+	}
+	zassert_false(fk.rejoin_forced, "the supervision rejoin, not M-2");
+	zassert_true(k_uptime_get() > 2 * STALE_MS, "M-2 had its chance");
+}
+BOTH_PROFILES(outage_leaves_the_link_to_supervision)
+
+/* ats radio tx_mute: telemetry never reaches the air, M-2 rejoins. */
+static void tx_mute_trips_m2(void)
+{
+	const size_t lens[] = {20};
+
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_debug_tx_mute(true);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(150));
+	zassert_equal(fk.n, 0, "nothing on air");
+	zassert_equal(g_compose_reset_calls, 1, "abandoned after its retries");
+	app_radio_test_stale_tick(t0 + STALE_MS + 1000);
+	zassert_equal(fk.rejoin_calls, 1, "mute: M-2 rejoin");
+	zassert_true(fk.rejoin_forced);
+
+	app_radio_debug_tx_mute(false);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(4));
+	zassert_equal(fk.n, 1, "unmuted: sent");
+}
+BOTH_PROFILES(tx_mute_trips_m2)
+
 /* ---- Rejoin backoff (common) ------------------------------------------------ */
 
 ZTEST(radio_common, test_rejoin_backoff_doubles_then_caps)
