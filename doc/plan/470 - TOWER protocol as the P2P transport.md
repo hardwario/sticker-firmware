@@ -975,7 +975,7 @@ Node lists: SC `~/Documents/claude/tower-p1/ack_node.txt`.
 |---|---|---|
 | D4 | Default `p2p-modulation` | **Decided 2026-09-28: `lora`**; `fsk` for TOWER-mixed sites |
 | D5 | Northbridge ↔ Hub link | **Decided 2026-09-28:** our own protocol (today's HDLC link extended, §13.2 H2); TOWER compatibility only on air, no tower console |
-| D6 | Address derivation | low 32 bits of DevEUI if unique across the HARDWARIO range, else FNV-1a-32 |
+| D6 | Address derivation | **Decided 2026-10-07 (Hynek): low 32 bits of the DevEUI**, a collision is refused at `node-add` (exit 16 `address_collision`, HW PASS); no hash, no central-assigned address. The Portal message must say the clash is on the last 8 hex digits of the DevEUI |
 | D7 | `lora`: gateway ACK/downlink on 869.525 MHz (10 %) | yes, P6; sparse confirmation from P2. §3.3 proposes the uplink on 869.525 MHz too (one channel, from P2) |
 | D8 | Envelope `0x81 ‖ port ‖ protobuf` | yes, pending E3 |
 | D9 | `fsk` frequency: free `p2p-frequency` or TOWER channel index 0..2 | keep frequency, validate against the TOWER plan in `fsk` |
