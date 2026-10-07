@@ -13,9 +13,11 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 /* Standard includes */
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,11 +37,13 @@ static const struct gpio_dt_spec m_led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y),
 
 struct blink_request {
 	int64_t timestamp;
+	atomic_val_t gen;
 	struct app_led_blink_req blink;
 };
 
 struct play_request {
 	int64_t timestamp;
+	atomic_val_t gen;
 	struct app_led_play_req play;
 };
 
@@ -49,6 +53,12 @@ static K_SEM_DEFINE(m_led_sem, 0, K_SEM_MAX_LIMIT);
 static K_THREAD_STACK_DEFINE(m_led_thread_stack, LED_THREAD_STACK_SIZE);
 
 static k_tid_t m_led_thread_id;
+
+/* Indicator hold (app_led_hold): while set, the thread writes no pin, cuts a
+ * running blink/play short and drops requests. m_hold_gen advances on every
+ * take, so a request queued before it never runs after the release. */
+static atomic_t m_hold;
+static atomic_t m_hold_gen;
 
 static void set(enum app_led_channel channel, int state)
 {
@@ -82,22 +92,48 @@ void app_led_set(enum app_led_channel channel, int state)
 	set(channel, state);
 }
 
-static void execute_blink(const struct app_led_blink_req *req)
+/* Pin write from the LED thread. The check and the write run under irq_lock, the
+ * same lock the hold holder writes under, so no thread write lands after the
+ * holder has taken the pins. */
+static void thread_set(enum app_led_channel channel, int state)
 {
-	for (int i = 0; i < req->repetitions; i++) {
-		set(req->color, 1);
+	unsigned int key = irq_lock();
+
+	if (!atomic_get(&m_hold)) {
+		set(channel, state);
+	}
+
+	irq_unlock(key);
+}
+
+static bool held_since(atomic_val_t gen)
+{
+	return atomic_get(&m_hold) || atomic_get(&m_hold_gen) != gen;
+}
+
+static void all_off(void)
+{
+	thread_set(APP_LED_CHANNEL_R, 0);
+	thread_set(APP_LED_CHANNEL_G, 0);
+	thread_set(APP_LED_CHANNEL_Y, 0);
+}
+
+static void execute_blink(const struct app_led_blink_req *req, atomic_val_t gen)
+{
+	for (int i = 0; i < req->repetitions && !held_since(gen); i++) {
+		thread_set(req->color, 1);
 		k_sleep(K_MSEC(req->duration));
 
-		if (i < req->repetitions - 1 && req->space > 0) {
-			set(req->color, 0);
+		if (i < req->repetitions - 1 && req->space > 0 && !held_since(gen)) {
+			thread_set(req->color, 0);
 			k_sleep(K_MSEC(req->space));
 		}
 	}
 
-	set(req->color, 0);
+	thread_set(req->color, 0);
 }
 
-static void execute_play(const struct app_led_play_req *req)
+static void execute_play(const struct app_led_play_req *req, atomic_val_t gen)
 {
 	int length = 0;
 	for (int i = 0; i < APP_LED_PLAY_MAX_COMMANDS; i++) {
@@ -116,6 +152,10 @@ static void execute_play(const struct app_led_play_req *req)
 		for (int i = 0; i < length; i++) {
 			const struct app_led_cmd *cmd = &req->commands[i];
 
+			if (held_since(gen)) {
+				goto out;
+			}
+
 			/* Skip last delay on last repetition */
 			if (rep == req->repetitions - 1 && i == length - 1 &&
 			    cmd->type == APP_LED_CMD_DELAY) {
@@ -124,7 +164,7 @@ static void execute_play(const struct app_led_play_req *req)
 
 			switch (cmd->type) {
 			case APP_LED_CMD_SET:
-				set(cmd->set.channel, cmd->set.state);
+				thread_set(cmd->set.channel, cmd->set.state);
 				break;
 			case APP_LED_CMD_DELAY:
 				if (cmd->duration > 0) {
@@ -138,9 +178,8 @@ static void execute_play(const struct app_led_play_req *req)
 		}
 	}
 
-	set(APP_LED_CHANNEL_R, 0);
-	set(APP_LED_CHANNEL_G, 0);
-	set(APP_LED_CHANNEL_Y, 0);
+out:
+	all_off();
 }
 
 static void thread_entry(void *p1, void *p2, void *p3)
@@ -157,18 +196,20 @@ static void thread_entry(void *p1, void *p2, void *p3)
 		/* Check play queue first (higher priority) */
 		struct play_request play_req;
 		if (k_msgq_get(&m_play_msgq, &play_req, K_NO_WAIT) == 0) {
-			if (now - play_req.timestamp <= REQUEST_MAX_AGE_MS) {
-				execute_play(&play_req.play);
-			} else {
-				LOG_WRN("Discarding stale LED play request");
+			/* A stale request (queued behind a longer one, e.g. a heartbeat
+			 * during the boot carousel) or one queued before the indicator
+			 * was taken is dropped: every request is a periodic or best-effort
+			 * indication, so the next one follows. */
+			if (!held_since(play_req.gen) &&
+			    now - play_req.timestamp <= REQUEST_MAX_AGE_MS) {
+				execute_play(&play_req.play, play_req.gen);
 			}
 		} else {
 			struct blink_request blink_req;
 			if (k_msgq_get(&m_blink_msgq, &blink_req, K_NO_WAIT) == 0) {
-				if (now - blink_req.timestamp <= REQUEST_MAX_AGE_MS) {
-					execute_blink(&blink_req.blink);
-				} else {
-					LOG_WRN("Discarding stale LED blink request");
+				if (!held_since(blink_req.gen) &&
+				    now - blink_req.timestamp <= REQUEST_MAX_AGE_MS) {
+					execute_blink(&blink_req.blink, blink_req.gen);
 				}
 			}
 		}
@@ -225,11 +266,16 @@ int app_led_blink(const struct app_led_blink_req *req)
 		return -EINVAL;
 	}
 
-	struct blink_request request = {.timestamp = k_uptime_get(), .blink = *req};
+	if (atomic_get(&m_hold)) {
+		return -EBUSY;
+	}
 
+	struct blink_request request = {
+		.timestamp = k_uptime_get(), .gen = atomic_get(&m_hold_gen), .blink = *req};
+
+	/* A full queue drops the request (-ENOMSG), like a stale one. */
 	int ret = k_msgq_put(&m_blink_msgq, &request, K_NO_WAIT);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
 
@@ -248,15 +294,36 @@ int app_led_play(const struct app_led_play_req *req)
 		return -EINVAL;
 	}
 
-	struct play_request request = {.timestamp = k_uptime_get(), .play = *req};
+	if (atomic_get(&m_hold)) {
+		return -EBUSY;
+	}
+
+	struct play_request request = {
+		.timestamp = k_uptime_get(), .gen = atomic_get(&m_hold_gen), .play = *req};
 
 	int ret = k_msgq_put(&m_play_msgq, &request, K_NO_WAIT);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
 
 	k_sem_give(&m_led_sem);
 
 	return 0;
+}
+
+void app_led_hold(bool hold)
+{
+	if (!hold) {
+		atomic_clear(&m_hold);
+		return;
+	}
+
+	if (atomic_cas(&m_hold, 0, 1)) {
+		atomic_inc(&m_hold_gen);
+		/* Flags first, then the wake: a sleeping blink/play step returns early
+		 * and sees the hold at its next check. */
+		if (m_led_thread_id) {
+			k_wakeup(m_led_thread_id);
+		}
+	}
 }

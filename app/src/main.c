@@ -83,6 +83,9 @@ static void die(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/* Boot self-test of all three LEDs, 3 s. It plays in the LED thread; main()
+ * goes on with the init chain meanwhile, and an NFC tap cuts it short
+ * (app_led_hold), so neither the phone nor the boot waits for it. */
 static void play_carousel_boot(void)
 {
 	struct app_led_play_req req = {
@@ -101,7 +104,6 @@ static void play_carousel_boot(void)
 		.repetitions = 1};
 
 	app_led_play(&req);
-	k_sleep(K_MSEC(5000));
 }
 
 /* #414: before an NFC-triggered reboot, let the mailbox session's result finish
@@ -331,12 +333,6 @@ int main(void)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 	play_carousel_boot();
-
-#if defined(CONFIG_WATCHDOG)
-	/* The carousel just blocked for 5 s of the 10 s IWDG window; feed again so
-	 * the init chain below gets the full budget rather than the remainder. */
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
 
 	ret = app_clock_init();
 	if (ret) {

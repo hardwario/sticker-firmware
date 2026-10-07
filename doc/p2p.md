@@ -404,6 +404,13 @@ The common sliding-hour ledger (`app_radio_duty_*`) is used:
 - every transmission is charged at its ToA, including a failed one;
 - a send the ledger holds returns `-EAGAIN` with the wait, and nothing goes on the air.
 
+The ledger keeps **one entry per fixed 75 s slot** (`uptime / APP_RADIO_DUTY_SLOT_MS`),
+not per frame: at most 49 live entries per hour (400 B of RAM), and a frame's air
+leaves the window at most 75 s late (over-counted, never under-counted). The earlier
+per-frame ring with two-oldest folding (F-P2P-1) piled all air into one entry above
+48 frames/h and silenced 5722 for ~21 min every ~6 h on the TOWER bench (PR #473,
+2026-10-07).
+
 The ledger is RAM-only, so a reboot forgets the hour just transmitted. This is
 accepted; persisting it would cost an NVS write per frame.
 

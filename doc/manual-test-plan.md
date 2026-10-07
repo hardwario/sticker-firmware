@@ -105,7 +105,8 @@ byte is the `seq` and is echoed in the reply.
 ### G2 — Boot LED carousel
 
 **Goal:** Visual boot indicator runs.
-**Observable:** Red (≈0.5 s) → Yellow (≈0.5 s) → Green (≈1.5 s), ~5 s total right after boot.
+**Observable:** Red (≈0.5 s) → Yellow (≈0.5 s) → Green (≈1.5 s), 3 s total, starting ~0.7 s
+after reset. The init chain runs meanwhile, and the first heartbeat follows only after the green.
 
 **Prompt for Claude:**
 > Trigger a reboot over the RTT shell (`ats radio reset`). I (the tester) will watch the LEDs.
@@ -113,7 +114,12 @@ byte is the `seq` and is echoed in the reply.
 > in the boot log it starts, so I can confirm the carousel visually. Collect the boot log to
 > correlate timing.
 
-- [ ] Pass
+- [x] Pass — #467, 2026-09-28 (release + debug)
+
+> **HW-verified 2026-09-28** (#467, `ffd1002`):
+> - the full carousel plays at boot, and the first heartbeat follows it (visual, release + debug);
+> - boot log (debug P2P bench, SN 2162190413): no `app_led` WRN / ERR, NFC ready at 1.236 s;
+>   the init chain no longer waits for the carousel.
 
 ### G3 — Shell reachable over RTT
 
@@ -1856,9 +1862,10 @@ field on**, on Android and iOS alike. The phone bootstraps with the plaintext `g
     `mb: session end (deferred action)`);
   - a phone left on the tag without traffic is released after **120 s** (RTT `NFC: field held 120 s
     without mailbox traffic -> releasing the tag`, `VCC_ON` → 0), and the next tap works.
-- Boot: NFC starts last, after the boot carousel and the whole init chain (~8 s after boot).
+- Boot: NFC starts last, after the whole init chain (~1.2 s after reset, while the boot carousel
+  may still play; a tap cuts the carousel short).
   Until then a phone on the tag reads `VCC_ON = 0` and no command is served.
-- Reboot with the phone kept on the tag (save / reboot / resets): `VCC_ON` returns ~8 s after boot
+- Reboot with the phone kept on the tag (save / reboot / resets): `VCC_ON` returns ~1.2 s after reset
   and the phone's first request is answered without a lift. RTT shows no `left enabled at boot`.
 - A unit whose `MB_MODE` cannot be set reports `MAILBOX_DOWN` (device_status bit 13) and
   `NFC mailbox: UNAVAILABLE` in `ats device info` (production tester).
@@ -1876,7 +1883,7 @@ field on**, on Android and iOS alike. The phone bootstraps with the plaintext `g
 > (5) `hold --hold 130` → RTT shows the 120 s release WRN ~120 s after the last exchange, `probe`
 > then reads `VCC_ON=0`, and a re-tap works again. (6) `sticker_mailbox_seq_b.py <current
 > interval_report>` (same value, so the config does not change): Ack → session end at once, device
-> back ~13 s after the Ack (2 s result + NVS save + boot + ~8 s init chain), and the first
+> back ~6 s after the Ack (2 s result + NVS save + reboot + ~1.2 s to NFC-up), and the first
 > `get_basic_info` after the reboot answered without lifting the phone. With the phone on the tag
 > during the boot, `probe` keeps reading `VCC_ON=0` until the init chain is done.
 > (7) Debug build, phone removed: `nfc clear`, then `nfc read 0 512` stays all zero after a reboot
@@ -2009,7 +2016,7 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 - A follow-up command sent in the same hold right after the `ack` gets **no reply**: the session is
   over and the action runs first.
 - With the phone kept on the tag, the next `get_basic_info` after the reboot is answered once NFC
-  is up (~8 s after boot, at the end of the init chain). Its `nonce_counter` is **not** reset: every
+  is up (~1.2 s after reset, at the end of the init chain). Its `nonce_counter` is **not** reset: every
   tier keeps it.
 - `device_reset`: config and alarm defaults are restored. Kept: identity (serial, `secret_key`,
   nonce, claim token + window state, `vendor_token`) and the full LoRaWAN provisioning and session
@@ -2137,7 +2144,9 @@ unknown channel), so without the LED a failed tap looks like a slow one.
 - an authenticated `Response.error` (e.g. `NOT_WRITABLE`) counts as OK;
 - a reboot-type command (`set_param save=true`, `reboot`, resets, `set_secret_key`) shows
   **green + yellow 2 s, then reboots** (boot carousel follows; no pre-reboot green ×10);
-- never an orange blend (red + green) between states.
+- never an orange blend (red + green) between states;
+- a tap during the boot carousel cuts it short (only the NFC LED, no carousel colour mixed in),
+  and no heartbeat, status or alarm blink shows while the NFC LED holds the indicator.
 
 **Prompt for Claude:**
 > Release-like build, SWD detached (Q14). Drive the mailbox from the phone bench
@@ -2147,7 +2156,9 @@ unknown channel), so without the LED a failed tap looks like a slow one.
 > the end. (3) One frame with a wrong key: red 2 s at the end; RTT shows `mb: request rejected`.
 > (4) Wrong-key frame, then `get_basic_info` + a correct frame in the same session: green + yellow.
 > (5) Send a request and lift before reading the reply: red. (6) `setparam --save`: green + yellow
-> 2 s, then reboot + boot carousel. Report each outcome.
+> 2 s, then reboot + boot carousel. (7) Keep the phone on the tag through that reboot: the
+> carousel is cut short as soon as the NFC LED lights. (8) Trigger an alarm (magnet on a hall
+> input) during a `getinfo` loop: no alarm blink until the NFC LED is off. Report each outcome.
 
 - [ ] Pass
 
@@ -2379,7 +2390,7 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 > unpowered (`VCC_ON = 0`), so no command reaches an uninitialised component.
 >
 > Re-run on v1.5.0 with the phone on the tag during a reboot:
-> - `probe` must read `VCC_ON = 0` until ~8 s after boot;
+> - `probe` must read `VCC_ON = 0` until ~1.2 s after reset;
 > - a `reset_counters{hall_left}` sent as soon as the mailbox comes up must zero only `hall_left`.
 
 ### X7 — M24: claim state locked against shell/poll races (was M3/M15/vendor-consume, superseded by #415)
