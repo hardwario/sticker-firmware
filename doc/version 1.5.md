@@ -1525,6 +1525,7 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
 - **M-2 waits out a ledger hold** (fix from the HIL). A held frame waits for its hold in one go, up to the hour. The M-2 watchdog (§22) now takes the known end of that hold as its duty-cycle excuse, and no longer only the last held attempt plus one interval + 3 min. Without the fix, the DR0 bench run rejoined 4 min into a 41 min hold and then every ~5 min: fcnt restarted and nothing was sent for 45 min. The 75 min cap is unchanged.
 - The Info / settings-info announce no longer re-encodes into a full answer queue on its 5 s retry.
 - Hardware (0413, EU868 DR0, ADR off, 60 s, 2026-09-28): the ledger held at 34.9 s of 36 s. The MAC never refused a frame, M-2 did not rejoin, and the held frame went at the end of the hold on the same session.
+- **Fixed: one ledger entry per 75 s slot** instead of per frame. Above 48 frames/h the F-P2P-1 fold of a full ring built one entry that never left the hour and summed all air, so a 60 s cadence with link checks hit the 1 % allowance every ~6 h and went silent ~21 min (TOWER bench 5722, 2026-10-07; LoRaWAN EU868 alike). Frames of the same fixed slot now share an entry (over-count ≤ 75 s, never under-count), at most 49 entries live per hour; RAM +8 B. doc/p2p.md §6.
 
 ## 32. Alarm bursts and the post-command reboot (#462)
 
