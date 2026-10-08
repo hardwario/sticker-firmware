@@ -907,7 +907,7 @@ Each command DL went `PENDING` on the next confirmed uplink, and the fPort-85 an
 
 - P3-F1 (latency, not loss): a pending `0x91` answer takes the single DL slot ahead of a queued command, so force-send and SetParam each waited one extra interval (70 s and 66 s at 60 s). **Kept as is:** a `LinkCheckAns` or `TimeAns` pushed behind a command would count as a missed link-check on the node (supervision) or leave the RTC unsynced. Fixed by §13.5 (N1 part A pulled into P3: the answer rides in the ACK).
 
-Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq, supervision (outage → WARNING → rejoin) and history replay over the radio.
+Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq. Supervision and history replay over the radio: **PASS**, §13.6.
 
 ### 13.5 P3: `LinkCheckAns` / `TimeAns` in the ACK (N1 part A, Hynek 2026-10-06)
 
@@ -956,6 +956,27 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 NT confirmation (Portal side, same run): 0 LC answers pushed by the central, the only `0x91` DLs were 2 × `Capabilities` after node reboots; `TimeAns` 124–134 ms after TX-done; command DL latency pushed → delivered 0.3–6.7 s at a 10 s stream; a central restart at 16:39:00 sent `TWR_TIME_SYNC` with the `GET_INFO` 175 ms after SIGTERM, started at head seq 159 without learning and resynced the peer.
 
 Node lists: SC `~/Documents/claude/tower-p1/ack_node.txt`.
+
+### 13.6 P3: node supervision, M-2 and the night soak (2026-10-07/08)
+
+Two nodes on the Hub (NB c69), images from #470. Node-side tests are named node-T*, not
+to clash with the gateway T* of §13.3.
+
+| Test | Image | Result |
+|---|---|---|
+| Night soak, 2 nodes unattended (14:10Z → 05:25Z, 15 h 14 min) | rel `49434ef4` on 5625 + 5722 | **PASS**: 914 / 915 uplinks = Portal points; gaps > 90 s, dups, backfills, resets, rejoins all 0. Both crossed the ~6 h and ~12 h duty marks with no hold (#473 confirmed on HW). NB: `mic_fail` 0, ACK late 0, duty 28 % of the 1 % budget |
+| node-T3a: ACK loss → WARNING → rejoin (`ats radio ack_drop 500`, 07:12:53–07:28:11Z) | p2pbw `49434ef4`, 5722 | **PASS**: LC fails 07:13 / 07:18 / 07:23 → WARNING; 5 fails in WARNING → rejoin 07:28:11, joined 07:28:12; no M-2, no reboot. Found T3a-F1 (below) |
+| node-T4 negative: no ACKs for ~15 intervals (same run) | p2pbw `49434ef4`, 5722 | **PASS**: frames on air, M-2 silent; supervision alone handles it |
+| node-T3b: RF outage (detune + save, 07:31–07:48Z) | p2pbw `49434ef4`, 5722 | **PASS**: LC fails → WARNING → 5 fails → rejoin attempts (JoinAccept missing, retried); after the restore the node resumed PAIRED in the old session, no join. Backfill not testable: the debug history is a RAM ring, cleared by the restore reboot |
+| node-T4 positive: `ats radio tx_mute on` | p2pbw `49434ef4`, 5722 | **PASS**: M-2 at 4 intervals → rejoin (M-2 rejoins, it does not reboot), uptime continuous |
+| History replay over the radio (T4 repeat + manual Portal backfill, 08:00–08:06Z) | p2pbw `49434ef4`, 5722 | **PASS**: `ReqHistory` rode an ACK PENDING, 1 HistoryFrame (9 records), the Portal gap 08:01:28–08:04:28 filled, 0 duplicate timestamps. The auto backfill fires ≥ 1 h after the previous job, past the debug RAM ring |
+| node-T3a re-run after the T3a-F1 fix (08:53–08:57Z) | p2pbw `82a6911f`, 5722 | **PASS**: retries under the same counter (`Retry N under counter X`), 0 new counters; central and Portal one point per report, 0 dups |
+
+Findings:
+- **T3a-F1 (fixed, `82a6911f`, Hynek 2026-10-08):** an app_radio retry took a new counter, so a frame the NB heard but whose ACKs were lost reached the Portal up to 4×. Fix in §7.3.
+- **T3a-F2 (central, open):** the central counts a `NotDelivered` per DL transmission, and the NB re-sends the queued DL after every ACK it seals, retransmissions included. Under ACK loss one uplink burns the 5-attempt budget of a queued command in ~7 s (job 49 on ctr 517). Proposed: count once per uplink counter (the NB TX event carries the counter it rode on).
+- **T3a-F3 (node, low):** the link-up "first telemetry" after a rejoin does not coalesce with a report sent 0.4 s earlier, and `hist_finish()` always kicks a report at the end of a replay. Each gives one identical-body point in the Portal.
+- **LC re-ask on release (open):** 5625 re-asked a `LinkCheckReq` 30 s later 3× out of 150 overnight (LC-only frames, the NB ACKed each with the tail). Debug images never failed an LC (62/62). Being traced on the NB until 16:00Z.
 
 ## 14. Test plan (outline)
 
