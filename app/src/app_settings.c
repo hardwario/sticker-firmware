@@ -294,6 +294,29 @@ static int clear_and_save_alarm_rules(void)
 	return ret;
 }
 
+/* factory_reset and vendor_reset hand the unit to a new owner (#471): the pulse
+ * totalizers live in their own settings subtree ("counters", outside "config")
+ * and the history in its own flash ring, so neither config reset touches them;
+ * wipe both explicitly through their live APIs (no raw erase of the settings
+ * partition, see the GOTCHA in app_settings_vendor_reset()). The history ring is
+ * not settings-backed, so app_history_clear() erases it and resets its in-RAM
+ * bookkeeping. device_reset keeps both. Returns 0 or the counters save error. */
+static int clear_counters_and_history(void)
+{
+	int ret;
+
+	app_hall_reset_counts();
+	app_input_reset_counts();
+	ret = app_counters_save(true);
+	if (ret) {
+		LOG_ERR("Call `app_counters_save` failed: %d", ret);
+	}
+
+	app_history_clear();
+
+	return ret;
+}
+
 /* factory_reset and vendor_reset both reset the LoRaWAN identity/keys back to
  * defaults (app_config.yml persistent tiers) — unlike device_reset, whose
  * persistent tier keeps ALL lorawan_* fields untouched. Without this, the
@@ -370,8 +393,9 @@ int app_settings_factory_reset(void)
 	 * (see the atomicity note in app_settings.h) — and every reboot from here
 	 * on must also wipe the LoRaMac stack's own NVM, since the keys it was
 	 * built under are already gone. */
-	/* Error already logged inside; this tier reboots either way. */
+	/* Errors already logged inside; this tier reboots either way. */
 	clear_and_save_alarm_rules();
+	(void)clear_counters_and_history();
 
 	lrw_reset_nvm_before_reboot();
 	sys_reboot(SYS_REBOOT_COLD);
@@ -452,25 +476,19 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
-	/* The pulse totalizers and the NFC claim-record state each live in their own
-	 * settings subtree, outside "config" — device_reset/factory_reset leave them
-	 * alone on purpose, but vendor_reset is the deep tier meant to look like a
-	 * freshly manufactured device, so wipe both explicitly through their own live
-	 * APIs (same reasoning as the GOTCHA above: no raw erase). */
-	app_hall_reset_counts();
-	app_input_reset_counts();
-	ret = app_counters_save(true);
+	/* Counters and history go, as in factory_reset (#471). */
+	ret = clear_counters_and_history();
 	if (ret) {
-		LOG_ERR("Call `app_counters_save` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
 		sys_reboot(SYS_REBOOT_COLD);
 	}
-	app_nfc_claim_active();
 
-	/* History is a separate, non-NVS flash ring (its own on-flash format, not
-	 * settings-API-backed), so a raw erase here is safe — app_history_clear()
-	 * also resets its own in-RAM bookkeeping to match. */
-	app_history_clear();
+	/* claim_token is not in the vendor_reset persistent tier, so the unit has
+	 * none now. Close the claim window (#471): nothing claim-related is readable
+	 * until the owner sends claim_active (secret_key channel), which generates a
+	 * new token and hands it to the phone for ATELOS. The latch lives in its own
+	 * settings subtree ("clm"), outside "config", so it is set explicitly. */
+	app_nfc_claim_done("vendor_reset");
 
 	app_alarm_rules_clear_all();
 	ret = app_alarm_rules_save();

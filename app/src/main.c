@@ -159,30 +159,20 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
-			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
-			 * together, always (both the same-token and new-token claim_active
-			 * cases run this action, see app_cmd_handle_claim_active) so the phone can
-			 * always assume "ack read -> reboot" regardless of which case it
-			 * took. When a new token was staged, this also ensures
-			 * g_app_config.claim_token becomes live (h_commit) in the same
-			 * breath the latch flips — no window where a poll could
-			 * re-expose the OLD token; when no new token was given this is a
-			 * same-value no-op re-persist.
-			 *
-			 * #340 M15: app_nfc_claim_active() already persisted clm/state=ACTIVE
-			 * to flash by the time app_settings_save() runs. If that save
-			 * then fails, don't keep running live with the latch reopened
-			 * but the (possibly new) claim_token never persisted - mirrors
-			 * app_settings.c's post-destructive-step convention (34a1ed8):
-			 * force a reboot so the device re-reads whatever DID actually
-			 * get persisted, instead of a silent, un-rebooted return leaving
-			 * flash and live state out of sync until some later, unrelated
-			 * reboot. */
+			/* #351/#415/#471: persist the staged claim_token (new, generated or
+			 * the same one), then flip the claim window to ACTIVE, then reboot,
+			 * always (every claim_active case runs this action, see
+			 * app_cmd_handle_claim_active), so the phone can always assume
+			 * "claim_info read -> reboot". The latch flips only after the token
+			 * is on flash: a failed save reboots with the old token and the old
+			 * latch, never with an open window and a token the phone was told
+			 * about but the unit lost (e.g. an all-zero one after vendor_reset).
+			 * claim_token becomes live via h_commit on the next boot. */
 			nfc_result_before_reboot();
-			app_nfc_claim_active();
-			if (app_settings_save(true)) {
-				sys_reboot(SYS_REBOOT_COLD);
+			if (app_settings_save(false) == 0) {
+				app_nfc_claim_active("claim_active command");
 			}
+			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters

@@ -1338,7 +1338,7 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_claim_active();
+	app_nfc_claim_active("ats claim active");
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1361,7 +1361,7 @@ static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_claim_done();
+	app_nfc_claim_done("ats claim done");
 	shell_print(sh, "claim window -> done");
 	return 0;
 }

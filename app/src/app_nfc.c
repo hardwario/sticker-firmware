@@ -388,24 +388,67 @@ static K_MUTEX_DEFINE(m_claim_lock);
 
 /* Load handler for the "clm" settings subtree (key "clm/state"). Migrates the
  * legacy #247 tri-state in place: unset(0)/pending(1) -> ACTIVE, consumed(2) ->
- * DONE, any other byte -> ACTIVE (safe default). */
+ * DONE. Fail-closed (#471): any other byte, a wrong length or a read error
+ * closes the window (DONE), so corrupted NVS on a claimed unit never re-exposes
+ * claim_token through get_claim_info. Only a missing key (fresh factory NVS)
+ * keeps the default ACTIVE. Recovery: claim_active (owner, NFC) or
+ * `ats claim active`. */
 static int clm_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	if (settings_name_steq(name, "state", NULL)) {
 		uint8_t stored;
 		if (len != sizeof(stored)) {
+			atomic_set(&m_claim_state, CLAIM_DONE);
+			LOG_WRN("NFC: clm/state bad length %u: window closed", (unsigned)len);
 			return -EINVAL;
 		}
 		ssize_t r = read_cb(cb_arg, &stored, sizeof(stored));
 		if (r < 0) {
+			atomic_set(&m_claim_state, CLAIM_DONE);
+			LOG_WRN("NFC: clm/state read failed: %d: window closed", (int)r);
 			return (int)r;
 		}
-		atomic_set(&m_claim_state, (stored == CLAIM_DONE) ? CLAIM_DONE : CLAIM_ACTIVE);
+		if (stored == 0 || stored == CLAIM_ACTIVE) {
+			atomic_set(&m_claim_state, CLAIM_ACTIVE);
+		} else {
+			if (stored != CLAIM_DONE) {
+				LOG_WRN("NFC: clm/state unknown value %u: window closed",
+					(unsigned)stored);
+			}
+			atomic_set(&m_claim_state, CLAIM_DONE);
+		}
 		return 0;
 	}
 	return -ENOENT;
 }
 SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NULL);
+
+#if defined(CONFIG_ZTEST)
+struct clm_test_src {
+	const uint8_t *data;
+	int read_ret; /* < 0: the read fails with it */
+};
+
+static ssize_t clm_test_read(void *cb_arg, void *data, size_t len)
+{
+	const struct clm_test_src *src = cb_arg;
+
+	if (src->read_ret < 0) {
+		return src->read_ret;
+	}
+	memcpy(data, src->data, len);
+	return (ssize_t)len;
+}
+
+/* Feed one stored "clm/state" value through the load handler (#471), as
+ * settings_load_subtree("clm") would. */
+int app_nfc_test_clm_load(const uint8_t *data, size_t len, int read_ret)
+{
+	struct clm_test_src src = {.data = data, .read_ret = read_ret};
+
+	return clm_settings_set("state", len, clm_test_read, &src);
+}
+#endif /* defined(CONFIG_ZTEST) */
 
 static void clm_state_save(uint8_t state)
 {
@@ -435,17 +478,17 @@ static void claim_state_set(uint8_t state, const char *reason)
 
 /* #415: claiming finished - get_claim_info refuses from now on. Reached from the
  * claim_done command (secret_key-encrypted owner channel / shell; the vendor
- * channel is not allow-listed) and `ats claim done`. */
-void app_nfc_claim_done(void)
+ * channel is not allow-listed), `ats claim done`, and vendor_reset (#471). */
+void app_nfc_claim_done(const char *reason)
 {
-	claim_state_set(CLAIM_DONE, "claim_done command");
+	claim_state_set(CLAIM_DONE, reason);
 }
 
 /* #415: (re)open the claim window (factory default). Reached from the
- * claim_active command, `ats claim active`, and vendor_reset. */
-void app_nfc_claim_active(void)
+ * claim_active command and `ats claim active`. */
+void app_nfc_claim_active(const char *reason)
 {
-	claim_state_set(CLAIM_ACTIVE, "claim_active command");
+	claim_state_set(CLAIM_ACTIVE, reason);
 }
 
 /* Lock-free: safe from any thread, never waits on a mailbox session (see above). */
@@ -1271,7 +1314,9 @@ int app_nfc_init(void)
 	(void)settings_subsys_init();
 	ret = settings_load_subtree("clm");
 	if (ret) {
-		LOG_WRN("NFC: clm state load failed: %d (defaulting ACTIVE)", ret);
+		/* Fail-closed (#471): an unreadable latch must not open the window. */
+		atomic_set(&m_claim_state, CLAIM_DONE);
+		LOG_WRN("NFC: clm state load failed: %d (window closed)", ret);
 	}
 	LOG_INF("NFC: claim state = %u", (unsigned)atomic_get(&m_claim_state));
 

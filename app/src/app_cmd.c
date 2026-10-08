@@ -52,6 +52,7 @@
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -868,40 +869,50 @@ static void app_cmd_handle_claim_done(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
-	app_nfc_claim_done();
+	app_nfc_claim_done("claim_done command");
 	resp->which_body = Response_ack_tag;
 }
 
 /* #351/#415: re-open the claim window (symmetric counterpart to claim_done's
  * close). Always deferred via APP_CMD_ACTION_CLAIM_ACTIVE_SAVE — same
- * restart-style pattern as reboot/device_reset/set_secret_key: the Ack is
+ * restart-style pattern as reboot/device_reset/set_secret_key: the answer is
  * written and delivered to the phone first (app_nfc_take_cmd_action() only
  * releases the action once that round-trip completes, #242), and only then does
- * main.c flip the latch + reboot. This used to short-circuit to a synchronous
- * app_nfc_claim_active() (no reboot) when no new_claim_token was given, on the
- * reasoning that nothing in g_app_config was changing so there was nothing to
- * wait on — but that made the two branches behave differently for no
- * functional reason. Deferring both the same way costs one reboot in the
- * no-new-token case and buys consistent, predictable timing instead: the
- * phone can always assume "ack read -> reboot happens" regardless of which
- * branch it took, mirroring the non-new-token branch's rebuild of
- * app_config()->claim_token being a same-value no-op (h_commit just re-syncs
- * the value that's already live), so a plain re-open still leaves
- * claim_token unchanged. */
+ * main.c persist the config, flip the latch and reboot.
+ *
+ * The token (#471): a non-zero new_claim_token replaces it; without one the
+ * stored token is kept, and when none is stored (wiped by vendor_reset) a new
+ * 128-bit token comes from the CSPRNG. The answer is always Response.claim_info
+ * with the token that holds after the reboot, so the phone can forward it to
+ * ATELOS; it travels on the secret_key channel (nfc) or the shell only. */
 static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command *cmd,
 					Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
 	const Command_ClaimActive *rearm = &cmd->body.claim_active;
+	uint8_t *token = app_config()->claim_token;
+	const size_t token_size = sizeof(app_config()->claim_token);
 
 	if (rearm->has_new_claim_token &&
 	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
-		memcpy(app_config()->claim_token, rearm->new_claim_token,
-		       sizeof(app_config()->claim_token));
+		memcpy(token, rearm->new_claim_token, token_size);
+	} else if (buffer_is_zero(token, token_size)) {
+		uint8_t fresh[sizeof(app_config()->claim_token)];
+
+		if (sys_csrand_get(fresh, sizeof(fresh)) || buffer_is_zero(fresh, sizeof(fresh))) {
+			make_error(resp, Response_Error_Code_NOT_READY, "no entropy");
+			return;
+		}
+		memcpy(token, fresh, token_size);
+		LOG_INF("claim_active: new claim_token generated");
 	}
 	*action = APP_CMD_ACTION_CLAIM_ACTIVE_SAVE;
 
-	resp->which_body = Response_ack_tag;
+	resp->which_body = Response_claim_info_tag;
+	resp->body.claim_info.serial_number = app_config()->serial_number;
+	BUILD_ASSERT(sizeof(resp->body.claim_info.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(resp->body.claim_info.claim_token, token, token_size);
 }
 
 /* #415: read the claim identity {serial_number, claim_token} over the
