@@ -20,6 +20,8 @@
 #include "app_hall.h"
 #include "app_sensor.h"
 
+#include <math.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
 
@@ -737,4 +739,51 @@ ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
 	zassert_equal(g_buzzer_play_calls, 1, "deactivation must trigger exactly one buzzer call");
 	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_STOP,
 		      "expected a stop, not a melody");
+}
+
+static size_t count_onboard_nodata(uint8_t edge)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < test_alarm_event_count; i++) {
+		const struct app_cmd_alarm_event *e = &test_alarm_events[i];
+
+		if (e->source == APP_ALARM_SRC_ONBOARD && e->type == 4 /* no_data */ &&
+		    e->edge == edge &&
+		    (e->quantity == APP_ALARM_Q_TEMPERATURE ||
+		     e->quantity == APP_ALARM_Q_HUMIDITY)) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/* #465: the no-data watchdog only watches the onboard SHT4x while cap_sht is on.
+ * On: a NaN temperature/humidity raises no_data after APP_ALARM_NO_DATA_MS.
+ * Turning the cap off emits the deactivate edges; while off, NaN never fires. */
+ZTEST(alarm_eval, test_cap_sht_gates_onboard_nodata)
+{
+	g_app_config.alarm_limit = 0; /* flush synchronously inside poll */
+	g_app_sensor_data.temperature = NAN;
+	g_app_sensor_data.humidity = NAN;
+
+	g_app_config.cap_sht = true;
+	test_alarm_event_count = 0;
+	/* nodata_poll() uses 0 as the "not armed" sentinel; move off uptime 0. */
+	k_sleep(K_MSEC(10));
+	app_alarm_poll(); /* arms the NaN timers */
+	k_sleep(K_MSEC(5100));
+	app_alarm_poll();
+	zassert_equal(count_onboard_nodata(0), 2, "cap_sht on: expected 2 no_data activations");
+
+	g_app_config.cap_sht = false;
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(count_onboard_nodata(1), 2, "cap off must clear the latched no_data");
+
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	k_sleep(K_MSEC(5100));
+	app_alarm_poll();
+	zassert_equal(test_alarm_event_count, 0, "cap_sht off: %zu events", test_alarm_event_count);
 }
