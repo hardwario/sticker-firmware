@@ -200,7 +200,7 @@ stays joined / rejoins with the same credentials.
 **Goal:** `factory_reset` (new, narrower than device_reset above) keeps the identity (serial,
 `secret-key`, `nonce-counter`, claim token, `vendor-token`) plus DevEUI / JoinEUI, and resets the
 LoRaWAN keys, session and radio settings to defaults — the unit must be re-keyed before it can join
-again. `vendor_reset` keeps only
+again. Since #471 it also clears the pulse counters and the history. `vendor_reset` keeps only
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
@@ -208,16 +208,18 @@ already-encrypted nfc/shell channel, then reboots so the new key is live (#322);
 replacement is refused.
 **Observable:** `factory_reset` — identity and DevEUI / JoinEUI survive. AppKey / NwkKey, the ABP
 keys, region / sub-band / network / ADR / datarate and the radio mode go back to defaults, and the
-LoRaWAN NVM is wiped (X8). Once re-keyed, the device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+LoRaWAN NVM is wiped (X8), the counters read 0 and the history is empty (#471). Once re-keyed, the
+device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
-live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
+live after reboot, the claim token is blank and the claim window is `done` (#471). `set_secret_key` — the device saves and cold-reboots, and the new key is in
 effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
 `BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
 > `settings factory-reset` over the RTT shell. Confirm:
 > - `config serial-number` / `secret-key` / `lrw-deveui` / `lrw-joineui` survive;
-> - `config lrw-appkey` and the other LoRaWAN keys and settings are back to defaults.
+> - `config lrw-appkey` and the other LoRaWAN keys and settings are back to defaults;
+> - `ats sensors sample` shows the hall / input counters at 0 and `history info` an empty ring (#471).
 >
 > Re-provision the keys (`config lrw-appkey …` + `settings save`, or NFC `set_param`, N1) and
 > confirm the device joins afresh. Then `config vendor-reset-allow false` + `settings save`, and confirm
@@ -225,7 +227,8 @@ effect once it comes back (old key no longer decrypts); an all-zero key is rejec
 > `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
 > argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
 > `config serial-number`/`config vendor-token` are unchanged but everything else (incl.
-> `config secret-key`, which should now read the supplied key) is back to defaults/blank.
+> `config secret-key`, which should now read the supplied key) is back to defaults/blank, and
+> `ats claim status` → `done` (#471).
 
 - [ ] Pass
 
@@ -243,9 +246,9 @@ channel instead of the shell. `vendor_reset` (id 26, `SetSecretKey{key}` body) i
 - A valid request → `ack`. Then the session ends (deferred action), green + yellow 2 s, and the
   reset + reboot run. Afterwards only `serial_number`, `vendor_token` and `nonce_counter` survive,
   and the supplied `secret_key` is live (the owner channel works with the new key). The claim
-  window is set back to `active`, but the claim token is wiped with everything else, so
-  `get_claim_info` → `NOT_READY "no claim token"` until it is provisioned again. The LoRaWAN
-  identity is wiped too (X8).
+  token is wiped with everything else and the claim window is closed (`done`, #471), so
+  `get_claim_info` → `NOT_READY "claimed"` until the owner sends `claim_active`, which
+  generates a new token (N10). The LoRaWAN identity is wiped too (X8).
 - `vendor-reset-allow = false` → `Error{NOT_READY "vendor_reset disabled"}`, no reboot. Recovery:
   `set_param{application{vendor_reset_allow = true}}` over `0x02`. It is always accepted there: the
   field is `writable: [vendor]` and its write is not gated on the current value. Then re-send
@@ -265,7 +268,7 @@ the Manager-App guide §4.4 and `tests/nfc_crypto` `test_vendor_channel_vector`)
 >    kept on the tag), confirm:
 >    - `get_basic_info` reports the same serial and a `nonce_counter` that is not reset;
 >    - the owner channel answers under the new `secret_key` (the old one gets no reply);
->    - `ats claim status` → `active`, while `get_claim_info` → `NOT_READY "no claim token"`;
+>    - `ats claim status` → `done` and `get_claim_info` → `NOT_READY "claimed"` (#471);
 >    - `config serial-number` / `vendor-token` are unchanged and everything else is back to
 >      defaults.
 > 5. Send `vendor_reset` over `0x01` → `NOT_READY "transport not allowed"`.
@@ -1991,8 +1994,8 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 - `device_reset`: config and alarm defaults are restored. Kept: identity (serial, `secret_key`,
   nonce, claim token + window state, `vendor_token`) and the full LoRaWAN provisioning and session
   (G6).
-- `factory_reset`: kept are identity + DevEUI / JoinEUI. The LoRaWAN keys and session reset, and the
-  device re-joins (G6a).
+- `factory_reset`: kept are identity + DevEUI / JoinEUI. The LoRaWAN keys and session reset, the
+  counters and the history are cleared (#471), and the device re-joins (G6a).
 - `set_secret_key`: the `ack` decrypts under the **old** key. After the reboot, a frame sealed with
   the old key gets no reply (RTT `cmd: decrypt failed`, red LED) while the new key works. The nonce
   is preserved.
@@ -2048,10 +2051,13 @@ mailbox channel `0x03`.
 `get_claim_info` with `ClaimInfo{serial_number, claim_token}` (`device_status` bit 17
 `CLAIM_ACTIVE` set). The window closes **only** on an explicit `claim_done` (owner command, id 25)
 or `ats claim done`, which gives `done`: `get_claim_info` → `NOT_READY "claimed"` and bit 17 = 0.
-`claim_active` (id 27, reboots) / `ats claim active` / `vendor_reset` reopen it; `device_reset` /
-`factory_reset` leave it alone. The state persists across reboot and reflash (NVS `clm/state`).
-Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and `consumed` → `done`.
-No token provisioned → `NOT_READY "no claim token"`.
+`claim_active` (id 27, reboots) / `ats claim active` reopen it; `vendor_reset` closes it and wipes
+the token (#471); `device_reset` / `factory_reset` leave it alone. The state persists across reboot
+and reflash (NVS `clm/state`). Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and
+`consumed` → `done`; any other stored value closes the window (fail-closed, #471). No token
+provisioned → `NOT_READY "no claim token"`. `claim_active` answers `ClaimInfo` with the token that
+holds after the reboot: `new_claim_token` if given, else the stored one, else (none stored) a new
+CSPRNG token (#471).
 **Observable:** `ats claim status` reports the state throughout. `get_claim_info` (over `[0x03]`
 or `ats cmd plain 0801ea0100`) returns the token or the `NOT_READY` reason. `device_status` bit 17
 in the encrypted `get_info` mirrors the window.
@@ -2068,8 +2074,11 @@ in the encrypted `get_info` mirrors the window.
 > 3. Reflash (plain `west flash`, no `--erase`) and confirm the state is still `active`.
 > 4. `ats claim done` → `done`, and `get_claim_info` → `NOT_READY "claimed"`. Reboot and confirm
 >    `done` survives.
-> 5. `vendor_reset` (G6a-NFC) → back to `active`. The token is wiped with it, so
->    `get_claim_info` → `NOT_READY "no claim token"` until `config claim-token` is set again.
+> 5. `vendor_reset` (G6a-NFC) → `done`, token wiped: `get_claim_info` → `NOT_READY "claimed"`
+>    (#471).
+> 6. Send `claim_active` with no token over the owner channel (phone
+>    part step 5) → `ClaimInfo` with a **new, non-zero** token; after the reboot `ats claim status`
+>    → `active`, `config claim-token` shows that token and `get_claim_info` returns it.
 >
 > **Phone part (bench as in N6, `sticker_mailbox_seq_led_claim.py` steps 3–7):**
 > 1. `get_claim_info` → token.
@@ -2077,7 +2086,11 @@ in the encrypted `get_info` mirrors the window.
 >    command must not close it.
 > 3. `claim_done` → `ack`, then `get_claim_info` → `NOT_READY "claimed"`, and `get_info` shows
 >    bit 17 = 0.
-> 4. `claim_active` → `ack`, reboot. With the phone kept on the tag, `get_claim_info` → token again.
+> 4. `claim_active` → `ClaimInfo` with the same token (#471), reboot. With the phone kept on the
+>    tag, `get_claim_info` → token again.
+> 5. After a `vendor_reset` (G6a-NFC): `claim_active` with no token → `ClaimInfo` with a new token;
+>    `claim_active` with `new_claim_token` → `ClaimInfo` with that token. Each time the token
+>    returned is the one `get_claim_info` gives after the reboot.
 >
 > Report each outcome.
 
