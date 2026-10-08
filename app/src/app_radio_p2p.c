@@ -2636,8 +2636,8 @@ int app_radio_p2p_init(void)
 		return -ENODEV;
 	}
 
-	/* The allowance of the EU868 sub-band the channel is in: 1 % on the
-	 * default 868.1 MHz, 0.1 % or 10 % on others (app_radio_duty_budget_ms). */
+	/* The allowance of the EU868 sub-band the channel is in: 10 % on the
+	 * default 869.525 MHz, 1 % or 0.1 % on others (app_radio_duty_budget_ms). */
 	app_radio_duty_init(app_radio_duty_budget_ms(g_app_config.p2p_frequency));
 
 	int ret = settings_register(&m_fcnt_sh);

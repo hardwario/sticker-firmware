@@ -48,7 +48,7 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
-	.p2p_frequency = 868100000,
+	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 	.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA,
@@ -85,7 +85,7 @@ static struct app_config m_app_config = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
-	.p2p_frequency = 868100000,
+	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 	.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA,
@@ -2048,7 +2048,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_input_b_counter, 1, 1),
 
 	SHELL_CMD_ARG(p2p-frequency, NULL,
-	              "Get/Set P2P carrier frequency in Hz (EU868 band).",
+	              "Get/Set P2P carrier frequency in Hz (EU868 band). Must match the Hub; default 869.525 MHz (10 % duty).",
 	              cmd_p2p_frequency, 1, 1),
 
 	SHELL_CMD_ARG(p2p-spreading-factor, NULL,

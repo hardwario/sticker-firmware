@@ -519,8 +519,8 @@ Limitations:
   `rejoin` backend op returns `-ENOTSUP`.
 - **No ADR, no power control, no SF change** (plan §3.3, §7.4). The only recovery
   from a lost link is the rejoin budget.
-- **One channel**, both directions: `p2p-frequency`. The 869.525 MHz downlink
-  channel is plan P7.
+- **One channel**, both directions: `p2p-frequency`, default 869.525 MHz (h1.6,
+  10 %, plan §3.3). Reception uses the boosted LNA gain (`CONFIG_LORA_RX_BOOSTED_GAIN`).
 - **No large transfers.** TOWER bulk for history is plan P6. History replays through
   the ordinary 76 B frames.
 - **The ACK carries no SNR** (TOWER). The node learns its SNR only through a

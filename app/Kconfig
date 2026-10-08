@@ -37,6 +37,9 @@ config RADIO_P2P
 	# Without it (native_sim, a driver lacking it) app_radio_p2p.c falls
 	# back to lora_send() + lora_recv_async().
 	imply LORA_SEND_RECV_ASYNC
+	# Boosted LNA gain on every lora_* reception, ~+2 dB for ~+0.1 uA at a
+	# 900 s report (doc/plan/470 §3.3, Hynek 2026-10-08).
+	imply LORA_RX_BOOSTED_GAIN
 	help
 	  App-level name for the raw-LoRa point-to-point transport
 	  (app_radio_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two

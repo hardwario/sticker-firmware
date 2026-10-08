@@ -44,7 +44,8 @@ Fixed per network. There is no ADR and no power or SF control.
 |---|---|
 | Modulation | LoRa, BW 125 kHz, CR 4/5, preamble 8, explicit header, CRC on |
 | SF | `p2p-spreading-factor` = SF7 |
-| Channel | `p2p-frequency` = 868.1 MHz, both directions |
+| Channel | `p2p-frequency` = 869.525 MHz (h1.6, 10 % duty), both directions |
+| RX gain | boosted (0x96, ~+2 dB) on the Node and the NB |
 | TX power | `p2p-tx-power` = 14 dBm, or the JoinAccept's assignment (the central sends none today) |
 | Frame MTU | 100 B (the SX126x 4 s TX timeout caps `lora` there) |
 
@@ -330,7 +331,7 @@ the link would lose the data, hence:
 | — | A JoinAccept lost on air after the commit: the Node keeps its old pairing until the next JoinRequest. |
 | — | TimeAns runs late by the `GET_INFO` transfer (~16 ms), uncompensated. |
 | — | A single lost report is not backfilled (gap ≤ 2 × interval), as on LoRaWAN. |
-| §3.3 | Single channel 869.525 MHz, RX boost and FW defaults: pending decision. |
+| §3.3 | One channel 869.525 MHz for ~30 Nodes per NB (decided 2026-10-08). The Hub config still defaults to 868.1 MHz until the central MR changes it. |
 
 ---
 
