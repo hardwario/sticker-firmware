@@ -154,7 +154,7 @@ building type is measured in M9 / P2 HIL.
 **Configuration.** `p2p-frequency`, `p2p-spreading-factor` and `p2p-tx-power` stay shell-only
 (bench, range tests), with the values above as defaults; production never changes them.
 Proposed for P1 commit C:
-- `p2p-frequency` default 869.525 MHz: **done 2026-10-08**; `fsk` sets 868.1 MHz (TOWER ch0) explicitly, D9;
+- `p2p-frequency` default 869.525 MHz: **done 2026-10-08** (`3e08006c`); bench cut over 11:02–11:09Z (both nodes set by shell + save, rel `3e08006c` with RX boost; NB 0.3.2 `7ee6cbc2`, Hub config `frequency_hz` 869525000); 5625 and 5722 resumed without a join, LC/TimeReq answered; central defaults MR !124 (draft); `fsk` sets 868.1 MHz (TOWER ch0) explicitly, D9;
 - `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit);
 - the `p2p-spreading-factor` help text without the SF sweep.
 
