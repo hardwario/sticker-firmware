@@ -37,7 +37,35 @@ static void nfc_hw_before(void *fixture)
 	 * across tests in the same ztest binary — CONFIG_SETTINGS_NONE makes
 	 * app_nfc_init()'s settings_load_subtree("clm") a no-op, so it does NOT
 	 * reset to the ACTIVE default on its own. Force it back explicitly. */
-	app_nfc_claim_active();
+	app_nfc_claim_active("test");
+}
+
+/* #471: the claim latch fails closed. Legacy 0/1 open the window, 2 closes it;
+ * an unknown byte, a wrong length or a failed read close it too, so corrupted
+ * NVS on a claimed unit never re-exposes the claim_token. */
+ZTEST(nfc_hw, test_clm_latch_fails_closed)
+{
+	static const struct {
+		uint8_t value;
+		size_t len;
+		int read_ret;
+		uint8_t expect;
+	} cases[] = {
+		{0, 1, 0, APP_NFC_CLAIM_ACTIVE},    {1, 1, 0, APP_NFC_CLAIM_ACTIVE},
+		{2, 1, 0, APP_NFC_CLAIM_DONE},      {0x7F, 1, 0, APP_NFC_CLAIM_DONE},
+		{0xFF, 1, 0, APP_NFC_CLAIM_DONE},   {1, 2, 0, APP_NFC_CLAIM_DONE},
+		{1, 1, -EIO, APP_NFC_CLAIM_DONE},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		uint8_t buf[2] = {cases[i].value, cases[i].value};
+
+		app_nfc_claim_active("test");
+		(void)app_nfc_test_clm_load(buf, cases[i].len, cases[i].read_ret);
+		zassert_equal(app_nfc_claim_state_get(), cases[i].expect,
+			      "case %zu (value %u len %zu read %d): state %u", i, cases[i].value,
+			      cases[i].len, cases[i].read_ret, app_nfc_claim_state_get());
+	}
 }
 
 ZTEST(nfc_hw, test_init_succeeds_on_empty_tag)

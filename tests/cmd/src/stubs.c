@@ -334,7 +334,7 @@ bool app_nfc_mailbox_available(void)
  * tests/nfc_hw). */
 int g_claim_done_calls;
 
-void app_nfc_claim_done(void)
+void app_nfc_claim_done(const char *reason)
 {
 	g_claim_done_calls++;
 }
@@ -342,7 +342,7 @@ void app_nfc_claim_done(void)
 /* #351/#415: mirrors g_claim_done_calls above, for the claim_active command. */
 int g_claim_active_calls;
 
-void app_nfc_claim_active(void)
+void app_nfc_claim_active(const char *reason)
 {
 	g_claim_active_calls++;
 }
