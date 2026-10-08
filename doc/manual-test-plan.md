@@ -395,7 +395,8 @@ on TTN.
 settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
 **Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
 fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
-(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+(`interval_sample`, `interval_report`, `history_enable`), every `sensors.cap_*` flag (since #465
+incl. `cap_buzzer` and `cap_sht`) and,
 on a 1-Wire build, `w1_slot_type` (4 entries).
 
 **Prompt for Claude:**
@@ -897,6 +898,24 @@ requires `cap_barometer` / `cap_light_sensor`.
 > Confirm `cap_barometer` and `cap_light_sensor` are enabled. Run `ats sensors sample` and report
 > pressure, altitude and illuminance; sanity-check against ambient. Ask me to cover/uncover the
 > light sensor and confirm illuminance changes. Confirm all three reach fPort 2 telemetry.
+
+- [ ] Pass
+
+### S10b — Onboard SHT4x switched off: `cap_sht` (v1.5.0, #465)
+
+**Goal:** With `cap_sht` off the onboard SHT4x is not read and leaves no trace on the wire,
+in the alarms or in the history; the settings-info reports the flag.
+**Observable:** fPort 2 telemetry without `temperature` / `humidity`; no `no_data` alarm for
+the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors.cap_buzzer`.
+
+**Prompt for Claude:**
+> On a joined unit with `history-enable true` and `history-sensors` incl. temperature/humidity,
+> confirm the boot `ConfigDump` shows `cap_sht: 1` and `cap_buzzer`. Run `config cap-sht false`
+> and `settings save` (reboots). Confirm the new boot `ConfigDump` shows `cap_sht: 0`, and that
+> the next fPort 2 telemetry frames decode without `temperature` / `humidity` (other groups
+> unchanged). Wait > 5 s past a sample and confirm no fPort 3 `no_data` alarm for
+> `onboard` temperature/humidity. Run `history info` and confirm the `sensors:` line no longer
+> lists temperature/humidity. Restore `config cap-sht true` + `settings save` and confirm the fields return.
 
 - [ ] Pass
 
