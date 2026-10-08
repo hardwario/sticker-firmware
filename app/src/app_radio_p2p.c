@@ -152,6 +152,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_CTRL_START_JITTER_MS 2000
 #define P2P_CTRL_RETRY_MS        30000
 #define P2P_CTRL_TRIES           3
+/* A control frame waits while app_radio holds a confirmed frame for its retry:
+ * taking a counter in between would send the retry under a new one (§7.3). */
+#define P2P_CTRL_HOLD_MS         1000
+/* p2p_exchange() `attempt` of a frame app_radio never retries. */
+#define P2P_NOT_RETRIED          (-1)
 /* A LinkCheckReq follows a report the cadence made a link check, after the
  * report's own frames. */
 #define P2P_LINK_CHECK_DELAY_MS  5000
@@ -269,6 +274,19 @@ static int64_t m_time_req_done_ms;
 static bool m_time_req_valid;
 static bool m_lc_outstanding;     /* a LinkCheckReq was acknowledged, no answer yet */
 static atomic_t m_answer_reports; /* confirmed reports sent for the outstanding answer */
+
+/* The last confirmed app_radio frame (plan §7.3): an app_radio retry of it goes
+ * again under the same counter, so a frame the gateway heard but whose ACKs
+ * were all lost is a retransmission there (re-ACKed, not delivered again)
+ * instead of a second report. Only while no other frame has taken a counter
+ * since -- a lower counter would be a replay -- and only for the very same
+ * plaintext (one counter never seals two plaintexts). */
+static struct {
+	bool valid;
+	uint32_t counter;
+	uint8_t len;
+	uint8_t pt[TWR_PAYLOAD_MAX];
+} m_retx;
 
 /* One received frame, stamped in the RX callback. */
 struct p2p_rx {
@@ -610,6 +628,7 @@ static void session_reset(void)
 	atomic_clear(&m_answer_reports);
 	atomic_clear(&m_ctrl_pending);
 	m_ctrl_tries = 0;
+	m_retx.valid = false;
 }
 
 /* Persist a successful JoinAccept's pairing state and switch the module to
@@ -1436,17 +1455,33 @@ static void p2p_auto_ack(const struct p2p_xfer *x)
 	app_radio_duty_charge(air);
 }
 
+/* The counter an app_radio retry of `pt` goes under again (plan §7.3): the
+ * last confirmed app_radio frame's, if it carried this very plaintext and no
+ * frame has taken a counter since (m_fcnt is still right behind it). */
+static bool retx_counter(const uint8_t *pt, size_t pt_len, uint32_t *counter)
+{
+	if (!m_retx.valid || m_retx.len != pt_len || memcmp(m_retx.pt, pt, pt_len) != 0 ||
+	    m_fcnt != m_retx.counter + 1U) {
+		return false;
+	}
+	*counter = m_retx.counter;
+	return true;
+}
+
 /* One exchange (plan §7.1): seal `pt` under a fresh counter and send it; a
  * confirmed frame is sent up to P2P_REPS times (byte-identical, random backoff)
  * until its ACK arrives, then an announced downlink is received and ACKed. The
  * downlink stays in m_dl for p2p_deliver(), after the radio is released, and an
  * ACK's CTRL tail in `x` -- `ack_tail` is the extra ACK airtime a request
- * (LinkCheckReq, TimeReq) waits for, 0 otherwise (plan §13.5).
+ * (LinkCheckReq, TimeReq) waits for, 0 otherwise (plan §13.5). `attempt` is
+ * the app_radio retry of a confirmed frame (0 = its first send; a retry
+ * reuses its counter while retx_counter() allows), P2P_NOT_RETRIED for a
+ * frame app_radio never retries (a 0x91 control frame).
  * Returns 0 when the frame went out at least once (`x->acked` for a confirmed
  * one), -EAGAIN (duty held, nothing sent), -EBUSY (listen mode), -ENOTCONN
  * (not paired), -EMSGSIZE, or a counter / radio error. Radio work queue. */
 static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_t ack_tail,
-			struct p2p_xfer *x)
+			int attempt, struct p2p_xfer *x)
 {
 	/* Radio work queue only, one exchange at a time: off its 4 KB stack. */
 	static uint8_t frame[P2P_FRAME_MAX];
@@ -1481,10 +1516,15 @@ static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_
 		return -EAGAIN;
 	}
 
-	int ret = twr_counter_next(&counter);
+	int ret = 0;
 
-	if (ret) {
-		return ret; /* fail-closed: no durably-reserved counter available */
+	if (attempt > 0 && retx_counter(pt, pt_len, &counter)) {
+		LOG_INF("Retry %d under counter %u", attempt, counter);
+	} else {
+		ret = twr_counter_next(&counter);
+		if (ret) {
+			return ret; /* fail-closed: no durably-reserved counter available */
+		}
 	}
 
 	const struct twr_hdr h = {
@@ -1501,6 +1541,12 @@ static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_
 		return ret;
 	}
 	x->counter = counter;
+	m_retx.valid = confirmed && attempt != P2P_NOT_RETRIED;
+	if (m_retx.valid) {
+		m_retx.counter = counter;
+		m_retx.len = (uint8_t)pt_len;
+		memcpy(m_retx.pt, pt, pt_len);
+	}
 
 	for (uint8_t n = 0; n < (confirmed ? P2P_REPS : 1) && !x->acked; n++) {
 		uint32_t done_cyc = 0;
@@ -1662,12 +1708,16 @@ static void ctrl_work_handler(struct k_work *work)
 	if (bits == 0) {
 		return;
 	}
+	if (app_radio_ack_pending()) {
+		k_work_reschedule_for_queue(app_radio_work_q(), dwork, K_MSEC(P2P_CTRL_HOLD_MS));
+		return;
+	}
 
 	size_t len = ctrl_build(bits, pt);
 	struct p2p_xfer x;
 	/* The gateway answers these requests in the ACK (plan §13.5). */
 	bool asks = bits & (P2P_CTRL_BIT_LINK_CHECK | P2P_CTRL_BIT_TIME);
-	int ret = p2p_exchange(pt, len, true, asks ? TWR_ACK_TAIL_MAX : 0, &x);
+	int ret = p2p_exchange(pt, len, true, asks ? TWR_ACK_TAIL_MAX : 0, P2P_NOT_RETRIED, &x);
 
 	if (ret == -EAGAIN) {
 		k_work_reschedule_for_queue(
@@ -1894,7 +1944,7 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 	pt[1] = port;
 	memcpy(&pt[P2P_ENV_LEN], f->buf, f->len);
 
-	int ret = p2p_exchange(pt, P2P_ENV_LEN + f->len, confirmed, 0, &x);
+	int ret = p2p_exchange(pt, P2P_ENV_LEN + f->len, confirmed, 0, f->attempt, &x);
 
 	switch (ret) {
 	case 0:
@@ -1915,7 +1965,7 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 		return 0;
 	}
 	if (!x.acked) {
-		return -ETIMEDOUT; /* app_radio retries, under a new counter */
+		return -ETIMEDOUT; /* app_radio retries, under the same counter if it can */
 	}
 	note_uplink_acked(); /* a plain ACK counts as "link alive" (plan §8.2) */
 	p2p_deliver_xfer(&x);
@@ -2466,6 +2516,7 @@ void p2p_test_tx_reset(void)
 	k_msgq_purge(&m_rxq);
 	atomic_clear(&m_ctrl_pending);
 	m_ctrl_tries = 0;
+	m_retx.valid = false;
 	(void)k_work_cancel_delayable(&m_ctrl_work);
 }
 
@@ -2532,7 +2583,7 @@ uint32_t p2p_test_get_gw_last(void)
 int p2p_test_uplink_tail(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_t ack_tail)
 {
 	struct p2p_xfer x;
-	int ret = p2p_exchange(pt, pt_len, confirmed, ack_tail, &x);
+	int ret = p2p_exchange(pt, pt_len, confirmed, ack_tail, P2P_NOT_RETRIED, &x);
 
 	if (ret) {
 		return ret;

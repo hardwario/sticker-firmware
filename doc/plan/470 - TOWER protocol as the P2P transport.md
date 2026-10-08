@@ -375,9 +375,18 @@ below; the net layer does TOWER reps (byte-identical, same counter).
 ### 7.3 Retries
 
 One `app_radio` attempt = one TOWER confirmed send with 3 net-layer reps. On failure the
-common `app_radio` ladder (1..2ⁿ s, max 3) applies; a new attempt is a new send with a new
-counter (TOWER semantics), so a delivered-but-unACKed frame can arrive twice — telemetry
-dedups on the central by snapshot timestamp, responses by `seq` (as today).
+common `app_radio` ladder (1..2ⁿ s, max 3) applies. **A retry goes under the same
+counter** (the stored plaintext, sealed again) while no other frame took a counter since;
+a 0x91 control frame waits for the retry. The gateway re-ACKs an equal counter and does
+not deliver it again, so a delivered-but-unACKed frame reaches the Portal once. Only when
+another frame took a counter in between does the retry take a new one (a delivered frame
+can then arrive twice).
+
+*History (T3a-F1, 2026-10-08):* every retry used to take a new counter on the assumption
+that telemetry dedups on the central by snapshot timestamp. It does not: the telemetry
+payload carries no timestamp or sequence, and under `ack_drop` the Portal stored each
+report ~4×. Hynek chose the same-counter retry (2026-10-08). LoRaWAN has the same exposure
+(an app retry takes a new FCnt) and is handled separately.
 
 ### 7.4 Link supervision
 

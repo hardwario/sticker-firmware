@@ -108,7 +108,9 @@ Node                                   NB                         central
   `radio-alarm-ack`). A downlink therefore waits at most one report interval.
 - A confirmed send = up to **3 byte-identical transmissions** (same counter), each
   followed by an ACK window from TX-done (SF7 200 ms). Unanswered, app_radio retries up to
-  3 × **under a new counter**.
+  3 × **under the same counter** while no other frame took one since (otherwise a new
+  counter); a heard frame whose ACKs were all lost is then a retransmission at the NB,
+  not a second report.
 - The NB checks the frame (header → CCM → counter) and ACKs **20 ms** after RxDone:
 
   ```

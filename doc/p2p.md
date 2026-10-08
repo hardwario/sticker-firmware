@@ -318,8 +318,11 @@ The node's own RSSI/SNR of the ACK updates the downlink quality in `RadioState`.
 
 Unanswered after three transmissions, the send returns `-ETIMEDOUT`. It is neither a
 link success nor a failure: that verdict is app_radio's, after its own retries
-(`APP_RADIO_ACK_MAX_RETRIES` = 3, a random 1..2ⁿ s apart). **Each app_radio retry
-is a new TOWER send under a new counter** (plan §7.3).
+(`APP_RADIO_ACK_MAX_RETRIES` = 3, a random 1..2ⁿ s apart). **An app_radio retry goes
+under the same counter** while no other frame took one since, and a 0x91 control frame
+waits for it (`P2P_CTRL_HOLD_MS`); otherwise it is a new send under a new counter (plan
+§7.3). The gateway re-ACKs an equal counter and does not deliver it again, so a frame it
+heard but whose ACKs were all lost is not a second report.
 
 Every exchange is bracketed by `app_radio_air_begin/end()`, the flash/exchange gate.
 Frames are spaced ≥ 200 ms apart.

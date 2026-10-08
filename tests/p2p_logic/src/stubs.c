@@ -282,9 +282,11 @@ void app_radio_tx_kick(void)
 	p2p_test_tx_kick_calls++;
 }
 
+bool p2p_test_ack_pending; /* app_radio holds a confirmed frame for its retry */
+
 bool app_radio_ack_pending(void)
 {
-	return false;
+	return p2p_test_ack_pending;
 }
 
 bool app_radio_tx_answer_pending(void)

@@ -773,8 +773,9 @@ static void tx_request_telemetry(void)
  * frame the backend sent without an Ack (-ETIMEDOUT) stays with its path -- the
  * queued frame, the report's frame or the replay's -- and goes again after
  * app_radio_ack_backoff_ms(), APP_RADIO_ACK_MAX_RETRIES times at most; every
- * other send waits meanwhile. P2P sends it under the same counter (the central
- * keeps a strict counter high-water), LoRaWAN under a new FCnt. Given up, it
+ * other send waits meanwhile. P2P sends it under the same counter while no
+ * other frame took one since (the gateway re-ACKs a retransmission and does
+ * not deliver it again, plan §7.3), LoRaWAN under a new FCnt. Given up, it
  * is a failed link check, and the frame counts as sent: it went out. A new
  * session starts it afresh. Radio work queue only. */
 #define TX_ACK_RETRY      1 /* tx_send(): no Ack; sent again after res->wait_ms */

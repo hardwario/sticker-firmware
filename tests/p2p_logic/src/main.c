@@ -39,6 +39,7 @@ extern uint64_t test_duty_charged_ms;
 extern int test_settings_save_ret;
 extern int p2p_test_announce_calls;
 extern int p2p_test_tx_kick_calls;
+extern bool p2p_test_ack_pending;
 extern int p2p_test_link_ups;
 extern int p2p_test_link_ok_calls;
 extern int p2p_test_link_fail_calls;
@@ -196,6 +197,7 @@ static void before(void *fixture)
 	g_app_config.p2p_tx_power = 14;
 	g_app_config.radio_link_check_interval = 5;
 
+	p2p_test_ack_pending = false;
 	test_lora_reset();
 	test_duty_wait_ms = 0;
 	test_settings_save_ret = 0;
@@ -1404,6 +1406,96 @@ static int backend_send(enum app_radio_frame_kind kind, uint8_t port, uint8_t fl
 	return app_radio_p2p_backend.send(&f, res);
 }
 
+/* One app_radio send of a confirmed telemetry body, `attempt` its retry. */
+static int backend_retry(const uint8_t *body, size_t len, uint8_t attempt)
+{
+	static uint8_t buf[P2P_MAX_BODY];
+	struct app_radio_tx_result res = {0};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_TELEMETRY,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .attempt = attempt,
+				    .len = (uint16_t)len,
+				    .buf = buf};
+
+	memcpy(buf, body, len);
+	return app_radio_p2p_backend.send(&f, &res);
+}
+
+/* Plan §7.3 (T3a-F1): an app_radio retry goes under the counter of the frame
+ * it repeats, so a frame the gateway heard but whose ACKs were all lost is a
+ * retransmission there, not a second report. */
+ZTEST(p2p_logic, test_app_retry_keeps_the_counter)
+{
+	static const uint8_t body[] = {0x01, 0x08, 0xa0};
+	uint32_t counter;
+
+	paired();
+	zassert_equal(backend_retry(body, sizeof(body), 0), -ETIMEDOUT);
+	counter = gw.up_hdr.counter;
+	zassert_equal(backend_retry(body, sizeof(body), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter, "retry 1 under the same counter");
+	zassert_equal(gw.reps, 6, "the gateway sees six transmissions of one counter");
+	gw.ack = true;
+	zassert_ok(backend_retry(body, sizeof(body), 2));
+	zassert_equal(gw.up_hdr.counter, counter, "retry 2 under the same counter");
+	zassert_equal(p2p_test_get_fcnt(), counter + 1, "no counter spent on the retries");
+
+	/* The next frame is a new one. */
+	zassert_ok(backend_retry(body, sizeof(body), 0));
+	zassert_equal(gw.up_hdr.counter, counter + 1);
+}
+
+/* A counter taken in between (here a 0x91 control frame) would make the old
+ * one a replay, and another body must never be sealed under a used counter:
+ * both retries take a new counter. */
+ZTEST(p2p_logic, test_app_retry_takes_a_new_counter_when_it_must)
+{
+	static const uint8_t body[] = {0x01, 0x08, 0xa0};
+	static const uint8_t other[] = {0x01, 0x08, 0xa1};
+	static const uint8_t ctrl[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	uint32_t counter;
+
+	paired();
+	zassert_equal(backend_retry(body, sizeof(body), 0), -ETIMEDOUT);
+	counter = gw.up_hdr.counter;
+	zassert_equal(p2p_test_uplink(ctrl, sizeof(ctrl), true), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 1);
+	zassert_equal(backend_retry(body, sizeof(body), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 2, "after another frame: a new counter");
+
+	zassert_equal(backend_retry(other, sizeof(other), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 3, "another body: a new counter");
+
+	/* A new session forgets the frame. */
+	paired();
+	zassert_equal(backend_retry(other, sizeof(other), 2), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 4, "after a session reset: a new counter");
+}
+
+/* A control frame waits while app_radio holds a frame for its retry, so the
+ * retry still finds its counter the newest. */
+ZTEST(p2p_logic, test_control_frame_waits_for_an_app_retry)
+{
+	uint32_t uplinks;
+
+	paired();
+	gw.ack = true;
+	p2p_test_set_paired();
+	app_radio_p2p_start();
+	zassert_not_equal(p2p_test_ctrl_pending(), 0);
+	uplinks = gw.uplinks;
+
+	p2p_test_ack_pending = true;
+	p2p_test_ctrl_run();
+	zassert_equal(gw.uplinks, uplinks, "nothing sent while a retry waits");
+	zassert_not_equal(p2p_test_ctrl_pending(), 0, "still pending");
+
+	p2p_test_ack_pending = false;
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), 0, "sent once the retry is done");
+	zassert_true(gw.uplinks > uplinks);
+}
+
 /* D-a: the LoRaWAN fPort payload behind the 0x81 envelope, on the LoRaWAN
  * port: telemetry 2, alarm 3, answers 85 (or the command's own port). */
 ZTEST(p2p_logic, test_backend_envelopes_and_ports)
@@ -1505,28 +1597,6 @@ ZTEST(p2p_logic, test_backend_send_result_mapping)
 	zassert_equal(
 		backend_send(APP_RADIO_FRAME_ALARM, 0, APP_RADIO_FRAME_CONFIRMED, body, 10, &res),
 		-ETIMEDOUT, "no ACK: app_radio retries");
-}
-
-/* Plan §7.3: app_radio's retry of a frame that got no ACK is a new TOWER send,
- * under a new counter. */
-ZTEST(p2p_logic, test_retry_takes_a_new_counter)
-{
-	static const uint8_t body[4] = {0x10};
-	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
-				    .flags = APP_RADIO_FRAME_CONFIRMED,
-				    .len = sizeof(body),
-				    .buf = (uint8_t *)body};
-	struct app_radio_tx_result res = {0};
-
-	paired();
-	p2p_test_set_fcnt(100, 200);
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(gw.up_hdr.counter, 100);
-	p2p_test_tx_reset();
-
-	f.attempt = 1;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(gw.up_hdr.counter, 101, "the retry is a new send");
 }
 
 ZTEST(p2p_logic, test_not_paired_sends_nothing)
