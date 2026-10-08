@@ -1433,8 +1433,8 @@ ZTEST(radio_common, test_stale_known_hold_lasts_until_its_end)
 
 	/* A send ends it. */
 	app_radio_stale_note(&dc, true, false, t0 + 2 * 60 * 1000);
-	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60),
-		      APP_RADIO_STALE_REJOIN, "the streak is gone");
+	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60), APP_RADIO_STALE_REJOIN,
+		      "the streak is gone");
 
 	/* The cap still bounds a hold longer than the window plus its margin. */
 	app_radio_stale_note_hold(&dc, t0, 2 * APP_RADIO_STALE_DC_HOLD_MAX_MS);
@@ -2226,6 +2226,58 @@ static void replay_ends_with_the_link(void)
 	zassert_equal(m_ready_calls, 2, "the link-up kicks the cadence, not the drop");
 }
 BOTH_PROFILES(replay_ends_with_the_link)
+
+static size_t telemetry_frames(void)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < fk.n; i++) {
+		n += fk.log[i].kind == APP_RADIO_FRAME_TELEMETRY;
+	}
+	return n;
+}
+
+/* T3a-F3: the end of a replay right after a report does not ask for the same
+ * snapshot again; once READY_COALESCE_MS (10 s) has passed, it does. */
+static void replay_end_right_after_a_report_does_not_kick(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	hist_fill(0);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(1));
+	zassert_equal(telemetry_frames(), 1);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(8));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 0, "a report went < 10 s ago");
+
+	k_sleep(K_SECONDS(10));
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 43));
+	k_sleep(K_SECONDS(10));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1, "> 10 s after the report: the end kicks");
+}
+BOTH_PROFILES(replay_end_right_after_a_report_does_not_kick)
+
+/* T3a-F3: a report held back by the replay goes at its end, and the kick
+ * folds into it instead of composing a second one. */
+static void replay_end_folds_the_kick_into_a_held_report(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	hist_fill(0);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(1));
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(30));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(telemetry_frames(), 1, "the held report went, once");
+	zassert_equal(m_ready_calls, 0, "folded into the held report");
+}
+BOTH_PROFILES(replay_end_folds_the_kick_into_a_held_report)
 
 /* M-2: a replay holds telemetry back, so its frames refresh the stale-uplink
  * clock; a long replay does not rejoin a healthy session. */

@@ -198,6 +198,7 @@ static K_WORK_DELAYABLE_DEFINE(m_hist_work, hist_work_handler);
 static bool m_hist_active;
 /* app_report's link-ready kick, also fired when a replay ends. */
 static void (*m_ready_cb)(void);
+static void ready_kick(void);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -742,6 +743,8 @@ static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
 static uint8_t m_tlm_retries;
 static size_t m_tlm_len;
 static uint8_t m_tlm_buf[TLM_BUF_SIZE];
+static bool m_tlm_done_valid;
+static int64_t m_tlm_done_ms; /* uptime of the last completed report */
 
 static void tx_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_tx_work, tx_work_handler);
@@ -1469,6 +1472,8 @@ static void tlm_step(void)
 	if (ret == 0) {
 		/* Reports, not frames, drive the link-check cadence (#267). */
 		m_link.reports++;
+		m_tlm_done_ms = k_uptime_get();
+		m_tlm_done_valid = true;
 		LOG_INF("Snapshot complete");
 	}
 	tlm_close(false);
@@ -1565,9 +1570,7 @@ static void hist_finish(void)
 {
 	hist_end();
 	app_radio_tx_kick();
-	if (m_ready_cb) {
-		m_ready_cb();
-	}
+	ready_kick();
 }
 
 static void hist_drop(void)
@@ -1821,6 +1824,7 @@ void app_radio_test_tx_reset(void)
 	atomic_clear(&m_tlm_requested);
 	m_tlm_open = false;
 	m_tlm_frame = false;
+	m_tlm_done_valid = false;
 	m_hist_active = false;
 	m_ack_pending = false;
 	m_debug_tx_mute = false;
@@ -1921,6 +1925,29 @@ static void jitter_work_handler(struct k_work *work)
 
 	atomic_clear(&m_telemetry_held);
 	tx_request_telemetry();
+}
+
+/* The link-ready kick (a join, the end of a history replay) asks app_report
+ * for an immediate report. It is folded into a report already on its way,
+ * and skipped right after one: the same snapshot again would be a second,
+ * identical Portal point (T3a-F3). */
+#define READY_COALESCE_MS 10000
+
+static void ready_kick(void)
+{
+	if (m_tlm_open || atomic_get(&m_tlm_requested) || atomic_get(&m_telemetry_held) ||
+	    k_work_delayable_is_pending(&m_jitter_work)) {
+		LOG_INF("Link-ready report folded into the one on its way");
+		return;
+	}
+	if (m_tlm_done_valid && k_uptime_get() - m_tlm_done_ms < READY_COALESCE_MS) {
+		LOG_INF("Link-ready report skipped: one went %lld ms ago",
+			(long long)(k_uptime_get() - m_tlm_done_ms));
+		return;
+	}
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
 }
 
 /* Uplink phase (O9, p2p_link_check.md §3.7, Hynek 2026-09-27): the report
@@ -2025,12 +2052,12 @@ void app_radio_register_ready_cb(void (*cb)(void))
 	m_ready_cb = cb;
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
-		app_radio_p2p_register_ready_cb(cb);
+		app_radio_p2p_register_ready_cb(ready_kick);
 		return;
 	}
 #endif
 #if defined(CONFIG_LORAWAN)
-	app_radio_lrw_register_ready_cb(cb);
+	app_radio_lrw_register_ready_cb(ready_kick);
 #endif
 }
 
