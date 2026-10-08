@@ -68,9 +68,9 @@ struct hist_desc {
 
 static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 	[APP_HISTORY_TEMPERATURE] = {"temperature", offsetof(struct app_sensor_data, temperature),
-				     ENC_TEMP, 2, NO_CAP},
+				     ENC_TEMP, 2, offsetof(struct app_config, cap_sht)},
 	[APP_HISTORY_HUMIDITY] = {"humidity", offsetof(struct app_sensor_data, humidity), ENC_HUM,
-				  1, NO_CAP},
+				  1, offsetof(struct app_config, cap_sht)},
 	/* 1-Wire ROM-bound slots s1..s4 (= telemetry slot model, w1[0..3]); each slot
 	 * stores temperature + humidity. A Dallas slot has no humidity → sentinel. */
 	[APP_HISTORY_S1_TEMP] = {"s1-temp", offsetof(struct app_sensor_data, w1[0].temperature),

@@ -947,7 +947,7 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 		if (quantity == APP_ALARM_Q_PRESSURE) {
 			return g_app_config.cap_barometer;
 		}
-		return true; /* onboard SHT4x temperature/humidity always present */
+		return g_app_config.cap_sht; /* onboard SHT4x temperature/humidity (#465) */
 	case APP_ALARM_SRC_SLOT1:
 	case APP_ALARM_SRC_SLOT2:
 	case APP_ALARM_SRC_SLOT3:
