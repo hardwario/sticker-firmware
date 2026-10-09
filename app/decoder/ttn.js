@@ -67,18 +67,28 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect", "disabled"];
 
 // device_status (Info field 14) bit -> name. Keep in sync with APP_DEVICE_STATUS_*.
+// Re-grouped for v1.5.0 (#415): alarms / radio / hardware / system. This layout
+// is v1.5.0-specific — a still-deployed 1.4.x unit used a different bit layout.
 var _DEVICE_STATUS = [
+  // Alarms (0-7)
   [1 << 0, "alarm_any"],
   [1 << 1, "alarm_threshold"],
   [1 << 2, "alarm_state"],
   [1 << 3, "alarm_rate"],
   [1 << 4, "alarm_no_data"],
   [1 << 5, "alarm_low_battery"],
-  [1 << 8, "nfc_down"],
-  [1 << 9, "history_down"],
-  [1 << 10, "i2c_wedged"],
-  [1 << 11, "time_unsynced"],
-  [1 << 12, "lrw_disabled"],
+  [1 << 6, "alarm_sensor_mismatch"],
+  // Radio (8-11)
+  [1 << 8, "radio_off"],
+  [1 << 9, "lrw_disabled"],
+  [1 << 10, "radio_link_down"],
+  // Hardware / health (12-15); bit 13 = mailbox_down (added by PR #414)
+  [1 << 12, "nfc_down"],
+  [1 << 14, "i2c_wedged"],
+  [1 << 15, "history_down"],
+  // System (16-17)
+  [1 << 16, "time_unsynced"],
+  [1 << 17, "claim_active"],
 ];
 
 // reset_cause (Info field 11) bit -> name. Zephyr hwinfo RESET_* bitmask of the
@@ -95,14 +105,17 @@ var _RESET_CAUSES = [
 ];
 
 // Config submessage maps: proto field tag -> name. The flat C struct is split
-// across submessages lorawan/application/sensors/alarms; device identity stays
-// at the AppConfigMessage root (not addressable via SetParam/GetConfig).
+// across submessages lorawan/application/sensors/alarms/p2p; device identity
+// stays at the AppConfigMessage root (not addressable via SetParam/GetConfig).
 // proto_ids are contiguous 1..N per submessage (aligned in #166).
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
-  4: "history_enable", 5: "history_sensors", 6: "battery_level",
-  7: "vendor_reset_allow"
+  4: "history_enable", 6: "battery_level",
+  7: "vendor_reset_allow", 8: "interval_announce"
 };
+// 5 was history_sensors (uint32 bitmask), replaced by history_channels (#430).
+var _APP_HEX = { 9: "history_channels" };
+var _APP_HEX_ENC = { history_channels: 9 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
 
@@ -111,7 +124,8 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer"
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer", 22: "cap_sht",
+  23: "sensor1_type", 24: "sensor2_type", 25: "sensor3_type", 26: "sensor4_type"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
@@ -123,8 +137,10 @@ var _ALM_NAMES = {
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
-// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 3..18, each a packed
-// 17-byte rule carried as native bytes (presented/authored as a 34-char hex string).
+// Dynamic alarm rules alarm_0..alarm_15 = proto fields 3..18, each a packed
+// 18-byte rule carried as native bytes (presented/authored as a 36-char hex
+// string). Layout (#430): flags, slot, channel, sensor_type, from, to, then
+// float32 LE lo, hi, dwell.
 var _ALM_HEX = {};
 var _ALM_HEX_ENC = {};
 (function () {
@@ -132,21 +148,33 @@ var _ALM_HEX_ENC = {};
 })();
 
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
+// Exception: fields 13/14 are named radio_link_check_* in the YAML (2026-09-27
+// rename, carrier-neutral) -- no `lrw_` prefix to strip, so they carry their
+// full name, same as radio_mode/13-16 below. The encoder also accepts the names
+// before the rename (_LRW_TAG_ALIASES) for one release.
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
-  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode"
+  13: "radio_link_check_interval", 14: "radio_link_check_fail_rejoin", 15: "radio_mode",
+  16: "datarate"
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
+
+// Names drop the `p2p_` prefix the YAML carries (frequency <- p2p_frequency, ...).
+// Radio parity (doc/plan/439): readable everywhere, like the LoRaWAN radio params above.
+var _P2P_NAMES = { 1: "frequency", 2: "spreading_factor", 3: "tx_power", 4: "modulation" };
+var _P2P_ENUMS = { 4: ["lora", "fsk"] };
+var _P2P_FLOAT = {};
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
 // secret keys (nwkkey/appkey/nwkskey/appskey) which the decoder deliberately
 // hides but which a downlink may legitimately set.
 var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, nwkskey: 11, appskey: 12 };
 var _LRW_ENUM = {
-  region: { EU868: 0, US915: 1, AU915: 2 },
+  region: { EU868: 0, US915: 1, AU915: 2, AS923: 3 },
   network: { PUBLIC: 0, PRIVATE: 1 },
   activation: { OTAA: 0, ABP: 1 },
-  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 }
+  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 },
+  datarate: { AUTO: 0, DR0: 1, DR1: 2, DR2: 3, DR3: 4, DR4: 5, DR5: 6, DR6: 7, DR7: 8 }
 };
 function _invert(map) {
   var out = {};
@@ -157,6 +185,14 @@ var _APP_TAGS = _invert(_APP_NAMES);
 var _SEN_TAGS = _invert(_SEN_NAMES);
 var _ALM_TAGS = _invert(_ALM_NAMES);
 var _LRW_TAGS = _invert(_LRW_NAMES);
+// v1.5.0 renamed lorawan fields 13/14 (same tags on the wire). SetParam JSON
+// still written with the old names keeps encoding instead of failing as an
+// unknown field; the decoder emits only the new names.
+var _LRW_TAG_ALIASES = { link_check_interval: 13, link_check_fail_rejoin: 14 };
+for (var _a in _LRW_TAG_ALIASES) {
+  if (_LRW_TAG_ALIASES.hasOwnProperty(_a)) _LRW_TAGS[_a] = _LRW_TAG_ALIASES[_a];
+}
+var _P2P_TAGS = _invert(_P2P_NAMES);
 
 // proto field tag -> command name in the DownlinkCommand body oneof.
 // BEGIN GENERATED COMMANDS
@@ -180,13 +216,75 @@ var _CMD_NAMES = {
   21: "sample",
   23: "factory_reset",
   24: "set_secret_key",
-  25: "clm_ack",
+  25: "claim_done",
   26: "vendor_reset",
-  27: "clm_rearm",
+  27: "claim_active",
   28: "buzzer_play",
+  29: "get_claim_info",
+  30: "get_basic_info",
+  31: "get_settings",
+  32: "get_radio_state",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
+
+// BEGIN GENERATED SENSOR_TYPES
+// Sensor type registry, generated by `west sensorgen` from app_sensor_types.yaml
+// (#430). type id -> { name, ch: [channel] }; a channel is
+// { n: name, u: unit, k: kind, s: wire scale, h: [history enc, scale] | null,
+//   p: part (1-Wire chip) }.
+// Slot 0 is always type 1 (motherboard); slots 1..4 carry their type on the wire.
+var _SENSOR_TYPES = {
+  1: {
+    name: "motherboard",
+    ch: [
+      { n: "temperature", u: "degC", k: "threshold", s: 100, h: ["i16", 100] },
+      { n: "humidity", u: "%RH", k: "threshold", s: 2, h: ["u8", 2] },
+      { n: "pressure", u: "hPa", k: "threshold", s: 10, h: ["u16", 10] },
+      { n: "illuminance", u: "lx", k: "threshold", s: 1, h: ["u16", 0.5] },
+      { n: "temperature-baro", u: "degC", k: "threshold", s: 100, h: ["i16", 100] },
+      { n: "hall-left-state", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "hall-left-count", u: "pulses", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "hall-right-state", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "hall-right-count", u: "pulses", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "input-a-state", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "input-a-count", u: "pulses", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "input-a-voltage", u: "V", k: "threshold", s: 1000, h: ["u16", 1000] },
+      { n: "input-b-state", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "input-b-count", u: "pulses", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "input-b-voltage", u: "V", k: "threshold", s: 1000, h: ["u16", 1000] },
+      { n: "pir-motion", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "pir-count", u: "events", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "accel-motion", u: "bool", k: "state", s: 1, h: ["u8", 1] },
+      { n: "accel-count", u: "events", k: "rate", s: 1, h: ["u32", 1] },
+      { n: "accel-orientation", u: "enum", k: "none", s: 1, h: ["u8", 1] },
+      { n: "battery-voltage", u: "V", k: "threshold", s: 1000, h: ["u16", 1000] },
+      { n: "altitude", u: "m", k: "none", s: 10, h: ["i16", 1] }
+    ]
+  },
+  2: {
+    name: "dallas",
+    ch: [
+      { n: "temperature", u: "degC", k: "threshold", s: 100, h: ["i16", 100], p: "ds18b20" }
+    ]
+  },
+  3: {
+    name: "machine-probe",
+    ch: [
+      { n: "temperature", u: "degC", k: "threshold", s: 100, h: ["i16", 100], p: "sht" },
+      { n: "humidity", u: "%RH", k: "threshold", s: 2, h: ["u8", 2], p: "sht" },
+      { n: "temperature-aux", u: "degC", k: "threshold", s: 100, h: ["i16", 100], p: "tmp112" },
+      { n: "illuminance", u: "lx", k: "threshold", s: 1, h: ["u16", 0.5], p: "opt3001" },
+      { n: "magnetic-field", u: "mT", k: "threshold", s: 1000, h: ["i16", 100], p: "si7210" },
+      { n: "tilt", u: "bool", k: "state", s: 1, h: ["u8", 1], p: "lis2dh12" },
+      { n: "accel-x", u: "m/s2", k: "threshold", s: 100, h: ["i16", 100], p: "lis2dh12" },
+      { n: "accel-y", u: "m/s2", k: "threshold", s: 100, h: ["i16", 100], p: "lis2dh12" },
+      { n: "accel-z", u: "m/s2", k: "threshold", s: 100, h: ["i16", 100], p: "lis2dh12" }
+    ]
+  }
+};
+var _SENSOR_MB_TYPE = 1;
+// END GENERATED SENSOR_TYPES
 
 function _decodeLorawan(bytes, start, end) {
   var o = {}, pos = start;
@@ -230,9 +328,10 @@ function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
   return o;
 }
 
-function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, null); }
+function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, _APP_HEX); }
 function _decodeSensors(b, s, e) { return _decodeCfgGroup(b, s, e, _SEN_NAMES, _SEN_ENUMS, _SEN_HEX); }
 function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, _ALM_HEX); }
+function _decodeP2P(b, s, e) { return _decodeCfgGroup(b, s, e, _P2P_NAMES, _P2P_ENUMS, null); }
 
 function _decodeConfigDump(bytes, start, end) {
   var cd = {}, pos = start;
@@ -243,6 +342,8 @@ function _decodeConfigDump(bytes, start, end) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (f === 1) cd.page_index = v.value;
       else if (f === 2) cd.page_count = v.value;
+      // field 7 = w1_slot_type, non-packed fallback (one varint per entry).
+      else if (f === 7) { (cd.w1_slot_type = cd.w1_slot_type || []).push(_W1_SLOT_TYPES[v.value] || ("type" + v.value)); }
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var e2 = pos + len.value;
@@ -250,6 +351,19 @@ function _decodeConfigDump(bytes, start, end) {
       else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
       else if (f === 5) cd.sensors = _decodeSensors(bytes, pos, e2);
       else if (f === 6) cd.alarms = _decodeAlarms(bytes, pos, e2);
+      // field 7 = repeated uint32 w1_slot_type (#412), packed: detected 1-Wire
+      // slot type for slots 1..4. Names mirror enum app_w1_slot_type (FW).
+      else if (f === 7) {
+        cd.w1_slot_type = [];
+        var p = pos;
+        while (p < e2) {
+          var t = _pbReadVarint(bytes, p); p = t.next;
+          cd.w1_slot_type.push(_W1_SLOT_TYPES[t.value] || ("type" + t.value));
+        }
+      }
+      // field 8 = p2p (radio parity, doc/plan/439): P2P radio tuning, readable
+      // over every transport like the LoRaWAN radio params.
+      else if (f === 8) cd.p2p = _decodeP2P(bytes, pos, e2);
       pos = e2;
     } else { break; }
   }
@@ -258,11 +372,13 @@ function _decodeConfigDump(bytes, start, end) {
 
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
+  var seen = {}; // field numbers present on the wire (#425: a page emits only these)
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    seen[field] = true;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) info.fw_major = v.value;
@@ -275,8 +391,11 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 8) info.debug = v.value !== 0;
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
-      else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
+      // field 19 = w1_slot_state, non-packed fallback (one varint per entry).
+      else if (field === 19) (info.w1_slot_state = info.w1_slot_state || []).push(_W1_SLOT_STATES[v.value] || ("state" + v.value));
+      // 12 (lrw_state) and 16-18 (last_dl_*) are retired: the link state and
+      // quality are read with get_radio_state (Response.radio_state, #446).
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
@@ -288,6 +407,16 @@ function _decodeInfo(bytes, start, end) {
       // field 15 = repeated AlarmStatus active_alarms (#288): one entry per alarm
       // latched active when Info was built. Same enums as the fPort 3 AlarmReport.
       else if (field === 15) info.active_alarms.push(_decodeAlarmStatus(bytes, pos, pos + len.value));
+      // field 19 = repeated uint32 w1_slot_state (#430), packed: 1-Wire slot
+      // state for slots 1..4; omitted while every slot is unused.
+      else if (field === 19) {
+        info.w1_slot_state = [];
+        for (var sp = pos; sp < pos + len.value;) {
+          var st = _pbReadVarint(bytes, sp); sp = st.next;
+          info.w1_slot_state.push(_W1_SLOT_STATES[st.value] || ("state" + st.value));
+        }
+      }
+
       // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
     } else {
@@ -296,11 +425,6 @@ function _decodeInfo(bytes, start, end) {
   }
   info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
   info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
-  // lrw_state is NFC-only, so it is absent from LoRaWAN uplinks — only name it
-  // when the field was actually present (leave both undefined otherwise).
-  if (info.lrw_state !== undefined) {
-    info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
-  }
   info.device_status_flags = _DEVICE_STATUS
     .filter(function (f) { return (info.device_status & f[0]) !== 0; })
     .map(function (f) { return f[1]; });
@@ -311,11 +435,73 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
+  // Internal: read by _pruneInfoPage(), removed again before the result leaves
+  // the decoder (see the paging block in the Response decoder).
+  Object.defineProperty(info, "_seen", { value: seen, enumerable: false, configurable: true });
   return info;
 }
 
+// #425: an Info *page* carries only some fields. Drop everything the page did
+// not contain, so a missing field never reads as a default (fw 0.0.0, status 0).
+var _INFO_FIELD_KEYS = {
+  1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
+  5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
+  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"],
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  19: ["w1_slot_state"]
+};
+function _pruneInfoPage(info) {
+  var seen = info._seen || {};
+  var keep = {};
+  for (var f in _INFO_FIELD_KEYS) {
+    if (seen[f]) _INFO_FIELD_KEYS[f].forEach(function (k) { keep[k] = true; });
+  }
+  if (seen[1] || seen[2] || seen[3]) keep.fw_version = true;
+  var out = {};
+  for (var k in info) { if (info.hasOwnProperty(k) && keep[k]) out[k] = info[k]; }
+  return out;
+}
+
+// #446 RadioState: [name, zigzag] per field number. Every field is optional —
+// a paged get_radio_state answer (#425) carries only some of them, so absent
+// fields stay absent (never defaulted).
+var _RADIO_STATE_FIELDS = {
+  1: ["state", false], 2: ["sf", false], 3: ["datarate", false], 4: ["tx_power_dbm", true],
+  5: ["dl_rssi", true], 6: ["dl_snr", true], 7: ["dl_age_s", false], 8: ["dl_unix_time", false],
+  9: ["ul_rssi", true], 10: ["ul_snr", true], 11: ["ul_margin", false], 12: ["ul_gw_count", false],
+  13: ["dev_addr", false], 14: ["fcnt_up", false], 15: ["fail_streak", false],
+  16: ["join_attempts", false], 17: ["duty_blocked_s", false], 18: ["airtime_hour_ms", false],
+  19: ["uptime_s", false], 20: ["tx_count", false], 21: ["rx_count", false],
+  22: ["retry_count", false], 23: ["fail_count", false], 24: ["tx_err_count", false],
+  25: ["join_count", false]
+};
+
+function _decodeRadioState(bytes, start, end) {
+  var rs = {};
+  var pos = start;
+  while (pos < end && pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      var f = _RADIO_STATE_FIELDS[field];
+      if (f) rs[f[0]] = f[1] ? _pbZigzag(v.value) : v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next + len.value;
+    } else {
+      break;
+    }
+  }
+  if (rs.state !== undefined) rs.state_name = _LRW_STATES[rs.state] || "unknown";
+  if (rs.dev_addr !== undefined) rs.dev_addr_hex = ("0000000" + rs.dev_addr.toString(16)).slice(-8);
+  return rs;
+}
+
 function _decodeError(bytes, start, end) {
-  var err = {};
+  // code defaults to 0 (UNKNOWN): proto3 omits it, and over LoRaWAN the compact
+  // "response too large" Error (#409) is exactly that — an empty Error body.
+  var err = { code: 0 };
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -363,7 +549,7 @@ function _decodeW1Scan(bytes, start, end) {
   return { rom: roms };
 }
 
-// app_history_sensor enum order → name + encoding (mirrors app_history.c).
+// Pre-#430 firmware: app_history_sensor enum order → name + encoding.
 var _HIST_SENSORS = [
   { name: "temperature", enc: "temp" },
   { name: "humidity", enc: "hum" },
@@ -449,17 +635,72 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
   return out;
 }
 
+// #430: a HistoryFrame with `channels` (field 10) describes its columns as
+// registry entries (slot << 5 | channel); `w1_types` (field 11) gives the sensor
+// type of 1-Wire slots 1..4 the layout was built with (slot 0 = motherboard).
+// Each column is encoded per the channel's history [enc, scale]; the top value
+// of the encoding is the "absent" sentinel (null). Counters are whole numbers,
+// other values are raw / scale. Column key = snake_case channel name, prefixed
+// "sN_" for 1-Wire slot N. Returns null when a column is unknown (the record
+// size cannot be derived, so the samples are not decoded).
+var _HIST_ENC_SIZE = { u8: 1, i16: 2, u16: 2, i32: 4, u32: 4 };
+var _HIST_ENC_SENTINEL = { u8: 0xff, i16: 0x7fff, u16: 0xffff, i32: 0x7fffffff,
+                           u32: 0xffffffff };
+
+function _historyColumns(channels, w1Types) {
+  var cols = [];
+  for (var i = 0; i < channels.length; i++) {
+    var slot = channels[i] >> 5, ch = channels[i] & 0x1f;
+    var type = slot === 0 ? _SENSOR_MB_TYPE : (w1Types ? w1Types[slot - 1] : 0);
+    var t = _SENSOR_TYPES[type];
+    var c = t ? t.ch[ch] : undefined;
+    if (!c || !c.h || !_HIST_ENC_SIZE[c.h[0]]) return null;
+    var key = c.n.replace(/-/g, "_");
+    cols.push({ key: slot === 0 ? key : "s" + slot + "_" + key, enc: c.h[0],
+                scale: c.h[1], count: c.k === "rate" });
+  }
+  return cols;
+}
+
+function _decodeHistoryColumns(bytes, t0, cols, interval, synced) {
+  var out = [];
+  var recSize = 0;
+  for (var i = 0; i < cols.length; i++) recSize += _HIST_ENC_SIZE[cols[i].enc];
+  if (recSize === 0) return out;
+
+  var p = 0, j = 0;
+  while (p + recSize <= bytes.length) {
+    var rec = { time: synced ? ((t0 + j * interval) >>> 0) : null };
+    for (var k = 0; k < cols.length; k++) {
+      var c = cols[k], n = _HIST_ENC_SIZE[c.enc], raw;
+      if (n === 1) raw = bytes[p];
+      else if (n === 2) raw = bytes[p] | (bytes[p + 1] << 8);
+      else raw = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) |
+                  (bytes[p + 3] << 24)) >>> 0;
+      p += n;
+      if (raw === _HIST_ENC_SENTINEL[c.enc]) { rec[c.key] = null; continue; }
+      if (c.enc === "i16" && raw > 0x7fff) raw -= 0x10000;
+      else if (c.enc === "i32") raw = raw | 0;
+      rec[c.key] = c.count ? raw : raw / c.scale;
+    }
+    out.push(rec);
+    j++;
+  }
+  return out;
+}
+
 function _decodeHistoryFrame(bytes, start, end) {
-  // frame_index/frame_count default to 0 — proto3 omits a zero frame_index, so
-  // frame 0 of a replay carries no field 1; the consumer still needs index 0.
-  var hf = { frame_index: 0, frame_count: 0, records: [] };
+  // frame_index/frame_count: only older firmware numbers frames here (#425 moved
+  // it to the Response envelope, pages "i/N"). Emitted only when frame_count is
+  // on the wire; then an absent frame_index is frame 0 (proto3 omits a zero).
+  var hf = { records: [] };
   var t0 = 0, present = 0, interval = 0;
   // time_synced (field 7) absent = old FW = treat as synced (emit timestamps).
   var synced = true;
   // next_ord (field 8) / has_more (field 9): NFC paged read (#260, req_history_page)
   // only. Absent over the LoRaWAN device-driven replay; surfaced here so the same
   // decoder is a complete reference for the NFC (Manager-App) paging cursor.
-  var samples = null;
+  var samples = null, channels = null, w1Types = null;
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -477,14 +718,27 @@ function _decodeHistoryFrame(bytes, start, end) {
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (f === 4) samples = bytes.slice(pos, pos + len.value);
+      else if (f === 10) channels = bytes.slice(pos, pos + len.value);
+      else if (f === 11) w1Types = bytes.slice(pos, pos + len.value);
       pos += len.value;
     } else { break; }
   }
+  if (hf.frame_count !== undefined && hf.frame_index === undefined) hf.frame_index = 0;
+  else if (hf.frame_count === undefined) delete hf.frame_index;
   hf.t0_unix = t0;
   hf.present = present;
   hf.interval_s = interval;
   hf.time_synced = synced;
-  if (samples) hf.records = _decodeHistorySamples(samples, t0, present, interval, synced);
+  if (channels) {
+    // #430 layout: present = one bit per column, always all set.
+    var cols = _historyColumns(channels, w1Types);
+    hf.channels = cols ? cols.map(function (c) { return c.key; }) : null;
+    if (w1Types) hf.w1_types = Array.prototype.slice.call(w1Types);
+    if (samples && cols) hf.records = _decodeHistoryColumns(samples, t0, cols, interval, synced);
+  } else if (samples) {
+    // Pre-#430 firmware: `present` is a mask over the fixed sensor enum.
+    hf.records = _decodeHistorySamples(samples, t0, present, interval, synced);
+  }
   return hf;
 }
 
@@ -498,6 +752,9 @@ function decodeDownlinkResponse(bytes) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) resp.seq = v.value;
+      // #425 universal paging: page_index (12) / page_count (13) in the envelope.
+      else if (field === 12) resp.page_index = v.value;
+      else if (field === 13) resp.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var end = pos + len.value;
@@ -507,12 +764,37 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
+      else if (field === 14) resp.radio_state = _decodeRadioState(bytes, pos, end); // get_radio_state (#446)
       pos = end;
     } else {
       break;
     }
   }
+  _applyPages(resp);
   return resp;
+}
+
+// #425: every page is a complete message decoded on its own (no state between
+// uplinks — TTN / ChirpStack codecs are stateless). Label it "i/N" (1-based).
+// Older firmware numbered ConfigDump / HistoryFrame inside the body; use that
+// when the envelope has none.
+function _applyPages(resp) {
+  if (resp.page_count === undefined) {
+    if (resp.config_dump && resp.config_dump.page_count > 1) {
+      resp.page_index = resp.config_dump.page_index || 0;
+      resp.page_count = resp.config_dump.page_count;
+    } else if (resp.history_frame && resp.history_frame.frame_count > 1) {
+      resp.page_index = resp.history_frame.frame_index || 0;
+      resp.page_count = resp.history_frame.frame_count;
+    }
+  }
+  if (resp.page_count > 1) {
+    if (resp.page_index === undefined) resp.page_index = 0;
+    resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
+    if (resp.info) resp.info = _pruneInfoPage(resp.info);
+  }
+  // The field-presence map is decoder-internal: never hand it to a consumer.
+  if (resp.info) delete resp.info._seen;
 }
 
 // Zig-zag decode for protobuf sint32.
@@ -520,23 +802,41 @@ function _pbZigzag(n) {
   return (n >>> 1) ^ -(n & 1);
 }
 
-// enum app_w1_slot_type → label (mirrors app_w1_slots.h).
-var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
+// 1-Wire slot type id → label: the sensor type ids of app_sensor_types.yaml
+// (#430; 0 = empty, 1 = motherboard is never a slot type). Shared by the fPort-2
+// telemetry per-slot type, the fPort-85 ConfigDump.w1_slot_type list (#412) and
+// the sensor-mismatch alarm.
+var _W1_SLOT_TYPES = (function () {
+  var m = { 0: "empty" };
+  for (var id in _SENSOR_TYPES) { if (Number(id) !== 1) m[id] = _SENSOR_TYPES[id].name; }
+  return m;
+})();
 
-// One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
-// sensorN config / `w1 list`), type=2,
-// temperature=3 (sint32 ×100), humidity=4 (uint ×2), flags=5 (bit0 tilt),
-// illuminance=6 (uint lux), magnetic_field=7 (sint µT → mT /1000), accel
-// x/y/z=8/9/10 (sint m/s² ×100). Machine-probe carries 6-10; a sub-sensor that
-// did not respond is absent. Absent quantities stay undefined. `bytes[start..end)`
-// is the submessage body.
+// Info.w1_slot_state (field 19, #430): enum app_w1_slot_state.
+var _W1_SLOT_STATES = ["none", "ok", "absent", "replaced", "mismatch"];
+
+// One SensorReading submessage (Telemetry field 27, #430 channel model):
+// slot=1 (1-based, matches sensorN config / `w1 list`), type=2 (sensor type
+// id), valid=11 (bit ch = channel ch has a value), value=12 (packed sint32, one
+// per set bit in ascending ch, each phys x channel wire scale). Every channel
+// of the type appears in `values` (null when its bit is clear, so a slot in
+// mismatch or with its probe absent is all null) with its unit in `units`.
+// `bytes[start..end)` is the submessage body.
 function _decodeSensorReading(bytes, start, end) {
   var sr = {};
+  var valid = 0;
+  var raw = [];
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    if (field === 12 && wire === 2) { // packed values
+      var pl = _pbReadVarint(bytes, pos); pos = pl.next;
+      var pend = pos + pl.value;
+      while (pos < pend) { var pv = _pbReadVarint(bytes, pos); pos = pv.next; raw.push(_pbZigzag(pv.value)); }
+      continue;
+    }
     if (wire !== 0) { // forward-compat: skip unknown non-varint
       if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
       if (wire === 5) { pos += 4; continue; }
@@ -547,16 +847,26 @@ function _decodeSensorReading(bytes, start, end) {
     switch (field) {
       case 1: sr.slot = v.value; break;
       case 2: sr.type = v.value; sr.type_name = _W1_SLOT_TYPES[v.value] || "unknown"; break;
-      case 3: { var _t = _pbZigzag(v.value); sr.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
-      case 4: sr.humidity = v.value / 2; break;
-      case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
-      case 6: sr.illuminance = v.value; break;
-      case 7: sr.magnetic_field = _pbZigzag(v.value) / 1000; break; // mT
-      case 8: sr.accel_x = _pbZigzag(v.value) / 100; break;         // m/s²
-      case 9: sr.accel_y = _pbZigzag(v.value) / 100; break;
-      case 10: sr.accel_z = _pbZigzag(v.value) / 100; break;
+      case 11: valid = v.value; break;
+      case 12: raw.push(_pbZigzag(v.value)); break; // unpacked encoding
       default: break;
     }
+  }
+  var t = _SENSOR_TYPES[sr.type];
+  sr.values = {};
+  sr.units = {};
+  var k = 0;
+  for (var ch = 0; ch < 32; ch++) {
+    var c = t ? t.ch[ch] : undefined;
+    var has = ((valid >>> ch) & 1) === 1;
+    var r = has ? raw[k++] : undefined;
+    if (c === undefined) {
+      if (has) sr.values["ch" + ch] = r; // channel newer than this decoder: raw
+      continue;
+    }
+    if (c.r) continue;
+    sr.values[c.n] = (r === undefined) ? null : r / c.s;
+    sr.units[c.n] = c.u;
   }
   return sr;
 }
@@ -600,7 +910,13 @@ function decodeTelemetry(bytes) {
     switch (field) {
       // system
       case 1:  d.voltage = (v.value === 0) ? null : v.value / 50; break; // 0 = pre-sample sentinel (L-51)
-      case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
+      case 2:  // system_flags (always sent): bit0 boot, bits 1..8 = device_status alarm byte (#409)
+        d.boot = (v.value & (1 << 0)) !== 0;
+        d.alarm_status = (v.value >>> 1) & 0xff;
+        d.alarm_status_flags = _DEVICE_STATUS
+          .filter(function (f) { return f[0] < (1 << 8) && (d.alarm_status & f[0]) !== 0; })
+          .map(function (f) { return f[1]; });
+        break;
       // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
       case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
@@ -646,10 +962,24 @@ function decodeTelemetry(bytes) {
         d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
+      // #425 paging, as Response / AlarmReport
+      case 28: d.page_index = v.value; break;
+      case 29: d.page_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }
+  _applyTelemetryPages(d);
   return d;
+}
+
+// #425: a telemetry report that does not fit one frame comes as pages, each
+// decoded on its own ("i/N", 1-based). A 1-Wire reading is never split, so a
+// reading on a page is complete; the host merges the pages by page_index.
+function _applyTelemetryPages(d) {
+  if (d.page_count > 1) {
+    if (d.page_index === undefined) d.page_index = 0;
+    d.pages = (d.page_index + 1) + "/" + d.page_count;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -785,9 +1115,10 @@ function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
   return out;
 }
 
-function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, null); }
+function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, _APP_HEX_ENC); }
 function _encSensors(s) { return _encCfgGroup(s, _SEN_TAGS, _SEN_FLOAT, _SEN_ENUMS, _SEN_HEX_ENC); }
 function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, _ALM_HEX_ENC); }
+function _encP2P(p) { return _encCfgGroup(p, _P2P_TAGS, _P2P_FLOAT, _P2P_ENUMS, null); }
 
 function encodeDownlinkCommand(cmd) {
   var out = [];
@@ -813,6 +1144,13 @@ function encodeDownlinkCommand(cmd) {
     // save (field 3): persist + reboot after applying; set on the LAST message
     // of a multi-downlink batch only.
     if (b.save) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
+    // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
+    // (the whole table in one message); on the FIRST message of a batch only.
+    if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
+    // p2p (field 7, radio parity, doc/plan/439): shell only (doc/p2p.md §2) — the device itself
+    // rejects this over a LoRaWAN/P2P downlink, but the builder does not
+    // pre-filter by transport so a hand-crafted NFC payload can still use it.
+    if (b.p2p) body = body.concat(_encLenDelim(7, _encP2P(b.p2p)));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
     var _packField = function (arr, tag) {
@@ -827,6 +1165,7 @@ function encodeDownlinkCommand(cmd) {
     _packField(b.alarms_field, 4);
     // page (field 5, #93.3): request page N of an over-budget field list.
     if (b.page) body = body.concat(_encTag(5, 0)).concat(_encVarint(b.page));
+    _packField(b.p2p_field, 6);
   } else if (name === "get_config") {
     if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "reset_counters") {
@@ -848,6 +1187,10 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
     if (b.start_ord) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.start_ord));
+  } else if (name === "get_radio_state") {
+    // #446: page (field 1) for host-driven paging; over LoRaWAN / P2P the device
+    // streams every page by itself, so the page is normally omitted.
+    if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "buzzer_play") {
     if (b.kind) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.kind));
     if (b.repeat_s) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.repeat_s));
@@ -899,21 +1242,25 @@ function decodeDownlinkCommand(bytes) {
             else if (f2 === 2) sp.application = _decodeApplication(bytes, p, p + l2.value);
             else if (f2 === 4) sp.sensors = _decodeSensors(bytes, p, p + l2.value);
             else if (f2 === 5) sp.alarms = _decodeAlarms(bytes, p, p + l2.value);
+            else if (f2 === 7) sp.p2p = _decodeP2P(bytes, p, p + l2.value);
             p += l2.value;
           } else if (w2 === 0) {
             var sv = _pbReadVarint(bytes, p); p = sv.next;
             if (f2 === 3) sp.save = sv.value !== 0; // persist + reboot after apply
+            else if (f2 === 6) sp.alarms_replace = sv.value !== 0; // clear all slots first
           } else { break; }
         }
         cmd.set_param = sp;
       } else if (field === 3) { // get_param (repeated uint32, packed or not)
-        var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [] },
+        var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [],
+                   p2p_field: [] },
             q = pos;
         while (q < end && q < bytes.length) {
           var t3 = _pbReadVarint(bytes, q); q = t3.next;
           var f3 = t3.value >>> 3, w3 = t3.value & 0x7;
           var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field
-                  : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field : null;
+                  : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field
+                  : (f3 === 6) ? gp.p2p_field : null;
           if (w3 === 0) {
             var v3 = _pbReadVarint(bytes, q); q = v3.next;
             if (f3 === 5) gp.page = v3.value; // #93.3 pagination cursor
@@ -924,7 +1271,7 @@ function decodeDownlinkCommand(bytes) {
             while (q < e3 && q < bytes.length) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
           } else { break; }
         }
-        ["lorawan_field", "application_field", "sensors_field", "alarms_field"].forEach(
+        ["lorawan_field", "application_field", "sensors_field", "alarms_field", "p2p_field"].forEach(
           function (k) { if (gp[k].length === 0) delete gp[k]; });
         cmd.get_param = gp;
       } else if (field === 5) { // get_config
@@ -1003,71 +1350,93 @@ function decodeDownlink(input) {
 }
 
 // fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
-// total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
-// source(1), edge(2), rel_s(4) varints + optional sint32 value(5) + quantity(6) +
-// slot(7) + type(9). source = enum app_alarm_source, quantity = enum
-// app_alarm_quantity; type says WHAT fired (low/high/trigger/no_data) and edge
-// the rising/falling transition — orthogonal (#212). value is scaled per quantity
-// (temp/hum ×100, pressure ×10, magnetic_field µT, digital 0/1, counter) and
-// absent for some edges. Per-event time = base_time + rel_s. `total` may exceed
-// events present (dropped to fit the data rate).
-var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
-  "input-a", "input-b", "pir", "accel", "battery"];
-var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
-  "magnetic-field", "tilt", "state", "count", "voltage"];
+// total(2), repeated AlarmEvent events(3). AlarmEvent (#430 sensor channel
+// model): slot(1), edge(2), rel_s(4) varints + optional sint32 value(5) +
+// rule(7) + type(9) + channel(10) + sensor_type(11). slot = 0 motherboard,
+// 1..4 = 1-Wire s1..s4; channel = channel of the slot's sensor type
+// (_SENSOR_TYPES; sensor_type is sent for 1-Wire slots only). rule = the alarm
+// rule index, 0xFF = no-data / sensor-mismatch watchdog, 0xFE = low battery.
+// type says WHAT fired (low/high/trigger/no_data/sensor_mismatch) and edge the
+// rising/falling transition — orthogonal (#212). value is the channel value
+// times its wire scale (the registry `s`), absent for some edges; a sensor
+// mismatch carries the detected type in value. Per-event time = base_time +
+// rel_s. `total` may exceed events present (dropped to fit the data rate).
+var _ALARM_SLOTS = ["mb", "s1", "s2", "s3", "s4"];
 var _ALARM_EDGES = ["activate", "deactivate"];
-var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
+var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data", "sensor_mismatch"];
+var _ALARM_TYPE_NO_DATA = 4;
+var _ALARM_TYPE_SENSOR_MISMATCH = 5;
+var _ALARM_CH_DEVICE = 255; // no_data of a whole 1-Wire device
+var _ALARM_RULE_COUNT = 16;
 
-function _alarmUnscale(quantity, raw) {
-  switch (quantity) {
-    case 0: case 1: return raw / 100;   // temperature, humidity
-    case 2: return raw / 10;            // pressure (hPa×10)
-    case 4: return raw / 1000;          // magnetic-field (µT -> mT)
-    case 8: return raw / 100;           // voltage (V×100)
-    default: return raw;                // illuminance / state / count
+// Channel descriptor of an alarm on (slot, channel); the motherboard type for
+// slot 0, else the sent sensor_type. undefined when unknown.
+function _alarmChannel(slot, sensorType, ch) {
+  var t = _SENSOR_TYPES[slot === 0 ? _SENSOR_MB_TYPE : sensorType];
+  return t ? t.ch[ch] : undefined;
+}
+
+// Common JSON shape of an alarm target: slot name, channel name (null for a
+// sensor mismatch, which concerns the whole slot; "device" for the no_data of
+// a whole 1-Wire device, channel 255) and the 1-Wire sensor type. A 1-Wire
+// no_data on a channel names the failed chip in `part`: it stands for every
+// channel of that part.
+function _alarmTarget(slot, ch, sensorType, type) {
+  var c = _alarmChannel(slot, sensorType, ch);
+  var o = {
+    slot: _ALARM_SLOTS[slot] || ("slot" + slot),
+    channel: type === _ALARM_TYPE_SENSOR_MISMATCH ? null
+      : ch === _ALARM_CH_DEVICE ? "device" : (c ? c.n : "ch" + ch),
+  };
+  if (type === _ALARM_TYPE_NO_DATA && c && c.p) {
+    o.part = c.p;
   }
+  if (sensorType !== null && slot !== 0) {
+    o.sensor_type = _W1_SLOT_TYPES[sensorType] || ("type" + sensorType);
+  }
+  return o;
 }
 
 // Response.Info.active_alarms entry (#288): a live alarm snapshot trimmed to
-// source(1)/quantity(2)/type(3) — no slot/value/edge/time (that is the fPort 3
-// AlarmEvent). Reuses the fPort 3 enum name maps for a consistent JSON shape.
+// slot(1)/type(3)/channel(4)/sensor_type(5) — no rule/value/edge/time (that is
+// the fPort 3 AlarmEvent). Same target shape as the fPort 3 events.
 function _decodeAlarmStatus(bytes, start, end) {
-  var a = { source: 0, quantity: 0, type: 0 };
+  var a = { slot: 0, channel: 0, type: 0, sensor_type: null };
   var p = start;
   while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, p); p = v.next;
-      if (field === 1) a.source = v.value;
-      else if (field === 2) a.quantity = v.value;
+      if (field === 1) a.slot = v.value;
       else if (field === 3) a.type = v.value;
+      else if (field === 4) a.channel = v.value;
+      else if (field === 5) a.sensor_type = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
   }
-  return {
-    source: _ALARM_SOURCES[a.source] || ("src" + a.source),
-    quantity: _ALARM_QUANTITIES[a.quantity] || ("q" + a.quantity),
-    type: _ALARM_TYPES[a.type] || "none",
-  };
+  var o = _alarmTarget(a.slot, a.channel, a.sensor_type, a.type);
+  o.type = _ALARM_TYPES[a.type] || "none";
+  return o;
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null };
+  var ev = { rule: 0, slot: 0, channel: 0, edge: 0, type: 0, rel_s: 0, value: null, sensor_type: null };
   var p = start;
   while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, p); p = v.next;
-      if (field === 1) ev.source = v.value;
+      if (field === 1) ev.slot = v.value;
       else if (field === 2) ev.edge = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
-      else if (field === 6) ev.quantity = v.value;
-      else if (field === 7) ev.slot = v.value;
+      else if (field === 7) ev.rule = v.value;
       else if (field === 9) ev.type = v.value;
+      else if (field === 10) ev.channel = v.value;
+      else if (field === 11) ev.sensor_type = v.value; // 1-Wire slot events only
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -1088,20 +1457,28 @@ function decodeAlarmBatch(bytes) {
       if (field === 1) out.base_time = v.value >>> 0;
       else if (field === 2) out.total = v.value;
       else if (field === 4) out.time_synced = v.value !== 0;
+      // #425: page_index (5) / page_count (6), the same paging as Response.
+      else if (field === 5) out.page_index = v.value;
+      else if (field === 6) out.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
       if (field === 3) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
-        out.alarms.push({
-          slot: ev.slot,
-          source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
-          quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
-          event: _ALARM_EDGES[ev.edge] || "activate",
-          type: _ALARM_TYPES[ev.type] || "none",
-          value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
-          time: 0,
-        });
+        var mismatch = ev.type === _ALARM_TYPE_SENSOR_MISMATCH;
+        var c = _alarmChannel(ev.slot, ev.sensor_type, ev.channel);
+        var a = _alarmTarget(ev.slot, ev.channel, ev.sensor_type, ev.type);
+        // Rules 0..15; the watchdogs (no-data / mismatch 0xFF, battery 0xFE)
+        // have none — type and channel say which one fired.
+        a.rule = ev.rule < _ALARM_RULE_COUNT ? ev.rule : null;
+        a.event = _ALARM_EDGES[ev.edge] || "activate";
+        a.type = _ALARM_TYPES[ev.type] || "none";
+        a.value = ev.value === null ? null
+          : (mismatch || !c ? ev.value : ev.value / c.s);
+        a.time = 0;
+        // A mismatch names the detected type (carried in value).
+        if (mismatch && ev.value !== null) a.detected_type = _W1_SLOT_TYPES[ev.value] || ("type" + ev.value);
+        out.alarms.push(a);
         rels.push(ev.rel_s);
       }
       pos = endE;
@@ -1113,7 +1490,15 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
+  // total counts every alarm in the window. A batch split across frames (#425)
+  // is labelled "i/N"; its pages share base_time and total, and each decodes on
+  // its own. Unpaged, fewer events than total means some were dropped.
+  if (out.page_count > 1) {
+    if (out.page_index === undefined) out.page_index = 0;
+    out.pages = (out.page_index + 1) + "/" + out.page_count;
+  } else {
+    out.truncated = out.alarms.length < out.total;
+  }
   return out;
 }
 
@@ -1397,6 +1782,7 @@ if (typeof module !== "undefined" && module.exports) {
     Decode: Decode,
     decodeTelemetry: decodeTelemetry,
     decodeDownlinkResponse: decodeDownlinkResponse,
-    decodeAlarmBatch: decodeAlarmBatch
+    decodeAlarmBatch: decodeAlarmBatch,
+    sensorTypes: _SENSOR_TYPES
   };
 }

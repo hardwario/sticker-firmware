@@ -1,0 +1,5 @@
+common:
+  tags: sticker w1
+  platform_allow: native_sim
+tests:
+  sticker.w1_slots: {}

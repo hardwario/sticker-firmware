@@ -11,8 +11,12 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
+#include "app_radio.h"
+#if defined(CONFIG_RADIO_P2P)
+#include "app_radio_p2p.h"
+#endif
 #include "app_report.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
@@ -176,8 +180,12 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+#if defined(CONFIG_SHT4X) || defined(CONFIG_W1)
 	int ret;
+#endif /* defined(CONFIG_SHT4X) || defined(CONFIG_W1) */
+#if defined(CONFIG_W1)
 	int count;
+#endif /* defined(CONFIG_W1) */
 
 #if defined(CONFIG_SHT4X)
 	/* SHT40 (onboard temperature/humidity sensor) */
@@ -190,6 +198,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
+#if defined(CONFIG_W1)
 	/* DS18B20 sensors (T1, T2) */
 	count = app_ds18b20_get_count();
 	shell_print(shell, "DS18B20 count: %d", count);
@@ -207,6 +216,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 		shell_print(shell, "DS18B20[%d] serial: %llu", i, serial_number);
 	}
 
+#if defined(CONFIG_DS28E17)
 	/* Machine Probe sensors (MP1, MP2) */
 	count = app_machine_probe_get_count();
 	shell_print(shell, "Machine Probe count: %d", count);
@@ -234,6 +244,8 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
@@ -248,11 +260,11 @@ static int cmd_reset_sample(const struct shell *shell, size_t argc, char **argv)
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	g_app_sensor_data.motion_count = 0;
-	g_app_sensor_data.hall_left_count = 0;
-	g_app_sensor_data.hall_right_count = 0;
-	g_app_sensor_data.input_a_count = 0;
-	g_app_sensor_data.input_b_count = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, PIR_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_RIGHT_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, INPUT_A_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, INPUT_B_COUNT) = 0;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -295,75 +307,79 @@ static enum sval_kind resolve_sensor(const char *name, float *f, uint32_t *u, in
 {
 	const struct app_sensor_data *d = &g_app_sensor_data;
 
+	/* The tester-facing names and units are kept as they were before the
+	 * channel model (#430): pressure stays kPa, orientation an int. */
 	if (strcmp(name, "voltage") == 0) {
-		*f = d->voltage;
+		*f = APP_SENSOR_MB_F(d, BATTERY_VOLTAGE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "temperature") == 0) {
-		*f = d->temperature;
+		*f = APP_SENSOR_MB_F(d, TEMPERATURE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "humidity") == 0) {
-		*f = d->humidity;
+		*f = APP_SENSOR_MB_F(d, HUMIDITY);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "illuminance") == 0) {
-		*f = d->illuminance;
+		*f = APP_SENSOR_MB_F(d, ILLUMINANCE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "altitude") == 0) {
-		*f = d->altitude;
+		*f = APP_SENSOR_MB_F(d, ALTITUDE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "pressure") == 0) {
-		*f = d->pressure;
+		*f = APP_SENSOR_MB_F(d, PRESSURE) / 10.0f; /* hPa -> kPa */
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "orientation") == 0) {
-		*iv = d->orientation;
+		float o = APP_SENSOR_MB_F(d, ACCEL_ORIENTATION);
+
+		*iv = isnan(o) ? INT_MAX : (int)o;
 		return SVAL_INT;
 	} else if (strcmp(name, "motion-count") == 0) {
-		*u = d->motion_count;
+		*u = APP_SENSOR_MB_U(d, PIR_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-left-count") == 0) {
-		*u = d->hall_left_count;
+		*u = APP_SENSOR_MB_U(d, HALL_LEFT_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-right-count") == 0) {
-		*u = d->hall_right_count;
+		*u = APP_SENSOR_MB_U(d, HALL_RIGHT_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "input-a-count") == 0) {
-		*u = d->input_a_count;
+		*u = APP_SENSOR_MB_U(d, INPUT_A_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "input-b-count") == 0) {
-		*u = d->input_b_count;
+		*u = APP_SENSOR_MB_U(d, INPUT_B_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-left-is-active") == 0) {
-		*bv = d->hall_left_is_active;
+		*bv = APP_SENSOR_MB_F(d, HALL_LEFT_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "hall-right-is-active") == 0) {
-		*bv = d->hall_right_is_active;
+		*bv = APP_SENSOR_MB_F(d, HALL_RIGHT_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "input-a-is-active") == 0) {
-		*bv = d->input_a_is_active;
+		*bv = APP_SENSOR_MB_F(d, INPUT_A_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "input-b-is-active") == 0) {
-		*bv = d->input_b_is_active;
+		*bv = APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f;
 		return SVAL_BOOL;
 	}
 
 	/* Slot sensors: sN-<quantity>, N=1..4 -> w1[N-1]. */
 	if (name[0] == 's' && name[1] >= '1' && name[1] <= '4' && name[2] == '-') {
-		const struct app_w1_slot_reading *s = &d->w1[name[1] - '1'];
+		const struct app_sensor_w1 *s = &d->w1[name[1] - '1'];
 		const char *q = name + 3;
 
 		if (strcmp(q, "temperature") == 0) {
-			*f = s->temperature;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "humidity") == 0) {
-			*f = s->humidity;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "illuminance") == 0) {
-			*f = s->illuminance;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "magnetic-field") == 0) {
-			*f = s->magnetic_field;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "tilt-alert") == 0) {
-			*bv = s->is_tilt_alert;
+			*bv = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
 			return SVAL_BOOL;
 		}
 	}
@@ -490,100 +506,185 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 
 	/* On-device sensors + the device's own discrete inputs. */
 	shell_print(shell, "== Device ==");
-	print_float(shell, "voltage:", d->voltage, "V");
-	print_float(shell, "temperature:", d->temperature, "C");
-	print_float(shell, "humidity:", d->humidity, "%");
-	print_float(shell, "pressure:", d->pressure, "Pa");
-	print_float(shell, "altitude:", d->altitude, "m");
-	print_float(shell, "illuminance:", d->illuminance, "lux");
+	print_float(shell, "voltage:", APP_SENSOR_MB_F(d, BATTERY_VOLTAGE), "V");
+	print_float(shell, "temperature:", APP_SENSOR_MB_F(d, TEMPERATURE), "C");
+	print_float(shell, "humidity:", APP_SENSOR_MB_F(d, HUMIDITY), "%");
+	/* kPa, as the tester has always read it (the channel itself is hPa). */
+	print_float(shell, "pressure:", APP_SENSOR_MB_F(d, PRESSURE) / 10.0f, "kPa");
+	print_float(shell, "altitude:", APP_SENSOR_MB_F(d, ALTITUDE), "m");
+	print_float(shell, "illuminance:", APP_SENSOR_MB_F(d, ILLUMINANCE), "lux");
 	/* orientation + raw axes are meaningful only with the accelerometer enabled;
 	 * read live (the onboard accel x/y/z are not cached in g_app_sensor_data). */
+#if defined(CONFIG_LIS2DH)
 	if (g_app_config.cap_accelerometer) {
 		float ax = NAN, ay = NAN, az = NAN;
-		int ori = d->orientation;
+		float ori_f = APP_SENSOR_MB_F(d, ACCEL_ORIENTATION);
+		int ori = isnan(ori_f) ? INT_MAX : (int)ori_f;
 		(void)app_accel_read(&ax, &ay, &az, &ori);
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
 		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
 			    "accel:", APP_FP2(ax), APP_FP2(ay), APP_FP2(az));
-	} else {
+	} else
+#endif /* defined(CONFIG_LIS2DH) */
+	{
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
 	}
-	shell_print(shell, "  %-16s %u", "motion-count:", d->motion_count);
-	shell_print(shell, "  %-16s %u", "accel-motion:", d->accel_motion_count);
-	shell_print(shell, "  %-16s count=%u active=%s", "hall-left:", d->hall_left_count,
-		    d->hall_left_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "hall-right:", d->hall_right_count,
-		    d->hall_right_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "input-a:", d->input_a_count,
-		    d->input_a_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
-		    d->input_b_is_active ? "true" : "false");
+	shell_print(shell, "  %-16s %u", "motion-count:", APP_SENSOR_MB_U(d, PIR_COUNT));
+	shell_print(shell, "  %-16s %u", "accel-motion:", APP_SENSOR_MB_U(d, ACCEL_COUNT));
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "hall-left:", APP_SENSOR_MB_U(d, HALL_LEFT_COUNT),
+		    APP_SENSOR_MB_F(d, HALL_LEFT_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "hall-right:", APP_SENSOR_MB_U(d, HALL_RIGHT_COUNT),
+		    APP_SENSOR_MB_F(d, HALL_RIGHT_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "input-a:", APP_SENSOR_MB_U(d, INPUT_A_COUNT),
+		    APP_SENSOR_MB_F(d, INPUT_A_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "input-b:", APP_SENSOR_MB_U(d, INPUT_B_COUNT),
+		    APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f ? "true" : "false");
 
+#if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
 	 * actually provides are non-NaN (a thermometer shows temperature only; a
 	 * machine probe shows the full cluster). */
 	for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
-		enum app_w1_slot_type type = app_w1_slot_get_type(i);
-		const struct app_w1_slot_reading *s = &d->w1[i];
+		/* Expected type (#430): an absent / mismatched slot keeps its name. */
+		enum app_w1_slot_type type =
+			(enum app_w1_slot_type)app_w1_slot_get_expected_type(i);
+		const struct app_sensor_w1 *s = &d->w1[i];
 
 		if (type == APP_W1_SLOT_EMPTY) {
 			shell_print(shell, "== s%d: empty ==", i + 1);
 			continue;
 		}
+#define W1(NAME) app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_##NAME)
 		shell_print(shell, "== s%d: %s%s ==", i + 1, app_w1_slot_type_name(type),
-			    s->present ? "" : " (absent)");
-		print_float(shell, "temperature:", s->temperature, "C");
-		print_float(shell, "humidity:", s->humidity, "%");
-		print_float(shell, "illuminance:", s->illuminance, "lux");
-		print_float(shell, "magnetic-field:", s->magnetic_field, "mT");
-		if (!isnan(s->accel_x) || !isnan(s->accel_y) || !isnan(s->accel_z)) {
+			    s->present                                               ? ""
+			    : app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_MISMATCH ? " (MISMATCH)"
+										     : " (absent)");
+		print_float(shell, "temperature:", W1(TEMPERATURE), "C");
+		print_float(shell, "temperature-aux:", W1(TEMPERATURE_AUX), "C");
+		print_float(shell, "humidity:", W1(HUMIDITY), "%");
+		print_float(shell, "illuminance:", W1(ILLUMINANCE), "lux");
+		print_float(shell, "magnetic-field:", W1(MAGNETIC_FIELD), "mT");
+		if (!isnan(W1(ACCEL_X)) || !isnan(W1(ACCEL_Y)) || !isnan(W1(ACCEL_Z))) {
 			shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
-				    "accel:", APP_FP2(s->accel_x), APP_FP2(s->accel_y),
-				    APP_FP2(s->accel_z));
+				    "accel:", APP_FP2(W1(ACCEL_X)), APP_FP2(W1(ACCEL_Y)),
+				    APP_FP2(W1(ACCEL_Z)));
 		}
 		shell_print(shell, "  %-16s %s",
-			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
+			    "tilt-alert:", W1(TILT) == 1.0f ? "true" : "false");
+#undef W1
 	}
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
 
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
+
 #if defined(CONFIG_LORAWAN)
-static const char *lrw_state_to_str(enum app_lrw_state state)
+static const char *lrw_state_to_str(enum app_radio_state state)
 {
 	switch (state) {
-	case APP_LRW_STATE_IDLE:
+	case APP_RADIO_STATE_IDLE:
 		return "IDLE";
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		return "JOINING";
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		return "WARNING";
-	case APP_LRW_STATE_RECONNECT:
+	case APP_RADIO_STATE_RECONNECT:
 		return "RECONNECT";
-	case APP_LRW_STATE_DISABLED:
+	case APP_RADIO_STATE_DISABLED:
 		return "DISABLED";
 	default:
 		return "UNKNOWN";
 	}
 }
+#endif /* defined(CONFIG_LORAWAN) */
 
-static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
+#if defined(CONFIG_RADIO_P2P)
+static const char *p2p_state_to_str(enum p2p_link_state state)
 {
-	struct app_lrw_info info;
-	int ret = app_lrw_get_info(&info);
+	switch (state) {
+	case P2P_LINK_UNPAIRED:
+		return "UNPAIRED";
+	case P2P_LINK_JOINING:
+		return "JOINING";
+	case P2P_LINK_PAIRED:
+		return "PAIRED";
+	default:
+		return "UNKNOWN";
+	}
+}
+#endif /* defined(CONFIG_RADIO_P2P) */
+
+/* Universal across whichever stack radio_mode selected at boot (app_radio
+ * facade, #118) -- the one status command a tester runs regardless of
+ * build/config. LoRaWAN exposes rich link diagnostics (devaddr/fcnt/rssi/
+ * margin/...); P2P its TOWER session, the gateway's RSSI of the last ACKed
+ * uplink and the last LinkCheckAns (doc/p2p.md). */
+static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+#if defined(CONFIG_RADIO_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		struct app_radio_p2p_info info;
+
+		app_radio_p2p_get_info(&info);
+
+		shell_print(shell, "kind: P2P");
+		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
+		shell_print(shell, "app_key: %s",
+			    info.app_key_set ? "set" : "MISSING (radio refused to start)");
+		shell_print(shell, "addr: %08x", info.addr);
+		shell_print(shell, "net_id: %08x", info.net_id);
+		shell_print(shell, "rx_delay: %u s", info.rx_delay_s);
+		shell_print(shell, "sf: %u (config %d)", info.sf,
+			    g_app_config.p2p_spreading_factor);
+		shell_print(shell, "tx power: %d dBm (%s)", info.tx_power_dbm,
+			    info.tx_power_assigned ? "assigned" : "config");
+		shell_print(shell, "fcnt: %u", info.fcnt);
+		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
+		shell_print(shell, "gw_last: %u", info.gw_last);
+		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
+		if (info.last_ack_valid) {
+			shell_print(shell, "last ack rssi (gateway): %d dBm", info.last_ack_rssi);
+		} else {
+			shell_print(shell, "last ack rssi (gateway): n/a");
+		}
+		if (info.lc_valid) {
+			shell_print(shell,
+				    "link check: rssi %d dBm, snr %d dB, margin %d dB, gw %u",
+				    info.lc_rssi, info.lc_snr, info.lc_margin, info.lc_gw_count);
+		} else {
+			shell_print(shell, "link check: n/a");
+		}
+		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
+		return 0;
+	}
+#endif /* defined(CONFIG_RADIO_P2P) */
+#if defined(CONFIG_LORAWAN)
+	struct app_radio_lrw_info info;
+	int ret = app_radio_lrw_get_info(&info);
 
 	if (ret) {
 		shell_error(shell, "Failed to get LRW info: %d", ret);
 		return ret;
 	}
 
+	shell_print(shell, "kind: LoRaWAN");
 	shell_print(shell, "state: %s", lrw_state_to_str(info.state));
 	shell_print(shell, "devaddr: %08x", info.dev_addr);
 	shell_print(shell, "fcnt up: %u", info.fcnt_up);
 	shell_print(shell, "datarate: DR%d", info.datarate);
+	shell_print(shell, "tx power: %d (0 = max)", info.tx_power);
 	shell_print(shell, "rssi: %d dBm", info.rssi);
 	shell_print(shell, "snr: %d dB", info.snr);
 	shell_print(shell, "margin: %u dB", info.margin);
@@ -591,16 +692,19 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "messages: %d", info.message_count);
 	shell_print(shell, "healthy->warning: %d/%d", info.consecutive_lc_fail,
 		    info.thresh_warning);
-	shell_print(shell, "warning->healthy: %d/%d", info.consecutive_lc_ok, info.thresh_healthy);
 	shell_print(shell, "warning->reconnect: %d/%d", info.warning_lc_fail_total,
 		    info.thresh_reconnect);
 
 	return 0;
+#else
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
 }
 
+#if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_force_link_check();
+	app_radio_force_link_check();
 	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;
@@ -611,7 +715,7 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	int ret = app_lrw_reset_nvm();
+	int ret = app_radio_lrw_reset_nvm();
 	if (ret) {
 		shell_warn(shell, "NVM clear reported errors: %d", ret);
 	}
@@ -622,12 +726,12 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* app_compose.c documents app_compose_ex()/app_compose_reset() as running
- * "solely on m_work_q" (owned by app_lrw.c) and mutating static state
+ * "solely on m_work_q" (owned by app_radio_lrw.c) and mutating static state
  * (m_active/m_pending/m_snapshot/a static frame buffer) with no lock on that
  * assumption. Calling app_compose_ex() directly from the shell thread below
  * would race the real telemetry TX path, which composes on m_work_q too. So
  * each frame is composed as a work item on m_work_q (via
- * app_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
+ * app_radio_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
  * prints that one frame, and loops for the next — mirroring the original
  * per-frame streaming print, one m_work_q round-trip per frame instead of
  * buffering the whole multi-frame report (which a full report can run to
@@ -683,7 +787,7 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 	while (more) {
 		res->budget = budget;
 
-		int sret = app_lrw_run_on_work_q(&m_compose_work);
+		int sret = app_radio_lrw_run_on_work_q(&m_compose_work);
 		if (sret < 0) {
 			shell_error(shell, "compose submit failed: %d", sret);
 			return sret;
@@ -724,28 +828,206 @@ static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
 	} else if (strcmp(argv[1], "fail") == 0) {
 		ok = false;
 	} else {
-		shell_error(shell, "usage: lrw lc ok|fail");
+		shell_error(shell, "usage: radio lc ok|fail");
 		return -EINVAL;
 	}
 
-	app_lrw_debug_inject_lc(ok);
-	shell_print(shell, "Injected link-check %s (see 'ats lrw status')", argv[1]);
+	app_radio_lrw_debug_inject_lc(ok);
+	shell_print(shell, "Injected link-check %s (see 'ats radio status')", argv[1]);
+	return 0;
+}
+#endif /* defined(CONFIG_LORAWAN) */
+
+#if defined(CONFIG_RADIO_P2P)
+/* Bench two-STICKER rig (doc/p2p.md §14): drives the reference receiver on a
+ * second STICKER without a real gateway/central. Not registered when P2P
+ * transport is compiled out (flash-tight debug builds, doc/p2p.md §11). */
+static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool enable;
+
+	if (strcmp(argv[1], "on") == 0) {
+		enable = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		enable = false;
+	} else {
+		shell_error(shell, "usage: radio listen on|off");
+		return -EINVAL;
+	}
+
+	int ret = app_radio_p2p_listen(enable);
+	if (ret) {
+		shell_error(shell, "listen %s failed: %d", enable ? "on" : "off", ret);
+		return ret;
+	}
+	shell_print(shell, "P2P listen %s", enable ? "ON" : "OFF");
 	return 0;
 }
 
+/* Clears the persisted pairing and reboots -- the P2P analogue of
+ * cmd_lrw_reset(), named to match P2P's own join/JoinRequest/JoinAccept
+ * vocabulary rather than "pairing". The reset tiers that drop the network
+ * session clear it too (factory_reset, vendor_reset, lrw_reset: all go through
+ * app_radio_reset_link()); device_reset keeps it, as it keeps the LoRaWAN
+ * session. For a LIVE re-join that doesn't need a reboot, see the top-level
+ * `join` command (app_radio_rejoin()) instead. */
+static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = app_radio_p2p_unjoin();
+
+	if (ret) {
+		shell_warn(shell, "Unjoin reported errors: %d", ret);
+	}
+	shell_print(shell, "P2P pairing cleared; rebooting...");
+	k_sleep(K_MSEC(200)); /* let the shell flush */
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
+/* Debug: exercise the confirmed-uplink repetition and retry path (doc/p2p.md)
+ * without a real RF outage, same idea as `ats radio lc` for the LoRaWAN
+ * link-check FSM. */
+static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	int n = atoi(argv[1]);
+
+	if (n < 0) {
+		shell_error(shell, "count must be >= 0");
+		return -EINVAL;
+	}
+
+	app_radio_p2p_debug_drop_acks((uint32_t)n);
+	shell_print(shell, "Next %d confirmed-uplink ACK(s) will appear dropped", n);
+	return 0;
+}
+
+/* Build (frame + encrypt) telemetry frames WITHOUT transmitting or advancing
+ * the frame counter -- lets a bench tech inspect the exact bytes that would
+ * go on air. The P2P counterpart of cmd_lrw_compose(); dispatched from the
+ * same universal `compose` entry as cmd_radio_compose() below. */
+static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_sensor_sample();
+
+	bool more = true;
+	int frame = 0;
+
+	shell_print(shell, "P2P TELEMETRY frame preview:");
+	while (more) {
+		uint8_t buf[P2P_FRAME_MAX];
+		size_t len = 0;
+
+		int ret = app_radio_p2p_debug_compose(buf, sizeof(buf), &len, &more);
+
+		if (ret == -ENOTCONN) {
+			shell_error(shell, "not paired yet");
+			return ret;
+		}
+		if (ret) {
+			shell_error(shell, "compose failed: %d", ret);
+			return ret;
+		}
+		if (len == 0) {
+			shell_print(shell, "  (nothing to report)");
+			break;
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
+		for (size_t i = 0; i < len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "\n");
+	}
+	return 0;
+}
+#endif /* defined(CONFIG_RADIO_P2P) */
+
+/* Debug: telemetry never reaches the air while the radio work queue drains,
+ * to exercise the M-2 stale-uplink rejoin (needs CONFIG_WATCHDOG). */
+static int cmd_radio_tx_mute(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool on = strcmp(argv[1], "on") == 0;
+
+	if (!on && strcmp(argv[1], "off") != 0) {
+		shell_error(shell, "Usage: tx_mute on|off");
+		return -EINVAL;
+	}
+
+	app_radio_debug_tx_mute(on);
+	shell_print(shell, "Telemetry TX %s", on ? "muted" : "unmuted");
+	return 0;
+}
+
+/* Universal `compose`, same dispatch idiom as cmd_radio_status(): a name
+ * collision would otherwise be unavoidable on a dual-stack build, since both
+ * cmd_lrw_compose() and cmd_p2p_compose() would need to register under the
+ * same `ats radio compose` slot. */
+static int cmd_radio_compose(const struct shell *shell, size_t argc, char **argv)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		return cmd_p2p_compose(shell, argc, argv);
+	}
+#endif /* defined(CONFIG_RADIO_P2P) */
+#if defined(CONFIG_LORAWAN)
+	return cmd_lrw_compose(shell, argc, argv);
+#else
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	shell_error(shell, "no radio stack compiled in");
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
+}
+
+/* Single ATS entry point for both radio stacks (#118): `ats radio status`
+ * and `ats radio compose` work no matter which one radio_mode picked at
+ * boot; the rest are necessarily stack-specific (LoRaWAN link-check/NVM
+ * reset vs. P2P's pairing/retry/timing bench helpers) and only compiled in
+ * for the stack that provides them. */
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
+	sub_radio,
+	SHELL_CMD_ARG(status, NULL, "Print radio status (LoRaWAN or P2P).", cmd_radio_status, 1, 0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build a telemetry frame without sending; dump hex. "
+		      "Usage: compose [budget] (budget: LoRaWAN only)",
+		      cmd_radio_compose, 1, 1),
+	SHELL_CMD_ARG(tx_mute, NULL,
+		      "Debug: telemetry fails before the air (M-2 test). Usage: tx_mute on|off",
+		      cmd_radio_tx_mute, 2, 0),
+#if defined(CONFIG_LORAWAN)
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
 		      0),
-	SHELL_CMD_ARG(compose, NULL,
-		      "Build telemetry uplink without sending; dump fPort-2 hex. "
-		      "Usage: compose [budget]",
-		      cmd_lrw_compose, 1, 1),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
-	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_RADIO_P2P)
+	SHELL_CMD_ARG(listen, NULL,
+		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
+		      "doc/p2p.md §14). Usage: listen on|off",
+		      cmd_p2p_listen, 2, 0),
+	SHELL_CMD_ARG(unjoin, NULL,
+		      "Clear P2P pairing state (reboots); factory_reset clears it too.",
+		      cmd_radio_unjoin, 1, 0),
+	SHELL_CMD_ARG(ack_drop, NULL,
+		      "Debug: force the next N confirmed-uplink ACKs to appear dropped. "
+		      "Usage: ack_drop <count>",
+		      cmd_radio_ack_drop, 2, 0),
+#endif /* defined(CONFIG_RADIO_P2P) */
+	SHELL_SUBCMD_SET_END);
+
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sensors,
@@ -814,7 +1096,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
-		ret = app_lrw_queue_response(85, out, out_len);
+		ret = app_radio_queue_response(85, out, out_len);
 		if (ret) {
 			shell_warn(sh, "queue_response failed: %d", ret);
 		}
@@ -832,6 +1114,15 @@ static int cmd_cmd_lrw(const struct shell *sh, size_t argc, char **argv)
 static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 {
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
+}
+
+/* #415: inject a raw (unencrypted) Command over the plain_text transport — the
+ * bench equivalent of the NFC mailbox channel 0x03. Only allow-listed commands
+ * answer (get_claim_info); anything else returns NOT_READY "transport not
+ * allowed". */
+static int cmd_cmd_plain(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_PLAIN_TEXT, argv[1]);
 }
 
 /* Bench driver for the NFC paged history read (#260): drives the same
@@ -949,6 +1240,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(plain, NULL,
+		      "Inject a raw Command over the unauthenticated plain_text transport "
+		      "(#415). Usage: plain <hex>",
+		      cmd_cmd_plain, 2, 0),
 	SHELL_CMD_ARG(history, NULL,
 		      "Drive the NFC paged history read (#260). Usage: history [<from> [<to>]]",
 		      cmd_cmd_history, 1, 2),
@@ -1026,6 +1321,7 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
  * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
  * cap_pir_detector owns the pins, or neither capability is on) and driving the
  * GPIOs here would race whatever else configured them. */
+#if defined(CONFIG_APP_BUZZER)
 static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1117,6 +1413,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Play a fixed melody. Usage: play <info|warning|alarm> [repeat_s 0-999]",
 		      cmd_buzzer_play, 2, 1),
 	SHELL_SUBCMD_SET_END);
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 /* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
@@ -1162,20 +1459,28 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		uint32_t flag;
 		const char *name;
 	} names[] = {
+		/* Alarms */
 		{APP_DEVICE_STATUS_ALARM_ANY, "alarm-any"},
 		{APP_DEVICE_STATUS_ALARM_THRESHOLD, "alarm-threshold"},
 		{APP_DEVICE_STATUS_ALARM_STATE, "alarm-state"},
 		{APP_DEVICE_STATUS_ALARM_RATE, "alarm-rate"},
 		{APP_DEVICE_STATUS_ALARM_NO_DATA, "alarm-no-data"},
 		{APP_DEVICE_STATUS_ALARM_LOW_BATT, "alarm-low-battery"},
-		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
-		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
-		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
-		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		/* Radio */
+		{APP_DEVICE_STATUS_RADIO_OFF, "radio-off"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_RADIO_LINK_DOWN, "radio-link-down"},
+		/* Hardware / health */
+		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
+		{APP_DEVICE_STATUS_MAILBOX_DOWN, "mailbox-down"},
+		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
+		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
+		/* System */
+		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		{APP_DEVICE_STATUS_CLAIM_ACTIVE, "claim-active"},
 	};
 
-	char buf[128];
+	char buf[256];
 	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
@@ -1200,8 +1505,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	static const char *const build_type_name[] = {"main", "dev", "custom"};
-	static const char *const lrw_state_name[] = {"idle",    "joining",   "healthy",
-						     "warning", "reconnect", "disabled"};
+	static const char *const radio_state_name[] = {"idle",    "joining",   "healthy",
+						       "warning", "reconnect", "disabled"};
 
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
@@ -1209,15 +1514,38 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
 				 ? build_type_name[info.build_type]
 				 : "unknown";
-	const char *ls = info.lrw_state < ARRAY_SIZE(lrw_state_name)
-				 ? lrw_state_name[info.lrw_state]
+	const char *ls = info.radio_state < ARRAY_SIZE(radio_state_name)
+				 ? radio_state_name[info.radio_state]
 				 : "unknown";
 
 	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
 	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
-	shell_print(sh, "LRW state:     %s", ls);
+	shell_print(sh, "Radio state:   %s", ls);
+
+	struct app_radio_status rs;
+
+	app_radio_get_status(&rs);
+	if (rs.has_dl) {
+		shell_print(sh, "Radio signal:  last downlink %d dBm / SNR %d dB, %u s ago",
+			    rs.dl_rssi, rs.dl_snr, rs.dl_age_s);
+	} else {
+		shell_print(sh, "Radio signal:  no downlink since boot");
+	}
+	if (rs.has_datarate) {
+		shell_print(sh, "Radio params:  SF%u DR%u, TX %d dBm", rs.sf, rs.datarate,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	} else {
+		shell_print(sh, "Radio params:  SF%u, TX %d dBm", rs.sf,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	}
+	shell_print(sh, "Radio link:    fail streak %u, join attempts %u, duty hold %u s",
+		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s);
+	shell_print(sh, "Radio counts:  tx %u rx %u retry %u fail %u tx_err %u join %u",
+		    rs.cnt[APP_RADIO_CNT_TX], rs.cnt[APP_RADIO_CNT_RX], rs.cnt[APP_RADIO_CNT_RETRY],
+		    rs.cnt[APP_RADIO_CNT_FAIL], rs.cnt[APP_RADIO_CNT_TX_ERR],
+		    rs.cnt[APP_RADIO_CNT_JOIN]);
 	if (info.battery_mv) {
 		shell_print(sh, "Battery:       %u mV", info.battery_mv);
 	} else {
@@ -1226,6 +1554,11 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 
 	print_reset_cause(sh, info.reset_cause);
 	print_device_status(sh, info.device_status);
+	/* #313 D7: FTM mailbox authorisation is a per-unit hardware property — a
+	 * unit that cannot enable it has no interactive NFC channel and must not
+	 * leave the production tester. */
+	shell_print(sh, "NFC mailbox:   %s",
+		    app_nfc_mailbox_available() ? "available" : "UNAVAILABLE (MB_MODE cfg failed)");
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;
@@ -1238,7 +1571,10 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Wall clock:    RTC not synced");
 	}
 
-	/* Device identity keys (local shell only). secret-key is confidential; the
+	/* Device identity keys (local shell only). secret-key is confidential, so
+	 * only its first and last two bytes are shown here -- `config secret-key`
+	 * prints the full value on request. Bench logs of this command get pasted
+	 * into run records and tickets; the summary must not carry the key. The
 	 * claim-token (#170) is shown as "(unset)" until commissioned. */
 	char hexbuf[2 * 16 + 1];
 
@@ -1246,7 +1582,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "DevEUI:        %s", hexbuf);
 
 	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
-	shell_print(sh, "Secret key:    %s", hexbuf);
+	shell_print(sh, "Secret key:    %.4s...%s (masked; `config secret-key` shows all)", hexbuf,
+		    &hexbuf[strlen(hexbuf) - 4]);
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1287,16 +1624,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-/* Re-arm the claim record (#247/#351): drops the clm latch back to UNSET, which
- * auto-advances to PENDING (clm reappears on NFC) on the next nfc_check_locked()
- * poll, as long as claim_token is still set. Non-destructive alternative to
- * app_settings_vendor_reset() for bench re-testing the claim flow. */
+/* #415: (re)open the claim window -> ACTIVE, so the clm record is laid again on
+ * the next NFC poll (while claim_token is set) and get_claim_info discloses the
+ * token. Non-destructive alternative to app_settings_vendor_reset() for bench
+ * re-testing the claim flow. */
 static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_reset();
+	app_nfc_claim_active("ats claim active");
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1305,34 +1642,36 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state -> unset (re-arms to pending on next NFC poll)");
+	shell_print(sh, "claim window -> active");
 	if (!claim_set) {
-		shell_print(sh, "warning: claim_token is unset - clm record will NOT reappear "
+		shell_print(sh, "warning: claim_token is unset - clm record will NOT appear "
 				"until one is provisioned (`config claim-token <hex>`)");
 	}
 	return 0;
 }
 
-/* Force the claim window closed (#308) without a phone deleting the clm record. */
+/* #415: close the claim window -> DONE without a phone (claim_done command). */
 static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_ack();
-	shell_print(sh, "clm state -> consumed");
+	app_nfc_claim_done("ats claim done");
+	shell_print(sh, "claim window -> done");
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). Moved
- * here from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
+/* #247/#415: show the claim window state (debug/HW-test visibility). Moved here
+ * from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
 static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	static const char *const names[] = {"unset", "pending", "consumed"};
-	uint8_t state = app_nfc_clm_state_get();
+	uint8_t state = app_nfc_claim_state_get();
+	const char *name = (state == APP_NFC_CLAIM_ACTIVE) ? "active"
+			   : (state == APP_NFC_CLAIM_DONE) ? "done"
+							   : "?";
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1341,9 +1680,8 @@ static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state:   %s (%u)", state < ARRAY_SIZE(names) ? names[state] : "?",
-		    state);
-	shell_print(sh, "claim token: %s", claim_set ? "set" : "unset");
+	shell_print(sh, "claim window: %s (%u)", name, state);
+	shell_print(sh, "claim token:  %s", claim_set ? "set" : "unset");
 	return 0;
 }
 
@@ -1363,13 +1701,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(claim, &sub_claim, "Claim-lifecycle test commands (#247/#351).", NULL),
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
-#if defined(CONFIG_LORAWAN)
-	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
-#endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
+	SHELL_CMD(radio, &sub_radio, "Radio (LoRaWAN/P2P) commands.", NULL),
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
+#if defined(CONFIG_APP_BUZZER)
 	SHELL_CMD(buzzer, &sub_buzzer, "Buzzer HW variant commands (#338).", NULL),
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif
 	SHELL_SUBCMD_SET_END);
 

@@ -10,7 +10,7 @@
 #include "app_ds18b20.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_machine_probe.h"
 #include "app_settings.h"
 #include "app_sht4x.h"
@@ -53,24 +53,28 @@ static const uint8_t m_cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d
 static const uint8_t m_cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
 					0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
 
+#if defined(CONFIG_W1)
 static int m_count_ds18b20;
+#endif /* defined(CONFIG_W1) */
+#if defined(CONFIG_DS28E17)
 static int m_count_machine_probe;
+#endif /* defined(CONFIG_DS28E17) */
 static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
-/* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore that can hang
- * forever (app_lrw.c's own documented hazard). app_calibration_run() IS the
+/* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore - up to
+ * CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS since #181, forever before. app_calibration_run() IS the
  * whole calibration thread - if the send hung there directly, the loop could
  * never feed the watchdog, blink its status LED, or re-check its own
  * deadline-based clean reboot again. Running the send via
- * app_lrw_run_on_work_q() (app_lrw.c's own m_work_q, mode is mutually
- * exclusive with normal app_lrw operation so there's no contention) decouples
+ * app_radio_lrw_run_on_work_q() (the radio work queue, mode is mutually
+ * exclusive with normal app_radio_lrw operation so there's no contention) decouples
  * the main loop's liveness from whether the send ever completes, at no extra
- * RAM cost - m_work_q's own existing heartbeat/wdog liveness channel
+ * RAM cost - the radio work queue's own existing heartbeat/wdog liveness channel
  * (#181/#182) already forces a fast IWDG reset if it wedges, instead of
  * silently waiting out the full multi-hour calibration deadline. A dedicated
  * queue+stack for this was considered and rejected: it cost ~2.3 KB of static
  * RAM the debug build budget can't absorb (confirmed by CI), for protection
- * m_work_q's existing heartbeat already provides. */
+ * the radio work queue's existing heartbeat already provides. */
 static struct k_work m_cal_send_work;
 static uint8_t m_cal_tx_buf[PAYLOAD_SIZE];
 
@@ -149,7 +153,7 @@ void app_calibration_check_trigger(void)
 	 * operator would have had to release both magnets first, then re-present
 	 * them, to clear magnet_expired before this branch was ever reachable). */
 	if (left && right) {
-		LOG_WRN("Both magnets detected — rebooting into calibration mode");
+		LOG_WRN_REBOOTING("both magnets detected -- entering calibration mode");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -209,6 +213,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	/* Offset 8-11: SHT40 temperature and humidity */
 	int16_t sht_temp = SENTINEL;
 	int16_t sht_hum = SENTINEL;
+#if defined(CONFIG_SHT4X)
 	{
 		float temperature, humidity;
 
@@ -218,6 +223,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			sht_hum = (int16_t)(humidity * 100.0f);
 		}
 	}
+#endif /* defined(CONFIG_SHT4X) */
 	sys_put_le16((uint16_t)sht_temp, &buf[8]);
 	sys_put_le16((uint16_t)sht_hum, &buf[10]);
 
@@ -225,6 +231,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	int16_t t1 = SENTINEL;
 	int16_t t2 = SENTINEL;
 
+#if defined(CONFIG_W1)
 	if (m_count_ds18b20 > 0) {
 		uint64_t sn;
 		float temperature;
@@ -241,6 +248,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	sys_put_le16((uint16_t)t1, &buf[12]);
 	sys_put_le16((uint16_t)t2, &buf[14]);
@@ -251,6 +259,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	int16_t p2_temp = SENTINEL;
 	int16_t p2_hum = SENTINEL;
 
+#if defined(CONFIG_DS28E17)
 	if (m_count_machine_probe > 0) {
 		uint64_t sn;
 		float temperature, humidity;
@@ -269,6 +278,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
 
 	sys_put_le16((uint16_t)p1_temp, &buf[16]);
 	sys_put_le16((uint16_t)p1_hum, &buf[18]);
@@ -280,8 +290,8 @@ static void compose_calibration_payload(uint8_t *buf)
 }
 
 /* #340 M22: runs the actual (possibly-hanging) lorawan_send() off the
- * calibration thread, on app_lrw.c's m_work_q - see the comment above
- * m_cal_send_work. app_lrw_is_ready() is checked here rather than by the
+ * calibration thread, on the radio work queue - see the comment above
+ * m_cal_send_work. app_radio_lrw_is_ready() is checked here rather than by the
  * caller so the readiness snapshot is taken as close as possible to the
  * actual send attempt. */
 static void cal_send_work_handler(struct k_work *work)
@@ -289,7 +299,7 @@ static void cal_send_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 #if defined(CONFIG_LORAWAN)
-	if (app_lrw_is_ready()) {
+	if (app_radio_lrw_is_ready()) {
 		lorawan_send(CALIBRATION_PORT, m_cal_tx_buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
 	}
 #endif /* defined(CONFIG_LORAWAN) */
@@ -302,7 +312,7 @@ int app_calibration_init(void)
 	/* One-shot: clear the persisted calibration flag in NVS without
 	 * rebooting, so the next boot (after the 2 h deadline, watchdog,
 	 * brown-out, etc.) lands in normal mode. g_app_config.calibration
-	 * stays true for the rest of this boot so app_lrw blocks normal TX. */
+	 * stays true for the rest of this boot so app_radio_lrw blocks normal TX. */
 	app_config()->calibration = false;
 	ret = app_settings_save(false);
 	if (ret) {
@@ -313,7 +323,7 @@ int app_calibration_init(void)
 	g_app_config.calibration = true;
 	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	g_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
-	memcpy(g_app_config.lrw_deveui, m_cal_deveui, sizeof(m_cal_deveui));
+	memcpy(g_app_config.radio_deveui, m_cal_deveui, sizeof(m_cal_deveui));
 	memset(g_app_config.lrw_joineui, 0, sizeof(g_app_config.lrw_joineui));
 	memcpy(g_app_config.lrw_devaddr, m_cal_devaddr, sizeof(m_cal_devaddr));
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
@@ -327,22 +337,23 @@ int app_calibration_init(void)
 
 	/* Init LoRaWAN */
 #if defined(CONFIG_LORAWAN)
-	ret = app_lrw_init();
+	ret = app_radio_lrw_init();
 	if (ret) {
 		return ret;
 	}
 
-	app_lrw_join();
+	app_radio_lrw_join();
 
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
 
-	/* #340 M22: work item for the calibration TX send, run on app_lrw.c's
-	 * m_work_q via app_lrw_run_on_work_q() - see cal_send_work_handler()'s
+	/* #340 M22: work item for the calibration TX send, run on app_radio_lrw.c's
+	 * the radio work queue via app_radio_lrw_run_on_work_q() - see cal_send_work_handler()'s
 	 * comment. */
 	k_work_init(&m_cal_send_work, cal_send_work_handler);
 
+#if defined(CONFIG_W1)
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
 
@@ -365,6 +376,7 @@ int app_calibration_init(void)
 		}
 	}
 
+#if defined(CONFIG_DS28E17)
 	/* Init Machine Probe sensors */
 	if (w1_ready && g_app_config.cap_w1_sensors) {
 		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
@@ -374,6 +386,8 @@ int app_calibration_init(void)
 			m_count_machine_probe = app_machine_probe_get_count();
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
+#endif /* defined(CONFIG_W1) */
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
@@ -413,6 +427,7 @@ void app_calibration_run(void)
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
+			LOG_WRN_REBOOTING("calibration window elapsed");
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 
@@ -424,11 +439,13 @@ void app_calibration_run(void)
 			counter = 0;
 
 			/* #340 M22: compose here (fast, bounded I2C/1-Wire reads), but
-			 * submit the actual send to app_lrw.c's m_work_q instead of
+			 * submit the actual send to the radio work queue instead of
 			 * calling the potentially-hanging lorawan_send() directly on
 			 * this thread - see cal_send_work_handler(). */
 			compose_calibration_payload(m_cal_tx_buf);
-			app_lrw_run_on_work_q(&m_cal_send_work);
+#if defined(CONFIG_LORAWAN)
+			app_radio_lrw_run_on_work_q(&m_cal_send_work);
+#endif /* defined(CONFIG_LORAWAN) */
 
 			if (++battery_tx_counter >= BATTERY_REMEASURE_TX_COUNT) {
 				battery_tx_counter = 0;

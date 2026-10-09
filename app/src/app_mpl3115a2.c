@@ -6,7 +6,7 @@
 
 #include "app_mpl3115a2.h"
 #include "app_log.h"
-#include "app_sensor_read.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>

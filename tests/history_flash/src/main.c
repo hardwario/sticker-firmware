@@ -24,8 +24,12 @@
 
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 struct app_config g_app_config;
@@ -37,11 +41,45 @@ extern uint32_t test_clock_unix;
 
 #define BIT16(n) ((uint16_t)(1u << (n)))
 
+/* Columns of the default layout (history_channels = temperature, humidity). */
+#define COL_TEMP 0
+#define COL_HUM  1
+
+static void set_channels(const uint8_t *list, size_t n)
+{
+	memset(g_app_config.history_channels, APP_HISTORY_ENTRY_UNUSED,
+	       sizeof(g_app_config.history_channels));
+	memcpy(g_app_config.history_channels, list, n);
+}
+
+static void mb_f(uint8_t ch, float v)
+{
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, g_app_sensor_data.mb.v,
+			 &g_app_sensor_data.mb.valid, ch, v);
+}
+
 static void set_temp(float t)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = t;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, t);
 	k_mutex_unlock(&g_app_sensor_data_lock);
+}
+
+/* The page-header layout guard (#430) of motherboard columns `chs`: crc32 over
+ * (entry, type, enc, scale) per column, as app_history.c computes it. */
+static uint32_t layout_crc(const uint8_t *chs, size_t n)
+{
+	uint32_t crc = 0;
+
+	for (size_t i = 0; i < n; i++) {
+		const struct app_sensor_channel *c =
+			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD, chs[i]);
+		uint8_t key[3] = {chs[i], APP_SENSOR_TYPE_MOTHERBOARD, c->hist_enc};
+
+		crc = crc32_ieee_update(crc, key, sizeof(key));
+		crc = crc32_ieee_update(crc, (const uint8_t *)&c->hist_scale, sizeof(c->hist_scale));
+	}
+	return crc;
 }
 
 /* Simulate a reboot: the simulator flash persists in-process, so a fresh init
@@ -62,13 +100,17 @@ static void before(void *unused)
 {
 	ARG_UNUSED(unused);
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default, onboard T/H available */
 	g_app_config.history_enable = true;
-	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
+	set_channels((const uint8_t[]){APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+				       APP_SENSOR_CH_MOTHERBOARD_HUMIDITY},
+		     2);
 	g_app_config.interval_report = 60;
 	g_app_sensor_data = (struct app_sensor_data){0};
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 50.0f;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, 20.0f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 50.0f);
 	test_clock_has = false;
+	app_history_set_work_queue(NULL);
 
 	zassert_equal(app_history_init(), 0, "init failed");
 	app_history_clear(); /* erase the whole partition → clean slate */
@@ -104,9 +146,9 @@ ZTEST(history_flash, test_records_persist_and_readable)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after reboot");
-	zassert_true(r.present & BIT16(APP_HISTORY_TEMPERATURE), "temp not present");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 22.5, 0.01, "temp %g",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+	zassert_true(r.present & BIT16(COL_TEMP), "temp not present");
+	zassert_within(r.value[COL_TEMP], 22.5, 0.01, "temp %g",
+		       r.value[COL_TEMP]);
 }
 
 /* A non-aligned capture count loses only the < 7 B staged tail on reboot: the
@@ -135,8 +177,8 @@ ZTEST(history_flash, test_ordering_preserved)
 	for (int i = 0; i < 21; i++) {
 		struct app_history_record r;
 		zassert_equal(app_history_get(i, &r), 0, "get(%d)", i);
-		zassert_within(r.value[APP_HISTORY_TEMPERATURE], (double)i * 0.10, 0.01,
-			       "record %d value %g", i, r.value[APP_HISTORY_TEMPERATURE]);
+		zassert_within(r.value[COL_TEMP], (double)i * 0.10, 0.01,
+			       "record %d value %g", i, r.value[COL_TEMP]);
 	}
 }
 
@@ -163,7 +205,7 @@ ZTEST(history_flash, test_wrap_evicts_oldest)
 	/* get(0) must still decode a valid record after wrap. */
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after wrap");
-	zassert_true(r.present & BIT16(APP_HISTORY_TEMPERATURE), "oldest temp present");
+	zassert_true(r.present & BIT16(COL_TEMP), "oldest temp present");
 }
 
 /* Eviction advances the oldest record's timestamp base by whole pages. */
@@ -250,8 +292,10 @@ ZTEST(history_flash, test_mask_change_resets)
 	/* Drop humidity → layout changes, buffer resets. Persist the new selection
 	 * to config too (the shell does this on `settings save`) so a reboot re-seeds
 	 * the same mask. */
-	app_history_set_mask(BIT(APP_HISTORY_TEMPERATURE));
-	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE);
+	const uint8_t temp_only[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE};
+
+	app_history_set_channels(temp_only, sizeof(temp_only));
+	set_channels(temp_only, sizeof(temp_only));
 	zassert_equal(app_history_count(), 0, "mask change must reset the buffer");
 
 	/* 7 records × 2 B (temp only) = 14 B = 2 double words → fully durable. */
@@ -263,7 +307,7 @@ ZTEST(history_flash, test_mask_change_resets)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0)");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 11.0, 0.01, "temp after reset");
+	zassert_within(r.value[COL_TEMP], 11.0, 0.01, "temp after reset");
 }
 
 /* #340 L7 regression: a logical reset that does NOT change the mask/layout (e.g.
@@ -285,8 +329,12 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 	set_temp(5.0f);
 	capture_n(cap + cap / 2); /* force real wraps -> large first_ord baseline */
 
-	uint32_t mask = app_history_get_mask();
-	app_history_set_mask(mask); /* logical reset, mask unchanged */
+	/* Logical reset, layout unchanged: one selection change and back. */
+	const uint8_t temp_only[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE};
+
+	app_history_set_channels(temp_only, sizeof(temp_only));
+	app_history_set_channels(g_app_config.history_channels,
+				 sizeof(g_app_config.history_channels));
 	zassert_equal(app_history_count(), 0, "same-mask reset must still empty the buffer");
 
 	set_temp(99.0f);
@@ -300,8 +348,523 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after reboot");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 99.0, 0.01,
+	zassert_within(r.value[COL_TEMP], 99.0, 0.01,
 		       "oldest surviving record must be from the post-reset batch, got %g "
 		       "(stale pre-reset page leaked in)",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+		       r.value[COL_TEMP]);
+}
+
+/* ---- F28: post-reboot record timestamps --------------------------------- */
+
+#define F28_T0     1750000000u  /* first record, RTC synced */
+#define F28_OUTAGE (5u * 3600u) /* device powered off for 5 h */
+
+/* Seven durable records (21 B = 3 double words) on the 60 s RTC cadence; returns
+ * with the clock at the next slot (T0 + 7 * 60). */
+static void f28_fill_before_outage(void)
+{
+	test_clock_has = true;
+	test_clock_unix = F28_T0;
+	for (int i = 0; i < 7; i++) {
+		app_history_capture();
+		test_clock_unix += 60;
+	}
+	zassert_equal(app_history_count(), 7, "pre-outage count");
+}
+
+/* Time the host reconstructs for record `ord`: the HistoryFrame t0 of an
+ * export starting at that record (time(j) = t0 + j * interval_s). */
+static uint32_t f28_frame_t0(size_t ord)
+{
+	uint8_t buf[64];
+	uint32_t t0 = 0;
+	uint16_t n = 0;
+	size_t next = 0;
+
+	(void)app_history_export_page(0, UINT32_MAX, ord, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_true(n > 0, "no record exported at ord %zu", ord);
+	return t0;
+}
+
+/* F28, RTC kept across the outage (backup domain, e.g. a watchdog reset): the
+ * first record after the reboot is captured at T0 + 7 * 60 + outage. The
+ * post-boot page is stamped from the RTC, not by ordinal continuation of the
+ * old ring (which put it at T0 + 7 * 60, -18000 s off before the fix), and the
+ * export splits at the page boundary so each frame's t0 is right. */
+ZTEST(history_flash, test_f28_reboot_rtc_kept)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	test_clock_unix += F28_OUTAGE;
+	uint32_t t_capture = test_clock_unix;
+	app_history_capture();
+	zassert_equal(app_history_count(), 8, "post-boot count");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	int32_t shift_get = (int32_t)(r.time_unix - t_capture);
+	int32_t shift_frame = (int32_t)(f28_frame_t0(7) - t_capture);
+
+	printk("F28 (RTC kept): record time shift %d s (get), %d s (frame t0), synced=%d\n",
+	       shift_get, shift_frame, r.time_synced);
+	zassert_equal(shift_get, 0, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, 0, "F28 shift (frame) %d", shift_frame);
+	zassert_true(r.time_synced, "RTC-stamped page is synced");
+
+	/* Pre-outage records keep their times. */
+	zassert_equal(app_history_get(6, &r), 0, "get(6)");
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "pre-outage time %u", r.time_unix);
+
+	/* The whole window takes two frames: one per page, never across the gap. */
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 2, "frames");
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7, "first frame ends at the page boundary (%u)", n);
+	zassert_equal(t0, F28_T0);
+	zassert_equal(next, 7);
+
+	/* A window around the outage end finds the post-boot record. */
+	zassert_equal(app_history_count_frames(t_capture - 30, t_capture + 30, sizeof(buf)), 1);
+}
+
+/* F28, power loss: the RTC is unset after the reboot until the network
+ * DeviceTimeAns (app_clock_set_unix -> app_history_on_clock_sync) arrives 30 s
+ * after the first post-boot capture. The post-boot page is stamped on uptime
+ * (base_synced=0) and re-based by the (unix - uptime) offset at the sync, so the
+ * record lands at its capture time (before the fix: -18000 s and wrongly
+ * claimed synced). */
+ZTEST(history_flash, test_f28_power_loss)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	uint32_t t_capture = test_clock_unix + F28_OUTAGE;
+	test_clock_has = false; /* RTC lost with the supply */
+	app_history_capture();
+	zassert_equal(app_history_count(), 8, "post-boot count");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	zassert_false(r.time_synced, "no RTC yet: the post-boot page is unsynced");
+
+	k_sleep(K_SECONDS(30)); /* join + DeviceTimeAns */
+	test_clock_has = true;
+	test_clock_unix = t_capture + 30;
+	app_history_on_clock_sync(test_clock_unix);
+
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	int32_t shift_get = (int32_t)(r.time_unix - t_capture);
+	int32_t shift_frame = (int32_t)(f28_frame_t0(7) - t_capture);
+
+	printk("F28 (power loss): record time shift %d s (get), %d s (frame t0), synced=%d\n",
+	       shift_get, shift_frame, r.time_synced);
+	zassert_true(r.time_synced, "re-based at the clock sync");
+	zassert_equal(shift_get, 0, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, 0, "F28 shift (frame) %d", shift_frame);
+
+	zassert_equal(app_history_get(6, &r), 0, "get(6)");
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "pre-outage time %u", r.time_unix);
+}
+
+/* A page stamped on uptime that never saw a clock sync before the next reboot:
+ * its uptime epoch is gone, so it stays unsynced (time_synced=false frames)
+ * instead of the old "newest record = now" guess (#191). A bounded window on a
+ * synced device skips it; an open window still returns it. */
+ZTEST(history_flash, test_unsynced_page_from_earlier_boot_stays_unsynced)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	test_clock_has = false;
+	capture_n(7); /* one durable post-boot page on uptime */
+	reboot();     /* power lost again before any DeviceTimeAns */
+
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 2 * F28_OUTAGE;
+	app_history_on_clock_sync(test_clock_unix);
+	capture_n(1);
+	zassert_equal(app_history_count(), 15);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_false(r.time_synced, "earlier-boot uptime page must stay unsynced");
+	zassert_equal(app_history_get(14, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, test_clock_unix, "new page from the RTC");
+
+	uint8_t buf[64];
+
+	/* Open window: all three pages, the unsynced one as its own frame. */
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 3);
+	uint32_t t0;
+	bool synced = true;
+	uint16_t n;
+	size_t next;
+
+	(void)app_history_export_page(0, UINT32_MAX, 7, buf, sizeof(buf), &t0, &synced, &n, &next);
+	zassert_equal(n, 7);
+	zassert_false(synced, "frame of the unsynced page carries time_synced=false");
+	zassert_equal(next, 14);
+
+	/* Bounded window: only the synced pages qualify. */
+	zassert_equal(app_history_count_frames(F28_T0, test_clock_unix, sizeof(buf)), 2);
+	(void)app_history_export_page(F28_T0, test_clock_unix, 7, buf, sizeof(buf), &t0, &synced,
+				      &n, &next);
+	zassert_equal(n, 1);
+	zassert_true(synced);
+	zassert_equal(t0, test_clock_unix);
+}
+
+/* C: while a replay streams the ring, writes within the current page go on but
+ * the page rollover (a ~20 ms erase) is held off: a record that needs the next
+ * page is dropped, and the first capture after the replay opens it. */
+ZTEST(history_flash, test_replay_holds_off_page_rollover)
+{
+	size_t rpp = app_history_capacity() / 4; /* 4 pages in app.overlay */
+
+	capture_n(rpp - 2);
+	app_history_set_replay_active(true);
+	capture_n(5); /* 2 fill the head page, 3 would need the next one */
+	zassert_equal(app_history_count(), rpp, "count %zu want %zu", app_history_count(), rpp);
+	app_history_set_replay_active(false);
+
+	app_history_capture();
+	zassert_equal(app_history_count(), rpp + 1, "rollover after the replay");
+}
+
+/* ---- Page header v2: clock-sync fix-up double word ---------------------- */
+
+/* Power loss, then the post-boot page (uptime base) learns the unix time; the
+ * (unix - uptime) offset goes into the page's fix-up double word, written from
+ * the registered work queue (never from the downlink callback, #96), so the
+ * page's times survive the next reboot. */
+ZTEST(history_flash, test_fixup_dw_survives_reboot)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	uint32_t t_capture = test_clock_unix + F28_OUTAGE;
+	test_clock_has = false;
+	capture_n(7); /* durable post-boot page on uptime */
+
+	app_history_set_work_queue(&k_sys_work_q);
+	k_sleep(K_SECONDS(30));
+	test_clock_has = true;
+	test_clock_unix = t_capture + 30;
+	app_history_on_clock_sync(test_clock_unix);
+	k_sleep(K_MSEC(10)); /* let the fix-up work run */
+	app_history_set_work_queue(NULL);
+
+	reboot();
+	zassert_equal(app_history_count(), 14);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_true(r.time_synced, "fix-up must survive the reboot");
+	zassert_equal(r.time_unix, t_capture, "time %u want %u", r.time_unix, t_capture);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_equal(r.time_unix, t_capture + 6 * 60);
+	zassert_equal(app_history_get(6, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "old page untouched");
+
+	/* A second reboot re-reads the same fix-up. */
+	reboot();
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, t_capture);
+}
+
+/* No work queue registered: the next capture (report work queue in the app)
+ * writes the pending fix-up before appending. */
+ZTEST(history_flash, test_fixup_dw_written_by_next_capture)
+{
+	test_clock_has = false;
+	capture_n(7);
+	k_sleep(K_SECONDS(5));
+	test_clock_has = true;
+	test_clock_unix = F28_T0;
+	app_history_on_clock_sync(test_clock_unix);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced);
+	uint32_t t_first = r.time_unix;
+	zassert_true(t_first <= F28_T0 - 5 && t_first >= F28_T0 - 6 - 7 * 60, "t %u", t_first);
+
+	capture_n(7); /* writes the fix-up, then appends (grid continues in unix) */
+	reboot();
+	zassert_equal(app_history_count(), 14);
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced, "fix-up written by the capture");
+	zassert_equal(r.time_unix, t_first);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_equal(r.time_unix, t_first + 13 * 60, "same page, same grid");
+}
+
+/* v1 pages (32 B header, firmware before the fix-up double word) written by the
+ * old firmware stay readable: same stream layout, own base per page. */
+struct v1_hdr {
+	uint32_t magic;
+	uint32_t seq;
+	uint32_t mask;
+	uint32_t interval;
+	uint32_t base_time;
+	uint32_t first_ord;
+	uint16_t sample_size;
+	uint8_t base_synced;
+	uint8_t rsv;
+	uint16_t crc;
+	uint16_t rsv2;
+} __packed;
+
+/* Write a v1 page with `n` temp+hum records (temp = t0 + i, hum 50 %). */
+static void write_v1_page(uint16_t phys, uint32_t seq, uint32_t first_ord, uint32_t base,
+			  bool synced, int n, int t0)
+{
+	const struct flash_area *fa;
+	off_t off = (off_t)phys * 2048;
+
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_erase(fa, off, 2048), 0);
+
+	struct v1_hdr h = {
+		.magic = 0x48524e47,
+		.seq = seq,
+		.mask = layout_crc((const uint8_t[]){APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+						     APP_SENSOR_CH_MOTHERBOARD_HUMIDITY},
+				   2),
+		.interval = 60,
+		.base_time = base,
+		.first_ord = first_ord,
+		.sample_size = 3,
+		.base_synced = synced ? 1 : 0,
+	};
+	h.crc = crc16_ccitt(0xffff, (const uint8_t *)&h, offsetof(struct v1_hdr, crc));
+	zassert_equal(flash_area_write(fa, off, &h, sizeof(h)), 0);
+
+	uint8_t stream[7 * 3 * 4] = {0};
+	for (int i = 0; i < n; i++) {
+		sys_put_le16((uint16_t)((t0 + i) * 100), &stream[i * 3]);
+		stream[i * 3 + 2] = 100;
+	}
+	for (int dw = 0; dw < (n * 3) / 7; dw++) {
+		uint8_t buf[8];
+		memcpy(buf, &stream[dw * 7], 7);
+		buf[7] = 0xA5;
+		zassert_equal(flash_area_write(fa, off + 32 + dw * 8, buf, 8), 0);
+	}
+	flash_area_close(fa);
+}
+
+ZTEST(history_flash, test_v1_pages_still_readable)
+{
+	/* Old firmware: a synced page, then an unsynced one (power loss). */
+	write_v1_page(0, 5, 0, F28_T0, true, 7, 10);
+	write_v1_page(1, 6, 7, 500, false, 7, 20);
+	reboot();
+	zassert_equal(app_history_count(), 14, "v1 pages mounted");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_within(r.value[COL_TEMP], 10.0, 0.01);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_false(r.time_synced);
+	zassert_equal(r.time_unix, 560);
+	zassert_within(r.value[COL_TEMP], 21.0, 0.01);
+
+	/* A v1 page has no fix-up double word: an old-boot unsynced page stays so. */
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 3600;
+	app_history_on_clock_sync(test_clock_unix);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_false(r.time_synced);
+
+	/* New pages continue the chain as v2 and everything survives a reboot. */
+	capture_n(7);
+	reboot();
+	zassert_equal(app_history_count(), 21);
+	zassert_equal(app_history_get(14, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0 + 3600);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_within(r.value[COL_TEMP], 26.0, 0.01, "v1 tail record");
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 3, "one frame per page");
+}
+
+/* Mount robustness (HIL 0413, 2026-09-25): a page that holds foreign data (code
+ * left over from a debug image whose code partition overlapped the release
+ * history partition) must be skipped, never erased at mount, and must not hide
+ * a valid chain that wraps physically around the end of the partition. It is
+ * reclaimed only when the ring needs that page for new records. */
+ZTEST(history_flash, test_mount_skips_garbage_keeps_wrapped_chain)
+{
+	const struct flash_area *fa;
+	uint8_t garbage[2048];
+	uint8_t readback[2048];
+
+	for (size_t i = 0; i < sizeof(garbage); i++) {
+		garbage[i] = (uint8_t)(0x3c + i * 7); /* code-like, never 0xFF magic */
+	}
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_erase(fa, 1 * 2048, 2048), 0);
+	zassert_equal(flash_area_write(fa, 1 * 2048, garbage, sizeof(garbage)), 0);
+	flash_area_close(fa);
+
+	/* v1 chain seq 5..7 on phys 2, 3, 0: wraps from the last page to the first. */
+	write_v1_page(2, 5, 0, F28_T0, true, 7, 10);
+	write_v1_page(3, 6, 7, F28_T0 + 7 * 60, true, 7, 20);
+	write_v1_page(0, 7, 14, F28_T0 + 14 * 60, true, 7, 30);
+	reboot();
+
+	zassert_equal(app_history_count(), 21, "wrapped chain mounted: %zu", app_history_count());
+	struct app_history_record r;
+
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_within(r.value[COL_TEMP], 10.0, 0.01);
+	zassert_equal(app_history_get(20, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 20 * 60);
+	zassert_within(r.value[COL_TEMP], 36.0, 0.01);
+
+	/* Mount left the foreign page alone. */
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_read(fa, 1 * 2048, readback, sizeof(readback)), 0);
+	flash_area_close(fa);
+	zassert_mem_equal(readback, garbage, sizeof(garbage), "mount touched a foreign page");
+
+	/* The next page after the head (phys 1) is reclaimed for new records; the
+	 * old chain stays intact and keeps its times. */
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 3600;
+	app_history_on_clock_sync(test_clock_unix);
+	capture_n(3);
+	zassert_equal(app_history_count(), 24);
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_equal(app_history_get(21, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0 + 3600);
+}
+
+/* Header v2 costs one double word (7 data bytes) per page: 1757 B of records,
+ * 585 temp+hum records instead of 588. */
+ZTEST(history_flash, test_v2_page_capacity)
+{
+	zassert_equal(app_history_capacity(), 4 * (1757 / 3), "capacity %zu",
+		      app_history_capacity());
+}
+
+/* ---- Slot discontinuities (report cadence on RTC slots) ------------------ */
+
+/* Records on the report cadence carry their slot. A 6 min halt skips 6 slots:
+ * the head page is closed early and the next record opens a new page stamped
+ * with its own slot, so the gap is a hole in the data, not a shift (T2). */
+ZTEST(history_flash, test_missed_slots_split_page)
+{
+	uint32_t t = F28_T0;
+
+	for (int i = 0; i < 7; i++, t += 60) {
+		app_history_capture_at(t, true);
+	}
+	t += 6 * 60;                  /* MCU halted for six slots */
+	for (int i = 0; i < 7; i++) { /* 21 B: durable across the reboot below */
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), 14);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(6, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60);
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, t, "post-halt record %u want %u", r.time_unix, t);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_equal(r.time_unix, t + 60);
+
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 2, "2 segments");
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7);
+	(void)app_history_export_page(0, UINT32_MAX, next, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7);
+	zassert_equal(t0, t);
+
+	/* Survives a reboot: the split is a real page boundary. */
+	reboot();
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, t);
+}
+
+/* Timer jitter / a small RTC correction (< interval / 2) keeps the page and the
+ * grid; the record is stamped on the grid. */
+ZTEST(history_flash, test_slot_jitter_keeps_segment)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_capture_at(F28_T0 + 60 + 2, true);
+	app_history_capture_at(F28_T0 + 120 - 29, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 1, "one segment");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 120);
+}
+
+/* The RTC set back by an hour (NFC clock set): a new segment, the old records
+ * keep their times. */
+ZTEST(history_flash, test_rtc_step_back_splits)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_capture_at(F28_T0 + 60, true);
+	app_history_capture_at(F28_T0 + 120 - 3600, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 2);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 60);
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 120 - 3600);
+}
+
+/* The first record after a boot always opens a page stamped with its slot, even
+ * when the slot happens to line up with the old page's grid. */
+ZTEST(history_flash, test_boot_page_from_slot)
+{
+	for (int i = 0; i < 7; i++) {
+		app_history_capture_at(F28_T0 + i * 60, true);
+	}
+	reboot();
+	app_history_capture_at(F28_T0 + 7 * 60, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 2, "new page after boot");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 7 * 60);
+}
+
+/* A split during a replay would need a page rollover: held off, the record is
+ * dropped, and the next slot after the replay opens the page with its own time
+ * (a hole, not a shift). */
+ZTEST(history_flash, test_split_during_replay_drops_record)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_set_replay_active(true);
+	app_history_capture_at(F28_T0 + 600, true); /* gap -> needs a new page */
+	zassert_equal(app_history_count(), 1);
+	app_history_set_replay_active(false);
+	app_history_capture_at(F28_T0 + 660, true);
+	zassert_equal(app_history_count(), 2);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 660);
 }

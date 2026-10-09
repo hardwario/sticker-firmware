@@ -1175,6 +1175,25 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 
 	if (!res) {
 		ret = lis2dh12_read(m_sensors[index].dev, accel_x, accel_y, accel_z);
+		if (ret == -ENODATA) {
+			/* The chip answers but does not sample: it lost power (probe
+			 * unplugged and plugged back, brownout) and is back in its
+			 * power-down default, with the tilt alert disarmed too. The
+			 * scan-time setup does not run again for a bound slot, so redo
+			 * it here; the next sample reads again. */
+			LOG_WRN("Machine probe idx %d: LIS2DH12 not sampling, re-initializing",
+				index);
+			ret = lis2dh12_init(m_sensors[index].dev);
+			if (!ret) {
+				ret = lis2dh12_enable_alert(m_sensors[index].dev, MP_TILT_THRESHOLD,
+							    MP_TILT_DURATION);
+			}
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("lis2dh12 re-init", ret);
+			}
+			res = -ENODATA;
+			goto error;
+		}
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_read", ret);
 			res = ret;

@@ -1,0 +1,50 @@
+From: Hynek Moravec <hynek.moravec@hardwario.com>
+Subject: [PATCH] mac: do not skip a trailing DevStatusReq after LinkADRReq
+
+ProcessMacCommands() post-incremented past the next CID after a LinkADRReq
+block and only stepped back when macIndex < commandsSize. A 1-byte command
+that is the last FOpts byte right after the block (DevStatusReq, as ChirpStack
+sends it) was therefore never processed and DevStatusAns never sent.
+Peek at the next CID instead.
+
+hardwario/sticker-firmware#419
+---
+diff --git a/src/mac/LoRaMac.c b/src/mac/LoRaMac.c
+index b0b1fb71..f0e3de91 100644
+--- a/src/mac/LoRaMac.c
++++ b/src/mac/LoRaMac.c
+@@ -2207,6 +2207,7 @@ static void ProcessMacCommands( uint8_t *payload, uint8_t macIndex, uint8_t comm
+                 int8_t linkAdrTxPower = TX_POWER_0;
+                 uint8_t linkAdrNbRep = 0;
+                 uint8_t linkAdrNbBytesParsed = 0;
++                bool nextIsLinkAdrReq = false;
+ 
+                 // The end node is allowed to process one block of LinkAdrRequests.
+                 // It must ignore subsequent blocks
+@@ -2274,13 +2275,19 @@ static void ProcessMacCommands( uint8_t *payload, uint8_t macIndex, uint8_t comm
+                         if( macIndex >= commandsSize )
+                             break;
+ 
+-                    } while( payload[macIndex++] == SRV_MAC_LINK_ADR_REQ );
+-
+-                    if( macIndex < commandsSize )
+-                    {
+-                        // Decrease the index such that it points to the next MAC command
+-                        macIndex--;
+-                    }
++                        // STICKER-419: peek at the next CID instead of post-incrementing
++                        // past it. The old "while( payload[macIndex++] == ... )" plus a
++                        // trailing "if( macIndex < commandsSize ) macIndex--" skipped a
++                        // 1-byte command that is the last FOpts byte right after the
++                        // LinkADRReq block (DevStatusReq), so DevStatusAns was never sent.
++                        nextIsLinkAdrReq = ( payload[macIndex] == SRV_MAC_LINK_ADR_REQ );
++                        if( nextIsLinkAdrReq == true )
++                        {
++                            // Keep the "Payload = &payload[macIndex - 1]" convention
++                            macIndex++;
++                        }
++                    } while( nextIsLinkAdrReq == true );
++                    // macIndex now points at the next MAC command (or past the end)
+                 }
+                 else
+                 {

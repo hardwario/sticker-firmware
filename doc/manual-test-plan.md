@@ -29,8 +29,8 @@ pass/fail. The tester only watches.
 - **Build**: debug variant. Some shell commands used below (`ats cmd lrw <hex>`,
   `ats cmd nfc <hex>`) exist only when `CONFIG_APP_CMD_DEBUG_SHELL=y` (debug builds).
 - **RTT shell**: available commands are `ats`, `config`, `clock`, `history`, `settings`,
-  `join`, `send`. Note there is **no** `ats device` command — device info is obtained via the
-  GetInfo downlink command (fPort 85), not the shell.
+  `join`, `send`. `ats device info` prints local device info too (see G4), but GetInfo over
+  the downlink command (fPort 85) is the cross-check that matters for a real join/network path.
 - **Networks**: the device must be provisioned on **both** TTN and ChirpStack. Claude sends
   downlinks / reads uplinks through the TTS MCP tools (`send_downlink`, `send_downlink_json`,
   `get_uplinks`, `get_device`, …) for TTN, and through the ChirpStack API for ChirpStack.
@@ -72,6 +72,7 @@ byte is the `seq` and is echoed in the reply.
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
 | `sample` | `0805aa0100` |
+| `get_settings` (boot settings-info on request) | `0807fa0100` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121d0a022001120218782a131a1100000100000000a0400000f0410000803f` |
@@ -94,7 +95,7 @@ byte is the `seq` and is echoed in the reply.
 **Observable:** RTT boot line `Firmware version: X.Y.Z (MAIN, release)` and `Build time: ...`.
 
 **Prompt for Claude:**
-> Over the `rttt` RTT shell, reboot the sticker (`ats lrw reset`, or power-cycle if you can't),
+> Over the `rttt` RTT shell, reboot the sticker (`ats radio reset`, or power-cycle if you can't),
 > then read the boot log. Confirm a line matching `Firmware version: <major>.<minor>.<patch>
 > (<build_type>, <release|debug>)` appears, followed by `Build time:`. Report the exact version
 > string and whether the build type and debug/release flag are what we expect for this build.
@@ -104,15 +105,21 @@ byte is the `seq` and is echoed in the reply.
 ### G2 — Boot LED carousel
 
 **Goal:** Visual boot indicator runs.
-**Observable:** Red (≈0.5 s) → Yellow (≈0.5 s) → Green (≈1.5 s), ~5 s total right after boot.
+**Observable:** Red (≈0.5 s) → Yellow (≈0.5 s) → Green (≈1.5 s), 3 s total, starting ~0.7 s
+after reset. The init chain runs meanwhile, and the first heartbeat follows only after the green.
 
 **Prompt for Claude:**
-> Trigger a reboot over the RTT shell (`ats lrw reset`). I (the tester) will watch the LEDs.
+> Trigger a reboot over the RTT shell (`ats radio reset`). I (the tester) will watch the LEDs.
 > Tell me exactly what sequence to expect (colors, order, approximate timing) and at what point
 > in the boot log it starts, so I can confirm the carousel visually. Collect the boot log to
 > correlate timing.
 
-- [ ] Pass
+- [x] Pass — #467, 2026-09-28 (release + debug)
+
+> **HW-verified 2026-09-28** (#467, `ffd1002`):
+> - the full carousel plays at boot, and the first heartbeat follows it (visual, release + debug);
+> - boot log (debug P2P bench, SN 2162190413): no `app_led` WRN / ERR, NFC ready at 1.236 s;
+>   the init chain no longer waits for the carousel.
 
 ### G3 — Shell reachable over RTT
 
@@ -122,7 +129,7 @@ byte is the `seq` and is echoed in the reply.
 **Prompt for Claude:**
 > Connect to the RTT shell and run `help`. Confirm the root commands `ats`, `config`, `clock`,
 > `history`, `settings`, `join`, `send` are all present. Then run `ats` with no args and confirm
-> the `led`, `sensors`, `lrw` (and in debug builds `cmd`) subcommands are listed. Report anything
+> the `led`, `sensors`, `radio` (and in debug builds `cmd`) subcommands are listed. Report anything
 > missing.
 
 - [ ] Pass
@@ -176,80 +183,132 @@ fPort-2 `Telemetry` frame and **no** fPort-85 response.
 ### G6 — Reset keeps identity (`settings device-reset` / DeviceReset)
 
 **Goal:** `settings device-reset` (renamed from `settings reset`, #299) and the DeviceReset command
-(same wire id as the old, single FactoryReset) restore application config + alarm rules to defaults
-but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
-(`lrw-deveui`, keys, region, …), so the unit stays provisioned and on the network (issue #108).
+(same wire id as the old, single FactoryReset; nfc/shell-only) restore application config + alarm
+rules to defaults but **keep** the device identity (`serial-number`, `secret-key`, `nonce-counter`,
+claim token + window state, `vendor-token`) and LoRaWAN provisioning (`radio-deveui`, keys, region,
+…), so the unit stays provisioned and on the network (issue #108).
 **Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
 stays joined / rejoins with the same credentials.
 
 **Prompt for Claude:**
-> First capture the identity + a couple of app values via `config` (e.g. `config lrw-deveui`,
+> First capture the identity + a couple of app values via `config` (e.g. `config radio-deveui`,
 > `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
 > Then run `settings device-reset` over the RTT shell. After reboot confirm: `interval-report` is
-> back to default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
-> rejoins with the same DevEUI. Repeat using a DeviceReset downlink on fPort 85 and confirm the
-> `Response.Ack` precedes the reboot and identity again survives.
+> back to default, but `config radio-deveui` / `config serial-number` are **unchanged**, and the device
+> rejoins with the same DevEUI. Then send a DeviceReset as a fPort-85 downlink (`08094200`) and
+> confirm it is **refused** with `Error{NOT_READY}` and nothing is reset (it is nfc/shell-only like
+> `factory_reset`; a phone runs it over the mailbox, N9).
 
 - [ ] Pass
 
 ### G6a — Reset ladder's narrower tiers (`factory_reset` / `vendor_reset` / `set_secret_key`, #299)
 
-**Goal:** `factory_reset` (new, narrower than device_reset above) keeps identity only and drops the
-LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps only
+**Goal:** `factory_reset` (new, narrower than device_reset above) keeps the identity (serial,
+`secret-key`, `nonce-counter`, claim token, `vendor-token`) plus DevEUI / JoinEUI, and resets the
+LoRaWAN keys, session and radio settings to defaults — the unit must be re-keyed before it can join
+again. Since #471 it also clears the pulse counters and the history. `vendor_reset` keeps only
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
 already-encrypted nfc/shell channel, then reboots so the new key is live (#322); an all-zero
 replacement is refused.
-**Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
-re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+**Observable:** `factory_reset` — identity and DevEUI / JoinEUI survive. AppKey / NwkKey, the ABP
+keys, region / sub-band / network / ADR / datarate and the radio mode go back to defaults, and the
+LoRaWAN NVM is wiped (X8), the counters read 0 and the history is empty (#471). Once re-keyed, the
+device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
-live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
+live after reboot, the claim token is blank and the claim window is `done` (#471). `set_secret_key` — the device saves and cold-reboots, and the new key is in
 effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
 `BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
-> `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
-> survive but `config lrw-deveui` and the LoRaWAN keys reset to all-zero/defaults, and the device
-> re-joins. Then `config vendor-reset-allow false` + `settings save`, and confirm
+> `settings factory-reset` over the RTT shell. Confirm:
+> - `config serial-number` / `secret-key` / `radio-deveui` / `lrw-joineui` survive;
+> - `config radio-appkey` and the other LoRaWAN keys and settings are back to defaults;
+> - `ats sensors sample` shows the hall / input counters at 0 and `history info` an empty ring (#471).
+>
+> Re-provision the keys (`config radio-appkey …` + `settings save`, or NFC `set_param`, N1) and
+> confirm the device joins afresh. Then `config vendor-reset-allow false` + `settings save`, and confirm
 > `settings vendor-reset <32-hex-key>` is refused (shell reports failure, no reboot). Set
 > `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
 > argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
 > `config serial-number`/`config vendor-token` are unchanged but everything else (incl.
-> `config secret-key`, which should now read the supplied key) is back to defaults/blank.
+> `config secret-key`, which should now read the supplied key) is back to defaults/blank, and
+> `ats claim status` → `done` (#471).
 
-- [ ] Pass
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):**
+> - `settings factory-reset`: serial / `secret-key` / DevEUI / JoinEUI kept, LoRaWAN keys zero,
+>   hall-left count 5 → 0, `history info` 1 → 0 segments, claim window unchanged. After re-keying
+>   (`radio-mode lorawan` + AppKey + ChirpStack `FlushDevNonces`) the unit joined afresh.
+> - `settings vendor-reset <key>` with `vendor-reset-allow false` → refused (-13), nothing erased;
+>   no argument → refused; with a key → serial / `vendor-token` kept, `secret-key` = supplied key,
+>   claim token blank, `ats claim status` → `done`.
 
-### G6a-NFC — vendor_reset over the `hio.stck:vnd` channel (#299, #316)
+- [x] Pass — 2026-10-09
 
-**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through the
-vendor-token-authenticated record (`hio.stck:vnd`) instead of the shell. Since #316 this is a normal
-protobuf `Command` (`vendor_reset`, `transports: [vendor]`) dispatched on the vendor transport — the
-same generic Command/Response path as `hio.stck:cmd`, only decrypted/encrypted with `vendor_token`,
-and never reachable over `hio.stck:cmd` or LoRaWAN.
-**Observable:** the tag holds a plaintext info record, then a `hio.stck:vnd` write, then a
-`hio.stck:rsp` reply (`Ack` on success, `Error{NOT_READY}` if `vendor-reset-allow` is false,
-`Error{BAD_REQUEST}` for a missing key) — the actual reset only fires after the phone acks the reply
-(same ack-before-reboot handshake as every other reset), never immediately from the tap. With
-`vendor-reset-allow=false`, first send `set_param{ application{ vendor_reset_allow=true } }` over
-`hio.stck:vnd` (always accepted — the field is `writable: [vendor]` and its write is not gated on the
-current value), then re-send `vendor_reset`.
+### G6a-NFC — vendor_reset over the vendor mailbox channel `0x02` (#299, #316, v1.5.0 #414)
 
-**Needs HIL re-verification for #316** (the prior 2026-07-13 result was for the removed `hio.stck:rst`
-magic-byte channel, which no longer exists). The frame is now a protobuf `Command{ vendor_reset{ key } }`
-sealed under `vendor_token` — see the `nfc_crypto` `test_vendor_channel_vector` golden vector
-(`VND_REQ_PLAIN`/`VND_REQ_WIRE`) for the exact construction — injected into ST25DV memory via the
-`nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>` would NOT work — it injects a *plaintext*
-`Command` straight into `app_cmd_handle` over the NFC transport, bypassing the tag/encryption and the
-vendor transport). Confirm: (1) a valid request is recognized ("vendor command record"), decrypted,
-dispatched on the vendor transport, accepted, and the reply written — the device does **not** reset
-until a `hio.stck:ack` record is written back, at which point the deferred action fires and
-`serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with `vendor-reset-allow=false`,
-rejected (`Error{NOT_READY}`), and the `set_param(vendor_reset_allow=true)` recovery step above then
-unblocks it; (3) a stale/reused nonce is rejected by `decrypt()` same as the `cmd` channel. Long
-`nfc write` hex strings silently truncate — split into multiple writes at sequential offsets.
+**Rewritten for v1.5.0 (#414).** The vendor channel is now the mailbox channel `0x02`: the same
+AES-CCM envelope as the owner channel `0x01`, sealed with `vendor_token` instead of `secret_key`,
+with no response cache. The `hio.stck:vnd` record and the `hio.stck:ack` handshake are gone.
 
-- [x] Pass (HIL-verified via hand-crafted frame, 2026-07-13)
+**Goal:** the same `vendor_reset` operation as G6a above, driven over NFC through the vendor
+channel instead of the shell. `vendor_reset` (id 26, `SetSecretKey{key}` body) is
+`transports: [vendor]`. On `0x01` or as a LoRaWAN downlink it is refused with
+`Error{NOT_READY "transport not allowed"}`.
+**Observable:**
+- A valid request → `ack`. Then the session ends (deferred action), green + yellow 2 s, and the
+  reset + reboot run. Afterwards only `serial_number`, `vendor_token` and `nonce_counter` survive,
+  and the supplied `secret_key` is live (the owner channel works with the new key). The claim
+  token is wiped with everything else and the claim window is closed (`done`, #471), so
+  `get_claim_info` → `NOT_READY "claimed"` until the owner sends `claim_active`, which
+  generates a new token (N10). The LoRaWAN identity is wiped too (X8).
+- `vendor-reset-allow = false` → `Error{NOT_READY "vendor_reset disabled"}`, no reboot. Recovery:
+  `set_param{application{vendor_reset_allow = true}}` over `0x02`. It is always accepted there: the
+  field is `writable: [vendor]` and its write is not gated on the current value. Then re-send
+  `vendor_reset`.
+- A missing key → `Error{BAD_REQUEST "missing key"}`; an all-zero key → `Error{BAD_REQUEST "zero
+  key"}` (#385). No reboot in either case.
+- A stale or reused counter on `0x02` gets no reply (no cache on the vendor channel, X12).
+
+**Prompt for Claude (phone bench as in N6; seal with `vendor_token` — the vector construction is in
+the Manager-App guide §4.4 and `tests/nfc_crypto` `test_vendor_channel_vector`):**
+> 1. With `vendor-reset-allow = false`, send `[0x02] vendor_reset{key = <new 16 B>}` →
+>    `NOT_READY "vendor_reset disabled"`, no reboot.
+> 2. Send `set_param{application{vendor_reset_allow = true}}` over `0x02` → `ack`.
+> 3. Send `vendor_reset` with no key → `BAD_REQUEST "missing key"`; with an all-zero key →
+>    `BAD_REQUEST "zero key"`.
+> 4. Send it with a valid key → `ack`, green + yellow 2 s, then the reboot. After the reboot (phone
+>    kept on the tag), confirm:
+>    - `get_basic_info` reports the same serial and a `nonce_counter` that is not reset;
+>    - the owner channel answers under the new `secret_key` (the old one gets no reply);
+>    - `ats claim status` → `done` and `get_claim_info` → `NOT_READY "claimed"` (#471);
+>    - `config serial-number` / `vendor-token` are unchanged and everything else is back to
+>      defaults.
+> 5. Send `vendor_reset` over `0x01` → `NOT_READY "transport not allowed"`.
+>
+> Restore the bench identity (secret key, claim token, LoRaWAN keys via N1) afterwards. Report results.
+
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, Pixel + nfc-proxy-app):** in one tap —
+> `vendor_reset` on `0x01` → `NOT_READY "transport not allowed"`; on `0x02` with
+> `vendor-reset-allow false` → `NOT_READY "vendor_reset disabled"`; 
+> `set_param{application{vendor_reset_allow = true}}` on `0x02` → `ack`; no key → `BAD_REQUEST "missing key"`; zero key →
+> `BAD_REQUEST "zero key"`; valid key → `ack`, RTT `session end (deferred action), 7 reply(ies)`,
+> reboot. Afterwards serial / `vendor-token` kept, `secret-key` = supplied key, `nonce_counter` not
+> reset (`get_basic_info` 301), claim token wiped, window `done`, DevEUI zero.
+> `vendor_reset` injected as a LoRaWAN Command (`ats cmd lrw …`) → `Error{NOT_READY}`, nothing
+> erased. Not checked: the LED pattern, and old-key rejection (the supplied key equalled the bench
+> key). Caveat: `ats claim status` read within ~1.5 s after boot shows the compile-time default
+> `active` until `app_nfc` loads `clm/state` — re-read after init.
+
+- [x] Pass — v1.5.0 mailbox, 2026-10-09
+
+> **Earlier runs (for reference):** 2026-07-13, HIL with a hand-crafted frame on the removed
+> `hio.stck:rst` magic-byte channel. After #316 the `hio.stck:vnd` protobuf channel was verified
+> with hand-crafted AES-CCM frames through X2 / X12 (2026-08-17). The command logic is covered by
+> `tests/cmd` (`test_vendor_reset_command`, `test_vendor_reset_rejects_zero_key`,
+> `test_vendor_reset_gated_by_allow`, `test_vendor_reset_rejected_off_vendor`,
+> `test_vendor_reset_allow_write_gate`).
 
 ### G6b — Full erase un-provisions (`settings erase`)
 
@@ -261,7 +320,7 @@ the device no longer joins until re-provisioned.
 **Prompt for Claude:**
 > ⚠️ Destructive — confirm it's acceptable to un-provision this bench unit first (you'll need to
 > re-flash provisioning afterwards). Run `settings erase` over the RTT shell. After reboot confirm
-> `config lrw-deveui` and `config serial-number` are wiped and the device fails to join. Then
+> `config radio-deveui` and `config serial-number` are wiped and the device fails to join. Then
 > re-provision and confirm join works again.
 
 - [ ] Pass
@@ -273,7 +332,7 @@ re-flashing firmware keeps the device provisioned (issue #108 partition-map cont
 **Observable:** identity + LoRaWAN credentials survive a firmware re-flash.
 
 **Prompt for Claude:**
-> Capture `config lrw-deveui` / `config serial-number` / `config interval-report` (set the latter
+> Capture `config radio-deveui` / `config serial-number` / `config interval-report` (set the latter
 > to a non-default and `settings save`). Re-flash the firmware with a plain `west flash` (no
 > `--erase`). After reboot confirm all three values are **unchanged** and the device rejoins with
 > the same DevEUI — i.e. the flash preserved the `storage` partition at `0x3C000`.
@@ -311,13 +370,13 @@ re-flashing firmware keeps the device provisioned (issue #108 partition-map cont
 ### L1 — OTAA join on TTN
 
 **Goal:** Device joins via OTAA on TTN and reaches HEALTHY.
-**Observable:** RTT `Using OTAA activation`; `ats lrw status` → state HEALTHY; join event visible
+**Observable:** RTT `Using OTAA activation`; `ats radio status` → state HEALTHY; join event visible
 on TTN.
 
 **Prompt for Claude:**
 > Ensure the device is configured for OTAA against TTN. Trigger a join (`join` over the RTT shell,
 > or reboot). Confirm the RTT log shows `Using OTAA activation` and the join completes. Run
-> `ats lrw status` and confirm the state is HEALTHY. Cross-check on TTN via the TTS MCP that a
+> `ats radio status` and confirm the state is HEALTHY. Cross-check on TTN via the TTS MCP that a
 > join-accept / first uplink was received for this device. Report DR/RSSI/SNR from the status.
 
 - [ ] Pass
@@ -330,7 +389,7 @@ on TTN.
 **Prompt for Claude:**
 > Repeat the OTAA join but pointed at ChirpStack (switch the device's network keys/config if
 > needed and note what you changed). Confirm `Using OTAA activation`, HEALTHY state via
-> `ats lrw status`, and that ChirpStack shows the join and a first uplink (use the ChirpStack
+> `ats radio status`, and that ChirpStack shows the join and a first uplink (use the ChirpStack
 > API). Report any differences from the TTN run.
 
 - [ ] Pass
@@ -359,7 +418,97 @@ on TTN.
 
 - [ ] Pass
 
-### L5 — Periodic telemetry
+### L4b — Settings-info ConfigDump after boot (v1.5.0, #412)
+
+**Goal:** Right after the boot `Info`, the device autonomously pushes its key operating
+settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
+**Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
+fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
+(`interval_sample`, `interval_report`, `history_enable`), every `sensors.cap_*` flag (since #465
+incl. `cap_buzzer` and `cap_sht`) and,
+on a 1-Wire build, `w1_slot_type` (4 entries).
+
+**Prompt for Claude:**
+> Note the current `config show` values. Change at least one reported setting (e.g.
+> `config interval-sample 60`, `config cap-w1-sensors true`) and run `settings save`, which reboots
+> and re-joins. Watching the network server / gateway uplinks, confirm that the uplink after the
+> fPort-85 `Info` is a fPort-85 `ConfigDump` (page 0/1), sent before the first fPort-2 Telemetry.
+> Decode it with `app/decoder/ttn.js` and confirm every field matches `config show`, including
+> the change just made. On a `CONFIG_W1=y` image, confirm `w1_slot_type` has 4 entries matching the
+> attached 1-Wire sensors (`empty` / `dallas` / `machine-probe`). Report the frame size and DR.
+
+> **HW-verified (2026-09-22, debug build @ `4848a09`, EU868, local ChirpStack v4 + RAK5146 GW):**
+> on a factory-blank unit provisioned with an OTAA test identity, each join was followed by
+> FCnt 1 `Info` (21/24 B), FCnt 2 `ConfigDump` page 0/1, and FCnt 3 telemetry, all at DR0
+> (SF12). The dumped values matched `config show` exactly (`interval_sample 60`,
+> `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`, all other caps `0`). With plain
+> `debug.conf` (`CONFIG_W1=n`) the frame was 34 B and field 7 was absent, as expected. With
+> `-DCONFIG_W1=y` it was 40 B, ending in `3a 04 00 00 00 00`, which decodes as
+> `w1_slot_type: ["empty","empty","empty","empty"]`. **Not covered on HW:** the `dallas` /
+> `machine-probe` values, because the unit has no DS2484 (`ds2484: Device reset failed: -5`);
+> they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
+> covered: both boot frames are dropped whole there, see #418.
+
+> **Re-verified with #465 (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** join → Info (fCnt 1, DR0) → `ConfigDump`
+> (fCnt 2, 37 B, DR5) → telemetry (fCnt 3); a changed `history_enable` is reflected, and the new
+> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `ttn.js`.
+
+- [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+- [x] Pass — `cap_sht` / `cap_buzzer` fields, 2026-10-09
+
+### L4c — GetSettings: settings-info on request (v1.5.0, #428)
+
+**Goal:** A host can read the L4b settings-info content at any time with one small command,
+instead of a full multi-page `GetConfig`, and tell the answer apart from the boot dump.
+**Observable:** After the `get_settings` downlink (fPort 85, `0807fa0100` = seq 7), one fPort-85
+`ConfigDump` uplink with `seq: 7` and the same fields as the L4b boot dump (`application`
+interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_slot_type` on a
+1-Wire build). No `pages` at EU868 DR0 and up; the boot dump keeps seq 0.
+
+**Prompt for Claude:**
+> Queue `0807fa0100` on fPort 85 and force an uplink (`send`) so it is delivered. Decode the
+> fPort-85 answer with `app/decoder/ttn.js`: confirm `seq` 7, `config_dump` with the same values
+> as the boot settings-info (L4b) and `config show`, and no `pages` (one frame). Change one
+> setting over the shell **without** `settings save` and send `get_settings` again: the answer
+> shows the staged value, like `GetConfig`. Report the frame size and DR.
+
+> **HW-verified (2026-09-23, debug build @ `215808c` = #425 `5503d54` + #429, EU868, ProXimos Hub
+> combined10 / ChirpStack v4):** `0807fa0100` queued through the Hub CLI (`node-send --hex --fport 85`)
+> went out in the RX of a telemetry uplink; the answer followed 1 s later as one fPort-85 frame at
+> DR5, 34 B: `01 0807 221d2207103c18840720002a12080010001800200028003000380040014800`. The
+> `config_dump` part is byte-identical to that boot's settings-info (`221d…4800`); `ttn.js` decodes
+> `seq: 7` with `interval_sample 60`, `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`,
+> the other caps `0` (= `config show`), no `pages`. `CONFIG_W1=n`, so no `w1_slot_type`. **Not
+> covered on HW:** the paged form (below the EU868 DR0 budget, `tests/cmd` only) and the staged-value
+> step.
+
+- [x] Pass (EU868 one-frame answer)
+
+### L4d — Periodic Info + settings-info announce (v1.5.0, #445)
+
+**Goal:** A node that runs without a reboot re-announces its Info + settings-info every
+`interval_announce` hours, so the network's retained identity/config heals by itself. LoRaWAN and
+P2P behave the same.
+**Observable:** RTT `Periodic announce`, then `Info announced` and `Settings-info announced`, and
+on the network side a fPort-85 (P2P: `0x55`) `Info` seq 0 followed by the settings-info
+`ConfigDump` seq 0, between 0.9 and 1.0 × `interval_announce` after the previous announce. No
+reboot, no re-join, no counter / history reset; telemetry keeps its cadence.
+
+**Prompt for Claude:**
+> On a joined (LoRaWAN) or paired (P2P) bench node set `config interval-announce 1` and
+> `settings save`; note the time of the boot/join announce. Leave RTT attached (debug: keep the
+> 20 min keepalive). Within 54–60 min confirm `Periodic announce` and the two frames on the network
+> side, decoded with `app/decoder/ttn.js`, and that the next one follows 54–60 min after it. Change
+> a setting over the shell **without** a reboot (`config interval-sample 30`, no save) and confirm
+> the next periodic settings-info carries the staged value. Then (a) set `interval-announce 0` +
+> save: after the boot announce no periodic one for > 1 h; (b) with `interval-announce 1`, take the
+> link down at the 50 min mark (LoRaWAN: gateway off; P2P: Hub off) so the period ends while the
+> link is down: RTT `Periodic announce deferred to the next link-up`, nothing sent; after the
+> re-join the join announce goes and the next periodic one comes ~1 h after it. Run on both radios.
+> Restore `interval-announce 24`.
+
+- [ ] Pass
+
 
 **Goal:** Telemetry is sent on the configured interval.
 **Observable:** fPort 2 uplinks every `interval_report` seconds; RTT `Snapshot complete; next
@@ -389,8 +538,8 @@ report in <N> s`.
 ### L7 — Link check
 
 **Goal:** LinkCheckReq is sent periodically and answered.
-**Observable:** Every 5th message carries a LinkCheckReq; LinkCheckAns within 10 s; visible in
-RTT LC logs.
+**Observable:** Every 5th message carries a LinkCheckReq (every message while `WARNING`, v1.5.0 #424);
+LinkCheckAns within 10 s of the uplink's RX windows closing; visible in RTT LC logs.
 
 **Prompt for Claude:**
 > With the device HEALTHY and a gateway in range, send several uplinks (or wait through several
@@ -404,16 +553,18 @@ RTT LC logs.
 
 **Goal:** Link-check failures escalate state correctly.
 **Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
-consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECONNECT` after
-`lrw-link-check-fail-rejoin` fails; `ats lrw status` mirrors the counters.
+consecutive fails; `LC FAIL in WARNING (total: n/5[, ladder step])` → `State: WARNING -> RECONNECT` once
+`radio-link-check-fail-rejoin` fails are reached **and** the recovery ladder is at its floor (v1.5.0 #424,
+see L18 — a device on a DR above the region minimum takes extra rungs first); `ats radio status` mirrors
+the counters.
 
 **Prompt for Claude:**
-> On a debug build, drive the failures deterministically with `ats lrw lc fail` (space them ~2 s
+> On a debug build, drive the failures deterministically with `ats radio lc fail` (space them ~2 s
 > apart — the hook reuses one work item, rapid injects coalesce); set
-> `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
-> streak. Watching the RTT log / `ats lrw status`, confirm HEALTHY → WARNING (3 consecutive) →
-> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats lrw lc ok` and confirm one success
-> returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
+> `config radio-link-check-interval 0` + `settings save` first so real link-checks don't reset the
+> streak. Watching the RTT log / `ats radio status`, confirm HEALTHY → WARNING (3 consecutive) →
+> RECONNECT (after `radio-link-check-fail-rejoin` more, counted until the L18 ladder reaches its floor —
+> note the start DR). Then `ats radio lc ok` and confirm one success returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
 > range — note the method.) Report the observed thresholds.
 
 - [ ] Pass
@@ -442,7 +593,7 @@ consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECO
 should not leave the device stuck outside HEALTHY indefinitely — it must keep retrying with
 backoff and eventually recover once a clear TX/RX window is available, bounded by the L9 backoff
 schedule (base 60 s, ×2, capped 3600 s).
-**Observable:** After the storm, `ats lrw status` cycles through `RECONNECT`/join attempts and
+**Observable:** After the storm, `ats radio status` cycles through `RECONNECT`/join attempts and
 returns to `HEALTHY` within the expected backoff-schedule bound — it should not sit at
 `devaddr=00000000`/`fcnt up` frozen far beyond one full backoff cap (3600 s) with zero visible
 join attempts. A filtered RTT log (`lorawan|Join|MlmeConfirm`) taken on a **freshly-booted**
@@ -450,7 +601,7 @@ session (so it can't be stale) should show periodic `JoinReq`/`MlmeConfirm` acti
 **Prompt for Claude:**
 > Deliberately trigger 4–5 reboot/rejoin events within a short window (a mix of `reboot`,
 > `device_reset`, and `settings save`, spaced ~1–2 min apart — e.g. while exercising G5/G6/S-caps
-> in the same session). Afterward, check `ats lrw status` repeatedly over several minutes. If it
+> in the same session). Afterward, check `ats radio status` repeatedly over several minutes. If it
 > stays in `RECONNECT` well past the point a single 60 s (or even a few escalated) backoff cycle
 > should have resolved it: (a) confirm the device is otherwise alive (GetInfo/config keep working
 > locally — this is NOT a crash), (b) pull a **fresh** (post-reboot) filtered log for
@@ -477,15 +628,15 @@ session (so it can't be stale) should show periodic `JoinReq`/`MlmeConfirm` acti
 
 - [ ] Pass
 
-### L11 — `ats lrw` shell commands
+### L11 — `ats radio` shell commands
 
 **Goal:** LoRaWAN shell utilities work.
-**Observable:** `ats lrw status` prints state/FCnt/DR/RSSI/SNR; `ats lrw check` sends with link
-check; `ats lrw reset` resets counters + DevNonce and reboots.
+**Observable:** `ats radio status` prints state/FCnt/DR/RSSI/SNR; `ats radio check` sends with link
+check; `ats radio reset` resets counters + DevNonce and reboots.
 
 **Prompt for Claude:**
-> Run `ats lrw status` and report the fields. Run `ats lrw check` and confirm an uplink with a
-> link check is sent (verify on the server). Finally run `ats lrw reset` and confirm the frame
+> Run `ats radio status` and report the fields. Run `ats radio check` and confirm an uplink with a
+> link check is sent (verify on the server). Finally run `ats radio reset` and confirm the frame
 > counters / DevNonce reset and the device reboots. (Reset is destructive to FCnt — confirm it's
 > OK on this bench.)
 
@@ -505,15 +656,17 @@ check; `ats lrw reset` resets counters + DevNonce and reboots.
 
 ### L13 — Configurable link-check cadence & rejoin threshold
 
-**Goal:** `lrw-link-check-interval` and `lrw-link-check-fail-rejoin` drive the state machine.
-**Observable:** `ats lrw status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
-where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
+**Goal:** `radio-link-check-interval` and `radio-link-check-fail-rejoin` drive the state machine.
+**Observable:** `ats radio status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
+where M = `radio-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
 
 **Prompt for Claude:**
-> Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
-> `settings save`. Confirm `ats lrw status` shows `warning->reconnect: n/3`. With interval 1,
+> Set e.g. `config radio-link-check-interval 1`, `config radio-link-check-fail-rejoin 3`,
+> `settings save`. Confirm `ats radio status` shows `warning->reconnect: n/3`. With interval 1,
 > confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
-> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails.
+> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails — start from the
+> region minimum DR (e.g. just after a join, before the NS raised it), otherwise the L18 ladder adds
+> one failure per DR step first.
 
 - [ ] Pass
 
@@ -521,12 +674,12 @@ where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink 
 
 **Goal:** A link-check result arriving while in RECONNECT is ignored and never cancels the rejoin
 (the root cause of the old "TX stops" bug).
-**Observable:** In RECONNECT, `ats lrw lc ok`/`fail` is logged as ignored; state stays RECONNECT,
+**Observable:** In RECONNECT, `ats radio lc ok`/`fail` is logged as ignored; state stays RECONNECT,
 the rejoin timer keeps running and the device rejoins.
 
 **Prompt for Claude:**
-> Drive the device into RECONNECT (L8). While it waits for the rejoin timer, inject `ats lrw lc ok`
-> and `ats lrw lc fail`. Confirm via `ats lrw status` the state stays RECONNECT (not back to
+> Drive the device into RECONNECT (L8). While it waits for the rejoin timer, inject `ats radio lc ok`
+> and `ats radio lc fail`. Confirm via `ats radio status` the state stays RECONNECT (not back to
 > HEALTHY/WARNING) and the rejoin still fires on schedule → HEALTHY. This must NOT wedge or stop TX.
 
 - [ ] Pass
@@ -536,34 +689,124 @@ the rejoin timer keeps running and the device rejoins.
 **Goal:** An un-provisioned device (DevEUI all-zero) does not burn power on impossible joins, and
 (#175) does not even bring up the radio.
 **Observable:** RTT `DevEUI is all-zero: skipping LoRaWAN bring-up (radio-silent, #98/#175)`;
-`ats lrw status` state **DISABLED**; **no** `lorawan_start`/region/JoinRequest activity at all, no
+`ats radio status` state **DISABLED**; **no** `lorawan_start`/region/JoinRequest activity at all, no
 rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** in the first second.
 
 **Prompt for Claude:**
-> Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
+> Set `config radio-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
 > shows `skipping LoRaWAN bring-up (radio-silent, #98/#175)` (debug build) and **no** region /
-> `lorawan_start` / join lines follow — `app_lrw_init` takes the radio-silent path. Confirm
-> `ats lrw status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
+> `lorawan_start` / join lines follow — `app_radio_lrw_init` takes the radio-silent path. Confirm
+> `ats radio status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
 
 - [ ] Pass
 
 > **HW-verified (2026-06-23, #175):** debug build on Base Compact, `lrw-deveui = 00…00` — RTT showed
-> `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats lrw status`
-> = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_lrw_init` call) confirmed via a
-> sentinel log that `app_lrw_init` is never even entered.
+> `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats radio status`
+> = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_radio_lrw_init` call) confirmed via a
+> sentinel log that `app_radio_lrw_init` is never even entered.
 
 ### L16 — Release-FW sustained TX (TX-stop regression, decisive)
 
 **Goal:** The original *"TX stops after 4–5 messages"* bug stays fixed under its exact repro
 conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 **Observable:** On the LNS, f_cnt climbs continuously well past 5 (≥10–15) with link-check active
-(`lrw-link-check-interval 5`), no stall — including across the msg-5/10 link-checks.
+(`radio-link-check-interval 5`), no stall — including across the msg-5/10 link-checks.
 
 **Prompt for Claude:**
-> Provision OTAA, `config lrw-link-check-interval 5`, `settings save`. Flash the **plain release**
+> Provision OTAA, `config radio-link-check-interval 5`, `settings save`. Flash the **plain release**
 > build (no debug overlay) and let it run. Watch the LNS uplinks (TTS/ChirpStack) and confirm f_cnt
 > climbs continuously past ~13 with no stop. (Release has PM=y → SWD sleeps; reflash via a
 > `west flash` retry loop or power-cycle.) Report the highest f_cnt reached.
+
+- [ ] Pass
+
+### L17 — LoRaWAN glue: real join result, bounded confirm, MAC lock (v1.5.0, #421)
+
+**Goal:** A (re)join reports the result of *its own* JoinRequest (not a stale link-check / device-time
+confirm). A lost MAC confirm ends in `-ETIMEDOUT` instead of wedging `m_work_q`. Concurrent LoRaMac access
+from shell/NFC and the radio/timer handlers never deadlocks.
+**Observable:** After a join plus its DeviceTime/LinkCheck exchange, a shell `join` blocks until the RX
+windows (≈ 6–9 s at SF12) instead of returning at once. After a network outage, the first rejoin once the NS
+answers again succeeds. No watchdog reset in any of the steps.
+
+**Prompt for Claude:**
+> On a joined debug image, wait for the first telemetry with its LinkCheckAns, then run `join` and note how
+> long it takes to end in `HEALTHY` versus when the NS saw the JoinRequest/JoinAccept. Disable the device on
+> the NS (e.g. ChirpStack `isDisabled`), run `join` and confirm the failure is reported only after the RX windows.
+> Re-enable it and confirm the automatic rejoin succeeds on its first attempt. With `interval-report 60` +
+> `radio-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
+> then success on the first attempt after re-enabling. Optionally (temporary, uncommitted hooks) drop one
+> McpsConfirm / join confirm and confirm `-ETIMEDOUT` after `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` with no
+> wedge. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, debug + release @ `545b679`, EU868, ChirpStack v4 + RAK5146 on the ProXimos Hub):**
+> - **T1 / T8:** first-attempt joins on debug and release, with Info, settings-info ConfigDump (release: `w1_slot_type` 4× `empty`) and telemetry.
+> - **T2:** a disabled-NS join failed only after RX2 (8.4 s), and the first rejoin after re-enabling succeeded.
+> - **T2b A/B** (temporary WRN timing log): `lorawan_join()` after the link-check / device-time confirms
+>   took **26 ms / 25 ms on v1.5.0** (stale result) versus **8305 ms with #421**.
+> - **T3:** 8 min at 1 uplink/min, 8/8 LinkCheckAns, no FCnt gaps.
+> - **T4:** GetConfig page 0, SetParam without save → Ack + staged, `settings_save` → boot ConfigDump 600, CLI `set-config` with commit → 900.
+> - **T5** (temporary hooks): a dropped McpsConfirm → `-ETIMEDOUT` exactly 20 s after the request, and the retry went out. A dropped join confirm → `ret=-116 after 20025 ms`, then MAC polling → `HEALTHY`. No watchdog reset in either case.
+> - **T6:** 3 × 25 s at ~900 locked `get_info`/MIB reads per second ran concurrently with 4 chained GetConfig downlinks; all were answered and nothing hung.
+> - **T7:** ~8.8 min of NS outage → WARNING → RECONNECT → rejoin 1 refused → rejoin 2 (the first after re-enabling) succeeded.
+
+- [x] Pass
+
+### L18 — Link-recovery ladder: TX power / DR step-down before rejoin (v1.5.0, #424)
+
+**Goal:** In WARNING the device checks the link on every report and, per failed check, restores the default
+TX power and drops the DR one step; it rejoins only at the floor. A check that succeeds on a lower DR returns to
+HEALTHY with the same session.
+**Observable:** RTT `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` on the transition
+into WARNING and on every later `LC FAIL in WARNING (total: n/m, ladder step)`; `ats radio status` `datarate` /
+`tx power` follow; the LNS sees each later uplink on the lower DR (higher SF). At the region minimum DR the next
+failure(s) complete the budget → `State: WARNING -> RECONNECT`. EU868 from DR5: WARNING entry + 4 rungs, rejoin
+on the 5th WARNING failure.
+
+**Prompt for Claude:**
+> On a joined EU868 debug image with ADR on, wait until the NS has raised the DR (`ats radio status` shows e.g.
+> DR5 and a tx power index > 0; ChirpStack can pin it via the device-profile ADR/DR settings). Set
+> `config interval-report 60`, `config radio-link-check-interval 0` + `settings save` (no real link checks, so
+> the injects are deterministic). Inject `ats radio lc fail` ~2 s apart: after the 3rd, confirm WARNING + the
+> first `Link recovery` rung (tx power → 0, DR5 → DR4); on each further inject one more DR step; let a periodic
+> uplink go out between steps and confirm its DR/SF on the LNS. At DR0 confirm the next inject reaches the
+> budget and ends in RECONNECT → rejoin (new DevAddr). Repeat, but inject `ats radio lc ok` mid-ladder (e.g. at
+> DR3): confirm WARNING → HEALTHY with the **same** DevAddr and the uplinks staying on DR3 until the NS raises
+> the DR. Real-outage variant: `radio-link-check-interval 1`, disable the device on the NS, confirm a link check
+> on every report in WARNING and one rung per report; re-enable it mid-ladder and confirm recovery on the lower
+> DR without a rejoin. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER `5876070000000413`):**
+> - B-2/B-3 inject runs (ADR off, temporary `ats radio setdr` hook to start from DR5): one rung per uplink
+>   DR5 → DR0 on air, with the TX-power rung visible as +8–9 dB RSSI.
+>   - Floor → rejoin (new DevAddr).
+>   - `lc ok` at DR1 → HEALTHY with the same DevAddr.
+> - B-4 real outage (ADR on, LC every report, device disabled on the NS, no injects): WARNING + rungs DR5 → DR2,
+>   then the NS was re-enabled and the device recovered on DR2 with the same DevAddr and no JoinRequest.
+> - C-2 on the image combined with #409: `lrw-datarate dr5` + ADR off, the ladder steps through
+>   `lorawan_set_datarate()`, and after the rejoin the pinned DR5 is back.
+> - Bench caveat: the Hub's ChirpStack has an effective `network.max_dr = 0`, so with ADR on it pulls every node to DR0.
+>   Start the ladder from a raised DR via the hook, or run with the NS disabled as in B-4.
+
+- [x] Pass
+
+### L19 — US915/AU915: sub-band survives repeated failed joins (v1.5.0, #424)
+
+**Goal:** With `lrw-sub-band` set, every JoinRequest stays on the configured sub-band even after the
+sub-band's 8 channels have all been used by failed joins and after each rejoin's MAC re-init.
+**Observable:** Gateway / NS raw frame log: all JoinRequests on the sub-band's 125 kHz channels (sub-band 2:
+903.9–905.3 MHz) or its 500 kHz channel (904.6 MHz); none elsewhere. RTT `Applied sub-band <n>` after each
+`MAC reinitialized`.
+
+**Prompt for Claude:**
+> On a US915 bench with an 8-channel (e.g. FSB2) gateway, set `config lrw-region us915`,
+> `config lrw-sub-band 2` + `settings save`. Make joins fail (device disabled on the NS or not registered)
+> and trigger ≥ 10 join attempts (shell `join` repeatedly, ~15 s apart for the duty cycle, or wait for the
+> backoff). From the gateway's frame log confirm every JoinRequest frequency lies in sub-band 2. Then
+> re-enable the device and confirm the next join succeeds. (On v1.5.0 before #424 the attempts after the 8th
+> spread over all eight sub-bands.)
+
+> **Not run yet (2026-09-23):** no US915 gateway, and no 902–928 MHz TX on the EU868 bench. Covered by code review only.
 
 - [ ] Pass
 
@@ -612,11 +855,11 @@ conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 ### S4 — Free-fall → alarm
 
 **Goal:** Free-fall raises an `accel-motion` alarm.
-**Observable:** AlarmReport on fPort 3 with source `accel-motion`, edge ACTIVATE; orange LED blink.
+**Observable:** AlarmReport on fPort 3 with slot `mb`, channel `accel-motion`, edge ACTIVATE; orange LED blink.
 
 **Prompt for Claude:**
 > Ask me to perform a short, safe free-fall (drop onto a cushion). Confirm an AlarmReport arrives
-> on fPort 3 with an event whose source decodes to `accel-motion` and edge ACTIVATE, and that the
+> on fPort 3 with an event whose channel decodes to `accel-motion` and edge ACTIVATE, and that the
 > RTT log / orange LED reflect the alarm. Decode and report the event fields.
 
 - [ ] Pass
@@ -717,6 +960,29 @@ requires `cap_barometer` / `cap_light_sensor`.
 
 - [ ] Pass
 
+### S10b — Onboard SHT4x switched off: `cap_sht` (v1.5.0, #465)
+
+**Goal:** With `cap_sht` off the onboard SHT4x is not read and leaves no trace on the wire,
+in the alarms or in the history; the settings-info reports the flag.
+**Observable:** fPort 2 telemetry without `temperature` / `humidity`; no `no_data` alarm for
+the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors.cap_buzzer`.
+
+**Prompt for Claude:**
+> On a joined unit with `history-enable true` and `history-channels` incl. temperature/humidity,
+> confirm the boot `ConfigDump` shows `cap_sht: 1` and `cap_buzzer`. Run `config cap-sht false`
+> and `settings save` (reboots). Confirm the new boot `ConfigDump` shows `cap_sht: 0`, and that
+> the next fPort 2 telemetry frames decode without `temperature` / `humidity` (other groups
+> unchanged). Wait > 5 s past a sample and confirm no fPort 3 `no_data` alarm for
+> `onboard` temperature/humidity. Run `history info` and confirm the `sensors:` line no longer
+> lists temperature/humidity. Restore `config cap-sht true` + `settings save` and confirm the fields return.
+
+> **HW-verified (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** boot `ConfigDump` `cap_sht: 1`, `cap_buzzer: 0`.
+> `cap-sht false` + save → `ConfigDump` `cap_sht: 0`; the next two fPort 2 frames are 9 B with no
+> `temperature` / `humidity` (voltage / accel unchanged); no fPort 3 within two cycles;
+> `history info` lists no sensors. `cap-sht true` + save → 14 B telemetry with T 23.27 °C / H 50.5 %.
+
+- [x] Pass — 2026-10-09
+
 ### S11 — Battery voltage
 
 **Goal:** Voltage field is reported.
@@ -798,15 +1064,19 @@ calibration uplinks. The flag is one-shot, so the next reboot returns to normal.
 
 - [ ] Pass
 
-### H2 — Sensor selection
+### H2 — Channel selection (#430)
 
-**Goal:** Per-sensor recording can be toggled.
-**Observable:** `history sensors` lists sensors + selection; `history sensors <name> on|off` toggles.
+**Goal:** any registry channel can be recorded; the selection persists as `history_channels`.
+**Observable:** `history sensors` lists every motherboard channel (and every channel of a typed
+1-Wire slot as `sN-<channel>`) with its selection and capability state; `history sensors <name>
+on|off` toggles it and stages `config history-channels` (`slot << 5 | ch` per byte, `ff` unused).
 
 **Prompt for Claude:**
-> Run `history sensors` and report the list with current selection. Toggle one sensor off then on
-> (e.g. `history sensors temperature off` / `... on`) and confirm the listing updates accordingly.
-> Note which sensors are gated by capability flags.
+> Run `history sensors` and report the list with current selection. Toggle one channel off then on
+> (e.g. `history sensors temperature off` / `... on`) and confirm the listing and
+> `config history-channels` update accordingly. Enable a channel that was not recordable before
+> #430 (e.g. `battery-voltage`), `settings save` (reboots), and confirm `history info` still lists
+> it after the reboot. Note which channels are gated by capability flags or by an untyped slot.
 
 - [ ] Pass
 
@@ -874,7 +1144,7 @@ records, `ReqHistory` returns one or more `HistoryFrame`s with **no reset/hard-f
 device stays fully responsive (RTT shell/GetInfo keep working) throughout and immediately after.
 **Prompt for Claude:**
 > Enable ADR (`config lrw-adr true`, `settings save`) and let it converge to DR3 or higher (check
-> `ats lrw status`). Accumulate ≥15–20 history records (raise `interval_report` beforehand if
+> `ats radio status`). Accumulate ≥15–20 history records (raise `interval_report` beforehand if
 > needed for speed — note this is a **RAM-backend debug build**, so any `settings save` reboot
 > wipes accumulated records; do config changes needing a reboot *before* starting the count).
 > Send `req_history` covering the whole stored range (`to_unix` must be a valid `uint32` — use
@@ -906,32 +1176,35 @@ it resets to 0.
 
 **Prompt for Claude:**
 > Determine the active history backend (RAM vs flash/NVS) from `history info` and the build
-> config. Store some records, note `history count`, reboot (`ats lrw reset`), and confirm the
+> config. Store some records, note `history count`, reboot (`ats radio reset`), and confirm the
 > count behaves as the backend implies — preserved on flash, reset to 0 on RAM. Report which
 > backend is active and the observed behavior.
 
 - [ ] Pass
 
-### H9 — Pressure / illuminance / orientation / accel-motion channels (#311)
+### H9 — Pressure / illuminance / orientation / accel channels (#311, #430)
 
-**Goal:** the 4 new history channels (barometer pressure, light-sensor illuminance, accelerometer
-orientation, accelerometer any-motion event count) record and read back correctly, gated on their
-own capability flags (`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates
-both `orientation` and `accel-motion`), and are absent (not recorded) when the capability is off.
-**Observable:** `history sensors` lists all 4 new names; enabling them + capturing records values
-consistent with a live sensor read; disabling the capability drops the channel from both the
-selection list and stored records.
+**Goal:** the barometer pressure, light-sensor illuminance, accelerometer orientation and
+accelerometer motion channels record and read back correctly, gated on their own capability flags
+(`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates `accel-orientation`,
+`accel-motion` and `accel-count`), and are skipped (not recorded) when the capability is off.
+`accel-motion` is momentary: `1` when the accel event counter moved since the previous record.
+**Observable:** `history sensors` lists the channels; enabling them + capturing records values
+consistent with a live sensor read; disabling the capability drops the channel from the recorded
+columns (it stays in `history-channels`).
 
 **Prompt for Claude:**
-> Confirm the board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell
-> or `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `orientation`,
-> `accel-motion` are all listed and available. Enable all 4 (`history sensors pressure on`, etc.),
-> `history capture`, then `history read 1` and confirm the printed values are in a plausible range
-> (pressure ~950–1050 hPa, illuminance a small non-negative number, orientation 0–5, accel-motion a
-> non-negative count) and roughly match a fresh sensor reading (`sample` command or `get_info`).
-> Then flip `cap_accelerometer` off via `config` + `settings save`, reboot, and confirm
-> `orientation`/`accel-motion` no longer appear in `history sensors` and are silently dropped from
-> the selection mask (no crash, no stale values). Report all observations.
+> Use a build with `CONFIG_LIS2DH=y` (the debug variant drops the accelerometer, #395). Confirm the
+> board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell or
+> `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `accel-orientation`,
+> `accel-motion`, `accel-count` are listed and available. Enable them (`history sensors pressure
+> on`, etc.), `history capture` twice (move the board in between), then `history read` and confirm
+> the printed values are plausible (pressure ~950–1050 hPa, illuminance a small non-negative
+> number, orientation 1–6, `accel-motion` absent in the first record then 0/1, `accel-count` a
+> non-negative count) and roughly match `ats sensors sample`. Then flip `cap_accelerometer` off via
+> `config` + `settings save`, and confirm the accel columns are gone from `history info` (buffer
+> restarted, no crash, no stale values) while `config history-channels` still lists them.
+> Report all observations.
 
 - [ ] Pass
 
@@ -939,14 +1212,18 @@ selection list and stored records.
 
 ## Alarms
 
-> **Alarms are dynamic rules** in 16 fixed slots (`0…15`). Arm/change/clear them locally with the
-> `alarm` shell command (`alarm set <i> <source> <quantity> <args>`, `alarm new …`,
-> `alarm clear <i>|all`, `alarm list`), or over the air with **SetParam** writing the slot config
-> parameter `alarm_<i>` (a packed 17-byte rule as hex) — the same message works on **fPort 85
-> (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*` config keys
-> any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See `doc/version 1.4.md` §7 for
-> the source/quantity enums, the kinds (threshold / state / count) and the packed-slot layout.
-> `alarm-limit` (rate-limit) still applies globally.
+> **Alarms are dynamic rules** in 16 fixed rule entries (`0…15`). Each rule targets a **channel**
+> of a sensor **slot** (#430): `mb` = motherboard, `s1`…`s4` = 1-Wire slots; `sensor types [<type>]`
+> lists every type's channels with their kind (threshold / state / rate). Arm/change/clear rules
+> locally with the `alarm` shell command (`alarm set <rule> <slot> <channel> <key> <value>...`,
+> `alarm new <slot> <channel> ...`, `alarm clear <rule>|all`, `alarm list`), or over the air with
+> **SetParam** writing the config parameter `alarm_<rule>` (a packed 18-byte rule as hex: flags,
+> slot, channel, sensor_type, from, to, then float32 LE lo, hi, dwell) — the same message works on
+> **fPort 85 (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*`
+> config keys any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See
+> `doc/version 1.5.md` (sensor channel model) for the channel registry, the kinds and the rule
+> layout. A rule written for another sensor type than the slot now holds is **stale**: kept,
+> listed as `STALE`, never evaluated. `alarm-limit` (rate-limit) still applies globally.
 >
 > **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band** —
 > `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` config keys are gone.
@@ -955,12 +1232,12 @@ selection list and stored records.
 > and give a concrete recipe to observe it, including the "canceled by an early revert" case that a
 > naive check-once-at-expiry implementation would get wrong.
 >
-> **Shell syntax gotcha:** `alarm new <source> <quantity> <kind-args>` / `alarm set <i> <source>
-> <quantity> <kind-args>` — `<source>`/`<quantity>` are **names** (e.g. `onboard`,
-> `temperature`), not numeric indices, and there is **no** literal `threshold`/`state`/`count`
-> keyword in the actual command line — the kind is inferred from the quantity. Threshold args are
-> `<lo> <hi> [dwell]` (e.g. `alarm new onboard temperature 0 20 1`); adding a `threshold` token as
-> if it were a positional argument shifts everything and fails with "wrong parameter count".
+> **Shell syntax:** `alarm new <slot> <channel> <key> <value>...` / `alarm set <rule> <slot>
+> <channel> <key> <value>...` — `<slot>` is `mb` or `s1`…`s4`, `<channel>` a channel name of the
+> slot's type (e.g. `temperature`, `hall-left-state`) or its number. The kind comes from the
+> channel; the keys are `lo`/`hi`/`dwell` (threshold), `from`/`to`/`dwell` (state) and `hi`/`dwell`
+> (rate), e.g. `alarm new mb temperature lo 0 hi 20 dwell 1`. A 1-Wire slot needs its
+> `sensorN-type` set first (the rule records that type).
 >
 > **Bench tip — testing alarms without a network join:** the alarm-poll loop in the main
 > application only runs while the LoRaWAN state is HEALTHY, so on a device that hasn't joined (or
@@ -977,16 +1254,16 @@ selection list and stored records.
 band continuously for `dwell` seconds; a value that dips back inside the band before `dwell` elapses
 must NOT fire, and must NOT get credit toward a later attempt (the dwell window resets).
 Deactivation is always immediate.
-**Observable:** AlarmReport on fPort 3, source `onboard`, quantity `temperature`, edge + side
+**Observable:** AlarmReport on fPort 3, slot `mb`, channel `temperature`, edge + side
 (LO/HI); RTT alarm log; red LED while active.
 
 **Prompt for Claude:**
-> Arm `alarm set 0 onboard temperature <lo> <hi> <dwell>` with bounds near the current room
+> Arm `alarm set 0 mb temperature lo <lo> hi <hi> dwell <dwell>` with bounds near the current room
 > temperature and `dwell` a few seconds (note the values); confirm with `alarm list`. Then, in order:
 > (1) push the sensor just past the bound and back inside within less than `dwell` seconds — confirm
 > **no** AlarmReport fires (the dwell was interrupted); (2) push it past the bound and hold it there
 > for longer than `dwell` — confirm an AlarmReport fires only after roughly `dwell` seconds have
-> elapsed, with source `onboard`/quantity `temperature` and the correct side (LO/HI); (3) bring the
+> elapsed, with slot `mb`/channel `temperature` and the correct side (LO/HI); (3) bring the
 > value back inside the band and confirm the alarm clears **immediately** (no matching dwell on the
 > way down). Decode and report all three events/non-events with their timing.
 
@@ -994,14 +1271,16 @@ Deactivation is always immediate.
 
 ### A2 — Threshold alarms: humidity / pressure / 1-Wire slots
 
-**Goal:** The other analog quantities behave like temperature (band + dwell + immediate clear).
-**Observable:** AlarmReport fPort 3 with the matching source and side.
+**Goal:** The other analog channels behave like temperature (band + dwell + immediate clear).
+**Observable:** AlarmReport fPort 3 with the matching slot/channel and side.
 
 **Prompt for Claude:**
-> For each present analog quantity (onboard humidity/pressure, and 1-Wire slot s1…s4 temperature/
-> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [dwell]`, stimulate a crossing held past
-> `dwell`, and confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side after
-> the dwell. Summarize per source; mark any sensor not fitted as N/A.
+> For each present analog channel (`mb` humidity/pressure, and the 1-Wire slots s1…s4 per their
+> type — dallas `temperature`, machine-probe `temperature`/`temperature-aux`/`humidity`), arm
+> `alarm set <i> <slot> <channel> lo <lo> hi <hi> [dwell <s>]`, stimulate a crossing held past
+> `dwell`, and confirm an AlarmReport on fPort 3 with the correct slot/channel (and `sensor_type`
+> for a 1-Wire slot) and LO/HI side after the dwell. Summarize per channel; mark any sensor not
+> fitted as N/A.
 
 - [ ] Pass
 
@@ -1011,7 +1290,7 @@ Deactivation is always immediate.
 to persist for `dwell` seconds before it fires; an edge that fires then also **holds** the alarm
 active (and blocks re-arming) for that same `dwell`. `dwell = 0` reproduces the old immediate
 behavior. Level deactivation is always immediate.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-state`/`hall-right-state`.
 
 **Polarity (#352):** `state 1` = magnet **present**, `state 0` = magnet **absent** —
 `ats sensors sample`/`alarm poll` reading `hall_left=1` while no magnet is applied (or `=0` while
@@ -1020,17 +1299,17 @@ one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue 
 **Prompt for Claude:**
 > First confirm the raw polarity: `ats sensors sample` with no magnet must show `hall_left=0`, and
 > `=1` only while a magnet is held against it. Then arm an **edge** rule with a confirm+hold
-> window, `alarm set 0 hall-left state 0 1 5` (fires on 0→1, 5 s confirm+hold) and confirm with
+> window, `alarm set 0 mb hall-left-state from 0 to 1 dwell 5` (fires on 0→1, 5 s confirm+hold) and confirm with
 > `alarm list` it reads `0->1 (edge) dwell=5.00`. Ask me to briefly tap the magnet on and off within
 > less than 5 s — confirm **no** AlarmReport fires (the confirm was interrupted). Then ask me to
 > apply the magnet and hold it past 5 s — confirm one AlarmReport fires roughly 5 s after the raw
 > transition, i.e. when the magnet is **applied**, not removed, and that reapplying the magnet
 > within the next 5 s produces **no** second report (holding/re-arm-blocked). Then arm a **level**
-> rule `alarm set 0 hall-left state 1 1 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
+> rule `alarm set 0 mb hall-left-state from 1 to 1 dwell 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
 > after the magnet has been present continuously for ~5 s, and clears immediately on removal.
 > Report all four checks with timing.
 
-**Reverse direction (edge on removal, `alarm set 0 hall-left state 1 0 5`):** symmetric to the
+**Reverse direction (edge on removal, `alarm set 0 mb hall-left-state from 1 to 0 dwell 5`):** symmetric to the
 `0→1` case above — confirmed to fire ~5 s after the magnet is removed (not reapplied), with the
 same early-revert-cancel on a quick remove+reapply within 5 s. Worth testing explicitly at least
 once, not just assuming symmetry: a bounce-prone reed switch has different release vs. close
@@ -1043,16 +1322,16 @@ way to confirm the physical transition actually settled before timing the dwell.
 ### A4 — Binary alarm: Input A/B (state)
 
 **Goal:** Input edges/levels raise `state` alarms (same confirm/hold model as A3).
-**Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `input-a-state`/`input-b-state`.
 
 **Polarity (#352):** `state 1` = input **asserted** (shorted to GND), `state 0` = input **idle** —
 same fix/regression check as A3's hall polarity note.
 
 **Prompt for Claude:**
 > With PIR disabled (shared pins), confirm `ats sensors sample` shows `input_a=0`/`input_b=0` idle,
-> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1 [dwell]` (and
-> `input-b`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3 with source
-> `input-a`/`input-b` fire on **assertion**, not release. Report results.
+> and `=1` only while shorted to GND. Then arm `alarm set <i> mb input-a-state from 0 to 1 [dwell <s>]`
+> (and `input-b-state`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3
+> with channel `input-a-state`/`input-b-state` fire on **assertion**, not release. Report results.
 
 - [ ] Pass
 
@@ -1062,7 +1341,7 @@ same fix/regression check as A3's hall polarity note.
 the sensor already reports a discrete event, not a raw level) and then use `dwell` purely as the
 hold/re-arm window: a further pulse within `dwell` seconds of the last is suppressed. `dwell = 0` re-
 arms on the very next poll.
-**Observable:** AlarmReport fPort 3, source `pir`/`accel`, quantity `state`, edge ACTIVATE; one
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `pir-motion`/`accel-motion`, edge ACTIVATE; one
 report per pulse, suppressed for `dwell` seconds, then re-armed; a motion burst is flood-suppressed
 (no permanent latch).
 
@@ -1076,8 +1355,8 @@ its own fire.
 **Prompt for Claude:**
 > Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
-> `alarm set 0 pir state 0 1 <dwell>` (or `accel state 0 1 <dwell>`, note the value) — edge and level
-> behave alike for these momentary sources. Ask me to trigger motion repeatedly; confirm the FIRST
+> `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — only
+> edge rules are accepted on these momentary channels. Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
 > `dwell` seconds of it are suppressed, that it re-arms and fires again once `dwell` has elapsed, and
 > that a sustained burst produces only periodic reports (not a flood, not a stuck `active`). Report
@@ -1087,26 +1366,26 @@ its own fire.
 
 ### A6 — Count / rate alarm (hall / input) — dwell as hold/re-arm
 
-**Goal:** A `count` rule fires when a counter exceeds the per-interval rate, then holds/re-arm-
+**Goal:** A rate rule on a counter channel fires when it exceeds the per-interval rate, then holds/re-arm-
 blocks for `dwell` seconds (same role as A5). `dwell = 0` re-arms on the next report interval.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
-`count`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-count`/`hall-right-count`/
+`input-a-count`/`input-b-count`.
 
 **Gotcha:** `interval_report` has a hard shell-enforced minimum of 60 s (`config interval-report`,
 `cmd_int` min=60) — it cannot be shrunk for a faster manual test cycle, so each rate-window
 iteration costs a real 60+ s wait. Also: re-arming a rule via `alarm clear all` immediately
-followed by `alarm new <same source+quantity>` does **not** reset the runtime dwell/window
-state — `rt_sync()` only resets on a `(source, quantity)` mismatch, and nothing re-syncs while the
+followed by `alarm new <same slot+channel>` does **not** reset the runtime dwell/window
+state — `rt_sync()` only resets on a rule change, and nothing re-syncs while the
 rule is briefly absent — so a "fresh" rule can silently inherit a stale window baseline from the
 previous test run. Insert an `alarm poll` **between** `alarm clear all` and `alarm new` to force a
 true reset before timing a fresh window.
 
 **Prompt for Claude:**
-> Arm `alarm new hall-left count <N> <dwell>` (small N, note both values; `alarm list` shows
+> Arm `alarm new mb hall-left-count hi <N> dwell <dwell>` (small N, note both values; `alarm list` shows
 > `rate>=N/interval dwell=…`) — if re-arming an existing rate rule, `alarm clear all` then
 > `alarm poll` then `alarm new` (not `clear` immediately followed by `new`, see gotcha above).
 > Ask me to pulse the hall sensor more than N times within a report interval and confirm an
-> AlarmReport on fPort 3 for that source/quantity, then confirm a second over-rate interval
+> AlarmReport on fPort 3 for that slot/channel, then confirm a second over-rate interval
 > within `dwell` seconds of the first does **not** produce a second report while one after `dwell`
 > has elapsed does. Report the result.
 
@@ -1114,15 +1393,15 @@ true reset before timing a fresh window.
 
 ### A7 — Set & read alarms over LoRaWAN & NFC (SetParam / GetParam)
 
-**Goal:** Alarm slots are written/read as `alarm_<i>` config parameters over both transports
+**Goal:** Alarm rules are written/read as `alarm_<i>` config parameters over both transports
 (native protobuf bytes, not hex strings on the wire).
-**Observable:** `set_param.alarms.alarm_<i>` arms a slot (Ack); `get_param.alarms_field=[54+i]`
+**Observable:** `set_param.alarms.alarm_<i>` arms a rule (Ack); `get_param.alarms_field=[54+i]`
 returns the packed rule in `config_dump`; `alarm list` matches; identical behaviour on fPort 85
 and NFC.
 
 **Prompt for Claude:**
-> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed onboard-
-> temperature rule (hex), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
+> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed 18-byte `mb`
+> temperature rule (hex, e.g. `0300000100000000a0400000f0410000803f` = lo 5, hi 30, dwell 1), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
 > shows the rule. Then GetParam `alarms_field:[54]` and confirm the returned hex matches what was
 > set. Repeat the SetParam over NFC and confirm the same result. Report both transports.
 
@@ -1130,32 +1409,32 @@ and NFC.
 
 ### A8 — Change / delete / deactivate a rule
 
-**Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
-**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
+**Goal:** A rule can be overwritten, cleared, and disabled-without-losing-its-definition.
+**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 36
 zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
-`01…`) keeps the slot listed with `en=0` and is **not** evaluated. Since the 2026-08-18
+`01…`) keeps the rule listed with `en=0` and is **not** evaluated. Since the 2026-08-18
 final-review fix, clearing/disabling/editing a rule whose latch is currently ACTIVE also emits
 the matching fPort-3 deactivate edge on the next poll (previously the activate was left
 dangling for edge-pairing backends).
 
 **Prompt for Claude:**
-> Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 5` then re-set to
-> `5 30 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
+> Using rule 0: (1) **change** it — `alarm set 0 mb temperature lo 0 hi 10 dwell 5` then re-set to
+> `lo 5 hi 30 dwell 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
 > `alarm_0` with the same rule but flags `01` (present, not enabled); confirm `alarm list` shows
 > `en=0` and that crossing the bound raises **no** alarm. (3) **delete** it (`alarm clear 0`, or
-> SetParam `alarm_0` = all zeros); confirm the slot disappears from `alarm list`. Report all three.
+> SetParam `alarm_0` = all zeros); confirm the rule disappears from `alarm list`. Report all three.
 
 - [ ] Pass
 
-### A9 — Multi-level (two slots, same source + quantity)
+### A9 — Multi-level (two rules, same slot + channel)
 
-**Goal:** Several slots may carry the same `(source, quantity)` as independent rules (e.g. a warning
+**Goal:** Several rules may target the same `(slot, channel)` independently (e.g. a warning
 band and a critical band), each latching/reporting on its own.
 
 **Prompt for Claude:**
-> Arm two onboard-temperature rules — slot 0 a wide "warning" band and slot 1 a tighter "critical"
-> band (note both). Stimulate crossings into each band and confirm each slot raises its own
-> AlarmReport independently (the `slot`/event fields distinguish them) and clears independently.
+> Arm two `mb temperature` rules — rule 0 a wide "warning" band and rule 1 a tighter "critical"
+> band (note both). Stimulate crossings into each band and confirm each rule raises its own
+> AlarmReport independently (the `rule` field distinguishes them) and clears independently.
 > Report.
 
 - [ ] Pass
@@ -1163,13 +1442,14 @@ band and a critical band), each latching/reporting on its own.
 ### A10 — AlarmReport structure
 
 **Goal:** AlarmReport fields are well-formed.
-**Observable:** `base_time`, `total`, `events[]` with `source`, `edge`, `side`, `rel_s`, and
-optional scaled `value` (×100 temp/hum, ×10 pressure; absent for discrete).
+**Observable:** `base_time`, `total`, `events[]` with `rule`, `slot`, `channel` (+ `sensor_type`
+for a 1-Wire slot), `edge`, `type`, `rel_s`, and optional `value` scaled by the channel's wire
+scale (×100 temperature, ×2 humidity, ×10 pressure, ×1000 voltage; see `sensor types`).
 
 **Prompt for Claude:**
 > Capture any AlarmReport on fPort 3 and fully decode it. Confirm `base_time` and `total` are
-> sensible, each event has a valid `source`/`edge`/`side`/`rel_s`, threshold events carry a scaled
-> `value` (×100 for temp/hum, ×10 for pressure) while discrete events omit it, and that no more
+> sensible, each event has a valid `rule`/`slot`/`channel`/`edge`/`type`/`rel_s`, threshold events
+> carry `value` scaled by the channel's wire scale, and that no more
 > than 8 events appear per frame. Report the decoded structure.
 
 - [ ] Pass
@@ -1443,6 +1723,29 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 
 - [ ] Pass
 
+### K3b — Network time sync over P2P (`TIME_REQ`)
+
+**Goal:** On P2P the node asks for the time the same way as on LoRaWAN: at a link-up without a
+time, by `clock sync`, by a `clock_sync` command and by the weekly re-sync (v1.5 §34).
+**Observable:**
+- RTT `Network time requested (TIME_REQ)`.
+- Then a `TX type … confirmed time-req` uplink and an `Ack (counter …) … [time]`.
+- Then `RTC synced from network: unix=<...>`.
+- The next fresh confirmed uplinks drop `time-req`.
+
+**Prompt for Claude:**
+> On a paired P2P node, reboot with RTT attached (`ats device reboot`). Confirm the first
+> confirmed uplink carries `time-req` and the Ack's `[time]` sets the RTC, with no command. Wait for
+> the next confirmed frames and confirm they have no `time-req`.
+>
+> Run `clock sync` and confirm the next report goes `confirmed time-req` even though no link
+> check is due, and that the time lands. `clock get` must match real UTC.
+>
+> For the weekly path, flash a HIL-only build with `RESYNC_PERIOD_SEC` shortened. Confirm
+> `Periodic time re-sync` repeats the same sequence at that period.
+
+- [ ] Pass
+
 ### K4 — `unix_time` in GetInfo
 
 **Goal:** Synced time surfaces in GetInfo.
@@ -1513,244 +1816,468 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 ## NFC
 
-### N1 — NFC config delivery: SAVE
+### N1 — NFC configuration over the mailbox: `set_param` + save (v1.5.0 #414)
 
-**Goal:** A SAVE NFC tag applies and persists config.
-**Observable:** RTT `NFC action: SAVE`; ~10 yellow blinks; config persisted.
+**Rewritten for v1.5.0 (#414).** The v1.4.0 NDEF config tag (`application/vnd.hardwario.sticker-config.v1`,
+"SAVE" action, ~10 yellow blinks) is gone: a phone configures the unit with encrypted `set_param`
+commands over the mailbox (N6), one tap for the whole batch.
 
-**Prompt for Claude:**
-> Tell me how to present a SAVE NFC config tag (NDEF MIME
-> `application/vnd.hardwario.sticker-config.v1`) to the device. On tap, confirm the RTT log shows
-> `NFC action: SAVE`, the yellow LED blinks ~10×, and the delivered config is persisted (read back
-> via `config`). Report what was applied.
+**Goal:** one tap applies and persists a configuration: one or more `set_param` batches, the last
+one with `save = true`.
+**Observable:**
+- Each `set_param` → `ack`. A field not writable over NFC → `Error{NOT_WRITABLE}` with
+  `fault_field` (group × 100 + field); an invalid value → `Error{OUT_OF_RANGE}` / `BAD_REQUEST`.
+  A rejected batch is rolled back as a whole.
+- Without `save` the batch is only staged. Application values and alarm rules are live at once;
+  LoRaWAN values need save + reboot (`lrw_join` / `lrw_reset` before that →
+  `NOT_READY "unsaved lrw config; save first"`, N5).
+- The batch with `save = true` → `ack`, the session ends (deferred action), green + yellow 2 s,
+  then save + reboot (~5 s). After the reboot `get_config` over NFC (or `config` on the shell)
+  shows the new values.
+
+**Prompt for Claude (phone bench as in N6):**
+> Read `interval_report` with `get_config` (or `config interval-report`). Send
+> `set_param{application{interval_report = <new>}}` without save (`sticker_mailbox_test.py setparam
+> --interval <new>`) → `ack`, and `get_config` already shows the new value. Send it again with
+> `save = true` (`--save`) and confirm the `ack`, green + yellow 2 s, then the reboot. After the
+> reboot (phone kept on the tag) confirm the value persisted. Negative checks:
+> - `set_param{application{vendor_reset_allow = true}}` on the owner channel `0x01` →
+>   `Error{NOT_WRITABLE}` (the field is vendor-only, FR-4 / G6a-NFC);
+> - an out-of-range value → an error, with the config unchanged.
+>
+> Restore the original value with save. Report results.
 
 - [ ] Pass
 
 ### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
 
-**Goal:** The command/config channel is AES-CCM encrypted by default; only info reads without a key. A validation build (`=n`) accepts plaintext (#135).
-**Observable:** On a default build, a plaintext `hio.stck:cmd` record is rejected (no response / decrypt error) while a properly encrypted one is answered with an encrypted `hio.stck:rsp`. On a `CONFIG_APP_NFC_ENCRYPTION=n` build, the boot log shows the `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` banner and plaintext command/config records are accepted.
+**Rewritten for v1.5.0 (#414).**
+**Goal:** by default the mailbox channels `0x01` (owner, `secret_key`) and `0x02` (vendor,
+`vendor_token`) are AES-CCM. Only the allow-listed plaintext channel `0x03` works without a key
+(`get_basic_info`, `get_claim_info`; #415, N10). A validation build (`=n`) accepts a raw `Command`
+on `0x01` (#135). It is debug-only: a release build with it off does not compile. It has no
+vendor channel.
+**Observable:**
+- Default build:
+  - a raw (unencrypted) `Command` on `0x01` gets **no reply** (RTT `mb: request rejected`, red LED);
+  - the same command sealed with `secret_key` (serial + counter = `nonce_counter` + 1) is answered
+    with an encrypted reply;
+  - `[0x03] get_basic_info` is answered without a key; any other command on `0x03` →
+    `NOT_READY "transport not allowed"`.
+- `=n` build:
+  - the boot banner `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` appears;
+  - a raw `Command` on `0x01` (e.g. `08 03 22 00`, `get_info`) returns a plaintext `Response` on
+    `0x01`;
+  - any `0x02` frame gets no reply.
 
 **Prompt for Claude:**
-> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug): confirm the boot banner, then inject
-> `ats cmd nfc 08032200` (get_info) and confirm a plaintext `Response.Info` comes back. Default
-> build (encryption on): present a plaintext command record and confirm it is rejected; present an
-> AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
-> the info record (`hio.stck:inf`) is still readable without the key. Report all results.
+> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug):
+> - confirm the boot banner;
+> - `ats cmd nfc 08032200` → a plaintext `Response.Info`;
+> - over the mailbox, send `[0x01] 08 03 22 00` → a plaintext `Response` on `0x01`;
+> - a `[0x02]` frame → no reply.
+>
+> Default build:
+> - the same raw `[0x01] 08 03 22 00` → no reply (RTT `mb: request rejected`);
+> - the command sealed (`sticker_mailbox_test.py getinfo`) → an encrypted reply that decrypts;
+> - `[0x03] get_basic_info` (`basicinfo`) → answered without a key.
+>
+> Report all results.
 
-> Note: the request/response nonce construction and anti-replay behaviour are covered in detail by **N8**.
+> Note: the nonce construction and anti-replay are covered by **N8**, the plaintext allow-list by
+> **N10**.
 
 - [ ] Pass
 
-### N5 — LoRaWAN reset & forced join over NFC (#109)
+### N5 — LoRaWAN reset & forced join over NFC (#109, v1.5.0 mailbox)
 
-**Goal:** A phone can reset the LoRaWAN counters and force a join via the NFC command channel, completing the set-params → `lrw_reset` → `lrw_join` commissioning flow without a shell/J-Link.
-**Observable:** `lrw_reset` writes an `ack` back to the tag, then RTT shows `Command: LoRaWAN reset (NVM wipe) + reboot` and the device cold-reboots (frame counter / `DevNonce` back to 0). `lrw_join` writes an `ack` and RTT shows `Command: forced LoRaWAN join` with a fresh join (no reboot).
+**Rewritten for v1.5.0 (#414).**
+**Goal:** a phone can finish commissioning without a shell / J-Link: LoRaWAN `set_param` + save
+(N1) → `lrw_reset` → `lrw_join`, all over the mailbox.
+**Observable:**
+- `lrw_join` (id 17, `08 01 8a 01 00`):
+  - `ack`, then a fresh join with no reboot (`ats radio status`);
+  - the session ends on the deferred action and the firmware resumes the field-present hold, so
+    the phone re-enables `MB_EN` (~1 s retry) and carries on in the same tap.
+- `lrw_reset` (id 16, `08 01 82 01 00`):
+  - `ack`, the session ends, green + yellow 2 s, then the LoRaWAN NVM wipe and a reboot;
+  - after it, the frame counter and `DevNonce` restart at 0 and the device joins afresh;
+  - a phone kept on the tag carries on after the reboot (N6).
+- Either one after an unsaved LoRaWAN `set_param` → `NOT_READY "unsaved lrw config; save first"`,
+  with nothing executed.
+- Both also work as fPort-85 downlinks (the hex above).
 
-**Prompt for Claude:**
-> On a default (encrypted) build: present an AES-CCM `hio.stck:cmd` record carrying `lrw_join`
-> (`08018a0100`) and confirm the `ack` is written back to the tag and RTT logs `Command: forced
-> LoRaWAN join` followed by a join attempt — with no reboot. Then present `lrw_reset` (`0801820100`),
-> confirm the `ack` is readable first, then RTT logs the NVM wipe + reboot and the LoRaWAN frame
-> counter restarts at 0 after reboot. Also verify both commands work as fPort-85 downlinks. Report results.
+**Prompt for Claude (phone bench as in N6):**
+> 1. Seal `lrw_join` over `0x01` and confirm:
+>    - the `ack`;
+>    - RTT `mb: session end (deferred action)`;
+>    - a join attempt with no reboot;
+>    - that a `get_info` after re-enabling `MB_EN` in the same tap is answered.
+> 2. Send `lrw_reset` and confirm:
+>    - the `ack` first;
+>    - green + yellow 2 s, then the reboot;
+>    - `ats radio status` after the reboot shows the frame counter back at 0 and a fresh join.
+> 3. Send `set_param{lorawan{adr = <toggled>}}` without save, then `lrw_join` →
+>    `NOT_READY "unsaved lrw config; save first"`. Save the batch (or revert it) and repeat.
+> 4. Confirm both commands also work as fPort-85 downlinks.
+>
+> Report results.
 
 - [ ] Pass
 
-- [x] N/A (feature removed)
+### N6 — Mailbox (Fast-Transfer-Mode) command channel (v1.5.0, #313 / #414)
 
-### N7 — Provisioning while powered off (boot-staged config, #147)
+**Rewritten for v1.5.0 (#414).** The mailbox channel removed in v1.4.0 (together with the NFC
+firmware-update path) is back as the **only** NFC command channel: the tag holds no NDEF at all
+(`doc/version 1.5.md` §18). Supersedes the NDEF-based parts of N1 / N4 / N5 / N8 for v1.5.0.
 
-**Goal:** A STICKER written over NFC while **unpowered** self-configures on the next boot, before
-the LoRaWAN stack starts, with nonce anti-replay.
-**Observable:** A config/command record written to the tag with the MCU off is applied on the next
-boot (yellow NFC carousel), persisted, and cleared from the tag (info record restored); a stale/replay
-record is rejected and the device still boots normally.
+**Goal:** every interactive NFC command runs through the ST25DV FTM mailbox in **one tap with the
+field on**, on Android and iOS alike. The phone bootstraps with the plaintext `get_basic_info`
+(serial, `nonce_counter` high-water, config/FW version), then sends AES-CCM commands on channel
+`0x01` (owner, `secret_key`) or `0x02` (vendor, `vendor_token`). The session limits hold.
+**Observable:**
+- Unit unpowered, or read by a generic NFC app: a **blank tag** (no NDEF record).
+- Powered unit: `VCC_ON` within ~50 ms of the tap and the phone's `MB_EN` sticks (`MB_MODE=1`).
+  `[0x03] get_basic_info` → `0x03 ‖ 0x01 ‖ Response{basic_info}` — identity only, no
+  `device_status`. Any other command on `[0x03]` except `get_claim_info` →
+  `Error{NOT_READY "transport not allowed"}` (N10).
+- `[0x01]` `get_info` with counter = `nonce_counter` + 1 → encrypted `0x01 ‖ Response{info}`,
+  ~0.2 s per exchange, dozens of exchanges per hold without an error. `get_config` pages
+  (`Response.page_index` / `page_count`) each fit one 256 B frame. `GetInfo` / `W1Scan` page with
+  `page` only when they do not fit.
+- `[0x02]` vendor `get_info` sealed with `vendor_token` → answered (no response cache on `0x02`).
+  A wrong key, a stale counter or an unknown channel byte → **no reply** (red LED, N11).
+- Session limits:
+  - the session ends 3 s after the last request, or at once when the phone clears `MB_EN`;
+  - a deferred action (e.g. `set_param save=true`) ends it right after its reply (RTT
+    `mb: session end (deferred action)`);
+  - a phone left on the tag without traffic is released after **120 s** (RTT `NFC: field held 120 s
+    without mailbox traffic -> releasing the tag`, `VCC_ON` → 0), and the next tap works.
+- Boot: NFC starts last, after the whole init chain (~1.2 s after reset, while the boot carousel
+  may still play; a tap cuts the carousel short).
+  Until then a phone on the tag reads `VCC_ON = 0` and no command is served.
+- Reboot with the phone kept on the tag (save / reboot / resets): `VCC_ON` returns ~1.2 s after reset
+  and the phone's first request is answered without a lift. RTT shows no `left enabled at boot`.
+- A unit whose `MB_MODE` cannot be set reports `MAILBOX_DOWN` (device_status bit 13) and
+  `NFC mailbox: UNAVAILABLE` in `ats device info` (production tester).
+- The firmware never writes the user EEPROM: after `nfc clear` (debug) all 512 B stay zero.
 
-**Prompt for Claude (needs the Manager-App phone + a way to remove device power — not bench/J-Link testable):**
-> With the device **fully powered off** (battery out, J-Link disconnected so SWD can't back-power it),
-> use the Manager-App to write an (encrypted) `set_param` (e.g. `lorawan.adr` toggled, `save=true`) to
-> the tag and confirm the bytes read back. Power the device on with **no further phone interaction**
-> and confirm: the yellow NFC carousel blinks, the new value is persisted (read it back over shell/NFC),
-> the tag no longer holds the staged record (info record restored), and — because the early boot check
-> runs before LoRaWAN — staged LoRaWAN keys take effect on the first join. Then power-cycle again and
-> confirm the config is **not** re-applied (nonce anti-replay) and the device boots normally. Report
-> results, including that the **encrypted** path (decrypt + nonce at boot) works end-to-end.
+**Prompt for Claude (phone bench: Pixel + `nfc-proxy-app` over `adb forward tcp:8730`; RTT log for timestamps):**
+> Tools in `~/Documents/claude/Scripts/`: `sticker_mailbox_test.py` (single actions: `probe`,
+> `basicinfo`, `getinfo`, `loop`, `getconfig`, `setparam`, `hold`, `wrongkey`, …),
+> `sticker_mailbox_seq_b.py` (save + reboot with the phone kept on the tag). Keep nfc-proxy in the
+> foreground with the screen on: with a locked screen Android hands the next tap to the Manager-App.
+> (1) Unit powered off: read the tag with any NFC app → blank, no NDEF. (2) Powered: `probe` →
+> `VCC_ON` ≤ 50 ms, `MB_MODE=1`; `basicinfo` → serial + nonce. (3) `loop --loops 30` → 30/30 OK,
+> rtt ~0.2 s; `getconfig` → every page ≤ 256 B and `page_count` consistent. (4) A vendor-channel
+> `get_info` sealed with the unit's `vendor_token` → answered; `wrongkey` → no reply, nonce unchanged.
+> (5) `hold --hold 130` → RTT shows the 120 s release WRN ~120 s after the last exchange, `probe`
+> then reads `VCC_ON=0`, and a re-tap works again. (6) `sticker_mailbox_seq_b.py <current
+> interval_report>` (same value, so the config does not change): Ack → session end at once, device
+> back ~6 s after the Ack (2 s result + NVS save + reboot + ~1.2 s to NFC-up), and the first
+> `get_basic_info` after the reboot answered without lifting the phone. With the phone on the tag
+> during the boot, `probe` keeps reading `VCC_ON=0` until the init chain is done.
+> (7) Debug build, phone removed: `nfc clear`, then `nfc read 0 512` stays all zero after a reboot
+> plus some uptime. Repeat (2)–(6) with an iPhone (Manager-App mailbox transport). Report results.
+
+**HIL-verified 2026-09-23 — Android** (`b4c2ee5` debug, SN 2162190413, Pixel 9a + nfc-proxy, RTT
+on the bench):
+- tap → `VCC_ON` / `MB_EN` in 10–40 ms; `get_basic_info` 64–84 ms; 30× `get_info` in one session,
+  average 195 ms, 0 errors;
+- the 120 s release came after 120 s + the 500 ms tick, with its WRN (3×, once on a GDB breakpoint);
+- save with the phone kept on the tag: device back +5.6 s after the Ack, first `get_basic_info`
+  answered +5.9 s (session at uptime 1.2 s);
+- on the earlier `3c537cd`, this step exposed the boot-time race fixed in `e2ce024` (RTT
+  `left enabled at boot (MB_CTRL_Dyn=0x85)`);
+- these timings predate moving NFC to the end of the init chain (#414, 2026-09-24): from then on
+  the device is back ~8 s later — re-run (6);
+- the stale v1.4 `inf` record was wiped with `nfc clear`, and the EEPROM was still all zero 11 min
+  after a reboot.
+
+- [x] Pass — Android (Pixel 9a), 2026-09-23
+- [ ] Pass — iOS
+
+### N7 — Provisioning while powered off — REMOVED in v1.5.0 (#414)
+
+**Rewritten for v1.5.0 (#414).** v1.4.0's boot-staged provisioning (#147 / #250) is gone: a
+config / command record written to the tag of an **unpowered** unit used to be applied at the next
+boot. The mailbox needs the MCU running, and the firmware no longer reads or writes the user EEPROM
+on any path (`doc/version 1.5.md` §18 "What is removed"), so configuration and claiming need a
+powered device. What remains is a negative check.
+
+**Goal:** nothing written to the tag while the unit is unpowered is ever executed, and an unpowered
+unit reads as a blank tag.
+**Observable:**
+- Unit unpowered: a generic NFC app sees an empty tag (no NDEF). The Manager-App asks for a
+  powered device (apps/manager#129) instead of failing on a config error.
+- A v1.4-style NDEF `hio.stck:cmd` record (e.g. `set_param` + `save=true`) written while unpowered
+  is **not** applied at the next boot: the config is unchanged, the boot shows only the normal
+  carousel (no NFC carousel), and RTT has no NFC line about it.
+- The record stays on the tag untouched (the firmware neither reads nor clears it) until
+  `nfc clear` (debug) or an RF erase wipes it.
+
+**Prompt for Claude (needs a way to remove device power — battery out, J-Link disconnected so SWD cannot back-power it):**
+> With the unit unpowered, read the tag with any NFC app → no NDEF record. Write a v1.4-style NDEF
+> message carrying an (encrypted) `hio.stck:cmd` `set_param` that changes `interval_report` with
+> `save=true` (v1.4 Manager-App, or NFC Tools with the bytes from `sticker_nfc_frame.py`). Power the
+> unit on without touching the phone and confirm:
+> - `config` (RTT) shows `interval_report` unchanged;
+> - the boot shows only the normal carousel;
+> - with the phone removed, `nfc read 0 64` (debug) still shows the record.
+>
+> Wipe it with `nfc clear` and confirm all-zero. On the unpowered unit, confirm the Manager-App
+> shows the "power the device" guidance. Report results.
 
 - [ ] Pass
 
 ### N8 — NFC crypto hardening: nonce separation, anti-replay, response cache (#179, #184)
 
-**Goal:** The encrypted channel no longer reuses a `(key, nonce)` pair across a request and its
-response (#179), the anti-replay counter survives a power-cycle (#184), the counter high-water is
-exposed in the plaintext info record so a phone can resync, and a same-counter retransmission is
-idempotent via a response cache.
+**Rewritten for v1.5.0 (#414).** The AES-CCM envelope is unchanged from v1.4.0; only the transport
+moved to the mailbox. The counter high-water that the plaintext `hio.stck:inf` record used to
+expose now comes from `get_basic_info`.
+
+**Goal:** the encrypted channel never reuses a `(key, nonce)` pair across a request and its
+response (#179). The anti-replay counter survives a power-cycle (#184). The counter high-water is
+readable without a key, so a phone can resync. A byte-identical retransmission is idempotent via a
+response cache.
 **Observable:**
-- **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes), with
-  the direction byte `0x00` for the request and `0x01` for the response. Request and response carry the
-  *same* counter in the header but use different keystreams. A phone on the new codec (9-byte nonce +
-  header-as-AAD) decrypts the response; the old 8-byte-nonce / no-AAD codec fails to decrypt or verify.
-- **Counter in info record:** `hio.stck:inf` is format `0x02`, 15-byte payload, with the last-accepted
-  `nonce_counter` (big-endian) at payload bytes `[11..14]`. It tracks the live counter.
-- **Idempotent retransmission (response cache):** re-sending the **same** counter (e.g. the phone never
-  read the reply) replays the cached encrypted response **without re-running** the command — no double
-  execution of a `set_param`/action.
-- **Anti-replay persists across reboot:** the accepted counter is durable; a counter `<=` the stored
-  high-water is rejected (`-EACCES`). After a reboot the response cache is empty, so even a same-counter
-  retry is rejected and the phone resyncs from the info-record counter. `lrw_reset` (which reboots
-  immediately) cannot be replayed.
+- **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes),
+  with direction `0x00` for the request and `0x01` for the response. Request and response carry
+  the *same* counter in the header, which is also the AAD, but use different keystreams.
+- **Counter via `get_basic_info`:** `[0x03] get_basic_info` field 2 `nonce_counter` is the last
+  accepted counter. It tracks the live value (`config nonce-counter`) and is persisted on every
+  accepted decrypt, before the command runs.
+- **Idempotent retransmission (channel `0x01` only):** re-sending the **byte-identical** frame
+  (e.g. the phone never read the reply) replays the cached encrypted reply **without re-running**
+  the command. RTT shows `cmd: in_len=… counter=N (cache=N stored=N)` with no `decrypt ok` /
+  `handled` after it. The nonce does not advance, and a `set_param` is not applied twice. The
+  vendor channel `0x02` has no cache, so a retransmission there is rejected as a replay.
+- **Anti-replay window `(stored, stored + 1024]`:**
+  - a counter ≤ stored gets no reply (RTT `Nonce counter is not greater than the last used nonce`);
+  - a counter > stored + 1024 gets no reply either (`Nonce counter jumps too far ahead`);
+  - after a reboot the cache is empty, so even a same-counter retry is rejected and the phone
+    resyncs from `get_basic_info` (+1);
+  - `lrw_reset`, which reboots at once, cannot be replayed.
 
-**Prompt for Claude — bench/J-Link verifiable parts (FW agent):**
-> On the default (encrypted) build, over RTT: `nfc dump` and confirm the `hio.stck:inf` record has
-> format byte `0x02`, payload length `0x0f` (15), and a 4-byte counter field after the debug flag.
-> Set `config nonce-counter <N>` to a recognizable value, force an info rewrite (`nfc clear` then a few
-> `nfc check`), `nfc dump` again and confirm the counter field shows `<N>` big-endian. Restore
-> `config nonce-counter 0`. (The wire-format contract — golden request/response vectors, direction
-> separation, AAD binding — is also asserted by the `tests/nfc_crypto` native_sim unit suite.)
+**Prompt for Claude — bench / J-Link parts (FW agent):**
+> On the default (encrypted) build, over RTT: `ats cmd plain 0801f20100` (`get_basic_info`) and
+> note `nonce_counter`. Set `config nonce-counter <N>` to a recognizable value, repeat the
+> `ats cmd plain` and confirm it reports `<N>`, then restore the original value. (The wire-format
+> contract — golden request/response vectors, direction separation, AAD binding — is also asserted
+> by the `tests/nfc_crypto` native_sim suite; the mailbox session paths by `tests/nfc_hw`.)
 
-**Prompt for Claude — round-trip & replay parts (needs the Manager-App phone):**
-> With the Manager-App on the matching codec: send an encrypted `get_info` with counter = last+1,
-> confirm the encrypted `hio.stck:rsp` decrypts on the phone and that `config nonce-counter` (shell) and
-> the info-record counter both advanced. Re-send the **same** counter (simulating a lost reply) and
-> confirm the device **replays the identical cached response without re-running** the command (RTT shows
-> `retransmission … replaying cached response`; a `set_param` value is not applied twice). Power-cycle the
-> device, re-send the same counter, and confirm it is now **rejected** (`-EACCES`, cache gone) and the
-> phone resyncs from the info-record counter (`stored+1`). Capture a request and its response and confirm
-> they cannot be cross-decrypted (direction separation). Report results.
+**Prompt for Claude — round-trip & replay parts (phone bench as in N6):**
+> 1. `basicinfo` → `nonce_counter` = s. `getinfo` → the reply decrypts, and `basicinfo` now
+>    reports s + 1.
+> 2. Seal one frame and send it **twice** byte-identically (`sticker_mailbox_test.mb_exchange(p,
+>    0x01, wire)` with the same `wire`), and confirm:
+>    - the second reply is identical;
+>    - RTT shows no second `decrypt ok` / `handled`;
+>    - a `set_param` sent that way is applied once.
+> 3. Reboot the unit and send the same frame a third time → no reply. `basicinfo` → resync with
+>    s + 2.
+> 4. Send a frame at stored + 1025 → no reply.
+> 5. Capture a request and its response and confirm neither decrypts with the other's direction
+>    byte.
+>
+> Report results.
 
 - [ ] Pass
 
-### N9 — Reset ladder over `hio.stck:cmd`: `device_reset` / `factory_reset` / `set_secret_key`, ack-before-reboot (#299)
+### N9 — Reset ladder over the mailbox: `device_reset` / `factory_reset` / `set_secret_key`, reply-before-reboot (#299, v1.5.0 #414)
 
-**Goal:** unlike `vendor_reset` (its own `hio.stck:vnd` vendor channel, see G6a-NFC), `device_reset` and
-`factory_reset` are ordinary `Command`s dispatched over the standard encrypted `hio.stck:cmd`
-channel — `factory_reset` is additionally **nfc/shell-only** (rejected as a LoRaWAN downlink,
-since a downlink that drops its own LoRaWAN session could never confirm delivery). `set_secret_key`
-is also nfc/shell-only and reachable the same way, and since #322 it reboots too — that reboot is
-what makes the rotated key live, because the encrypted channel authenticates from the boot-time
-`g_app_config` copy. All three must follow
-the same **ack-before-reboot** handshake as `lrw_reset`/`lrw_join` (N5): the device writes its
-encrypted response to the tag *first*, and only reboots once the phone reads it (`hio.stck:ack`)
-or a ~10 s quiet-field timeout fires — never immediately off the tap.
-**Observable:** `device_reset` — encrypted `ack` written back, RTT shows the deferred action
-staged, reboot only after the ack/timeout, then config/alarm defaults restored but identity +
-LoRaWAN provisioning intact (same postconditions as G6, driven over NFC instead of shell/LRW).
-`factory_reset` — same ack-before-reboot gate, but LoRaWAN keys/session also reset and the device
-re-joins after reboot (same postconditions as G6a's `factory_reset`, driven over NFC); presenting
-it as a LoRaWAN downlink is rejected with `Error{NOT_READY}` (transport not allowed), never
-silently accepted. `set_secret_key` — encrypted `ack` written back **first** (still under the *old*
-key, since the rotation is not live yet), reboot only after the ack/quiet-field timeout, and *after*
-that reboot the **new** key decrypts while the old one is rejected (#322). An all-zero key is
-refused with `Error{BAD_REQUEST}` — no save, no reboot, key unchanged.
+**Rewritten for v1.5.0 (#414).** The three commands are ordinary AES-CCM `Command`s on the owner
+mailbox channel `0x01`. `vendor_reset` uses the vendor channel `0x02`, see G6a-NFC. The v1.4.0 NDEF
+handshake is gone: no `hio.stck:ack` record and no ~10 s quiet-field timeout.
+
+**Goal:** `device_reset` (id 8), `factory_reset` (id 23) and `set_secret_key` (id 24,
+`SetSecretKey{key = 1}`) run only **after** the phone has had their encrypted `ack`:
+1. the firmware writes the reply and waits ≤ 1 s for the phone to read it (`HOST_PUT` cleared);
+2. it ends the session and shows **green + yellow 2 s**;
+3. only then it runs the action and reboots, even if the phone keeps its field on. Nothing else is
+   served in between.
+
+Transport rules: none of the three is accepted as a LoRaWAN downlink (`Error{NOT_READY}`).
+`device_reset` is also refused on the vendor channel; `set_secret_key` is also accepted there
+(G6a-NFC). `set_secret_key` makes the new key live through the reboot (#322). An all-zero key is
+refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
+**Observable:**
+- RTT `mb: session end (deferred action), N reply(ies), result ok` right after the `ack`, then the
+  reboot: 2 s result LED + the NVS save, ~5 s in total.
+- A follow-up command sent in the same hold right after the `ack` gets **no reply**: the session is
+  over and the action runs first.
+- With the phone kept on the tag, the next `get_basic_info` after the reboot is answered once NFC
+  is up (~1.2 s after reset, at the end of the init chain). Its `nonce_counter` is **not** reset: every
+  tier keeps it.
+- `device_reset`: config and alarm defaults are restored. Kept: identity (serial, `secret_key`,
+  nonce, claim token + window state, `vendor_token`) and the full LoRaWAN provisioning and session
+  (G6).
+- `factory_reset`: kept are identity + DevEUI / JoinEUI. The LoRaWAN keys and session reset, the
+  counters and the history are cleared (#471), and the device re-joins (G6a).
+- `set_secret_key`: the `ack` decrypts under the **old** key. After the reboot, a frame sealed with
+  the old key gets no reply (RTT `cmd: decrypt failed`, red LED) while the new key works. The nonce
+  is preserved.
+- The claim window is unchanged by all three (N10).
+
+**Prompt for Claude (phone bench as in N6; seal frames with `sticker_mailbox_test.py` `Dev.enc(<id>, <body>)` or `sticker_nfc_frame.py`):**
+> Before each step, record `get_basic_info` (nonce) and `ats claim status`, and keep the phone on
+> the tag throughout.
+> 1. `device_reset` (id 8, empty body):
+>    - confirm the `ack`, RTT `session end (deferred action)`, green + yellow 2 s, then the reboot;
+>    - right after the `ack`, send one more `get_info` in the same hold and confirm it gets no reply;
+>    - after the reboot, confirm `get_basic_info` answers with the nonce not reset, config/alarm
+>      defaults are restored, `config serial-number` / `radio-deveui` / `secret-key` are unchanged, and
+>      the LoRaWAN session is intact.
+> 2. `factory_reset` (id 23):
+>    - confirm the same ordering, that the LoRaWAN keys/session reset and the device re-joins, and
+>      that identity and claim state are unchanged;
+>    - send `factory_reset` as a fPort-85 downlink and confirm `Error{NOT_READY}` (never executed).
+> 3. `set_secret_key` with an all-zero key: confirm `Error{BAD_REQUEST "zero key"}`, no reboot, and
+>    `config secret-key` unchanged.
+> 4. `set_secret_key` with a new 16-byte key:
+>    - confirm the `ack` decrypts under the old key and the device reboots;
+>    - after the reboot, confirm a frame sealed with the old key gets no reply while one sealed with
+>      the new key is answered;
+>    - restore the bench key the same way.
+>
+> Report each outcome.
+
+> **v1.4.0 run over the NDEF channel (2026-07-27, #322, for reference):** the command logic still
+> holds, only the transport changed.
+> - An all-zero key was refused (`BAD_REQUEST "zero key"`, no reboot).
+> - A valid rotation acked **first**, under the old key, then cold-rebooted with the new key live.
+> - The old key was rejected afterwards (`command rejected: -5`, nonce not advanced), and
+>   `nonce-counter` survived the rotation.
+>
+> The reply-before-reboot sequencing on the mailbox is HW-proven by the `set_param save=true` and
+> `claim_active` runs of N6 / N10 (2026-09-23). The command logic is covered by `tests/cmd`
+> (`test_deferred_actions`, `test_device_reset_nfc_shell_only`, `test_factory_reset_nfc_shell_only`,
+> `test_set_secret_key`, `test_set_secret_key_over_vendor`) and by `tests/nfc_hw`
+> (`test_mb_deferred_action_ends_poll_while_field_held`).
+
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868) — step 2 only:** `factory_reset` over `0x01` → `ack`, RTT
+> `session end (deferred action)`, reboot. Afterwards serial / `secret-key` / claim token kept,
+> claim window unchanged, LoRaWAN keys zero, `radio-mode off`, history empty. `factory_reset`
+> injected as a LoRaWAN Command (`ats cmd lrw 0801ba0100`) → `Error{NOT_READY}`, nothing erased.
+> Steps 1, 3, 4 (`device_reset`, `set_secret_key`) not re-run on the mailbox.
+
+- [ ] Pass — v1.5.0 mailbox: step 2 PASS 2026-10-09, steps 1/3/4 pending
+
+### N10 — Claim window: explicit two-state latch (`active`/`done`) + `get_claim_info` (#247, #415)
+
+**Rewritten for v1.5.0 (#415, #414).** The claim window is an explicit two-state latch with **no
+automatic behaviour**. The v1.4.0 auto-arm (`unset → pending` on a provisioned token) and the two
+implicit closes (RF delete-detection, and any decrypted command #308) are gone. With #414 there is
+no `hio.stck:clm` NDEF record either: the token is read with `get_claim_info` over the plaintext
+mailbox channel `0x03`.
+
+**Goal:** a provisioned unit is `active` from the factory (NVS default). While `active` it answers
+`get_claim_info` with `ClaimInfo{serial_number, claim_token}` (`device_status` bit 17
+`CLAIM_ACTIVE` set). The window closes **only** on an explicit `claim_done` (owner command, id 25)
+or `ats claim done`, which gives `done`: `get_claim_info` → `NOT_READY "claimed"` and bit 17 = 0.
+`claim_active` (id 27, reboots) / `ats claim active` reopen it; `vendor_reset` closes it and wipes
+the token (#471); `device_reset` / `factory_reset` leave it alone. The state persists across reboot
+and reflash (NVS `clm/state`). Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and
+`consumed` → `done`; any other stored value closes the window (fail-closed, #471). No token
+provisioned → `NOT_READY "no claim token"`. `claim_active` answers `ClaimInfo` with the token that
+holds after the reboot: `new_claim_token` if given, else the stored one, else (none stored) a new
+CSPRNG token (#471).
+**Observable:** `ats claim status` reports the state throughout. `get_claim_info` (over `[0x03]`
+or `ats cmd plain 0801ea0100`) returns the token or the `NOT_READY` reason. `device_status` bit 17
+in the encrypted `get_info` mirrors the window.
 
 **Prompt for Claude:**
-> Build an AES-CCM `hio.stck:cmd` frame carrying `device_reset` (mirror the golden-vector
-> construction in `tests/nfc_crypto` / `reference_nfc_rst_hil_test_299`, encrypted with the
-> current `secret-key`) and inject it via sequential `nfc write` calls (long hex truncates
-> silently past ~128 chars — split into ~40-byte chunks). Confirm the encrypted `ack` is on the
-> tag **before** any reboot happens; only after reading it back (or waiting out the ~10 s
-> quiet-field timeout) does RTT show the reboot. After reboot confirm config/alarm defaults are
-> restored but `config lrw-deveui`/`config serial-number` are unchanged. Repeat for
-> `factory_reset`: confirm the same ack-then-reboot ordering, and that LoRaWAN keys reset and the
-> device re-joins after reboot. Then present `factory_reset` as a fPort-85 LoRaWAN downlink instead
-> and confirm it is rejected with `Error{NOT_READY}` rather than silently executed. Finally send
-> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written to the
-> tag **before** the reboot and is still decryptable with the *old* key, that the reboot fires only
-> after the ack/quiet-field timeout, and that after it a frame encrypted with the *old* key is
-> rejected while one encrypted with the *new* key succeeds (#322). Repeat `set_secret_key` with an
-> all-zero key and confirm `Error{BAD_REQUEST}`, no reboot, and `config secret-key` unchanged.
-> Report all results.
+> **Shell part.**
+> 1. `settings erase`, then `config claim-token <32-hex>` + `config secret-key <32-hex>` +
+>    `settings save`.
+> 2. After the reboot, confirm:
+>    - `ats claim status` → **`active`** (the factory default, no arm step);
+>    - `ats cmd plain 0801ea0100` (`get_claim_info`) → `ClaimInfo` with the serial and the token;
+>    - `ats cmd plain 08012200` (`get_info`) → `NOT_READY "transport not allowed"` (plain_text is
+>      opt-in).
+> 3. Reflash (plain `west flash`, no `--erase`) and confirm the state is still `active`.
+> 4. `ats claim done` → `done`, and `get_claim_info` → `NOT_READY "claimed"`. Reboot and confirm
+>    `done` survives.
+> 5. `vendor_reset` (G6a-NFC) → `done`, token wiped: `get_claim_info` → `NOT_READY "claimed"`
+>    (#471).
+> 6. Send `claim_active` with no token over the owner channel (phone
+>    part step 5) → `ClaimInfo` with a **new, non-zero** token; after the reboot `ats claim status`
+>    → `active`, `config claim-token` shows that token and `get_claim_info` returns it.
+>
+> **Phone part (bench as in N6, `sticker_mailbox_seq_led_claim.py` steps 3–7):**
+> 1. `get_claim_info` → token.
+> 2. Send many authenticated `get_info` and confirm the window **stays `active`**: a decrypted
+>    command must not close it.
+> 3. `claim_done` → `ack`, then `get_claim_info` → `NOT_READY "claimed"`, and `get_info` shows
+>    bit 17 = 0.
+> 4. `claim_active` → `ClaimInfo` with the same token (#471), reboot. With the phone kept on the
+>    tag, `get_claim_info` → token again.
+> 5. After a `vendor_reset` (G6a-NFC): `claim_active` with no token → `ClaimInfo` with a new token;
+>    `claim_active` with `new_claim_token` → `ClaimInfo` with that token. Each time the token
+>    returned is the one `get_claim_info` gives after the reboot.
+>
+> Report each outcome.
 
-**`set_secret_key` portion HIL-verified 2026-07-27** (#322), same frame-construction recipe as
-G6a-NFC above — hand-crafted AES-CCM `hio.stck:cmd` records injected with chunked
-`nfc write <offset> <hex>` and driven with `nfc check`. Confirmed: (1) an all-zero key is refused
-with `Error{BAD_REQUEST}` detail `"zero key"`, deferred action `none`, no reboot, `secret-key`
-unchanged; (2) a valid rotation reports deferred action `secret-key-save+reboot`, the `Ack` is
-written to the tag **first** and still decrypts under the *old* key, then the device cold-reboots
-and `config secret-key` reads the new key — i.e. the new key is live immediately rather than at
-some later unrelated reboot; (3) after that reboot a frame sealed with the *old* key is refused
-(`command rejected: -5`, nonce high-water not advanced) while the same frame sealed with the *new*
-key is handled normally; (4) `nonce-counter` is preserved across the rotation reboot (persisted by
-`decrypt()` before the command runs). The `device_reset` / `factory_reset` legs of N9 were **not**
-re-exercised in this session — unchanged by #322.
+**HIL-verified 2026-09-23 — phone part** (`b4c2ee5` debug, SN 2162190413, Pixel 9a + nfc-proxy):
+- `get_claim_info` → token `0102…10`, after 31 authenticated exchanges in the same run (so decrypted
+  commands did not close the window);
+- `claim_done` → `ack`, then `NOT_READY "claimed"`, `device_status` = `0x00000000`;
+- `claim_active` → `ack`, reboot, device back +6.15 s, and `get_claim_info` → token again;
+- no WRN / ERR in RTT.
 
-- [ ] Pass
+The shell part (reflash survival, `vendor_reset` reopen) is still to be re-run on v1.5.0.
 
-### N10 — Claim window: `hio.stck:clm` lay-down + all three end-of-claim triggers (#247, #308)
+- [x] Pass — phone part, 2026-09-23
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, #471 claim flow):**
+> - Shell 4: `ats claim done` → `done`, survived a `settings save` reboot.
+> - Shell 5 / G6a-NFC: `vendor_reset` → `done`, token wiped.
+> - Phone: `get_claim_info` → `NOT_READY "claimed"`; `claim_active` (no token) → `ClaimInfo` with a
+>   new random token, reboot, `active`, `config claim-token` = that token; `get_claim_info` → same
+>   token; `claim_done` → `ack`, then `NOT_READY "claimed"`; `claim_active` → `ClaimInfo` with the
+>   **same** token; `claim_active{new_claim_token}` → `ClaimInfo` with that token, persisted.
+> - Shell 6 via `ats cmd` inject: `ClaimInfo` with a new token. The inject does not run the deferred
+>   save/reboot, but the token is staged into config and a later `settings save` persists it.
+> - Not re-run: shell 1–3 (erase / reflash survival), phone 2 (many `get_info`).
 
-**Goal:** once `claim_token` is provisioned, the firmware publishes `hio.stck:clm` alongside the
-plaintext info record on every resting-tag write (including after a reboot/reflash), and the claim
-window ends via **any** of three independent triggers: (1) the phone deletes `clm` off the tag
-(#247, unauthenticated over RF, kept for backward compatibility), (2) the phone sends the explicit
-`clm_ack` command over the encrypted `hio.stck:cmd` channel (#308), or (3) the phone sends **any**
-other authenticated command at all — decrypting it already proves `secret_key` possession (#308).
-All three latch the same persisted `UNSET → PENDING → CONSUMED` state; once `CONSUMED`, `clm` is
-never republished, even across reboot/reflash — only a full NVS erase or `vendor_reset` reopens it.
-**Observable:** `nfc clm` shell command reports the latch state throughout. `nfc dump` shows a
-two-record `[inf, clm]` NDEF message while `PENDING`, `inf`-only once `CONSUMED`.
+- [x] Pass — #471 claim flow (shell 4–6, phone 1, 3–5), 2026-10-09
+- [ ] Pass — shell part 1–3 (v1.5.0)
+
+> **Superseded v1.4.0 run (2026-07-14, for reference only):** with the old auto-arm + implicit
+> close, `config claim-token` + `settings save` armed `pending`; `nfc dump` showed the two-record
+> `[inf, clm]` message (byte-exact `hio.stck:clm` + token); a `clm_ack` frame and an unrelated
+> `get_info` each latched `consumed (2)`. Under #415 the arm is gone (default is `active`) and only
+> `claim_done` closes it; under #414 the `clm` record is gone.
+
+### N11 — NFC LED during a mailbox tap (#315, v1.5.0 #414)
+
+**Goal:** an operator holding the phone can tell a successful tap from a failed one by the LED
+alone (`doc/version 1.5.md` §18 "LED during a tap"). The firmware sends **no reply** to a frame it
+cannot authenticate (wrong `secret_key` / `vendor_token`, stale or out-of-window `nonce_counter`,
+unknown channel), so without the LED a failed tap looks like a slow one.
+**Observable:**
+- phone on the tag, no mailbox session → **green**, off after ≤ 5 s (even if the phone stays);
+- mailbox session running → **green blink**;
+- session end (3 s idle / `MB_EN` cleared / field off), last exchange OK → **green + yellow 2 s**, then off;
+- last exchange rejected, or its reply never read (phone lifted too early) → **red 2 s**, then off;
+- a rejection followed by a successful exchange (app resync) ends **green + yellow** (last decides);
+- an authenticated `Response.error` (e.g. `NOT_WRITABLE`) counts as OK;
+- a reboot-type command (`set_param save=true`, `reboot`, resets, `set_secret_key`) shows
+  **green + yellow 2 s, then reboots** (boot carousel follows; no pre-reboot green ×10);
+- never an orange blend (red + green) between states;
+- a tap during the boot carousel cuts it short (only the NFC LED, no carousel colour mixed in),
+  and no heartbeat, status or alarm blink shows while the NFC LED holds the indicator.
 
 **Prompt for Claude:**
-> `settings erase`, then `config claim-token <32-hex>` + `settings save`. After reboot confirm
-> `nfc clm` reports `PENDING` and `nfc dump` shows the two-record `[inf, clm]` message. Reflash the
-> firmware (plain `west flash`, no `--erase`) and confirm `PENDING` and the two-record tag survive
-> the reflash unchanged (#308 "publish until claimed" guarantee).
->
-> Trigger 1 (delete-detection, #247): rewrite the tag with an info-only NDEF message (simulating
-> the phone deleting `clm` after claiming) via `nfc write`, then `nfc check`. Confirm `nfc clm`
-> latches `CONSUMED` and reboot doesn't resurrect `clm`.
->
-> Reset to `PENDING` again (`settings erase` + re-provision) for the next two triggers so each is
-> tested from a clean arm. Trigger 2 (`clm_ack`, #308): build an AES-CCM `hio.stck:cmd` frame
-> carrying `clm_ack` (mirror the golden-vector construction in `tests/nfc_crypto` /
-> `reference_nfc_rst_hil_test_299`; split into sequential `nfc write` calls — long hex truncates
-> silently past ~128 chars) and inject it. Confirm the encrypted `ack` comes back and `nfc clm`
-> latches `CONSUMED` — with **no** RF delete needed.
->
-> Trigger 3 (implicit consume, #308): re-arm to `PENDING` once more, then send an *unrelated*
-> authenticated command (e.g. `get_info`) over `hio.stck:cmd` instead of `clm_ack`. Confirm that
-> merely decrypting this command also latches `CONSUMED`, even though the command itself was never
-> `clm_ack`. Report all three trigger outcomes and the reflash-survival result.
-
-**HIL-verified 2026-07-14** (debug image, J-Link 822005109), hand-crafted AES-CCM frames (no phone,
-same recipe as `reference_nfc_rst_hil_test_299`): `settings erase` → `config claim-token` +
-`config secret-key` + `settings save` → reboot arms `PENDING`; `nfc dump` confirmed the two-record
-`[inf, clm]` message (`TLV len=0x5b`, second record `54 0c 12 68 69 6f 2e 73 74 63 6b 3a 63 6c 6d`
-= `hio.stck:clm`, payload `12 10` + the 16-byte test token, byte-exact). **Reflash survival**:
-re-flashed the same image (no `--erase`) and confirmed `PENDING` + the identical two-record content
-survived unchanged. **Trigger 2 (`clm_ack`)**: injected an encrypted `hio.stck:cmd` frame carrying
-`clm_ack` → `handled, response 5 B` (bare ack, `deferred action: none`) → `clm state: consumed (2)`.
-**Trigger 3 (implicit consume)**: re-armed to `PENDING`, injected an encrypted `get_info` command
-instead (67 B `Info` response, clearly not `clm_ack`) → `clm state: consumed (2)` all the same,
-confirming any authenticated command ends the window. Trigger 1 (delete-detection) was not
-re-exercised standalone this session — its logic is unchanged from #247 (only moved into the shared
-`clm_consume()` helper also used by triggers 2/3, both of which passed) — see the original #247
-HW-validation note above for its own direct HIL run.
-
-- [x] Pass (HIL-verified via hand-crafted frames, 2026-07-14; triggers 2 and 3 + reflash survival)
-
-### N11 — Rejected tap blinks red, not green (#315)
-
-**Goal:** a command that fails authentication is visually distinguishable from one that succeeded.
-Both encrypted channels (`hio.stck:cmd` keyed by `secret_key`, `hio.stck:vnd` keyed by
-`vendor_token`) write **nothing** back to the tag when the frame is rejected — wrong key, stale or
-out-of-window `nonce_counter`, unprovisioned (all-zero) key, malformed frame — so before #315 the
-green "servicing" blink simply kept running until the RF-quiet backstop and a failed tap looked
-exactly like a successful one.
-**Observable:** on rejection the green fast blink is replaced by a **red fast blink** (same ~90 ms
-cadence) held ~2 s, then the LED clears; RTT shows `-> command rejected: <errno>` (or
-`-> vendor command rejected:`) for the same tap. An *authenticated* command that merely fails at the
-application level (e.g. `NOT_WRITABLE`) is **not** a rejection: it returns an encrypted `error`
-response and still shows the reply-ready green+yellow (`doc/version 1.4.md` §16).
-
-**Prompt for Claude:**
-> On the debug build over RTT, inject a *tampered* encrypted `hio.stck:cmd` frame (take a valid
-> hand-crafted frame — same recipe as N9/N10 — and flip one ciphertext byte so the CCM tag fails)
-> via sequential `nfc write` calls, then `nfc check`. Confirm RTT reports the rejection
-> (`handle_encrypted_cmd` failed / `-> command rejected: -5`) and that the red LED is driven
-> instead of green: read the LED GPIO state over J-Link (or watch the unit) during the ~2 s window,
-> then confirm all three channels are off afterwards. Repeat with a **stale** counter (`<=` the
-> stored high-water → `-EACCES`) and with a `hio.stck:vnd` frame under a wrong `vendor_token`.
-> Finally send one *valid* command and confirm the normal green → green+yellow sequence still
-> happens (no red, no orange blend from a leftover red channel). Report each outcome.
+> Release-like build, SWD detached (Q14). Drive the mailbox from the phone bench
+> (`nfc-proxy-app` + `sticker_mailbox_test.py`, or the Manager-App mailbox transport) and watch
+> the unit (or read the LED GPIOs over J-Link between taps). (1) Hold the phone without enabling the
+> mailbox: green, off within 5 s. (2) `getinfo` loop of 5: green blink during, green + yellow 2 s at
+> the end. (3) One frame with a wrong key: red 2 s at the end; RTT shows `mb: request rejected`.
+> (4) Wrong-key frame, then `get_basic_info` + a correct frame in the same session: green + yellow.
+> (5) Send a request and lift before reading the reply: red. (6) `setparam --save`: green + yellow
+> 2 s, then reboot + boot carousel. (7) Keep the phone on the tag through that reboot: the
+> carousel is cut short as soon as the NFC LED lights. (8) Trigger an alarm (magnet on a hall
+> input) during a `getinfo` loop: no alarm blink until the NFC LED is off. Report each outcome.
 
 - [ ] Pass
 
@@ -1855,6 +2382,10 @@ the identical write over NFC secret_key auth; confirm success.
 > over NFC `secret_key` auth succeeded (`ack{}`), `alarm list` confirmed slot 0 updated to the new
 > rule. Decisive.
 
+> **v1.5.0 (#414):** the vendor channel is the mailbox channel `0x02` (G6a-NFC). To re-run, send a
+> `[0x02]` `SetParam{alarms.alarm_0=…}` sealed with `vendor_token` — expected unchanged
+> (`NOT_WRITABLE`, `fault_field` 403) — and the same write on `0x01` → `ack`.
+
 ### X3 — H: history replay-active flag cleared on RECONNECT abort (M4)
 
 **Goal:** A history replay aborted by a RECONNECT transition clears `app_history_set_replay_active
@@ -1877,23 +2408,23 @@ confirm `history stats` count keeps climbing.
 
 
 
-### X4 — H: `ats lrw compose` runs on `m_work_q`, no longer races real TX
+### X4 — H: `ats radio compose` runs on `m_work_q`, no longer races real TX
 
-**Goal:** The debug `ats lrw compose` shell command composes on `m_work_q` instead of the shell
+**Goal:** The debug `ats radio compose` shell command composes on `m_work_q` instead of the shell
 thread, so it can't race a real TX in flight.
-**Observable:** Running `ats lrw compose` while a real telemetry send is in flight does not corrupt
+**Observable:** Running `ats radio compose` while a real telemetry send is in flight does not corrupt
 the frame or crash; both complete cleanly.
 
-**Prompt for Claude:** With a short `interval-report`, fire `ats lrw compose` repeatedly while
+**Prompt for Claude:** With a short `interval-report`, fire `ats radio compose` repeatedly while
 telemetry is actively sending; confirm no corruption/crash and both the manual and periodic frames
 land on the LNS.
 
 - [x] Pass
 
-> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** fired `ats lrw
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** fired `ats radio
 > compose` three times back-to-back over RTT shell while the periodic 60 s telemetry cadence was
 > live; a real periodic uplink landed concurrently (`fcnt up` 10→11 mid-sequence). All composes
-> returned clean fPort-2 hex frames, `ats lrw status` stayed HEALTHY throughout, no crash/corruption.
+> returned clean fPort-2 hex frames, `ats radio status` stayed HEALTHY throughout, no crash/corruption.
 
 ### X5 — H `[HIL-only]`: `advance_page()` doesn't commit a ring page on flash erase/write failure
 
@@ -1931,7 +2462,7 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 
 > **Code-verified (2026-08-17)**: confirmed in `main.c` at the `5d14b24` tip that
 > `nfc_run_deferred_cmd_actions()` is called at line 548, after `app_sensor_init()`/
-> `app_counters_init()` (lines 532/539) and before `app_lrw_join()` (line 555) — the exact ordering
+> `app_counters_init()` (lines 532/539) and before `app_radio_lrw_join()` (line 555) — the exact ordering
 > the fix describes.
 >
 > **HIL-verified selectivity, decisive (2026-08-18, SN 2162199999)**: with a real magnet, got
@@ -1969,13 +2500,34 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 - [x] Pass — code-verified ordering + HIL-verified selective-reset behavior (see above); the
   exact at-boot race timing not independently reproduced without real RF/phone hardware
 
-### X7 — H + M3 + M15 + M24: clm arm/rearm persist-after-confirmed-write + vendor decrypt doesn't consume + `m_clm_state` locked
+> **v1.5.0 (#414):** the boot-staged path is gone (N7), but the same class came back through the
+> mailbox. The "3 s start delay closes the window" argument above did not hold: the boot LED
+> carousel (~7 s) runs **before** `app_counters_init()`, so a phone command could be served during
+> it. After `e2ce024` started the poll thread right after `app_nfc_init()`, that was already ~1 s
+> after boot. #414 now runs `app_nfc_init()` and starts the poll thread at the **end** of the init
+> chain, after `app_counters_init()` and just before `app_radio_lrw_join()`. Until then the chip is
+> unpowered (`VCC_ON = 0`), so no command reaches an uninitialised component.
+>
+> Re-run on v1.5.0 with the phone on the tag during a reboot:
+> - `probe` must read `VCC_ON = 0` until ~1.2 s after reset;
+> - a `reset_counters{hall_left}` sent as soon as the mailbox comes up must zero only `hall_left`.
 
-**Goal:** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt (only `clm_ack` /
-successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm sequence (M15) persist
-`CLM_PENDING`/`UNSET` only after the tag write / config-save is confirmed, reverting instead of
-latching a bad terminal state on failure; (c) `m_clm_state` is now locked against the shell
-`ats claim active/done` commands racing the NFC poll thread (M24).
+### X7 — M24: claim state locked against shell/poll races (was M3/M15/vendor-consume, superseded by #415)
+
+> **Mostly superseded by v1.5.0 (#415).** (a) and (b) below no longer apply: the implicit close is
+> gone (NO command — owner or vendor — closes the window any more; only an explicit `claim_done`
+> does), and the M3/M15 arm-persist-after-confirmed-write dance is deleted (with #414 there is no
+> `clm` record at all — nothing to commit/revert). Only **(c)** survives, in a new form: claim-state
+> writes (`claim_state_set()`, from `ats claim active/done` / `claim_active` / `claim_done` /
+> `vendor_reset`) are serialised by their own `m_claim_lock`, and reads are lock-free atomics (#414
+> review fix), so `app_cmd_get_info()` on `m_work_q` never waits on a phone tap. See the rewritten
+> **N10** for the current claim-window test.
+
+**Goal (historical, v1.4.0):** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt
+(only `clm_ack` / successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm
+sequence (M15) persist `CLM_PENDING`/`UNSET` only after the tag write / config-save is confirmed,
+reverting instead of latching a bad terminal state on failure; (c) `m_clm_state` is now locked
+against the shell `ats claim active/done` commands racing the NFC poll thread (M24).
 **Observable:** A vendor-channel decrypt on a claimed device does NOT flip `clm` state; an
 inf-write failure during arm reverts to `CLM_UNSET` (retries next poll) instead of latching
 `CLM_CONSUMED`; concurrent shell claim commands + NFC poll don't corrupt `clm` state.
@@ -2013,8 +2565,8 @@ cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 - [x] Pass
 
 > **HW-verified (2026-08-17, SN 2162199999, TTN)**: performed both a real `factory_reset` and a
-> real `vendor_reset` over NFC this session (see X12). Both correctly zeroed `lrw-appkey` (+
-> devaddr/nwkskey/appskey) while preserving `lrw-deveui`/`lrw-joineui`; after restoring the
+> real `vendor_reset` over NFC this session (see X12). Both correctly zeroed `radio-appkey` (+
+> devaddr/nwkskey/appskey) while preserving `radio-deveui`/`lrw-joineui`; after restoring the
 > original AppKey via NFC `SetParam{lorawan.appkey}+save=true`, the device rejoined OTAA cleanly
 > both times (fresh `devaddr`, `state: HEALTHY`) with no manual DevNonce flush and no "already
 > used" rejection. Caveat: TTN is known to be more tolerant of DevNonce reuse than ChirpStack
@@ -2023,7 +2575,7 @@ cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 
 ### X9 — H: alarm `rt_sync()` resets stale latch on any rule edit; RATE/COUNT holds after firing
 
-**Goal:** Editing an alarm rule (not just source/quantity changes) resets its runtime latch; a
+**Goal:** Editing an alarm rule (not just slot/channel changes) resets its runtime latch; a
 RATE/COUNT alarm holds after firing instead of re-firing every window.
 **Observable:** Editing any field of an armed rule clears its latched state cleanly; a RATE/COUNT
 alarm fires once per window then stays quiet (no report spam) until the condition genuinely
@@ -2090,6 +2642,10 @@ rejected (red LED / no cached reply), not silently accepted.
 > 8-byte `BE32(serial)||BE32(same counter)` frame (no ciphertext/tag) at that counter —
 > `-> command rejected: -22` (EINVAL), not served a cached reply. Decisive.
 
+> **v1.5.0 (#414):** on the mailbox, send the 8-byte header-only frame as `[0x01] BE32(serial)
+> BE32(same counter)` → no reply (RTT `mb: request rejected`), red LED. The byte-identical
+> retransmission of the real frame is still served from the cache (N8).
+
 ### X12 — M2: `nonce_counter` preserved across `vendor_reset`
 
 **Goal:** `vendor_reset` no longer restarts the AES-CCM nonce counter from 0 under the unchanged
@@ -2109,6 +2665,9 @@ and confirm `nonce_counter` in `get_info`/`config show` did NOT drop to 0.
 > Post-reset `nonce-counter` read back as **565** (not 0). Replaying the recorded counter-564 frame
 > was rejected (`-13`/EACCES, "nonce not greater than last used"). Fully decisive. LoRaWAN identity
 > was then restored via NFC SetParam (deveui/joineui/appkey) and the device rejoined TTN cleanly.
+
+> **v1.5.0 (#414):** the replay test now runs on the vendor mailbox channel `0x02` (no response
+> cache there), and `get_basic_info` shows the preserved counter right after the reset (G6a-NFC).
 
 ### X13 — M5: telemetry trigger coalesced with a queued drain still composes
 
@@ -2180,7 +2739,7 @@ a single physical round trip.
 
 **Prompt for Claude:** Drive into WARNING (L8), arrange a downlink to land right as a link-check
 is pending (so it resolves LC implicitly), then confirm a late/duplicate `LinkCheckAns` doesn't
-also increment `m_consecutive_lc_ok` a second time (`ats lrw status` consecutive-ok counter).
+also increment `m_consecutive_lc_ok` a second time (`ats radio status` consecutive-ok counter).
 
 - [~] Pass (best-effort — race precondition achieved, magnitude structurally unobservable)
 
@@ -2194,7 +2753,7 @@ also increment `m_consecutive_lc_ok` a second time (`ats lrw status` consecutive
 > `m_consecutive_lc_ok`, so +1 vs. a buggy +2 lands on the same visible `0/1` — the counter
 > magnitude cannot distinguish the two on this config, and `debug.conf`'s
 > `CONFIG_LOG_MAX_LEVEL=2` compiles out the guard's `LOG_DBG` line. The guard itself
-> (`app_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
+> (`app_radio_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
 > statically confirmed; no anomaly was observable on hardware with the race forced.
 
 ### X17 — M17: `app_report_suspend()` cancels pending report work
@@ -2210,7 +2769,7 @@ via RTT log that no compose/TX happens after the suspend log line.
 
 - [x] Pass
 
-> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** `ats lrw check`
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** `ats radio check`
 > (forces a link check + `app_report_trigger()`, queuing `m_trigger_work`) immediately followed by
 > `power suspend`. Terminal log shows `Sending data with link check request` → `Suspending (deep
 > sleep). Wake via NRST / power-cycle.` with **no** compose/TX line in between or after — the
@@ -2289,7 +2848,7 @@ ends via its own deadline reboot rather than an unexplained hang/IWDG reset.
 > **Partially HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):**
 > `config calibration true` + `settings save` rebooted cleanly into calibration mode (temporary
 > calibration DevEUI `02403b84fd451f37`, `Device status: nfc-down` as expected, `LRW state:
-> healthy`) — the decoupled `app_lrw_run_on_work_q()` send path works with no hang on the normal
+> healthy`) — the decoupled `app_radio_lrw_run_on_work_q()` send path works with no hang on the normal
 > (non-stalled) path, and a plain `ats device reboot` cleanly exited back to normal
 > (`app_calibration_init()` auto-clears the flag). **Not yet confirmed:** the actual regression
 > target — a forced MAC-confirm stall — needs reproducible radio silence (e.g. detach antenna or
@@ -2440,7 +2999,7 @@ read back shifted/garbage (sibling of the #384 rollover bug, one layer deeper).
 fresh page and the stream re-aligns; a no-bytes-lost failure keeps the page open. Blast radius
 shrinks from "rest of the page" to "at most the failed record".
 
-### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_lrw.c`)
+### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_radio_lrw.c`)
 
 The post-command action (reboot/save/reset over the fPort-85 downlink port) fired at a fixed
 8 s, but a failed `lorawan_send()` requeues the Ack with a 15 s retry backoff — the reboot always

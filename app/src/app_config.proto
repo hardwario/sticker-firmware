@@ -7,12 +7,14 @@ message AppConfigMessage {
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
+    optional P2P p2p = 11;
 
     message Lorawan {
         enum Region {
             EU868 = 0;
             US915 = 1;
             AU915 = 2;
+            AS923 = 3;
         }
 
         enum Network {
@@ -31,6 +33,18 @@ message AppConfigMessage {
             P2P = 2;
         }
 
+        enum Datarate {
+            AUTO = 0;
+            DR0 = 1;
+            DR1 = 2;
+            DR2 = 3;
+            DR3 = 4;
+            DR4 = 5;
+            DR5 = 6;
+            DR6 = 7;
+            DR7 = 8;
+        }
+
         optional Region region = 1;
         optional uint32 sub_band = 2;
         optional Network network = 3;
@@ -43,19 +57,22 @@ message AppConfigMessage {
         optional bytes devaddr = 10;
         optional bytes nwkskey = 11;
         optional bytes appskey = 12;
-        optional uint32 link_check_interval = 13;
-        optional uint32 link_check_fail_rejoin = 14;
+        optional uint32 radio_link_check_interval = 13;
+        optional uint32 radio_link_check_fail_rejoin = 14;
         optional RadioMode radio_mode = 15;
+        optional Datarate datarate = 16;
     }
 
     message Application {
+        reserved 5;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 3;
         optional bool history_enable = 4;
-        optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
         optional bool vendor_reset_allow = 7;
+        optional uint32 interval_announce = 8;
+        optional bytes history_channels = 9;
     }
 
     message Sensors {
@@ -85,9 +102,25 @@ message AppConfigMessage {
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
         optional bool cap_buzzer = 19;
+        optional bool cap_sht = 22;
+        optional uint32 sensor1_type = 23;
+        optional uint32 sensor2_type = 24;
+        optional uint32 sensor3_type = 25;
+        optional uint32 sensor4_type = 26;
     }
 
     message Alarms {
+        enum AlarmBuzzerMode {
+            OFF = 0;
+            ONCE = 1;
+            SLOW = 2;
+            NORMAL = 3;
+            FAST = 4;
+            CONTINUOUS = 5;
+            RESERVED_6 = 6;
+            RESERVED_7 = 7;
+        }
+
         reserved 2;
         reserved 19;
         optional uint32 alarm_limit = 1;
@@ -107,6 +140,20 @@ message AppConfigMessage {
         optional bytes alarm_13 = 16;
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
+        optional AlarmBuzzerMode alarm_buzzer_mode = 20;
+        optional bool radio_alarm_ack = 21;
+    }
+
+    message P2P {
+        enum Modulation {
+            LORA = 0;
+            FSK = 1;
+        }
+
+        optional uint32 frequency = 1;
+        optional uint32 spreading_factor = 2;
+        optional uint32 tx_power = 3;
+        optional Modulation modulation = 4;
     }
 }
 // END GENERATED CONFIG
@@ -135,10 +182,14 @@ message Command {
         Sample           sample            = 21;
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
-        ClmAck           clm_ack           = 25;
+        ClaimDone        claim_done        = 25;
         SetSecretKey     vendor_reset      = 26;
-        ClmRearm         clm_rearm         = 27;
+        ClaimActive      claim_active      = 27;
         BuzzerPlay       buzzer_play       = 28;
+        GetClaimInfo     get_claim_info    = 29;
+        GetBasicInfo     get_basic_info    = 30;
+        GetSettings      get_settings      = 31;
+        GetRadioState    get_radio_state   = 32;
     }
 // END GENERATED COMMANDS
 
@@ -157,6 +208,17 @@ message Command {
         optional bool                         save        = 3;
         optional AppConfigMessage.Sensors     sensors     = 4;
         optional AppConfigMessage.Alarms      alarms      = 5;
+        // Empty all alarm rule slots (alarm_0..alarm_15) before this message's
+        // `alarms` group is applied, so one SetParam rewrites the whole table
+        // (the host is the source of truth for the rules). Without an `alarms`
+        // group it clears every slot. alarm_limit / alarm_buzzer_mode are kept.
+        // Staged like any other key (`save` persists); rolled back with the whole
+        // batch on a fault. A multi-downlink table sets it on the FIRST message
+        // only (and `save` on the last). LoRaWAN / NFC / shell, not vendor.
+        optional bool                         alarms_replace = 6;
+        // P2P radio tuning (doc/plan/439 parity): shell only (doc/p2p.md §2), never over a
+        // LoRaWAN or P2P downlink — see the p2p_* comment in app_config.yml.
+        optional AppConfigMessage.P2P         p2p         = 7;
     }
 
     // Read back selected non-secret config fields. Paged like GetConfig:
@@ -170,9 +232,14 @@ message Command {
         repeated uint32 sensors_field     = 3;
         repeated uint32 alarms_field      = 4;
         optional uint32 page              = 5;
+        repeated uint32 p2p_field         = 6;
     }
 
-    message GetInfo      { }
+    // page (#425, NFC / vendor / shell): which page of an Info that does not fit
+    // one frame — the answer carries Response.page_index/page_count; the phone
+    // asks for pages 1..page_count-1 itself. Omitted/0 = first page. Ignored
+    // over LoRaWAN, where the device streams every page by itself.
+    message GetInfo      { optional uint32 page = 1; }
     message GetConfig    { optional uint32 page = 1; }
     message SettingsSave { }
     message Reboot       { }
@@ -186,7 +253,7 @@ message Command {
     // settings_save). One-shot: app_calibration_init() clears the flag on entry.
     message EnterCalibration { }
     // Reset the LoRaWAN NVM (frame counters + DevNonce + session) and reboot,
-    // equivalent of `ats lrw reset`. Used during (re)commissioning after re-keying
+    // equivalent of `ats radio reset`. Used during (re)commissioning after re-keying
     // or moving the device to another network/session (#109).
     message LrwReset     { }
     // Trigger a forced (re)join immediately instead of waiting for the next
@@ -218,7 +285,9 @@ message Command {
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
     // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
-    message W1Scan { }
+    // page: as GetInfo.page — a result that does not fit one frame is paged by
+    // ROM; every page request rescans the bus (the order is deterministic).
+    message W1Scan { optional uint32 page = 1; }
 
     // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
     // and — over NFC — return the same readings synchronously in Response.sample
@@ -237,15 +306,17 @@ message Command {
     // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
     message SetSecretKey { optional bytes key = 1; }
 
-    // #308: explicit end of the claim window (companion to the #247 clm-record
-    // delete-detection). Empty — the token itself never travels on this command,
-    // only the fact that an authenticated caller sent it.
-    message ClmAck { }
+    // #308/#415: explicit end of the claim window (renamed from ClmAck, same
+    // wire id 25). Empty — the token itself never travels on this command, only
+    // the fact that an authenticated caller sent it. #415 D10: the only way the
+    // window closes (the implicit close on any decrypted command is gone).
+    message ClaimDone { }
 
-    // #351: symmetric counterpart to ClmAck — re-opens the claim window.
-    // new_claim_token omitted/zero re-arms with the existing token; a non-zero
-    // value replaces it (see app_cmd_handle_clm_rearm for the save+reboot path).
-    message ClmRearm { optional bytes new_claim_token = 1; }
+    // #351/#415: symmetric counterpart to ClaimDone (renamed from ClmRearm, same
+    // wire id 27) — re-opens the claim window. new_claim_token omitted/zero
+    // re-opens with the existing token; a non-zero value replaces it (see
+    // app_cmd_handle_claim_active for the save+reboot path).
+    message ClaimActive { optional bytes new_claim_token = 1; }
 
     // #338: remote-triggered buzzer melody (NFC/LRW). kind is a raw melody id,
     // deliberately NOT a proto enum: app_buzzer.c (MELODY_TABLE) is the only
@@ -264,6 +335,33 @@ message Command {
         optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
+
+    // #415: read the claim identity (serial_number + claim_token). Empty request.
+    // Answered with Response.claim_info while the claim window is active; Error
+    // NOT_READY "claimed" once done, or "no claim token" when none is
+    // provisioned. First command on the unauthenticated plain_text transport
+    // (also nfc / shell); never LoRaWAN.
+    message GetClaimInfo { }
+
+    // #415/#313: identity bootstrap over the mailbox (empty request). Answered
+    // with Response.basic_info — the serial + nonce high-water + config/FW
+    // version a phone needs before its first encrypted command. Replaces the
+    // plaintext hio.stck:inf NDEF record. plain_text / nfc / shell.
+    message GetBasicInfo { }
+
+    // The boot settings-info ConfigDump (#412) on request: application
+    // interval_sample / interval_report / history_enable, every sensors
+    // cap_* flag incl. cap_buzzer + cap_sht (#465), and the runtime
+    // w1_slot_type. The answer carries this command's seq (the autonomous
+    // boot dump has seq 0); over LoRaWAN it is paged with the Response
+    // envelope (#425) when it does not fit one frame.
+    message GetSettings { }
+
+    // Link state and diagnostics of the active radio (#446): answered with
+    // Response.radio_state. Over a radio the device streams the pages itself
+    // (#425); over NFC / vendor / shell the host asks for page 1..page_count-1
+    // with `page` (omitted/0 = first page), as GetInfo.page.
+    message GetRadioState { optional uint32 page = 1; }
 }
 
 message Response {
@@ -277,16 +375,46 @@ message Response {
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
+        ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
+        BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
+        RadioState     radio_state      = 14;  // get_radio_state: link state + diagnostics (#446)
     }
+
+    // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
+    // minimum a phone needs before its first encrypted command, none of it
+    // secret. Identity only: the device status (alarms / battery / radio / claim
+    // window) is NOT disclosed unauthenticated — the owner reads it from
+    // Info.device_status via the encrypted get_info. The claim state a claiming
+    // app needs comes from get_claim_info (NOT_READY "claimed" once done).
+    message BasicInfo {
+        uint32 serial_number  = 1;
+        uint32 nonce_counter  = 2;  // anti-replay high-water; the phone sends nonce_counter + 1
+        uint32 config_version = 3;  // bump => the phone's cached config layout is stale
+        uint32 fw_major       = 4;
+        uint32 fw_minor       = 5;
+        uint32 fw_patch       = 6;
+        reserved 7;                 // was device_status — owner-only via get_info (#414)
+    }
+    reserved 11;  // was info_lite (#409 draft), replaced by Info pages (#425)
+
+    // Universal paging (#425), the same for every response type. An answer that
+    // does not fit one frame — over a radio, the payload budget — is split into
+    // pages, each a complete Response with the same seq and a part of the body:
+    // page_index = 0..page_count-1 of page_count. Over a radio the device sends
+    // all pages by itself; over NFC the host asks for a page. Absent (page_count
+    // 0/1) = the whole answer is in this one frame.
+    uint32 page_index = 12;
+    uint32 page_count = 13;
 
     message Ack { }
 
+
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
-        // the LNS already knows it from the device context. lrw_state and dev_eui
-        // are emitted over NFC only (see below) — a LoRaWAN uplink omits them: the
-        // LNS already knows the DevEUI, and the link state is redundant on a frame
-        // it just received.
+        // the LNS already knows it from the device context. dev_eui is emitted
+        // over NFC only (see below) — the network already knows the DevEUI. The
+        // radio link state and diagnostics are not part of Info: a host asks
+        // for them with get_radio_state on any transport (#446).
         uint32 fw_major = 1;
         uint32 fw_minor = 2;
         uint32 fw_patch = 3;
@@ -299,17 +427,6 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // LoRaWAN network state (mirrors app_lrw_state). Emitted over NFC only
-        // (see lrw_state below).
-        enum LrwState {
-            IDLE      = 0;   // not joined / init
-            JOINING   = 1;   // join/rejoin in progress
-            HEALTHY   = 2;   // joined, link OK
-            WARNING   = 3;   // joined, link check failing
-            RECONNECT = 4;   // reconnecting with backoff
-            DISABLED  = 5;   // DevEUI all-zero: radio-silent, no join/TX (#98)
-        }
-
         uint32 serial_number = 5;
         uint32 uptime_s      = 6;   // seconds since boot
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
@@ -321,44 +438,121 @@ message Response {
         optional bytes claim_token = 9;
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
-        optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
+        // 12 was lrw_state (v1.4.0); the link state is in get_radio_state (#446).
+        reserved 12;
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
         uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
 
         // Currently-active alarms, one entry per latched alarm at the moment the
         // Info was built (rule slots + no-data / low-battery watchdogs). Only the
         // active ones are emitted, so the list is empty when all is well and its
-        // length varies. Each entry names its source/quantity/type using the same
-        // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
-        // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
+        // length varies. Each entry names its slot/channel/type like the alarm
+        // rules and the fPort 3 AlarmReport (#430) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
+
+        // 16..18 were last_dl_rssi / last_dl_snr / last_dl_age_s (#423), moved
+        // to get_radio_state before v1.5.0 shipped (#446).
+        reserved 16, 17, 18;
+
+        // 1-Wire slot state, slots 1..4 in order (#430): enum app_w1_slot_state
+        // (app_w1_slots.h) 0=none 1=ok 2=absent 3=replaced 4=mismatch. Omitted
+        // when every slot is unused.
+        repeated uint32 w1_slot_state = 19 [packed = true];
+    }
+
+    // Link state and diagnostics of the active radio, the same message and the
+    // same meaning for LoRaWAN and P2P (#446): the answer to get_radio_state on
+    // every transport (paged, #425); not part of Info. A
+    // snapshot at request time; every field is optional and absent means
+    // unknown or not applicable to the active radio (marked LoRaWAN / P2P).
+    // The counters run since boot (uptime_s is their time base), are not
+    // persisted and wrap at 2^32.
+    message RadioState {
+        // Link state (mirrors enum app_radio_state).
+        enum State {
+            IDLE      = 0;   // not joined / init
+            JOINING   = 1;   // join/rejoin in progress
+            HEALTHY   = 2;   // joined, link OK
+            WARNING   = 3;   // joined, uplinks going unconfirmed
+            RECONNECT = 4;   // reconnecting with backoff
+            DISABLED  = 5;   // DevEUI all-zero: radio-silent, no join/TX (#98)
+        }
+        optional State  state           = 1;
+        // Radio parameters of the uplinks now.
+        optional uint32 sf              = 2;   // spreading factor (7..12)
+        optional uint32 datarate        = 3;   // LoRaWAN: data rate index (DR)
+        optional sint32 tx_power_dbm    = 4;   // conducted TX power, dBm (capped by the PA)
+        // Last downlink as measured by the node; omitted until the first one
+        // since boot. On a Class A device it can be hours old.
+        optional sint32 dl_rssi         = 5;   // dBm
+        optional sint32 dl_snr          = 6;   // dB
+        optional uint32 dl_age_s        = 7;   // seconds since it
+        optional uint32 dl_unix_time    = 8;   // its wall-clock time (UTC); omitted while the RTC is unsynced
+        // Last uplink as received by the other side.
+        optional sint32 ul_rssi         = 9;   // P2P: RSSI the Hub reported in the last Ack, dBm
+        optional sint32 ul_snr          = 10;  // P2P: SNR the Hub reported in the last Ack, dB
+        optional uint32 ul_margin       = 11;  // LoRaWAN: last LinkCheckAns demodulation margin, dB
+        optional uint32 ul_gw_count     = 12;  // LoRaWAN: last LinkCheckAns gateway count
+        // Session.
+        optional uint32 dev_addr        = 13;  // LoRaWAN DevAddr / P2P node address; omitted when not joined
+        optional uint32 fcnt_up         = 14;  // next uplink frame counter
+        // Link health now.
+        optional uint32 fail_streak     = 15;  // consecutive unconfirmed uplinks (LoRaWAN LinkCheck, P2P Ack)
+        optional uint32 join_attempts   = 16;  // attempts in the current (re)join episode
+        optional uint32 duty_blocked_s  = 17;  // sends held by the duty cycle for this long; absent = not held
+        optional uint32 airtime_hour_ms = 18;  // airtime in the sliding hour (duty ledger, both radios)
+        // Counters since boot.
+        optional uint32 uptime_s        = 19;  // their time base (= Info.uptime_s)
+        optional uint32 tx_count        = 20;  // uplink transmissions, retransmissions included, joins excluded
+        optional uint32 rx_count        = 21;  // downlinks received
+        optional uint32 retry_count     = 22;  // retransmissions
+        optional uint32 fail_count      = 23;  // uplinks never confirmed
+        optional uint32 tx_err_count    = 24;  // sends refused by the MAC or failed in the radio
+        optional uint32 join_count      = 25;  // join attempts
     }
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a
     // configured alarm rule / fPort 3 AlarmEvent, trimmed to just what a status
-    // read needs: no slot/value/edge/time (this is a live snapshot, not an edge
+    // read needs: no rule/value/edge/time (this is a live snapshot, not an edge
     // report). Encoded as a nanopb callback so only the active alarms are sent.
     message AlarmStatus {
-        uint32 source   = 1;  // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel/battery
-        uint32 quantity = 2;  // enum app_alarm_quantity: temperature/humidity/.../state/count/voltage
-        uint32 type     = 3;  // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)
+        reserved 2;                         // was: quantity — replaced by channel (#430)
+        uint32 slot     = 1;                // 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
+        uint32 type     = 3;                // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)/sensor_mismatch(5)
+        uint32 channel  = 4;                // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
+        optional uint32 sensor_type = 5;    // sensor type id of a 1-Wire slot; absent for slot 0
     }
 
     message ConfigDump {
+        // Deprecated since #425, no longer set: paging is Response.page_index /
+        // page_count for every response type. Kept so older firmware decodes.
         uint32 page_index = 1;
         uint32 page_count = 2;
         optional AppConfigMessage.Lorawan     lorawan     = 3;
         optional AppConfigMessage.Application application = 4;
         optional AppConfigMessage.Sensors     sensors     = 5;
         optional AppConfigMessage.Alarms      alarms      = 6;
+        // Detected 1-Wire slot occupancy, slots 1..4 in order. Raw uint32 sensor
+        // type ids of app_sensor_types.yaml (#430; = enum app_w1_slot_type):
+        // 0=empty, 2=dallas (DS18B20), 3=machine-probe (DS28E17). This is live
+        // runtime state, not a stored config field — it is filled ONLY by the
+        // autonomous boot settings-info uplink (#412), never by GetConfig/GetParam
+        // (those stay a pure config snapshot). The persisted slot ROM serials are
+        // read separately via GetParam(sensors 11..14).
+        repeated uint32 w1_slot_type = 7;
+        optional AppConfigMessage.P2P p2p = 8;
     }
 
     message HistoryFrame {
+        // Deprecated since #425, no longer set: frames are Response.page_index /
+        // page_count like every other paged response. Kept so older firmware decodes.
         uint32 frame_index = 1;
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
         bytes  samples     = 4;   // records, values only (no per-record time/mask)
-        uint32 present     = 5;   // sensor mask shared by every record in the frame
+        // Bit i = column i is stored in every record of the frame. Since #430 the
+        // columns are `channels`; older firmware used a fixed sensor enum here.
+        uint32 present     = 5;
         uint32 interval_s  = 6;   // seconds between records; time(j) = t0_unix + j*interval_s
         // True when t0_unix is absolute UTC; false when the RTC had not synced at
         // capture, so t0_unix is only uptime-relative (L-1/L-3). Absent = old FW =
@@ -372,6 +566,14 @@ message Response {
         // has_more=false means the window is exhausted — stop tapping (no wedge).
         optional uint32 next_ord = 8;
         optional bool   has_more = 9;
+        // #430: record layout. One byte per column in record order, `slot << 5 |
+        // ch` (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = channel of the
+        // slot's type in app_sensor_types.yaml, whose `history` [enc, scale]
+        // gives the column's width and scale). w1_types = sensor type id of
+        // slots 1..4 the 1-Wire columns were recorded with; omitted when no
+        // column is a 1-Wire slot. Absent `channels` = pre-#430 firmware.
+        bytes channels = 10;
+        bytes w1_types = 11;
     }
 
     message Error {
@@ -385,13 +587,14 @@ message Response {
             PERSIST_FAILED      = 6;
             NOT_SUPPORTED       = 7;   // command tag unknown / removed (L-54)
             NOT_WRITABLE        = 8;   // field not writable over this transport (M-3); fault_field = group*100+tag
+            BUDGET_TOO_SMALL    = 9;   // answer does not fit the current LoRaWAN DR; retry once the DR rises (#409)
         }
 
         Code   code         = 1;
         // Offending field, encoded as group*100 + tag (#196). SetParam applies
         // groups in a fixed order and stops at the first failing one; the tag
         // alone is ambiguous across groups, so the group is folded in:
-        // group 1=lorawan, 2=application, 3=sensors, 4=alarms; 0 = not group-scoped
+        // group 1=lorawan, 2=application, 3=sensors, 4=alarms, 5=p2p; 0 = not group-scoped
         // (tags stay < 100). Host decodes: group = fault_field / 100, tag = % 100.
         uint32 fault_field  = 2;
         string detail       = 3;
@@ -421,15 +624,21 @@ message AlarmReport {
     // uptime-relative (L-3/L-4). Absent = old FW = treat as synced. The decoder
     // emits time=null for every event when this is present and false.
     optional bool time_synced = 4;
+    // #425: a batch that does not fit one frame is split into several reports
+    // (same base_time / total), numbered page_index = 0..page_count-1 — the same
+    // paging as Response. Absent = the whole batch is in this report.
+    uint32 page_index = 5;
+    uint32 page_count = 6;
 }
 
 message AlarmEvent {
-    // One alarm edge from a dynamic alarm rule. The rule's target is (source,
-    // quantity); the event reports what fired (type) and the transition (edge),
-    // plus the current value. The rule config (from/to, lo/hi, rate N) is NOT on
-    // the wire — only the resulting edge. type and edge are orthogonal: type says
-    // WHAT fired, edge says rising/falling, so a recovery still names the
-    // condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
+    // One alarm edge from a dynamic alarm rule or a built-in watchdog. The target
+    // is (slot, channel) of the sensor channel model (#430,
+    // app_sensor_types.yaml); the event reports what fired (type) and the
+    // transition (edge), plus the current value. The rule config (from/to, lo/hi,
+    // rate N) is NOT on the wire — only the resulting edge. type and edge are
+    // orthogonal: type says WHAT fired, edge says rising/falling, so a recovery
+    // still names the condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
     enum Edge {
@@ -439,24 +648,32 @@ message AlarmEvent {
 
     // What kind of condition fired (#212). Threshold rules report LOW/HIGH (which
     // bound); state/count/PIR/accel rules report TRIGGER; the no-data watchdog
-    // reports NO_DATA. NONE is unused on the wire (default guard).
+    // reports NO_DATA (on a 1-Wire slot: channel 255 = the whole device stopped
+    // answering, else the first channel of the one chip that stopped); a 1-Wire
+    // slot with a device of another type than its
+    // sensorN_type reports SENSOR_MISMATCH (#430: rule = 0xFF, no channel,
+    // sensor_type = expected type, value = detected type). NONE is unused on the
+    // wire (default guard).
     enum Type {
-        TYPE_NONE    = 0;
-        TYPE_LOW     = 1;
-        TYPE_HIGH    = 2;
-        TYPE_TRIGGER = 3;
-        TYPE_NO_DATA = 4;
+        TYPE_NONE            = 0;
+        TYPE_LOW             = 1;
+        TYPE_HIGH            = 2;
+        TYPE_TRIGGER         = 3;
+        TYPE_NO_DATA         = 4;
+        TYPE_SENSOR_MISMATCH = 5;
     }
 
     reserved 3, 8;               // was: side (3), no_data (8) — folded into type (#212)
+    reserved 6;                  // was: quantity — replaced by channel (#430)
 
-    uint32 source   = 1;         // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel
+    uint32 slot     = 1;         // sensor slot: 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
     Edge   edge     = 2;         // activate / deactivate
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
-    optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
-    uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
-    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
-    Type   type     = 9;         // low / high / trigger / no_data
+    optional sint32 value = 5;   // current value × the channel's wire scale, digital 0/1, or counter
+    uint32 rule     = 7;         // alarm rule index that fired (stable identity), 0xFF = watchdog, 0xFE = low battery (#430; was `slot`)
+    Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
+    uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
+    optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
@@ -507,34 +724,38 @@ message Telemetry {
     // 1-wire ROM-bound sensor slots (cap_w1_sensors). One SensorReading per
     // populated slot; type travels with the reading so heterogeneous mixes and
     // future sensor types need no new fields. The composer may split the list
-    // across frames (each reading is indivisible). Replaces fields 10-17.
+    // across pages (page_index / page_count below). Replaces fields 10-17.
     repeated SensorReading w1_sensors = 27;
-    // New sensors append at field >= 28 as new groups; never renumber.
+    // #425 paging, as AlarmReport / Response: a report that does not fit one
+    // frame is split into pages page_index = 0..page_count-1 of the same
+    // snapshot. A 1-Wire reading is never split; one too big for a page goes
+    // out alone. Absent = the whole report is in this frame.
+    uint32 page_index = 28;
+    uint32 page_count = 29;
+    // New sensors append at field >= 30 as new groups; never renumber.
 }
 
-// One ROM-bound 1-Wire slot's reading. type = enum app_w1_slot_type
-// (1=dallas temperature-only, 2=machine-probe full sensor cluster); quantities a
-// slot's type does not provide — or a sub-sensor that did not respond — are
-// absent. Fields 6-10 (lux/field/accel) are machine-probe only.
+// One ROM-bound 1-Wire slot's reading. type = the slot's expected sensor type
+// id (sensorN_type, app_sensor_types.yaml: 2=dallas temperature-only,
+// 3=machine-probe full sensor cluster); quantities a slot's type does not
+// provide — or a sub-sensor that did not respond — are absent. A slot whose
+// probe is absent or mismatched (#430) carries only slot + type. Fields 6-10
+// (lux/field/accel) are machine-probe only.
 message SensorReading {
-    uint32 slot              = 1;   // 1-based slot (matches sensorN config / `w1 list`)
-    uint32 type              = 2;   // enum app_w1_slot_type
-    optional sint32 temperature = 3;  // degC x100
-    optional uint32 humidity    = 4;  // %RH  x2
-    optional uint32 flags       = 5;  // bit0 tilt (machine-probe only)
-    optional uint32 illuminance    = 6;  // lux           (OPT3001)
-    optional sint32 magnetic_field = 7;  // uT (mT x1000) (Si7210)
-    optional sint32 accel_x        = 8;  // m/s^2 x100    (LIS2DH12)
-    optional sint32 accel_y        = 9;  // m/s^2 x100
-    optional sint32 accel_z        = 10; // m/s^2 x100
+    reserved 3 to 10;                        // typed per-quantity fields, replaced by the channel model (#430)
+    uint32 slot             = 1;             // 1-based slot (matches sensorN config / `w1 list`)
+    uint32 type             = 2;             // sensor type id (app_sensor_types.yaml)
+    uint32 valid            = 11;            // bit ch = channel ch of `type` has a value
+    repeated sint32 value   = 12 [packed = true]; // values of the set bits, ascending ch,
+                                             // each round(phys * channel wire scale)
 }
 
-// Provisioning claim record (#247). Carried plaintext in the NFC `hio.stck:clm`
-// NDEF record during the factory -> first-claim window so the provisioning app
-// can claim the device (first-claim-wins). The phone deletes the record from the
-// ST25DV over RF once the server confirms the claim; the firmware never rewrites
-// it afterwards. Not carried over LoRaWAN (the owner reads claim_token via the
-// encrypted get_info Info instead).
+// Provisioning claim identity (#247/#415): {serial_number, claim_token}. Served
+// two ways while the claim window is active: laid plaintext in the NFC
+// `hio.stck:clm` NDEF record (removed by PR #414), and returned in
+// Response.claim_info by the get_claim_info command over the plain_text / nfc /
+// shell transports. Not carried over LoRaWAN (the owner also reads claim_token
+// via the encrypted get_info Info).
 message ClaimInfo {
     uint32 serial_number = 1;
     bytes  claim_token   = 2;  // 128-bit device claim token (#170)

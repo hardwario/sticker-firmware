@@ -21,6 +21,19 @@ enum app_config_lrw_region {
 	APP_CONFIG_LRW_REGION_EU868 = 0,
 	APP_CONFIG_LRW_REGION_US915 = 1,
 	APP_CONFIG_LRW_REGION_AU915 = 2,
+	APP_CONFIG_LRW_REGION_AS923 = 3,
+};
+
+enum app_config_lrw_datarate {
+	APP_CONFIG_LRW_DATARATE_AUTO = 0,
+	APP_CONFIG_LRW_DATARATE_DR0 = 1,
+	APP_CONFIG_LRW_DATARATE_DR1 = 2,
+	APP_CONFIG_LRW_DATARATE_DR2 = 3,
+	APP_CONFIG_LRW_DATARATE_DR3 = 4,
+	APP_CONFIG_LRW_DATARATE_DR4 = 5,
+	APP_CONFIG_LRW_DATARATE_DR5 = 6,
+	APP_CONFIG_LRW_DATARATE_DR6 = 7,
+	APP_CONFIG_LRW_DATARATE_DR7 = 8,
 };
 
 enum app_config_lrw_network {
@@ -39,11 +52,27 @@ enum app_config_radio_mode {
 	APP_CONFIG_RADIO_MODE_P2P = 2,
 };
 
+enum app_config_p2p_modulation {
+	APP_CONFIG_P2P_MODULATION_LORA = 0,
+	APP_CONFIG_P2P_MODULATION_FSK = 1,
+};
+
 enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
 	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
 	APP_CONFIG_MOTION_SENSITIVITY_MEDIUM = 2,
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
+};
+
+enum app_config_alarm_buzzer_mode {
+	APP_CONFIG_ALARM_BUZZER_MODE_OFF = 0,
+	APP_CONFIG_ALARM_BUZZER_MODE_ONCE = 1,
+	APP_CONFIG_ALARM_BUZZER_MODE_SLOW = 2,
+	APP_CONFIG_ALARM_BUZZER_MODE_NORMAL = 3,
+	APP_CONFIG_ALARM_BUZZER_MODE_FAST = 4,
+	APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS = 5,
+	APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6 = 6,
+	APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7 = 7,
 };
 
 #define APP_CONFIG_VERSION 4
@@ -59,9 +88,10 @@ struct app_config {
 	int interval_sample;
 	int interval_report;
 	bool history_enable;
-	uint32_t history_sensors;
+	uint8_t history_channels[24];
 	int battery_level;
 	bool vendor_reset_allow;
+	int interval_announce;
 	int alarm_limit;
 	enum app_config_lrw_region lrw_region;
 	enum app_config_radio_mode radio_mode;
@@ -69,15 +99,16 @@ struct app_config {
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
 	enum app_config_lrw_activation lrw_activation;
-	uint8_t lrw_deveui[8];
+	uint8_t radio_deveui[8];
 	uint8_t lrw_joineui[8];
 	uint8_t lrw_nwkkey[16];
-	uint8_t lrw_appkey[16];
+	uint8_t radio_appkey[16];
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
-	int lrw_link_check_interval;
-	int lrw_link_check_fail_rejoin;
+	enum app_config_lrw_datarate lrw_datarate;
+	int radio_link_check_interval;
+	int radio_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
 	bool cap_input_a;
@@ -86,33 +117,44 @@ struct app_config {
 	bool cap_barometer;
 	bool cap_pir_detector;
 	bool cap_buzzer;
+	bool cap_sht;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
-	uint8_t alarm_0[17];
-	uint8_t alarm_1[17];
-	uint8_t alarm_2[17];
-	uint8_t alarm_3[17];
-	uint8_t alarm_4[17];
-	uint8_t alarm_5[17];
-	uint8_t alarm_6[17];
-	uint8_t alarm_7[17];
-	uint8_t alarm_8[17];
-	uint8_t alarm_9[17];
-	uint8_t alarm_10[17];
-	uint8_t alarm_11[17];
-	uint8_t alarm_12[17];
-	uint8_t alarm_13[17];
-	uint8_t alarm_14[17];
-	uint8_t alarm_15[17];
+	uint8_t alarm_0[18];
+	uint8_t alarm_1[18];
+	uint8_t alarm_2[18];
+	uint8_t alarm_3[18];
+	uint8_t alarm_4[18];
+	uint8_t alarm_5[18];
+	uint8_t alarm_6[18];
+	uint8_t alarm_7[18];
+	uint8_t alarm_8[18];
+	uint8_t alarm_9[18];
+	uint8_t alarm_10[18];
+	uint8_t alarm_11[18];
+	uint8_t alarm_12[18];
+	uint8_t alarm_13[18];
+	uint8_t alarm_14[18];
+	uint8_t alarm_15[18];
+	enum app_config_alarm_buzzer_mode alarm_buzzer_mode;
+	bool radio_alarm_ack;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
+	uint8_t sensor1_type;
 	uint8_t sensor2_rom[8];
+	uint8_t sensor2_type;
 	uint8_t sensor3_rom[8];
+	uint8_t sensor3_type;
 	uint8_t sensor4_rom[8];
+	uint8_t sensor4_type;
 	bool hall_left_counter;
 	bool hall_right_counter;
 	bool input_a_counter;
 	bool input_b_counter;
+	int p2p_frequency;
+	int p2p_spreading_factor;
+	int p2p_tx_power;
+	enum app_config_p2p_modulation p2p_modulation;
 };
 
 extern struct app_config g_app_config;

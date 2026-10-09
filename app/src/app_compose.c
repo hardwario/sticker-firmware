@@ -5,11 +5,12 @@
  */
 
 #include "app_compose.h"
+#include "app_alarm.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 /* Nanopb includes */
@@ -40,12 +41,17 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 #define TM_U32_NA UINT32_MAX /* uint32 fields: humidity, pressure, illuminance */
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
-#define SYSTEM_FLAG_BOOT BIT(0)
-/* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
+#define SYSTEM_FLAG_BOOT        BIT(0)
+/* Bits 1..8: the device_status alarm byte (APP_DEVICE_STATUS_ALARM_*, bits 0..7)
+ * shifted up by one (#409 A5a). Telemetry is the only uplink that still gets
+ * through at the 11 B budget tier, where no fPort 3 AlarmReport fits, so the
+ * alarm state rides here. Bits 1..6 are in use today (varint stays 1 B). */
+#define SYSTEM_FLAG_ALARM_SHIFT 1
+#define SYSTEM_FLAG_ALARM_MASK  0xFFu
 /* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
  * migration — notify is now an alarm rule, not a per-counter telemetry flag.
  * ACTIVE stays at bit 2 to keep the wire bit position stable. */
-#define CNT_FLAG_ACTIVE  BIT(2)
+#define CNT_FLAG_ACTIVE         BIT(2)
 
 /* Sensor groups, in priority order (packed into frames first → last). A group
  * is the atomic unit: all its fields go into one frame, or none. */
@@ -123,7 +129,7 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 /* True if a group carries any data in the snapshot (any of its fields present). */
 static bool group_present(const Telemetry *s, enum tlm_group g)
 {
-	/* Compose runs solely on m_work_q; static keeps this large struct off the
+	/* Compose runs solely on the radio work queue; static keeps this large struct off the
 	 * tight work-queue stack (it grew with the w1_sensors array). */
 	static Telemetry probe;
 
@@ -138,18 +144,60 @@ static bool group_present(const Telemetry *s, enum tlm_group g)
 
 /* Snapshot held across the frames of one report (consistency). */
 static Telemetry m_snapshot;
-static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
-static pb_size_t m_w1_sent; /* repeated w1_sensors already emitted (split cursor) */
+
+/* Packing cursor of a report: what is still to send. */
+/* Upper bound of page_index / page_count while laying pages out: keeps both
+ * varints at one byte, so the real values never make a page grow. */
+#define PAGE_COUNT_BOUND 127
+
+struct tlm_cursor {
+	uint16_t pending; /* bitmask of enum tlm_group still to send */
+	pb_size_t w1;     /* next w1_sensors reading of the snapshot */
+};
+
+static struct tlm_cursor m_cur;
 static bool m_active;
+static uint8_t m_cap;        /* protobuf budget captured at the report start */
+static uint8_t m_page_index; /* next page to send */
+static uint8_t m_page_count; /* pages of this report (1 = not paged) */
 
 /* Map the current sensor + counter readings into `t`. Pure mapping with no
  * compose state-machine side effects, so it backs both the LoRaWAN snapshot
  * (fill_snapshot) and the synchronous Sample response (app_compose_snapshot).
  * `boot` sets the one-shot system boot flag. */
+#if defined(CONFIG_W1)
+BUILD_ASSERT(ARRAY_SIZE(((SensorReading *)0)->value) >= APP_SENSOR_W1_CH_MAX,
+	     "SensorReading.value max_count must cover APP_SENSOR_W1_CH_MAX");
+
+/* A slot's reading as the channel model on the wire (#430, D2 = c): bit ch of
+ * `valid` per channel holding a value, and the values of those channels in
+ * ascending ch order, each scaled by its registry wire scale. */
+static void encode_sensor_reading(SensorReading *sr, const struct app_sensor_w1 *r)
+{
+	const struct app_sensor_type *type = app_sensor_type_get(sr->type);
+
+	if (type == NULL || r->type != sr->type) {
+		return;
+	}
+	for (uint8_t ch = 0; ch < type->channel_count && ch < ARRAY_SIZE(sr->value); ch++) {
+		const struct app_sensor_channel *c = &type->channels[ch];
+
+		if (!(r->valid & BIT(ch)) || (c->flags & APP_SENSOR_F_RETIRED)) {
+			continue;
+		}
+		sr->valid |= BIT(ch);
+		sr->value[sr->value_count++] = app_sensor_wire_value(c, r->v[ch]);
+	}
+}
+#endif /* defined(CONFIG_W1) */
+
 static void fill_telemetry(Telemetry *t, bool boot)
 {
 	memset(t, 0, sizeof(*t));
 	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
+
+	system_flags |= (app_alarm_status_flags() & SYSTEM_FLAG_ALARM_MASK)
+			<< SYSTEM_FLAG_ALARM_SHIFT;
 
 	struct app_hall_data hall;
 	struct app_input_data input;
@@ -160,75 +208,84 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
+	const float voltage = APP_SENSOR_MB_F(&d, BATTERY_VOLTAGE);
+	const float temperature = APP_SENSOR_MB_F(&d, TEMPERATURE);
+	const float humidity = APP_SENSOR_MB_F(&d, HUMIDITY);
+	const float pressure = APP_SENSOR_MB_F(&d, PRESSURE); /* hPa */
+	const float altitude = APP_SENSOR_MB_F(&d, ALTITUDE);
+	const float illuminance = APP_SENSOR_MB_F(&d, ILLUMINANCE);
+	const float orientation = APP_SENSOR_MB_F(&d, ACCEL_ORIENTATION);
+
 	/* system — always sent as one group; boot=false is encoded explicitly.
 	 * voltage uses 0 as a "no sample" sentinel (only the pre-sample case). */
 	t->has_voltage = true;
-	t->voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+	t->voltage = isnan(voltage) ? 0 : (uint32_t)CLAMP(voltage * 50.0f, 0.0f, 255.0f);
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal — onboard SHT4x is always present, so temperature/humidity are
-	 * always on the wire; a NaN reading (sensor fault) goes out as the sentinel
-	 * (decoder → null) instead of dropping the field. */
-	t->has_temperature = true;
-	t->temperature = isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
-	t->has_humidity = true;
-	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
-	 * negative %RH, and a negative float->uint cast is UB. */
-	t->humidity =
-		isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
+	/* internal — onboard SHT4x, sent whenever enabled (#465 cap_sht); a NaN
+	 * reading (sensor fault) goes out as the sentinel (decoder → null) instead
+	 * of dropping the field. */
+	if (g_app_config.cap_sht) {
+		t->has_temperature = true;
+		t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
+		t->has_humidity = true;
+		/* Clamp before the unsigned cast: the SHT4x formula can yield a
+		 * slightly negative %RH, and a negative float->uint cast is UB. */
+		t->humidity = isnan(humidity) ? TM_U32_NA
+					      : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
+	}
 
 	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
 		t->has_pressure = true;
-		/* d.pressure is kPa from the driver; the wire unit is hPa x10
-		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
-		t->pressure = isnan(d.pressure)
-				      ? TM_U32_NA
-				      : (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
+		/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
+		t->pressure = isnan(pressure) ? TM_U32_NA
+					      : (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
 		t->has_altitude = true;
-		t->altitude = isnan(d.altitude)
-				      ? TM_S32_NA
-				      : (int32_t)CLAMP(d.altitude * 10.0f, (float)INT16_MIN,
-						       (float)INT16_MAX);
+		t->altitude = isnan(altitude) ? TM_S32_NA
+					      : (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
+							       (float)INT16_MAX);
 	}
 
 	/* light — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_light_sensor) {
 		t->has_illuminance = true;
-		t->illuminance = isnan(d.illuminance)
+		t->illuminance = isnan(illuminance)
 					 ? TM_U32_NA
-					 : (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
+					 : (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */
-	if (g_app_config.cap_accelerometer && d.orientation != INT_MAX) {
+	if (g_app_config.cap_accelerometer && !isnan(orientation)) {
 		t->has_orientation = true;
-		t->orientation = (uint32_t)(d.orientation & 0xf);
+		t->orientation = (uint32_t)((int)orientation & 0xf);
 	}
 	/* Always send the count when the accelerometer is enabled (0 included) —
 	 * the #78/#80 "whole group every report" policy that the other digital
 	 * counters already follow; this was the lone holdout. */
 	if (g_app_config.cap_accelerometer) {
 		t->has_accel_motion_count = true;
-		t->accel_motion_count = d.accel_motion_count;
+		t->accel_motion_count = APP_SENSOR_MB_U(&d, ACCEL_COUNT);
 	}
 
 	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
 	if (g_app_config.cap_pir_detector) {
 		t->has_motion_count = true;
-		t->motion_count = d.motion_count;
+		t->motion_count = APP_SENSOR_MB_U(&d, PIR_COUNT);
 	}
 
-	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
-	 * The composer owns the slot index, type and the repeated array; the
-	 * per-type value fields are filled by the slot's driver via the registry
-	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
-	 * type travels with the reading; the composer may split the list across
-	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+	/* 1-wire ROM-bound slots → one repeated SensorReading per slot with an
+	 * expected type (sensorN_type, #430): the valid mask plus the values of the
+	 * present channels, scaled by the registry (encode_sensor_reading), so
+	 * adding a sensor type needs no change here. A slot whose probe is absent
+	 * or mismatched is still sent with valid = 0, so the decoder emits null.
+	 * The composer may split the list across frames (each reading is
+	 * indivisible). */
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
-			enum app_w1_slot_type type = app_w1_slot_get_type(i);
+			uint8_t type = app_w1_slot_get_expected_type(i);
 			if (type == APP_W1_SLOT_EMPTY) {
 				continue; /* unconfigured slot → no reading */
 			}
@@ -239,10 +296,13 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			 * stays 0-based internally. */
 			sr->slot = i + 1;
 			sr->type = type;
-			app_w1_slot_encode(i, &d.w1[i], sr);
+			if (app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_OK) {
+				encode_sensor_reading(sr, &d.w1[i]);
+			}
 			t->w1_sensors_count++;
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* hall left / right */
 	if (g_app_config.cap_hall_left) {
@@ -291,35 +351,34 @@ static void fill_telemetry(Telemetry *t, bool boot)
 
 /* #340 M16: the one-shot "first uplink after boot" marker. Module-level (not a
  * fill_snapshot()-local static) so app_compose_ex()'s debug/test callers (e.g.
- * `ats lrw compose`) can read it without being the ones who clear it — only a
+ * `ats radio compose`) can read it without being the ones who clear it — only a
  * real report (app_compose(), consume_boot=true below) may consume it. Without
- * this split, a bench tech running `ats lrw compose` before the real first
+ * this split, a bench tech running `ats radio compose` before the real first
  * post-boot cycle silently stole the marker: the debug dump got
  * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
 static bool m_boot_pending = true;
 
 /* True while the in-progress snapshot belongs to the shell's debug probe
  * (app_compose_ex()) rather than the real TX path. Both paths run their
- * multi-frame sessions as separate per-frame work items on m_work_q, so they
+ * multi-frame sessions as separate per-frame work items on the radio work queue, so they
  * can interleave — without this tag the real report would silently drain the
  * remainder of a debug session's snapshot over the air (and vice versa). */
 static bool m_active_debug;
 
 /* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
- * solely on m_work_q. `consume_boot` is true only for the real report path
+ * solely on the radio work queue. `consume_boot` is true only for the real report path
  * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
  * one-shot marker for the real uplink that hasn't happened yet. */
 static void fill_snapshot(bool consume_boot)
 {
 	fill_telemetry(&m_snapshot, m_boot_pending);
 
-	m_pending = 0;
+	m_cur = (struct tlm_cursor){0};
 	for (enum tlm_group g = 0; g < G_COUNT; g++) {
 		if (group_present(&m_snapshot, g)) {
-			m_pending |= BIT(g);
+			m_cur.pending |= BIT(g);
 		}
 	}
-	m_w1_sent = 0;
 	m_active = true;
 	if (consume_boot) {
 		m_boot_pending = false;
@@ -329,11 +388,10 @@ static void fill_snapshot(bool consume_boot)
 void app_compose_reset(void)
 {
 	/* Drop the in-progress snapshot; the next app_compose() takes a fresh one.
-	 * These run solely on m_work_q (as does the join path that calls this), so
+	 * These run solely on the radio work queue (as does the join path that calls this), so
 	 * no lock is needed. */
 	m_active = false;
-	m_pending = 0;
-	m_w1_sent = 0;
+	m_cur = (struct tlm_cursor){0};
 }
 
 void app_compose_snapshot(Telemetry *out)
@@ -348,9 +406,112 @@ void app_compose_snapshot(Telemetry *out)
 	fill_telemetry(out, false);
 }
 
+static bool cursor_done(const struct tlm_cursor *c)
+{
+	return c->pending == 0 && c->w1 >= m_snapshot.w1_sensors_count;
+}
+
+static bool frame_fits(const Telemetry *f, size_t cap)
+{
+	size_t sz = 0;
+
+	pb_get_encoded_size(&sz, Telemetry_fields, f);
+	return sz <= cap;
+}
+
+/* Fill `f` with the next page from cursor `c` and advance it: whole pending
+ * groups first (highest priority first), then whole 1-Wire readings in order.
+ * A reading that does not fit beside other content waits for the next page; a
+ * single unit bigger than the budget is sent alone so the report never stalls.
+ * `paged` reserves the page_index / page_count fields (index exact, count at
+ * its one-byte bound) so the layout matches the frames sent later. */
+static void pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged, uint8_t index)
+{
+	uint16_t frame_groups = 0;
+	pb_size_t w1_added = 0;
+
+	memset(f, 0, sizeof(*f));
+	if (paged) {
+		f->page_index = index;
+		f->page_count = PAGE_COUNT_BOUND;
+	}
+
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (!(c->pending & BIT(g))) {
+			continue;
+		}
+		apply_group(f, &m_snapshot, g, true); /* tentatively add */
+		if (frame_fits(f, cap)) {
+			frame_groups |= BIT(g);
+		} else {
+			apply_group(f, &m_snapshot, g, false); /* revert */
+		}
+	}
+
+	while (c->w1 < m_snapshot.w1_sensors_count) {
+		pb_size_t at = f->w1_sensors_count;
+
+		f->w1_sensors[at] = m_snapshot.w1_sensors[c->w1];
+		f->w1_sensors_count = at + 1;
+		if (frame_fits(f, cap)) {
+			c->w1++;
+			w1_added++;
+			continue;
+		}
+		f->w1_sensors_count = at; /* revert; keep order */
+		break;
+	}
+
+	if (frame_groups == 0 && w1_added == 0) {
+		for (enum tlm_group g = 0; g < G_COUNT; g++) {
+			if (c->pending & BIT(g)) {
+				apply_group(f, &m_snapshot, g, true);
+				frame_groups = BIT(g);
+				LOG_WRN("Group %d exceeds budget %zuB, sending alone", (int)g, cap);
+				break;
+			}
+		}
+	}
+
+	if (frame_groups == 0 && w1_added == 0 && c->w1 < m_snapshot.w1_sensors_count) {
+		f->w1_sensors[0] = m_snapshot.w1_sensors[c->w1++];
+		f->w1_sensors_count = 1;
+		LOG_WRN("w1 slot=%u exceeds budget %zuB, sending alone",
+			(unsigned)f->w1_sensors[0].slot, cap);
+	}
+
+	c->pending &= ~frame_groups;
+}
+
+/* Lay the report out for `cap` (#425 paging, as AlarmReport / Response): the
+ * number of pages, or 1 when everything fits one frame without page fields.
+ * `probe` is scratch space for the trial pages. */
+static uint8_t layout_pages(Telemetry *probe, size_t cap)
+{
+	struct tlm_cursor c = m_cur;
+
+	pack_page(probe, &c, cap, false, 0);
+	if (cursor_done(&c)) {
+		return 1;
+	}
+
+	uint8_t pages = 0;
+
+	c = m_cur;
+	while (!cursor_done(&c) && pages < PAGE_COUNT_BOUND) {
+		pack_page(probe, &c, cap, true, pages);
+		pages++;
+	}
+	return pages;
+}
+
 static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget,
 			   bool consume_boot)
 {
+	/* Static: app_compose runs solely on the radio work queue and the struct
+	 * is too big for that stack. Also the layout pass's scratch frame. */
+	static Telemetry frame;
+
 	if (budget == 0) {
 		return -EAGAIN;
 	}
@@ -370,81 +531,27 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 	if (!m_active) {
 		fill_snapshot(consume_boot);
 		m_active_debug = debug_probe;
-		if (m_pending == 0 && m_snapshot.w1_sensors_count == 0) {
+		if (cursor_done(&m_cur)) {
 			/* Nothing to report (e.g. all sensors NaN pre-sample). */
 			*len = 0;
 			*more = false;
 			m_active = false;
 			return 0;
 		}
+		/* Reserve 1 byte for the version prefix (buf[0]); the protobuf is
+		 * encoded from buf+1. The pages are laid out once, for the budget at
+		 * the report start, so page_count stays exact for every frame. */
+		m_cap = (uint8_t)(MIN(size, (size_t)budget) - 1);
+		m_page_index = 0;
+		m_page_count = layout_pages(&frame, m_cap);
 	}
 
-	/* Reserve 1 byte for the version prefix (buf[0]); the protobuf is encoded
-	 * from buf+1, so the group-packing budget loses that byte. */
-	size_t cap = MIN(size, (size_t)budget) - 1;
+	bool paged = m_page_count > 1;
 
-	/* Greedily pack whole pending groups, highest priority first, that fit.
-	 * Static for the same reason as the snapshot: app_compose runs solely on
-	 * m_work_q and the struct is too big for that stack. */
-	static Telemetry frame;
-	memset(&frame, 0, sizeof(frame));
-	uint16_t frame_groups = 0;
-
-	for (enum tlm_group g = 0; g < G_COUNT; g++) {
-		if (!(m_pending & BIT(g))) {
-			continue;
-		}
-		apply_group(&frame, &m_snapshot, g, true); /* tentatively add */
-		size_t sz = 0;
-		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
-		if (sz <= cap) {
-			frame_groups |= BIT(g);
-		} else {
-			apply_group(&frame, &m_snapshot, g, false); /* revert */
-		}
-	}
-
-	/* Append pending 1-Wire readings one at a time (lowest priority, after the
-	 * whole-group scalars). The repeated list may split across frames: stop at
-	 * the first reading that no longer fits and carry the rest (kept contiguous
-	 * from frame.w1_sensors[0]). */
-	pb_size_t w1_added = 0;
-	for (pb_size_t i = m_w1_sent; i < m_snapshot.w1_sensors_count; i++) {
-		pb_size_t at = frame.w1_sensors_count;
-		frame.w1_sensors[at] = m_snapshot.w1_sensors[i];
-		frame.w1_sensors_count = at + 1;
-		size_t sz = 0;
-		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
-		if (sz <= cap) {
-			w1_added++;
-		} else {
-			frame.w1_sensors_count = at; /* revert; stop, keep order */
-			break;
-		}
-	}
-
-	/* A single unit bigger than the budget would stall forever: force the
-	 * highest-priority pending group — or, if none, the next 1-Wire reading —
-	 * out alone and log it. */
-	if (frame_groups == 0 && w1_added == 0) {
-		bool forced = false;
-		for (enum tlm_group g = 0; g < G_COUNT; g++) {
-			if (m_pending & BIT(g)) {
-				apply_group(&frame, &m_snapshot, g, true);
-				frame_groups = BIT(g);
-				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g,
-					budget);
-				forced = true;
-				break;
-			}
-		}
-		if (!forced && m_w1_sent < m_snapshot.w1_sensors_count) {
-			frame.w1_sensors[0] = m_snapshot.w1_sensors[m_w1_sent];
-			frame.w1_sensors_count = 1;
-			w1_added = 1;
-			LOG_WRN("w1 reading slot=%u exceeds budget %uB, sending alone",
-				(unsigned)m_snapshot.w1_sensors[m_w1_sent].slot, budget);
-		}
+	pack_page(&frame, &m_cur, m_cap, paged, m_page_index);
+	if (paged) {
+		frame.page_index = m_page_index;
+		frame.page_count = m_page_count;
 	}
 
 	buf[0] = APP_PROTO_VERSION;
@@ -455,16 +562,15 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 		return -EMSGSIZE;
 	}
 
-	m_pending &= ~frame_groups;
-	m_w1_sent += w1_added;
+	m_page_index++;
 	*len = os.bytes_written + 1;
-	*more = (m_pending != 0) || (m_w1_sent < m_snapshot.w1_sensors_count);
+	*more = !cursor_done(&m_cur);
 	if (!*more) {
 		m_active = false;
 	}
 
-	LOG_INF("TX: budget=%uB (from system), frame=%zuB, groups=0x%04x, w1=%u/%u, more=%d",
-		budget, *len, frame_groups, (unsigned)m_w1_sent,
+	LOG_INF("TX: budget=%uB, frame=%zuB, page %u/%u, w1=%u/%u, more=%d", budget, *len,
+		(unsigned)m_page_index, (unsigned)m_page_count, (unsigned)m_cur.w1,
 		(unsigned)m_snapshot.w1_sensors_count, (int)*more);
 	LOG_HEXDUMP_DBG(buf, *len, "Telemetry frame:");
 
@@ -473,10 +579,15 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
-	return compose_ex_impl(buf, size, len, more, app_lrw_get_max_payload(), true);
+	return compose_ex_impl(buf, size, len, more, app_radio_get_max_payload(), true);
 }
 
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
 {
 	return compose_ex_impl(buf, size, len, more, budget, false);
+}
+
+int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
+	return compose_ex_impl(buf, size, len, more, budget, true);
 }
