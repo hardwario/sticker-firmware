@@ -647,6 +647,13 @@ of every step.
      inert with a deactivate edge, event routed by channel, value wire scale, low
      battery on ch 20, registry liveness fits the latches), `cmd` (AlarmEvent rule /
      slot / channel / sensor_type, 18 B SetParam vectors), `ttn.test.js` (108).
+   - HIL 2026-10-09 on 2162165132 (`82c077ca`, machine probe, debug + `CONFIG_W1=y`,
+     ChirpStack EU868): `alarm set` by channel name and number; the wrong channel for
+     the type, an untyped slot and `from/to` on a threshold are refused; fPort 3
+     activate / deactivate with slot / channel / sensor_type / rule (threshold, tilt
+     state edge); Info `active_alarms` via GetInfo; the 18 B blob read back via
+     GetConfig; `sensor1-rom 0` + `sensor1-type 2` marks every s1 machine-probe rule
+     STALE (never evaluated, motherboard rule unaffected). PR comment 6082018813.
 5. ✅ **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
    output with units, `i32` history encoding.
    - Wire: `SensorReading` = `slot` (1), `type` (2), `valid` (11), `value` (12, packed
@@ -674,6 +681,9 @@ of every step.
      dallas, `valid = 0` for mismatch / absent, encoded size), `ttn.test.js` (mask +
      packed decode, all machine-probe channels, nulls, unknown channel, round trip of
      every 1-Wire `(type, channel)`).
+   - HIL 2026-10-09 on 2162165132 (same run): machine-probe reading with every channel
+     and units, `temperature-aux` `null` (no TMP112 on that probe), an absent dallas
+     slot as `{type 2, temperature: null}` next to the probe in another slot.
 6. ✅ **History per channel.** `history_channels`, `sensorN_type`, derived layout with
    a layout CRC in the page header, momentary columns from their pulse counters,
    `HistoryFrame` `channels` / `w1_types`, decoder. Tests: `history` (17),
