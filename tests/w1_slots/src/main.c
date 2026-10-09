@@ -243,3 +243,17 @@ ZTEST(w1_slots, test_teach_same_type_into_replaced_slot)
 	assert_slot(0, APP_W1_SLOT_STATE_OK, MP, 0);
 	zassert_equal(app_w1_slot_get_rom(0), MP_Y);
 }
+
+/* The boot scan + rebind runs for a slot provisioned only with sensorN_type,
+ * otherwise its probe is never auto-enrolled and a mismatch never seen. */
+ZTEST(w1_slots, test_any_taught_counts_provisioned_type)
+{
+	zassert_false(app_w1_slots_any_taught());
+
+	cfg_slot(2, 0, MP);
+	zassert_true(app_w1_slots_any_taught(), "type-only slot");
+
+	cfg_slot(2, 0, 0);
+	cfg_slot(1, DS_A, 0);
+	zassert_true(app_w1_slots_any_taught(), "ROM-only slot");
+}

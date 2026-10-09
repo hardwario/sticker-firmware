@@ -368,7 +368,10 @@ static void cfg_rom_set(int slot, uint64_t serial)
 bool app_w1_slots_any_taught(void)
 {
 	for (int slot = 0; slot < APP_W1_SLOT_COUNT; slot++) {
-		if (cfg_rom_get(slot) != 0) {
+		/* A slot provisioned with only sensorN_type also needs the boot
+		 * rebind: auto-enroll of a matching probe, or mismatch / absent. */
+		if (cfg_rom_get(slot) != 0 ||
+		    app_w1_slot_get_expected_type(slot) != APP_W1_SLOT_EMPTY) {
 			return true;
 		}
 	}

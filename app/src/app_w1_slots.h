@@ -51,8 +51,9 @@ enum app_w1_slot_state {
 struct app_sensor_w1;
 
 /* True if at least one 1-Wire slot is taught (has a non-zero configured ROM,
- * `sensorN-rom`). Used to skip the pointless boot sensor init+scan when
- * `cap-w1-sensors` is on but nothing is enrolled. */
+ * `sensorN-rom`) or provisioned (`sensorN-type` set). Used to skip the
+ * pointless boot sensor init+scan when `cap-w1-sensors` is on but no slot is
+ * configured. */
 bool app_w1_slots_any_taught(void);
 
 /* Re-bind logical slots to discovered driver indices by ROM-serial match.
