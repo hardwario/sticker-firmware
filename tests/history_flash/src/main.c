@@ -66,6 +66,7 @@ static void before(void *unused)
 {
 	ARG_UNUSED(unused);
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default, onboard T/H available */
 	g_app_config.history_enable = true;
 	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
 	g_app_config.interval_report = 60;

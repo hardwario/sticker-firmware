@@ -583,6 +583,7 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 6, 2, false, false},
 	{DUMP_SECTION_SENSORS, 7, 2, false, false},
 	{DUMP_SECTION_SENSORS, 19, 3, false, false},
+	{DUMP_SECTION_SENSORS, 22, 3, false, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false, false},
 	{DUMP_SECTION_SENSORS, 9, 2, false, false},
 	{DUMP_SECTION_SENSORS, 10, 2, false, false},
@@ -1977,8 +1978,10 @@ static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *re
 
 /* application: interval_sample, interval_report, history_enable */
 static const uint32_t cs_app_ids[] = {2, 3, 4};
-/* sensors: cap_hall_left..cap_accelerometer (all nine cap_* flags) */
-static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+/* sensors: every cap_* flag — cap_hall_left..cap_accelerometer (1..9),
+ * cap_buzzer (19, effective value: app_sensor_init() clears it when
+ * cap_pir_detector is also set) and cap_sht (22, #465) */
+static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 22};
 #if defined(APP_CMD_HAVE_W1)
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids) + 1)
 #else

@@ -43,6 +43,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
+| Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 
 ---
 
@@ -209,7 +210,7 @@ after every persisted change — no diff-tracking, no extra state.
 | Group | Fields |
 |---|---|
 | `application` | `interval_sample`, `interval_report`, `history_enable` |
-| `sensors` | `cap_hall_left` … `cap_accelerometer` (all nine capability flags, emitted explicitly incl. `false`) |
+| `sensors` | every capability flag, emitted explicitly incl. `false`: `cap_hall_left` … `cap_accelerometer` (1–9), `cap_buzzer` (19) and `cap_sht` (22) — the last two since #465 (§36) |
 | `w1_slot_type` | detected 1-Wire sensor type per logical slot 1..4 |
 
 `w1_slot_type` (`ConfigDump` field 7, packed `repeated uint32`) reports what is
@@ -235,7 +236,8 @@ config reply, bool fields decode as `0`/`1`):
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
                  "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
-                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0 },
+                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
+                 "cap_buzzer": 0, "cap_sht": 1 },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
 
@@ -243,7 +245,9 @@ config reply, bool fields decode as `0`/`1`):
 
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
-  interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
+  interval values. `cap_buzzer` + `cap_sht` (#465) add 6 B (3 B each, tag ≥ 16);
+  the worst case is then 40 B without / 46 B with 1-Wire (§36). It fits the EU868 DR0 budget (51 B)
+  and the 64 B response buffer; below that it pages (§13).
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
   budget the settings-info is paged (§13); a setting that does not fit even alone is
   left out, and when nothing fits the device sends it once a DR change makes room.
@@ -707,8 +711,8 @@ the §4 content on request.
 |---|---|
 | Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
 | Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
-| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
-| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, every `sensors.cap_*` flag (incl. `cap_buzzer` / `cap_sht`, #465), runtime `w1_slot_type` (1-Wire builds) |
+| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire before #465, +6 B for `cap_buzzer`/`cap_sht`, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
 | Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
 | Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
 
@@ -1743,6 +1747,60 @@ Release +136 B flash, RAM unchanged. `tests/nfc_hw` `test_clm_latch_fails_closed
 (0/1 → `active`, 2 / 0x7F / 0xFF / wrong length / read error → `done`);
 `tests/cmd` `test_claim_active` (kept, replaced and generated token, always
 `claim_info`, rejected over LoRaWAN without generating).
+
+---
+
+## 36. Onboard SHT4x capability flag `cap_sht` (#465)
+
+The onboard SHT4x was the only sensor without a runtime switch: it was always
+read, and its temperature/humidity were always on the wire (`null` on a fault).
+A host could neither see nor turn it off. `cap_sht` adds the switch.
+
+| | |
+|---|---|
+| Key | `cap_sht` = `sensors` **22**, `bool`, default **`true`**; shell `config cap-sht`, NVS `cap-sht` |
+| proto_id | 22, not 20: draft PR #407 (analog inputs) claims `sensors` 20/21 |
+| Access | the same as every other `cap_*` flag |
+| Reset tiers | not persistent: a device/factory/vendor reset restores `true` |
+| Upgrade | the key is new; a unit with no stored value gets the default `true`, so it behaves as before. An older image ignores the key on a downgrade |
+
+With `cap_sht` = `false`:
+
+- `app_sensor_sample()` does not call `app_sht4x_read()`, and the skipped read is
+  left out of the wedged-I2C accounting (`i2c_tried` / `i2c_failed`).
+- Telemetry carries no `temperature` / `humidity` fields (the onboard group is
+  absent, not `null`).
+- The no-data watchdog does not watch the onboard temperature/humidity, so no
+  `no_data` alarm fires. Turning the flag off while a `no_data` alarm is latched
+  sends its deactivate edge. A threshold rule on onboard temperature/humidity sees
+  `NaN` and stays inactive.
+- History drops the onboard channels (`history_sensors` bits 0/1) from the active
+  mask, like any other channel whose capability is off, instead of storing `NaN`.
+- The production test (`ats`) and the calibration still read the SHT4x directly,
+  regardless of the flag.
+
+The battery ADC stays the only sensor without a switch: undervoltage,
+`battery_level` and `Info.battery` depend on it.
+
+**Settings-info.** The boot settings-info (§4) and `GetSettings` (§14) now carry
+`cap_buzzer` (19) and `cap_sht` (22) as well, so the host sees every capability
+flag. `cap_buzzer` reports the effective value: `app_sensor_init()` clears it when
+`cap_pir_detector` is also set. The two flags add 6 B. The worst case (every
+flag `true`, `interval_sample` 3600, `interval_report` 86400) is 40 B without
+1-Wire (measured by `cmd/test_build_config_status_worst_case_dr0`) and 46 B with
+the four `w1_slot_type` entries, so it still fits one EU868 DR0 frame (51 B).
+There is no hard 51 B limit anyway: the settings-info pages when it does not
+fit (§13).
+
+**Decoder:** `ttn.js` learns `_SEN_NAMES[22] = "cap_sht"` (decode + encode).
+
+**Consumers:** the Manager-App needs a `cap_sht` toggle; Hub / Portal get the new
+`sensors` field, and `cap_buzzer` now also arrives in the boot announce.
+
+Tests: `compose/test_cap_sht_gating`, `history/test_cap_sht_off_drops_onboard_channels`,
+`alarm_eval/test_cap_sht_gates_onboard_nodata`,
+`cmd/test_build_config_status_worst_case_dr0`, the settings-info field counts
+(12 → 14) and the `ttn.js` decoder tests.
 
 ---
 

@@ -286,10 +286,11 @@ commands:
     # owner-only, via the encrypted get_info).
     - {name: get_basic_info, proto_id: 30, body: GetBasicInfo, kind: handler, response: basic_info, transports: [plain_text, nfc, shell]}
     # get_settings (#428): the small boot settings-info ConfigDump (#412 content:
-    # application interval_sample/interval_report/history_enable, the nine
-    # sensors cap_* flags, runtime w1_slot_type) on request, so a host can refresh
-    # the key operating settings without a full multi-page GetConfig. Answer
-    # carries the command's seq (the autonomous boot dump keeps seq 0); over
+    # application interval_sample/interval_report/history_enable, every
+    # sensors cap_* flag incl. cap_buzzer + cap_sht (#465), runtime
+    # w1_slot_type) on request, so a host can refresh the key operating
+    # settings without a full multi-page GetConfig. Answer carries the
+    # command's seq (the autonomous boot dump keeps seq 0); over
     # LoRaWAN it is paged like the boot dump (#425 envelope) when the budget is
     # too small. Read-only, non-secret — all transports except the opt-in
     # plain_text (#415: omitted `transports:` excludes it).
@@ -682,6 +683,16 @@ parameters:
     proto_id: 19
     type: bool
     help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
+
+  # Onboard SHT4x (#465). proto_id 22, not 20: draft PR #407 claims sensors
+  # 20/21 for cap_analog_a/_b. Default true keeps an upgraded unit (no NVS key)
+  # sampling the onboard sensor exactly as before.
+  - name: cap_sht
+    proto_group: sensors
+    proto_id: 22
+    type: bool
+    default: true
+    help: "Get/Set onboard SHT4x temperature/humidity capability (true/false)."
 
   - name: cap_w1_sensors
     proto_group: sensors

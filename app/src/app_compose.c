@@ -177,16 +177,19 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal — onboard SHT4x is always present, so temperature/humidity are
-	 * always on the wire; a NaN reading (sensor fault) goes out as the sentinel
-	 * (decoder → null) instead of dropping the field. */
-	t->has_temperature = true;
-	t->temperature = isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
-	t->has_humidity = true;
-	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
-	 * negative %RH, and a negative float->uint cast is UB. */
-	t->humidity =
-		isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
+	/* internal — onboard SHT4x, sent whenever enabled (#465 cap_sht); a NaN
+	 * reading (sensor fault) goes out as the sentinel (decoder → null) instead
+	 * of dropping the field. */
+	if (g_app_config.cap_sht) {
+		t->has_temperature = true;
+		t->temperature =
+			isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
+		t->has_humidity = true;
+		/* Clamp before the unsigned cast: the SHT4x formula can yield a
+		 * slightly negative %RH, and a negative float->uint cast is UB. */
+		t->humidity = isnan(d.humidity) ? TM_U32_NA
+						: (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
+	}
 
 	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
