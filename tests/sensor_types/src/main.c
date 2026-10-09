@@ -164,7 +164,7 @@ ZTEST(sensor_types, test_every_channel_is_consistent)
 	}
 }
 
-/* ---- channel-vector helpers (app_sensor_channels.c) ---------------------- */
+/* ---- channel-vector helpers (app_sensor_types.c) ---------------------- */
 
 ZTEST(sensor_types, test_put_f_valid_and_range)
 {

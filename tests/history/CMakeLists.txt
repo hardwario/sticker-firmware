@@ -13,7 +13,6 @@ target_include_directories(app PRIVATE ${APP_DIR}/src)
 target_sources(app PRIVATE
   ${APP_DIR}/src/app_history.c
   ${APP_DIR}/src/app_sensor_types.c
-  ${APP_DIR}/src/app_sensor_channels.c
   src/main.c
   src/stubs.c
 )

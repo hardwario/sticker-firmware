@@ -8,10 +8,13 @@
 #define APP_SENSOR_H_
 
 /* Zephyr includes */
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 
 /* Standard includes */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Application includes */
@@ -75,6 +78,14 @@ void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, 
  * 4-6). A dallas slot provides only the temperature (ch 0 in both types); every
  * other channel reads NaN. */
 float app_sensor_w1_f(const struct app_sensor_w1 *s, uint8_t mp_ch);
+
+/* Fetch one sample from a Zephyr sensor device and read `n` channels into `out`
+ * as floats. Shared fetch/channel-get/convert boilerplate for the onboard I2C
+ * sensors (SHT4x, OPT3001, MPL3115A2) so each driver only keeps its own
+ * channel list, logging and range checks (#220.C). Returns 0, -ENODEV if the
+ * device is not ready, or the first failing sensor API error. */
+int app_sensor_read_channels(const struct device *dev, const enum sensor_channel *chans, float *out,
+			     size_t n);
 
 extern struct app_sensor_data g_app_sensor_data;
 extern struct k_mutex g_app_sensor_data_lock;

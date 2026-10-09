@@ -184,8 +184,8 @@ struct app_sensor_data { struct app_sensor_mb mb; struct app_sensor_w1 w1[4]; };
 - State channels are `0.0f` / `1.0f`.
 - Motherboard accessors: `APP_SENSOR_MB_F(d, NAME)` / `APP_SENSOR_MB_U(d, NAME)`.
 
-**`app_sensor_channels.c`** holds the helpers, separate from the sampling loop so the
-host tests can link them:
+The helpers live in the generated **`app_sensor_types.c`** (sensorgen template), apart
+from the sampling loop, so the host tests can link them:
 - `app_sensor_put_f()` stores a value and applies the registry range. Out of range or
   non-finite → NaN.
 - `app_sensor_w1_clear()` resets a slot vector.
@@ -558,7 +558,7 @@ of every step.
    - No behaviour change: nothing references the tables yet, so release and debug
      images are byte-identical in size to `v1.5.0` (release 163 392 B flash /
      52 812 B RAM, debug 222 156 B / 61 820 B).
-2. ✅ **Readings → channels.** Channel vectors, `app_sensor_channels.c`, hPa pressure,
+2. ✅ **Readings → channels.** Channel vectors + helpers (in `app_sensor_types.c`), hPa pressure,
    TMP112 + MPL3115A2 temperatures, altitude channel, all readers moved. Telemetry,
    history and alarm wire formats are unchanged. Tests: `alarm_eval` (+4: machine-probe
    / dallas slot channels, hPa pressure) and `sensor_types` (+4: channel helpers).
