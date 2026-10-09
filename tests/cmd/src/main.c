@@ -34,6 +34,7 @@ extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
 extern int g_claim_done_calls;
 extern int g_claim_active_calls;
+extern int g_claim_active_saves_before;
 extern uint8_t g_claim_state;
 extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
@@ -659,6 +660,7 @@ ZTEST(cmd, test_build_config_status)
 	g_app_config.history_enable = true;
 	g_app_config.cap_hall_left = true;
 	g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
 
 	bool more;
 	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len, &more);
@@ -698,12 +700,43 @@ ZTEST(cmd, test_build_config_status)
 	zassert_true(r.body.config_dump.sensors.has_cap_barometer,
 		     "cap_barometer must be explicit");
 	zassert_false(r.body.config_dump.sensors.cap_barometer, "cap_barometer default false");
+	/* #465: cap_buzzer (19) and cap_sht (22) complete the capability picture. */
+	zassert_true(r.body.config_dump.sensors.has_cap_buzzer, "cap_buzzer must be explicit");
+	zassert_true(r.body.config_dump.sensors.has_cap_sht, "cap_sht missing");
+	zassert_true(r.body.config_dump.sensors.cap_sht, "cap_sht value");
 
 	/* This native build has no CONFIG_W1 (APP_CMD_HAVE_W1 undefined), so the
 	 * runtime-only slot-type list is compiled out; the wire encoding of
 	 * w1_slot_type is covered by the decoder regression test (ttn.test.js). */
 	zassert_equal(r.body.config_dump.w1_slot_type_count, 0,
 		      "w1_slot_type must be empty without CONFIG_W1");
+}
+
+/* #465: worst case of the boot settings-info — every cap_* true (a false bool
+ * costs the same 2-3 B, so this is about values, not flags) and the widest
+ * in-range interval varints — still fits one EU868 DR0 frame (51 B), so adding
+ * cap_buzzer/cap_sht does not make the boot dump page there. */
+ZTEST(cmd, test_build_config_status_worst_case_dr0)
+{
+	uint8_t out[51];
+	size_t out_len = 0;
+	bool more = true;
+
+	reset_cfg();
+	g_app_config.interval_sample = 3600;  /* yml max */
+	g_app_config.interval_report = 86400; /* yml max */
+	g_app_config.history_enable = true;
+	g_app_config.cap_hall_left = g_app_config.cap_hall_right = true;
+	g_app_config.cap_input_a = g_app_config.cap_input_b = true;
+	g_app_config.cap_light_sensor = g_app_config.cap_barometer = true;
+	g_app_config.cap_pir_detector = g_app_config.cap_buzzer = true;
+	g_app_config.cap_w1_sensors = g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
+
+	zassert_equal(app_cmd_build_config_status(out, sizeof(out), &out_len, &more), 0, "build");
+	TC_PRINT("settings-info worst case: %zu B\n", out_len);
+	zassert_false(more, "worst-case settings-info pages at DR0 (%zu B)", out_len);
+	zassert_true(out_len <= 51, "%zu B > DR0", out_len);
 }
 
 /* sample over NFC: the device answers synchronously with the fresh telemetry
@@ -1419,21 +1452,37 @@ ZTEST(cmd, test_claim_done)
 	zassert_equal(g_claim_done_calls, 1, "app_nfc_claim_done called exactly once");
 }
 
-/* #351/#415 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected over
- * lrw, same pattern as claim_done/set_secret_key above). Both the
- * no/zero-new_claim_token and the non-zero-new_claim_token cases defer
- * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way — restart-style, Ack delivered
- * to the phone first, then main.c flips the latch (app_nfc_claim_active()) and
- * reboots — so the phone can always assume "ack read -> reboot" regardless of
- * which case it took. A non-zero new_claim_token additionally stages it into
- * g_app_config synchronously in the handler, before the deferred reboot lands it
- * via h_commit. Wire id 27 is unchanged by the rename. */
+/* #351/#415/#471 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected
+ * over lrw, same pattern as claim_done/set_secret_key above). Every case defers
+ * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way (restart-style: the answer is
+ * delivered first, then main.c saves, flips the latch and reboots) and answers
+ * Response.claim_info with the token that holds after the reboot: a non-zero
+ * new_claim_token replaces it, otherwise the stored token is kept, and when none
+ * is stored (vendor_reset wiped it) a new one comes from the CSPRNG. */
+static bool buffer_is_zero_test(const uint8_t *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void expect_claim_info(const Response *r, const uint8_t *token)
+{
+	zassert_equal(r->which_body, Response_claim_info_tag,
+		      "claim_active answers claim_info (%d)", r->which_body);
+	zassert_equal(r->body.claim_info.serial_number, g_app_config.serial_number, "serial");
+	zassert_mem_equal(r->body.claim_info.claim_token, token, 16, "claim_info token");
+	zassert_mem_equal(g_app_config.claim_token, token, 16, "staged token");
+}
+
 ZTEST(cmd, test_claim_active)
 {
 	Response r;
-	uint8_t expect_token[16];
-
-	memset(expect_token, 0x33, sizeof(expect_token));
+	uint8_t token[16];
+	uint8_t zero[16] = {0};
 
 	reset_cfg();
 	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE,
@@ -1442,25 +1491,44 @@ ZTEST(cmd, test_claim_active)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(g_claim_active_calls, 0, "must not call app_nfc_claim_active over lrw");
+	zassert_mem_equal(g_app_config.claim_token, zero, sizeof(zero),
+			  "a rejected claim_active must not generate a token");
 
+	/* Stored token kept. */
 	reset_cfg();
+	g_app_config.serial_number = 2162190413U;
+	memset(g_app_config.claim_token, 0x22, sizeof(g_app_config.claim_token));
+	memset(token, 0x22, sizeof(token));
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active without token also defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously in the handler");
 
-	reset_cfg();
+	/* new_claim_token replaces the stored one. */
 	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active with token defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
-	zassert_mem_equal(g_app_config.claim_token, expect_token, sizeof(expect_token),
-			  "new_claim_token not staged");
+	memset(token, 0x33, sizeof(token));
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously when staging a new token");
+
+	/* No stored token (after vendor_reset): a fresh one is generated. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, "generated token defers save+reboot");
+	zassert_false(buffer_is_zero_test(g_app_config.claim_token, 16),
+		      "a token must be generated when none is stored");
+	memcpy(token, g_app_config.claim_token, sizeof(token));
+	expect_claim_info(&r, token);
+
+	/* A second generation differs from the first. */
+	reset_cfg();
+	(void)handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_true(memcmp(g_app_config.claim_token, token, sizeof(token)) != 0,
+		     "two generated tokens must differ");
 }
 
 /* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
@@ -2418,10 +2486,11 @@ static void visit_settings_page(const uint8_t *buf, size_t len, const Response *
 			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_input_a +
 			     cd->sensors.has_cap_input_b + cd->sensors.has_cap_light_sensor +
 			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_pir_detector +
-			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer;
+			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer +
+			     cd->sensors.has_cap_buzzer + cd->sensors.has_cap_sht;
 }
 
-/* #425: settings-info that does not fit is paged; all 12 settings arrive. */
+/* #425: settings-info that does not fit is paged; all 14 settings arrive. */
 ZTEST(cmd, test_settings_info_paged_at_small_budget)
 {
 	uint8_t out[64];
@@ -2435,12 +2504,12 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	zassert_true(more, "expected more pages at 16 B");
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 0, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings: the boot settings-info content on request. At the EU868 DR0
  * budget it is one frame, carries the command's seq (not the boot dump's 0) and
- * the same 12 settings; no page fields, no stream. */
+ * the same 14 settings; no page fields, no stream. */
 ZTEST(cmd, test_get_settings_one_frame)
 {
 	uint8_t in[8], out[64], boot[64];
@@ -2467,7 +2536,7 @@ ZTEST(cmd, test_get_settings_one_frame)
 	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left");
 	g_seen_cfg_fields = 0;
 	visit_settings_page(out, out_len, &r);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 
 	/* Same bytes as the autonomous boot dump apart from the seq field
 	 * (08 07 right after the version byte). */
@@ -2497,7 +2566,7 @@ ZTEST(cmd, test_get_settings_paged)
 	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 42, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings over NFC: one frame with the seq, never a radio page stream. */
@@ -3032,11 +3101,14 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 	zassert_equal(test_run_settings_save_calls, 1, "and is saved (+ reboot)");
 	g_app_config.calibration = false;
 
-	/* The claim latch flips first, then the save persists the token with it. */
+	/* #471: the token is saved first, only then the claim latch flips, then the
+	 * reboot (a second, no-op save). */
 	run_action_reset();
+	g_claim_active_saves_before = -1;
 	app_cmd_run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE);
 	zassert_equal(g_claim_active_calls, 1, "claim window re-opened");
-	zassert_equal(test_run_settings_save_calls, 1, "claim token saved (+ reboot)");
+	zassert_equal(g_claim_active_saves_before, 1, "latch flips after the token save");
+	zassert_equal(test_run_settings_save_calls, 2, "then save + reboot");
 }
 
 ZTEST(cmd, test_run_action_none_and_page_stream_do_nothing)

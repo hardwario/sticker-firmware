@@ -27,6 +27,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
 | NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §18. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §19. |
+| NFC claiming / resets | **Changed** — the claim latch fails closed on a corrupt NVS value; `vendor_reset` closes the claim window and wipes the token; `claim_active` generates a token when none is set and answers `ClaimInfo` (breaking for the Manager-App, was `Ack`); `factory_reset` also clears the counters and the history (#471). See §35. |
 | NFC | ~~**New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2)~~ — superseded before release by `get_radio_state` (#446, §24): the fields moved out of Info. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
@@ -42,7 +43,8 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
-| LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §35. |
+| Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
+| LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
 
 ---
 
@@ -109,7 +111,7 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 
 ---
 
-## 3. LED: back to GPIO, PWM removed (#301)
+## 3. LED: back to GPIO, PWM removed (#301, #466)
 
 #301 (PR #406) moved red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) onto hardware
 PWM, dimmed "on" to 20 % duty and faded them in the boot carousel. That path is
@@ -209,7 +211,7 @@ after every persisted change — no diff-tracking, no extra state.
 | Group | Fields |
 |---|---|
 | `application` | `interval_sample`, `interval_report`, `history_enable` |
-| `sensors` | `cap_hall_left` … `cap_accelerometer` (all nine capability flags, emitted explicitly incl. `false`) |
+| `sensors` | every capability flag, emitted explicitly incl. `false`: `cap_hall_left` … `cap_accelerometer` (1–9), `cap_buzzer` (19) and `cap_sht` (22) — the last two since #465 (§36) |
 | `w1_slot_type` | detected 1-Wire sensor type per logical slot 1..4 |
 
 `w1_slot_type` (`ConfigDump` field 7, packed `repeated uint32`) reports what is
@@ -235,7 +237,8 @@ config reply, bool fields decode as `0`/`1`):
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
                  "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
-                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0 },
+                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
+                 "cap_buzzer": 0, "cap_sht": 1 },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
 
@@ -243,7 +246,9 @@ config reply, bool fields decode as `0`/`1`):
 
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
-  interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
+  interval values. `cap_buzzer` + `cap_sht` (#465) add 6 B (3 B each, tag ≥ 16);
+  the worst case is then 40 B without / 46 B with 1-Wire (§36). It fits the EU868 DR0 budget (51 B)
+  and the 64 B response buffer; below that it pages (§13).
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
   budget the settings-info is paged (§13); a setting that does not fit even alone is
   left out, and when nothing fits the device sends it once a DR change makes room.
@@ -557,6 +562,47 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - The release image passed too.
 - Not HW-tested: the US915/AU915 sub-band fix (no 915 MHz gateway), code review only.
 
+**Power trace of a full link loss (AT-PWR-14, 2026-10-07, release CI `68bf48f`, EU868, ChirpStack v4 at 10.0.0.52, PPK2 3.0 V):**
+`interval-report 120` (set over NFC; link-check defaults 5 / 5), ADR on, device disabled on ChirpStack at 14:41:13.
+The LNS logs nothing for a disabled device, so the state was read over NFC every 5 min (mailbox `GetInfo`:
+`lrw_state`, `last_dl_*`, `uptime_s`; see AT-PWR-14 in the playbook) and each rung was identified on the PPK2
+trace by its TX burst (airtime and TX current):
+
+| Time | State | TX on air | What it is |
+|---|---|---|---|
+| 14:28–15:00 | `HEALTHY` → outage | 61 ms, 28 mA | DR5/SF7 at the ADR-reduced TX power; link check every 5th report (unanswered from 14:41) |
+| 15:02:01 | 3rd failed check | 62 ms, 32 mA | → `WARNING`, first rung taken at once |
+| 15:03:55 | `WARNING` | 114 ms, 59 mA | default (max) TX power + DR4/SF8 |
+| 15:06:03 | `WARNING` | 206 ms, 60 mA | DR3/SF9 |
+| 15:07:55 | `WARNING` | 412 ms, 60 mA | DR2/SF10 |
+| 15:09:55 | `WARNING` | 824 ms, 57 mA | DR1/SF11 |
+| 15:12:02 | `WARNING` | 1483 ms, 57 mA | DR0/SF12 telemetry — the floor |
+| 15:12:12 | → `RECONNECT` | — | check failed at the floor, 5th failure in `WARNING` |
+| 15:13:01, 15:15:16, 15:18:34, 15:26:57, 15:46:14, 16:21:16 | `RECONNECT` | 1483 ms, 57 mA | SF12 JoinRequests, gaps 59 / 135 / 198 / 503 / 1157 / 2102 s (60 s × 2ⁿ + jitter, cap 3600 s) |
+| 17:11:47 | — | — | device re-enabled on ChirpStack |
+| 17:16:15 | → `HEALTHY` | 1483 ms + 2 × 2303 ms | next scheduled join (+3299 s) accepted; Info + ConfigDump at SF12, then ADR back to DR5 |
+| 17:18–17:31 | `HEALTHY` | 78 ms, 28 mA | 120 s reports at SF7 again |
+
+- The ladder runs to the end: every rung is taken before the rejoin, which comes only at the floor with the
+  rejoin budget spent (`app_lrw.c` `on_lc_failure`). The M-2 stale-uplink watchdog did not fire — the device
+  transmitted throughout.
+- Outage → `WARNING` took 21 min (3 checks at every 5th report), `WARNING` → `RECONNECT` 10 min (one rung per
+  report). At the default 900 s this scales to ≈ 2.5 h + 1.25 h.
+- Charge of the TX part of a report: SF7 ≈ 1.7 mC → SF8 6.8 → SF9 12.3 → SF10 24.6 → SF11 47 → SF12 85 mC
+  (×50 from DR5 at reduced power to DR0 at full power), plus ≈ 8–11 mC of RX windows. A JoinRequest costs
+  ≈ 87 mC + ≈ 12 mC for its RX1/RX2 windows (the two small bursts ~5–6 s after each join). In `WARNING` the
+  idle band between bursts is unchanged (70.5 µA healthy).
+- In `RECONNECT` the floor rises from ≈ 76 µA to ≈ 149 µA: the status LED blinks yellow 10 ms + red 80 ms
+  every 3 s (`main.c`, `BLINK_INTERVAL_SECONDS`), ≈ 0.23 mC per blink, ≈ +1.75 mAh/day for as long as the
+  network is gone — about as much as the whole healthy idle budget.
+- Average excluding the NFC probe windows: healthy 155.6 µA (560 mC/h at 120 s reports); outage hours with
+  rejoins every 35–55 min 148–212 µA (534–763 mC/h). At the 120 s grid the outage costs little more than
+  the healthy hour; the LED, not the radio, dominates once the rejoin back-off is at its cap.
+- Recovery: the network comes back only at the next scheduled join — 4.5 min here, up to ≈ 1 h once the
+  back-off has reached its cap. The join was accepted at once, Info and ConfigDump went out at SF12, ADR
+  brought the device back to DR5 within two reports, and the last 10 min averaged 159 µA (idle 67.7 µA) — the
+  healthy profile.
+
 See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
 
 ---
@@ -666,8 +712,8 @@ the §4 content on request.
 |---|---|
 | Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
 | Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
-| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
-| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, every `sensors.cap_*` flag (incl. `cap_buzzer` / `cap_sht`, #465), runtime `w1_slot_type` (1-Wire builds) |
+| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire before #465, +6 B for `cap_buzzer`/`cap_sht`, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
 | Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
 | Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
 
@@ -1011,12 +1057,14 @@ decrypted command closed the window (#308); now it closes **only** on an explici
 `claim_done`. The app must therefore send `claim_done` after storing the claimed
 keys; a crash in between leaves the token readable on a powered unit (accepted:
 the backend refuses a second claim of the same serial, so only the token leaks,
-not control). Mutators are explicit only: `claim_done` / `ats claim done` →
-`done`; `claim_active` / `ats claim active` / `vendor_reset` → `active`.
-`device_reset` / `factory_reset` leave the state alone.
+not control). Mutators are explicit only: `claim_done` / `ats claim done` /
+`vendor_reset` → `done`; `claim_active` / `ats claim active` → `active`.
+`device_reset` / `factory_reset` leave the state alone. (`vendor_reset` opened the
+window before #471, see §35.)
 
 Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
-`active`, `consumed` → `done`.
+`active`, `consumed` → `done`. Any other stored value, a wrong length or a read
+error closes the window (`done`, #471, see §35).
 
 ### 19.4 Command rename (wire-compatible)
 
@@ -1526,6 +1574,7 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
 - **M-2 waits out a ledger hold** (fix from the HIL). A held frame waits for its hold in one go, up to the hour. The M-2 watchdog (§22) now takes the known end of that hold as its duty-cycle excuse, and no longer only the last held attempt plus one interval + 3 min. Without the fix, the DR0 bench run rejoined 4 min into a 41 min hold and then every ~5 min: fcnt restarted and nothing was sent for 45 min. The 75 min cap is unchanged.
 - The Info / settings-info announce no longer re-encodes into a full answer queue on its 5 s retry.
 - Hardware (0413, EU868 DR0, ADR off, 60 s, 2026-09-28): the ledger held at 34.9 s of 36 s. The MAC never refused a frame, M-2 did not rejoin, and the held frame went at the end of the hold on the same session.
+- **Fixed: one ledger entry per 75 s slot** instead of per frame. Above 48 frames/h the F-P2P-1 fold of a full ring built one entry that never left the hour and summed all air, so a 60 s cadence with link checks hit the 1 % allowance every ~6 h and went silent ~21 min (TOWER bench 5722, 2026-10-07; LoRaWAN EU868 alike). Frames of the same fixed slot now share an entry (over-count ≤ 75 s, never under-count), at most 49 entries live per hour; RAM +8 B. doc/p2p.md §6.
 
 ## 32. Alarm bursts and the post-command reboot (#462)
 
@@ -1606,7 +1655,155 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
   - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
 
-## 35. Periodic Info + settings-info announce (#445)
+## 35. Claiming and reset tiers (#471)
+
+Four changes to the claim lifecycle and the reset ladder.
+
+### Fail-closed claim latch
+
+Before, every unexpected `clm/state` value opened the claim window, so a claimed
+unit with corrupted NVS disclosed its `claim_token` again through
+`get_claim_info`. Now only a missing key (fresh factory NVS) opens it:
+
+| Stored `clm/state` | Window |
+|---|---|
+| key missing | `active` (factory default) |
+| `0`, `1` (legacy `unset` / `pending`) | `active` |
+| `2` | `done` |
+| any other byte, wrong length, read error, subtree load failure | **`done`** + `WRN` |
+
+A window closed by mistake is reopened with `claim_active` (owner, NFC) or
+`ats claim active`.
+
+### `vendor_reset` closes the window
+
+`vendor_reset` still wipes the `claim_token` (it is not in its persistent tier),
+but it now sets the window to **`done`** instead of `active`. Before, the unit
+ended up `active` without a token (`get_claim_info` → `NOT_READY "no claim
+token"`) and could not be claimed through ATELOS. Now nothing claim-related is
+readable after a vendor reset (`get_claim_info` → `NOT_READY "claimed"`) until
+the owner re-opens the window with `claim_active`.
+
+### `claim_active` generates the token and answers `ClaimInfo`
+
+| `claim_active` request | Stored token | Token after the reboot |
+|---|---|---|
+| non-zero `new_claim_token` | any | `new_claim_token` |
+| no / zero `new_claim_token` | non-zero | unchanged |
+| no / zero `new_claim_token` | zero (after `vendor_reset`) | **new 128-bit token from the CSPRNG** (`sys_csrand_get()`, STM32 RNG) |
+
+The answer is now **`Response.claim_info {serial_number, claim_token}`** (field 9)
+with the token that holds after the reboot, instead of `Ack`. It goes over the
+secret_key channel (`0x01`) or the shell only (`claim_active` stays
+`transports: [nfc, shell]`), so the token is never sent in clear. The phone
+forwards it to ATELOS, which is how a unit gets claimable again after a vendor
+reset. If the RNG fails, the command answers `NOT_READY "no entropy"` and changes
+nothing.
+
+The deferred action (`APP_CMD_ACTION_CLAIM_ACTIVE_SAVE`) runs after the answer is
+read, as before, but in a new order: save the config, **then** flip the latch to
+`active`, then reboot. If the save fails, the unit reboots with the old token and
+the old latch, so it never ends up `active` with a token the phone was told about
+but the unit lost.
+
+**Host impact:** the Manager-App must accept `claim_info` as the answer to
+`claim_active` (an app that expects `Ack` reports an error although the unit
+re-opened the window), and push the token to ATELOS.
+
+### `factory_reset` clears counters and history
+
+`factory_reset` hands a unit to a new owner, so it now also resets the hall /
+input pulse totalizers and erases the history ring, as `vendor_reset` already
+did. `device_reset` keeps both.
+
+### Reset tiers
+
+| | `device_reset` | `factory_reset` | `vendor_reset` | `settings erase` |
+|---|---|---|---|---|
+| Transports | NFC, shell | NFC, shell | vendor NFC channel, shell | shell |
+| serial, `nonce_counter`, `vendor_token` | keep | keep | keep | wiped |
+| `secret_key` | keep | keep | replaced (from the command) | wiped |
+| `claim_token` | keep | keep | wiped | wiped |
+| Claim window | keep | keep | **→ `done`** | → `active` |
+| `vendor_reset_allow` | keep | keep | default | default |
+| DevEUI / JoinEUI | keep | keep | wiped | wiped |
+| Other LoRaWAN config and keys, `radio_mode` | keep | default | default | default |
+| Rest of the config, alarm rules | default | default | default | default |
+| Pulse counters, history | keep | **cleared** | cleared | counters wiped |
+| LoRaMac NVM (DevNonce, frame counters) | keep | wiped | wiped | — |
+
+### Upgrade from v1.4.x: wipe the old `hio.stck:clm` record
+
+v1.5.0 never writes the NFC user EEPROM (§18), so a unit upgraded from v1.4.x
+keeps the old plaintext `hio.stck:clm` NDEF record (serial + `claim_token`),
+readable without power even after `claim_done`. Part of the upgrade: wipe the
+NDEF area once, with `nfc clear` on a debug build or by writing an empty NDEF
+message from the phone.
+
+### Cost and tests
+
+Release +136 B flash, RAM unchanged. `tests/nfc_hw` `test_clm_latch_fails_closed`
+(0/1 → `active`, 2 / 0x7F / 0xFF / wrong length / read error → `done`);
+`tests/cmd` `test_claim_active` (kept, replaced and generated token, always
+`claim_info`, rejected over LoRaWAN without generating).
+
+---
+
+## 36. Onboard SHT4x capability flag `cap_sht` (#465)
+
+The onboard SHT4x was the only sensor without a runtime switch: it was always
+read, and its temperature/humidity were always on the wire (`null` on a fault).
+A host could neither see nor turn it off. `cap_sht` adds the switch.
+
+| | |
+|---|---|
+| Key | `cap_sht` = `sensors` **22**, `bool`, default **`true`**; shell `config cap-sht`, NVS `cap-sht` |
+| proto_id | 22, not 20: draft PR #407 (analog inputs) claims `sensors` 20/21 |
+| Access | the same as every other `cap_*` flag |
+| Reset tiers | not persistent: a device/factory/vendor reset restores `true` |
+| Upgrade | the key is new; a unit with no stored value gets the default `true`, so it behaves as before. An older image ignores the key on a downgrade |
+
+With `cap_sht` = `false`:
+
+- `app_sensor_sample()` does not call `app_sht4x_read()`, and the skipped read is
+  left out of the wedged-I2C accounting (`i2c_tried` / `i2c_failed`).
+- Telemetry carries no `temperature` / `humidity` fields (the onboard group is
+  absent, not `null`).
+- The no-data watchdog does not watch the onboard temperature/humidity, so no
+  `no_data` alarm fires. Turning the flag off while a `no_data` alarm is latched
+  sends its deactivate edge. A threshold rule on onboard temperature/humidity sees
+  `NaN` and stays inactive.
+- History drops the onboard channels (`history_sensors` bits 0/1) from the active
+  mask, like any other channel whose capability is off, instead of storing `NaN`.
+- The production test (`ats`) and the calibration still read the SHT4x directly,
+  regardless of the flag.
+
+The battery ADC stays the only sensor without a switch: undervoltage,
+`battery_level` and `Info.battery` depend on it.
+
+**Settings-info.** The boot settings-info (§4) and `GetSettings` (§14) now carry
+`cap_buzzer` (19) and `cap_sht` (22) as well, so the host sees every capability
+flag. `cap_buzzer` reports the effective value: `app_sensor_init()` clears it when
+`cap_pir_detector` is also set. The two flags add 6 B. The worst case (every
+flag `true`, `interval_sample` 3600, `interval_report` 86400) is 40 B without
+1-Wire (measured by `cmd/test_build_config_status_worst_case_dr0`) and 46 B with
+the four `w1_slot_type` entries, so it still fits one EU868 DR0 frame (51 B).
+There is no hard 51 B limit anyway: the settings-info pages when it does not
+fit (§13).
+
+**Decoder:** `ttn.js` learns `_SEN_NAMES[22] = "cap_sht"` (decode + encode).
+
+**Consumers:** the Manager-App needs a `cap_sht` toggle; Hub / Portal get the new
+`sensors` field, and `cap_buzzer` now also arrives in the boot announce.
+
+Tests: `compose/test_cap_sht_gating`, `history/test_cap_sht_off_drops_onboard_channels`,
+`alarm_eval/test_cap_sht_gates_onboard_nodata`,
+`cmd/test_build_config_status_worst_case_dr0`, the settings-info field counts
+(12 → 14) and the `ttn.js` decoder tests.
+
+---
+
+## 37. Periodic Info + settings-info announce (#445)
 
 The network side (LNS, Hub central, Portal) keeps a retained copy of each
 node's identity, firmware and effective configuration. Until now it was

@@ -8,6 +8,7 @@
 #define APP_NFC_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "app_cmd.h"
@@ -60,16 +61,24 @@ bool app_nfc_session_active(void);
 #define APP_NFC_CLAIM_DONE   2 /* claimed: no clm record, get_claim_info -> NOT_READY */
 
 /* (Re)open the claim window (#415): CLAIM_ACTIVE + persist, no reboot. Reached
- * from the claim_active command, `ats claim active`, and app_settings_vendor_reset()
- * (#299) — the one reset tier deep enough to re-provision; device_reset/
- * factory_reset deliberately leave the claim state alone (see app_nfc.c). */
-void app_nfc_claim_active(void);
+ * from the claim_active command and `ats claim active`. `reason` goes to the
+ * log. */
+void app_nfc_claim_active(const char *reason);
 
 /* Close the claim window (#415, claim_done command / `ats claim done`):
  * CLAIM_DONE + persist, no reboot. Idempotent — always safe to call. Replaces
  * the #308 implicit close (any decrypted command); the app must now send this
- * explicitly after storing the keys. */
-void app_nfc_claim_done(void);
+ * explicitly after storing the keys. vendor_reset closes it too (#471): the
+ * claim_token is wiped, and the owner re-opens the window with claim_active,
+ * which generates a new token. device_reset/factory_reset leave the claim state
+ * alone. `reason` goes to the log. */
+void app_nfc_claim_done(const char *reason);
+
+#if defined(CONFIG_ZTEST)
+/* Test hook (#471): run the "clm/state" load handler on `len` bytes of `data`;
+ * a negative `read_ret` makes the settings read fail with it. */
+int app_nfc_test_clm_load(const uint8_t *data, size_t len, int read_ret);
+#endif
 
 /* Current claim window state (APP_NFC_CLAIM_ACTIVE / APP_NFC_CLAIM_DONE), for
  * `ats claim status`, the get_claim_info handler, and tests. */

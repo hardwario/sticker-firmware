@@ -718,18 +718,35 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   passes against the ledger.
 
   Two costs, both deliberate:
-  - **392 B of RAM** — `APP_RADIO_DUTY_LEDGER_ENTRIES` (48) × 8 B plus the
+  - **400 B of RAM** — `APP_RADIO_DUTY_LEDGER_ENTRIES` (49) × 8 B plus the
     budget and the ring indices, replacing the bucket's 16 B.
-  - **No frame-count limit (F-P2P-1, fixed).** One entry per transmission
-    still inside the window; when the 48-entry ring is full the two *oldest*
-    entries are folded into one (summed air, the later end time) instead of
-    making the frame wait for a slot. The folded pair leaves the window when
-    its younger half would have, so air is only ever over-counted, never
-    under-counted, and every sliding hour stays within 1 %. Before the fold the
-    ring capped a node at 48 frames/hour whatever their air-time: on the
-    ProXimos bench (2026-09-26, 60 s reports at SF7, 67 ms frames) the node
-    went silent ~13 min of every hour, and 44 min after a run of failed
-    cycles, with the air-time budget barely touched.
+  - **One entry per 75 s slot, not per frame (no frame-count limit).** Every
+    frame that ends in the same fixed slot (`uptime / APP_RADIO_DUTY_SLOT_MS`,
+    75 s) as the newest entry is added to it, and the entry's end moves to the
+    frame's. An entry never spans more than its slot, so the air of an earlier
+    frame leaves the window at most 75 s late — over-counted, never
+    under-counted — and the live entries of an hour sit in distinct slots: at
+    most 3600 / 75 + 1 = 49, the ring size. Two-oldest folding survives only
+    as a fallback for the one extra slot the 32-bit uptime wrap can add.
+    History of the cap:
+    - A plain per-frame ring capped a node at 48 frames/hour whatever their
+      air-time: on the ProXimos bench (2026-09-26, 60 s reports at SF7, 67 ms
+      frames) the node went silent ~13 min of every hour, and 44 min after a
+      run of failed cycles, with the air-time budget barely touched.
+    - F-P2P-1 then folded the two oldest entries of a full ring (summed air, the
+      later end time). Above 48 frames/hour every frame folds, so the folded
+      entry rides ~48 frames behind, never leaves the window, and sums all the
+      air since the ring filled. The TOWER bench (2026-10-07, 5722, 60 s reports
+      plus link checks, 78 ms frames) reached the 36 s allowance every ~6 h and
+      went silent ~21 min until that entry aged out (22:22, 04:29, 10:34 UTC);
+      an exact simulation of the code gave 5.9–6.5 h / 20–24 min.
+    - Slots are fixed rather than "within 75 s of the newest end": moving one
+      entry's end with every frame of a faster stream (a 10 s HIL stream, a
+      history replay) would chain it the same way.
+    `tests/radio_common` checks a 72-frames/hour cadence for 24 h never waits
+    (it waits at 6.4 h against the fold), that a 10 s stream asking for twice
+    the allowance waits the exact sliding-hour time plus at most a slot, and
+    that a burst of the whole allowance clears within an hour and a slot.
 
   The ledger is **RAM-only**: a reboot forgets the hour just transmitted, so a
   reboot loop can still exceed 1 %. In other words it enforces 1 % per
@@ -1076,7 +1093,7 @@ phone app step is needed for P2P at all, one-time or otherwise.
   no network server, §1). **RESOLVED (B2 + decision D1, v1.5.0):** the node
   enforces its own limit over all TX (data, ACK retry, JoinRequest) with an
   exact sliding-hour ledger — every sliding hour ≤ 1 %, not merely a 1 %
-  long-run average — at a cost of 392 B of RAM (since #460 T2d shared with
+  long-run average — at a cost of 400 B of RAM (since #460 T2d shared with
   LoRaWAN, with a per-sub-band budget). See §6 for both, and for the token bucket this replaced. §6/§8's
   central/gateway-side duty *bookkeeping* is a separate concern and still
   applies.

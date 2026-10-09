@@ -112,6 +112,7 @@ struct app_config {
 	bool cap_barometer;
 	bool cap_pir_detector;
 	bool cap_buzzer;
+	bool cap_sht;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
 	uint8_t alarm_0[17];

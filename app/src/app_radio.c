@@ -455,7 +455,7 @@ void app_radio_set_duty_held(bool held)
  * An empty ledger at boot: never blocked, as the full token bucket was not. A
  * reboot therefore forgets the hour just transmitted. That hole is accepted:
  * the ledger is RAM-only, and persisting it would cost an NVS write per frame.
- * doc/p2p.md §6 records it. Cost: 392 B of RAM.
+ * doc/p2p.md §6 records it. Cost: 400 B of RAM.
  */
 #if defined(CONFIG_ZTEST)
 #define DUTY_TESTABLE
@@ -490,7 +490,9 @@ static void duty_expire(struct app_radio_duty *d, uint32_t now)
 /* Make room for one more entry by folding the two oldest into one: the
  * younger keeps its end time and takes the older's air, so the pair leaves the
  * window when the younger would have. Only ever over-counts air (the older
- * half is held a little longer), so the bound holds (F-P2P-1). */
+ * half is held a little longer), so the bound holds. A fallback only: slot
+ * coalescing in app_radio_ledger_charge() keeps the live entries within the
+ * ring, bar the one extra slot of the uptime wrap. */
 static void duty_fold_oldest(struct app_radio_duty *d)
 {
 	struct app_radio_duty_entry *oldest = &d->entries[d->head];
@@ -532,10 +534,23 @@ DUTY_TESTABLE void app_radio_ledger_charge(struct app_radio_duty *d, int64_t now
 	uint32_t now = (uint32_t)now_ms;
 
 	duty_expire(d, now);
+	if (d->count > 0) {
+		struct app_radio_duty_entry *newest = &d->entries[duty_slot(d, d->count - 1)];
+
+		/* Same fixed slot as the newest entry: add to it. The slot is
+		 * fixed (uptime / slot), not "within a slot of the newest end",
+		 * or a stream faster than a slot would keep moving one entry
+		 * forward and it would never leave the window. */
+		if (now - newest->end_ms < APP_RADIO_DUTY_SLOT_MS &&
+		    now / APP_RADIO_DUTY_SLOT_MS == newest->end_ms / APP_RADIO_DUTY_SLOT_MS) {
+			newest->air_ms += air_ms;
+			newest->end_ms = now;
+			return;
+		}
+	}
 	if (d->count >= APP_RADIO_DUTY_LEDGER_ENTRIES) {
-		/* app_radio_ledger_wait_ms() already folds before admitting, so
-		 * the real call paths never get here with a full ring; fold anyway
-		 * rather than drop a charge, the one outcome that could breach the
+		/* Only the uptime wrap gets here (an extra slot): fold rather
+		 * than drop a charge, the one outcome that could breach the
 		 * limit. */
 		duty_fold_oldest(d);
 	}
@@ -559,12 +574,6 @@ DUTY_TESTABLE int64_t app_radio_ledger_wait_ms(struct app_radio_duty *d, int64_t
 	uint32_t now = (uint32_t)now_ms;
 
 	duty_expire(d, now);
-
-	/* F-P2P-1: a full ring folds its two oldest entries rather than making
-	 * the frame wait for a slot, so only the air-time budget can refuse it. */
-	if (d->count >= APP_RADIO_DUTY_LEDGER_ENTRIES) {
-		duty_fold_oldest(d);
-	}
 
 	uint32_t used = app_radio_ledger_used_ms(d, now_ms);
 

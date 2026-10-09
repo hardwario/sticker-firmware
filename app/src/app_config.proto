@@ -101,6 +101,7 @@ message AppConfigMessage {
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
         optional bool cap_buzzer = 19;
+        optional bool cap_sht = 22;
     }
 
     message Alarms {
@@ -338,10 +339,11 @@ message Command {
     message GetBasicInfo { }
 
     // The boot settings-info ConfigDump (#412) on request: application
-    // interval_sample / interval_report / history_enable, the nine sensors
-    // cap_* flags and the runtime w1_slot_type. The answer carries this
-    // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
-    // paged with the Response envelope (#425) when it does not fit one frame.
+    // interval_sample / interval_report / history_enable, every sensors
+    // cap_* flag incl. cap_buzzer + cap_sht (#465), and the runtime
+    // w1_slot_type. The answer carries this command's seq (the autonomous
+    // boot dump has seq 0); over LoRaWAN it is paged with the Response
+    // envelope (#425) when it does not fit one frame.
     message GetSettings { }
 
     // Link state and diagnostics of the active radio (#446): answered with

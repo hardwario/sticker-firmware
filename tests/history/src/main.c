@@ -31,10 +31,12 @@ extern uint32_t test_clock_unix;
  * channels past index 15. */
 #define BIT16(n) ((uint32_t)(1u << (n)))
 
-/* Fresh start: temperature+humidity only (NO_CAP), all caps off, clock unsynced. */
+/* Fresh start: temperature+humidity only (cap_sht on), other caps off, clock
+ * unsynced. */
 static void setup(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default */
 	g_app_config.history_enable = true;
 	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
 
@@ -176,6 +178,26 @@ ZTEST(history, test_export)
 
 	/* count_frames mirrors the packing: 3 small records fit a single frame. */
 	zassert_equal(app_history_count_frames(0, 0xFFFFFFFF, sizeof(buf)), 1, "frames");
+}
+
+/* #465: with cap_sht off the onboard temperature/humidity channels are not
+ * available, so they drop out of the active mask and are not stored (instead of
+ * recording NaN). */
+ZTEST(history, test_cap_sht_off_drops_onboard_channels)
+{
+	setup();
+	g_app_config.cap_sht = false;
+	zassert_equal(app_history_init(), 0, "re-init with cap_sht off");
+	app_history_clear();
+
+	zassert_false(app_history_sensor_available(APP_HISTORY_TEMPERATURE), "temp available");
+	zassert_false(app_history_sensor_available(APP_HISTORY_HUMIDITY), "hum available");
+	zassert_equal(app_history_available_mask() &
+			      (BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY)),
+		      0, "onboard channels in the available mask");
+	zassert_equal(app_history_get_mask() &
+			      (BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY)),
+		      0, "onboard channels still recorded");
 }
 
 /* Per-slot 1-Wire channels (s1..s4 temp/hum) become available when cap_w1_sensors
