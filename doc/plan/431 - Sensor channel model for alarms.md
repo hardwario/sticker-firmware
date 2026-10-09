@@ -338,9 +338,20 @@ the table of `sensor_type`:
   replaces `app_alarm_quantity_kind()`, `source_is_momentary()` and the source lists
   in `rule_state_shape_valid()` / `app_alarm_rule_valid()`.
 - `alarm_scale()` becomes a lookup of the `wire` scale.
-- The no-data watchdog watches every `liveness` channel of an enabled/configured slot.
-  This replaces the hand-written `m_nodata_tab`: motherboard temperature, humidity,
-  pressure and battery, and the primary temperature of each 1-Wire type.
+- The no-data watchdog watches every `liveness` channel of the motherboard. This
+  replaces the hand-written `m_nodata_tab`: temperature, humidity, pressure and battery.
+- A 1-Wire slot is watched per device and per part (D9). Every 1-Wire channel names the
+  chip it is read from (`part:` in the YAML). The watchdog raises:
+  - one `no_data` on **channel 255 (`device`)** when no channel of the slot reports
+    (probe unplugged, cable cut), instead of one alarm per channel;
+  - one `no_data` per **part** while the device still answers, when any channel of that
+    chip stops reporting. The alarm names the part's first channel (SHT → `temperature`,
+    LIS2DH12 → `tilt`), and the decoder adds `part`.
+
+  A part is watched only once it has reported since the slot was armed, so a chip that is
+  not fitted (TMP112 on older probes) never alarms. Part alarms are held while the device
+  alarm is active. `Info.w1_slot_state` follows the device live: `absent` while it does
+  not answer, `ok` again when it does.
 - The low-battery watchdog becomes the evaluator of motherboard ch20.
 - Shell: `alarm set <rule> <slot> <channel-name|number> ...`. The shell fills
   `sensor_type` from the slot's current type.
@@ -625,8 +636,9 @@ of every step.
    - Evaluation by `kind`; value from the slot's channel vector (a 1-Wire slot whose data
      type differs from the rule's reads NaN, so a mismatched sensor never feeds a rule);
      counters from `.u`; event value = `lroundf(v × wire_scale)` of the channel.
-   - Watchdogs: no-data watches every `liveness` channel of the slot's type (latches 4
-     motherboard + 2 per 1-Wire slot, guarded by a test), re-armed on a type change;
+   - Watchdogs: no-data watches every motherboard `liveness` channel (4 latches) and,
+     per 1-Wire slot, the whole device (channel 255) plus each part of its type
+     (`1 + APP_SENSOR_W1_PART_MAX` latches, guarded by a test), re-armed on a type change;
      low battery reads `battery-voltage` (ch 20, value in mV); both use rule 0xFF / 0xFE.
      Active mask: 16 rule bits, 5 no-data (per slot), battery, 4 mismatch.
    - Wire: `AlarmEvent` slot(1) / rule(7) / channel(10) / sensor_type(11, 1-Wire only),
@@ -743,6 +755,20 @@ the last commit before the PR leaves draft.
     telemetry shows `null`;
   - hall/input rules on slot 0.
 
+### HIL of the 1-Wire no-data model (2026-10-09, 2162165132)
+
+Image: debug + W1, `6a4540f2`, machine probe `054ed8` in s1, ChirpStack EU868.
+
+| Check | Result |
+|---|---|
+| Unplug the probe | ✅ one AlarmEvent `s1 / device / machine-probe / no_data / activate` (channel 255), no per-channel alarms; `w1 list` and `Info.w1_slot_state` show `absent` without a reboot; telemetry s1 all `null` |
+| Plug it back | ✅ `device` no_data deactivates (`…1a0e0801100138ff01480450ff015803`), state `ok`, values back without a reboot |
+| Accelerometer after re-plug | ❌ on `4b955cd6`: accel-x/y/z stayed `null` (LIS2DH12 re-powered into power-down, tilt latch still read). Fixed in `6a4540f2` (re-init on `-ENODATA`, part healthy only if all its channels report); ✅ accel back from the 2nd sample |
+
+The re-run on `6a4540f2` was verified on the device (`ats radio compose`). The radio was
+duty-cycle restricted after ~15 DR0 frames in 10 min, so the edges of that run never
+went out over the air. The air path of both edges was shown on `4b955cd6`.
+
 ## Decisions
 
 | # | Question | Decision |
@@ -755,3 +781,4 @@ the last commit before the PR leaves draft.
 | D6 | Max channels per type | **Decided:** 10 per 1-Wire type; the motherboard has its own limit of 32 (21 used), because it now carries every on-board sensor |
 | D7 | Alarm rule identity | **Decided:** `(rule, slot, channel)`; `AlarmEvent` fields renamed `source` → `slot`, `slot` → `rule` (numbers kept) |
 | D8 | Store the sensor type in the rule | **Decided:** yes, blob 17 → 18 B; a rule with a type that differs from `sensorN_type` is stale (inert, reported) |
+| D9 | No-data on a multi-channel 1-Wire device | **Decided (HIL 2026-10-09):** one alarm per part (chip) on its first channel while the device answers; one alarm on channel 255 (`device`) when the whole device stops answering |
