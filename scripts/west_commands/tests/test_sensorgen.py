@@ -206,6 +206,7 @@ def test_history_sentinel_is_kept_free():
     (lambda r: _type(r, "motherboard")["channels"][0].update(history=["i8", 1]),
      "history must be"),
     (lambda r: _type(r, "motherboard")["channels"][0].update(range=[5.0, 1.0]), "min < max"),
+    (lambda r: _type(r, "motherboard")["channels"][5].pop("history"), "missing 'history'"),
     (lambda r: r.update(max_channels_w1=5), "9 channels > limit 5"),
     (lambda r: r["types"].append(dict(_type(r, "motherboard"), id=99, name="board-2")),
      "exactly one motherboard"),
@@ -213,6 +214,14 @@ def test_history_sentinel_is_kept_free():
 def test_invalid_registry_is_rejected(mutate, message):
     ok, e = _has(_mutated(mutate), message)
     assert ok, e
+
+
+def test_retired_channel_needs_no_history():
+    def f(reg):
+        c = _type(reg, "motherboard")["channels"][5]
+        c.pop("history")
+        c["retired"] = True
+    assert _mutated(f) == []
 
 
 def test_pending_cap_must_be_removed_once_it_exists():

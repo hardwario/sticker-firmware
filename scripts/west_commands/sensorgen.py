@@ -171,6 +171,8 @@ def validate(reg, caps):
                     err.append(f"{cw}: wire must be [sint32|uint32, scale > 0]")
                     wire = None
             hist = c.get("history")
+            if hist is None and not c.get("retired"):
+                err.append(f"{cw}: missing 'history' (every channel is recordable)")
             if hist is not None:
                 if (not isinstance(hist, list) or len(hist) != 2 or hist[0] not in HISTORY_ENCS
                         or not isinstance(hist[1], (int, float)) or hist[1] <= 0):

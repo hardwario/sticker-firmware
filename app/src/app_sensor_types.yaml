@@ -34,7 +34,9 @@
 #   wire      [type, scale]: value on the wire = round(phys * scale), type sint32|uint32;
 #             shared by telemetry (SensorReading.value, zigzag sint32) and AlarmEvent.value
 #   history   [enc, scale]: fixed-width history encoding u8|i16|u16|i32|u32
-#             (INT16_MAX / INT32_MAX / all-ones = absent); omitted = not recordable
+#             (INT16_MAX / INT32_MAX / all-ones = absent). Required on every channel:
+#             any channel can be picked for history (`history_channels`). A momentary
+#             channel records 1 when it asserted at least once during the interval
 #             CI: range * scale must fit both `wire` and `history` (sentinel kept free)
 #   range     [min, max] valid physical range; a reading outside is absent
 #   liveness  true = channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
@@ -67,28 +69,28 @@ types:
       - {ch: 3,  name: illuminance,       label: "Illuminance (OPT3001)",     quantity: illuminance, unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5],  range: [0.0, 83865.6], cap: cap_light_sensor}
       - {ch: 4,  name: temperature-baro,  label: "Temperature (MPL3115A2)",   quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-55.0, 125.0],  cap: cap_barometer}
       # Hall switches
-      - {ch: 5,  name: hall-left-state,   label: "Hall left — state",         quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_hall_left}
+      - {ch: 5,  name: hall-left-state,   label: "Hall left — state",         quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], history: [u8, 1], cap: cap_hall_left}
       - {ch: 6,  name: hall-left-count,   label: "Hall left — pulse count",   quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_hall_left}
-      - {ch: 7,  name: hall-right-state,  label: "Hall right — state",        quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_hall_right}
+      - {ch: 7,  name: hall-right-state,  label: "Hall right — state",        quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], history: [u8, 1], cap: cap_hall_right}
       - {ch: 8,  name: hall-right-count,  label: "Hall right — pulse count",  quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_hall_right}
       # Inputs GP_A / GP_B (digital or analog, #396)
-      - {ch: 9,  name: input-a-state,     label: "Input A — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_input_a}
+      - {ch: 9,  name: input-a-state,     label: "Input A — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], history: [u8, 1], cap: cap_input_a}
       - {ch: 10, name: input-a-count,     label: "Input A — pulse count",     quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_input_a}
       - {ch: 11, name: input-a-voltage,   label: "Input A — voltage",         quantity: voltage,     unit: V,      kind: threshold, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 30.0], cap: cap_analog_a}
-      - {ch: 12, name: input-b-state,     label: "Input B — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_input_b}
+      - {ch: 12, name: input-b-state,     label: "Input B — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], history: [u8, 1], cap: cap_input_b}
       - {ch: 13, name: input-b-count,     label: "Input B — pulse count",     quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_input_b}
       - {ch: 14, name: input-b-voltage,   label: "Input B — voltage",         quantity: voltage,     unit: V,      kind: threshold, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 30.0], cap: cap_analog_b}
       # PIR motion detector (PYQ1648)
-      - {ch: 15, name: pir-motion,        label: "PIR — motion",              quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], cap: cap_pir_detector}
+      - {ch: 15, name: pir-motion,        label: "PIR — motion",              quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], history: [u8, 1], cap: cap_pir_detector}
       - {ch: 16, name: pir-count,         label: "PIR — motion count",        quantity: count,       unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_pir_detector}
       # Accelerometer (LIS2DH)
-      - {ch: 17, name: accel-motion,      label: "Accelerometer — motion",    quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], cap: cap_accelerometer}
+      - {ch: 17, name: accel-motion,      label: "Accelerometer — motion",    quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
       - {ch: 18, name: accel-count,       label: "Accelerometer — motion count", quantity: count,    unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_accelerometer}
       - {ch: 19, name: accel-orientation, label: "Accelerometer — orientation (1..6)", quantity: orientation, unit: enum, kind: none, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
       # Supply rail — low-battery watchdog (battery_level), not a rule target
       - {ch: 20, name: battery-voltage,   label: "Battery voltage",           quantity: voltage,     unit: V,      kind: threshold, alarm_only_watchdog: true, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 6.0], liveness: true}
       # Barometric altitude (MPL3115A2) — telemetry only today, not an alarm target
-      - {ch: 21, name: altitude,          label: "Altitude (MPL3115A2)",      quantity: altitude,    unit: m,      kind: none, wire: [sint32, 10], cap: cap_barometer}
+      - {ch: 21, name: altitude,          label: "Altitude (MPL3115A2)",      quantity: altitude,    unit: m,      kind: none, wire: [sint32, 10], history: [i16, 1], range: [-700.0, 11000.0], cap: cap_barometer}
 
   # -------------------------------------------------------------------------
   # Slots 1..4 — 1-Wire types (sensorN_type; detected by family code)
