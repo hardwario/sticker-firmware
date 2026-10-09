@@ -32,6 +32,7 @@ static const struct app_sensor_channel m_ch_{{ t.cname }}[] = {
 {% else %}
 		.cap_off = APP_SENSOR_NO_CAP,
 {% endif %}
+		.pulses_ch = {{ c.pulses_sym }},
 		.wire_scale = {{ c.wire_scale }}f,
 		.hist_scale = {{ c.hist_scale }}f,
 		.range_min = {{ c.range_min }}f,

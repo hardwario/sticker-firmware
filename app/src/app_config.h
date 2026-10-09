@@ -83,7 +83,7 @@ struct app_config {
 	int interval_sample;
 	int interval_report;
 	bool history_enable;
-	uint32_t history_sensors;
+	uint8_t history_channels[24];
 	int battery_level;
 	bool vendor_reset_allow;
 	int interval_announce;
@@ -135,9 +135,13 @@ struct app_config {
 	bool radio_alarm_ack;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
+	uint8_t sensor1_type;
 	uint8_t sensor2_rom[8];
+	uint8_t sensor2_type;
 	uint8_t sensor3_rom[8];
+	uint8_t sensor3_type;
 	uint8_t sensor4_rom[8];
+	uint8_t sensor4_type;
 	bool hall_left_counter;
 	bool hall_right_counter;
 	bool input_a_counter;

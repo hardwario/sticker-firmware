@@ -52,6 +52,7 @@ TYPE_KEYS = {"id", "name", "label", "slot", "w1_family", "channels"}
 CHANNEL_KEYS = {
     "ch", "name", "label", "quantity", "unit", "kind", "momentary", "counter",
     "cap", "wire", "history", "range", "liveness", "alarm_only_watchdog", "retired",
+    "pulses",
 }
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
@@ -152,6 +153,14 @@ def validate(reg, caps):
                 err.append(f"{cw}: kind must be one of {KINDS}")
             if c.get("momentary") and kind != "state":
                 err.append(f"{cw}: momentary only applies to kind state")
+            if c.get("momentary") and not c.get("retired"):
+                # History records a momentary channel as "asserted during the
+                # interval", taken from the delta of its pulse counter.
+                tgt = next((o for o in chans if o.get("name") == c.get("pulses")), None)
+                if tgt is None or not tgt.get("counter"):
+                    err.append(f"{cw}: momentary needs `pulses: <counter channel of this type>`")
+            elif "pulses" in c:
+                err.append(f"{cw}: pulses only applies to momentary channels")
             if c.get("counter") and kind != "rate":
                 err.append(f"{cw}: counter only applies to kind rate")
             if kind == "rate" and not c.get("counter"):
@@ -236,6 +245,8 @@ def build_model(reg):
                 "kind": f"APP_SENSOR_KIND_{c['kind'].upper()}",
                 "flags": " | ".join(flags) or "0",
                 "wire_type": f"APP_SENSOR_WIRE_{wire[0].upper()}",
+                "pulses_sym": (f"APP_SENSOR_CH_{c_ident(t['name'])}_{c_ident(c['pulses'])}"
+                               if c.get("pulses") else "APP_SENSOR_NO_CH"),
                 "wire_scale": float(wire[1]),
                 "hist_enc": f"APP_SENSOR_HIST_{hist[0].upper()}" if hist else "APP_SENSOR_HIST_NONE",
                 "hist_scale": float(hist[1]) if hist else 0.0,

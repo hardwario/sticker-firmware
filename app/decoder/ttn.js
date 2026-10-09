@@ -109,9 +109,12 @@ var _RESET_CAUSES = [
 // proto_ids are contiguous 1..N per submessage (aligned in #166).
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
-  4: "history_enable", 5: "history_sensors", 6: "battery_level",
+  4: "history_enable", 6: "battery_level",
   7: "vendor_reset_allow", 8: "interval_announce"
 };
+// 5 was history_sensors (uint32 bitmask), replaced by history_channels (#430).
+var _APP_HEX = { 9: "history_channels" };
+var _APP_HEX_ENC = { history_channels: 9 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
 
@@ -120,7 +123,8 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer", 22: "cap_sht"
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer", 22: "cap_sht",
+  23: "sensor1_type", 24: "sensor2_type", 25: "sensor3_type", 26: "sensor4_type"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
@@ -320,7 +324,7 @@ function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
   return o;
 }
 
-function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, null); }
+function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, _APP_HEX); }
 function _decodeSensors(b, s, e) { return _decodeCfgGroup(b, s, e, _SEN_NAMES, _SEN_ENUMS, _SEN_HEX); }
 function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, _ALM_HEX); }
 function _decodeP2P(b, s, e) { return _decodeCfgGroup(b, s, e, _P2P_NAMES, _P2P_ENUMS, null); }
@@ -989,7 +993,7 @@ function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
   return out;
 }
 
-function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, null); }
+function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, _APP_HEX_ENC); }
 function _encSensors(s) { return _encCfgGroup(s, _SEN_TAGS, _SEN_FLOAT, _SEN_ENUMS, _SEN_HEX_ENC); }
 function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, _ALM_HEX_ENC); }
 function _encP2P(p) { return _encCfgGroup(p, _P2P_TAGS, _P2P_FLOAT, _P2P_ENUMS, null); }

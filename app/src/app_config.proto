@@ -64,14 +64,15 @@ message AppConfigMessage {
     }
 
     message Application {
+        reserved 5;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 3;
         optional bool history_enable = 4;
-        optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
         optional bool vendor_reset_allow = 7;
         optional uint32 interval_announce = 8;
+        optional bytes history_channels = 9;
     }
 
     message Sensors {
@@ -102,6 +103,10 @@ message AppConfigMessage {
         optional bool input_b_counter = 18;
         optional bool cap_buzzer = 19;
         optional bool cap_sht = 22;
+        optional uint32 sensor1_type = 23;
+        optional uint32 sensor2_type = 24;
+        optional uint32 sensor3_type = 25;
+        optional uint32 sensor4_type = 26;
     }
 
     message Alarms {

@@ -115,6 +115,9 @@ enum app_sensor_hist_enc {
  * app_config, or APP_SENSOR_NO_CAP (always on / 1-Wire channel). */
 #define APP_SENSOR_NO_CAP 0xFFFF
 
+/* No channel (app_sensor_channel.pulses_ch of a non-momentary channel). */
+#define APP_SENSOR_NO_CH 0xFF
+
 struct app_sensor_channel {
 	const char *name;
 	uint8_t kind;      /* enum app_sensor_kind */
@@ -122,6 +125,7 @@ struct app_sensor_channel {
 	uint8_t wire_type; /* enum app_sensor_wire_type */
 	uint8_t hist_enc;  /* enum app_sensor_hist_enc */
 	uint16_t cap_off;  /* offsetof(struct app_config, cap_*) or APP_SENSOR_NO_CAP */
+	uint8_t pulses_ch; /* momentary: counter channel of its pulses, else APP_SENSOR_NO_CH */
 	float wire_scale;  /* wire value = round(phys * wire_scale) */
 	float hist_scale;  /* history value = round(phys * hist_scale) */
 	float range_min;   /* valid physical range (APP_SENSOR_F_RANGE) */

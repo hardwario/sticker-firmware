@@ -29,6 +29,8 @@
 #             is a matter of `scale`, not of the unit
 #   kind      threshold | state | rate | none   (none = not an alarm target)
 #   momentary true for pulse channels that only assert (state rules edge-only)
+#   pulses    momentary only: the counter channel counting its pulses (history
+#             records the momentary channel as "asserted during the interval")
 #   counter   true = raw uint32 counter (rate rules / history use the exact integer)
 #   cap       app_config capability that enables the channel (absent = always on)
 #   wire      [type, scale]: value on the wire = round(phys * scale), type sint32|uint32;
@@ -81,10 +83,10 @@ types:
       - {ch: 13, name: input-b-count,     label: "Input B — pulse count",     quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_input_b}
       - {ch: 14, name: input-b-voltage,   label: "Input B — voltage",         quantity: voltage,     unit: V,      kind: threshold, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 30.0], cap: cap_analog_b}
       # PIR motion detector (PYQ1648)
-      - {ch: 15, name: pir-motion,        label: "PIR — motion",              quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], history: [u8, 1], cap: cap_pir_detector}
+      - {ch: 15, name: pir-motion,        label: "PIR — motion",              quantity: state,       unit: bool,   kind: state, momentary: true, pulses: pir-count, wire: [uint32, 1], history: [u8, 1], cap: cap_pir_detector}
       - {ch: 16, name: pir-count,         label: "PIR — motion count",        quantity: count,       unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_pir_detector}
       # Accelerometer (LIS2DH)
-      - {ch: 17, name: accel-motion,      label: "Accelerometer — motion",    quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
+      - {ch: 17, name: accel-motion,      label: "Accelerometer — motion",    quantity: state,       unit: bool,   kind: state, momentary: true, pulses: accel-count, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
       - {ch: 18, name: accel-count,       label: "Accelerometer — motion count", quantity: count,    unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_accelerometer}
       - {ch: 19, name: accel-orientation, label: "Accelerometer — orientation (1..6)", quantity: orientation, unit: enum, kind: none, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
       # Supply rail — low-battery watchdog (battery_level), not a rule target

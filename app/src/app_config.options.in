@@ -1,4 +1,5 @@
 # BEGIN GENERATED CONFIG
+AppConfigMessage.Application.history_channels max_size:24 fixed_length:true
 AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true
 AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true
 AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true

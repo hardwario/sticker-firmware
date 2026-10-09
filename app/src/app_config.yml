@@ -147,6 +147,7 @@ proto:
       message: Application
       field: application
       proto_id: 6
+      reserved: [5]  # was history_sensors (uint32 bitmask), replaced by history_channels (#430)
     - key: sensors
       message: Sensors
       field: sensors
@@ -412,12 +413,18 @@ parameters:
     default: false
     help: "Get/Set sensor history store-and-forward (true/false)."
 
-  - name: history_sensors
+  # Recorded channels (#430): up to 24 entries `slot << 5 | ch` in record order
+  # (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = app_sensor_types.yaml
+  # channel of that slot's type), 0xff = unused. Replaces the v1.4 uint32
+  # `history_sensors` bitmask (proto_id 5, reserved).
+  - name: history_channels
     proto_group: application
-    proto_id: 5
-    type: uint32
-    default: 3
-    help: "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity."
+    proto_id: 9
+    type: bytes
+    size: 24
+    default: [0x00, 0x01]
+    fill: 0xff
+    help: "Get/Set recorded history channels (24 bytes, slot<<5|ch each, ff = unused). Default 0001ff.. = temperature + humidity."
 
   - name: battery_level
     proto_group: application
@@ -929,6 +936,11 @@ parameters:
     # use for the ROM). get_param / NFC / shell still read it.
     dump_radio: false
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor1_type
+    proto_group: sensors
+    proto_id: 23
+    type: uint8
+    help: "Get/Set 1-Wire slot 1 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor2_rom
     proto_group: sensors
     proto_id: 12
@@ -936,6 +948,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_type
+    proto_group: sensors
+    proto_id: 24
+    type: uint8
+    help: "Get/Set 1-Wire slot 2 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor3_rom
     proto_group: sensors
     proto_id: 13
@@ -943,6 +960,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_type
+    proto_group: sensors
+    proto_id: 25
+    type: uint8
+    help: "Get/Set 1-Wire slot 3 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor4_rom
     proto_group: sensors
     proto_id: 14
@@ -950,6 +972,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_type
+    proto_group: sensors
+    proto_id: 26
+    type: uint8
+    help: "Get/Set 1-Wire slot 4 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
 
   # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
   # the sensors they belong to (moved out of `alarms`).
