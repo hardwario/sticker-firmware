@@ -239,8 +239,10 @@ commands:
     # No reboot, no deferred action: app_nfc_claim_done() is a narrow
     # settings_save_one() persist.
     - {name: claim_done, proto_id: 25, body: ClaimDone, kind: handler, response: ack, transports: [nfc, shell]}
-    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number
-    # + vendor_token and installs the replacement secret_key carried in the body
+    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number,
+    # nonce_counter + vendor_token, clears counters + history, closes the claim
+    # window with no claim_token (#471: the owner re-opens it with claim_active,
+    # which generates one), and installs the replacement secret_key carried in the body
     # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
     # Reachable ONLY over the vendor transport (NFC hio.stck:vnd, vendor-token
     # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
@@ -251,12 +253,15 @@ commands:
     # #351/#415: symmetric counterpart to claim_done above (renamed from
     # clm_rearm; SAME wire id 27) — re-opens the claim window instead of closing
     # it, over the same secret_key-authenticated hio.stck:cmd / mailbox channel.
-    # Optional new_claim_token: empty/omitted re-opens with the EXISTING token, a
-    # non-zero value replaces it — either way the latch flip + reboot are
-    # deferred together until after the Ack is delivered (same restart-style
-    # pattern as reboot/set_secret_key, see app_cmd_handle_claim_active), so the
-    # phone always sees "ack read -> reboot" regardless of which case it took.
-    - {name: claim_active, proto_id: 27, body: ClaimActive, kind: handler, response: ack, transports: [nfc, shell]}
+    # Optional new_claim_token: a non-zero value replaces the token; empty/omitted
+    # re-opens with the EXISTING token, or, when none is stored (vendor_reset
+    # wipes it, #471), with a new CSPRNG token. Answers Response.claim_info with
+    # the token that holds after the reboot, so the phone can forward it to
+    # ATELOS. The save, latch flip and reboot are deferred until after the answer
+    # is delivered (same restart-style pattern as reboot/set_secret_key, see
+    # app_cmd_handle_claim_active), so the phone always sees "claim_info read ->
+    # reboot" regardless of which case it took.
+    - {name: claim_active, proto_id: 27, body: ClaimActive, kind: handler, response: claim_info, transports: [nfc, shell]}
     # #338: remote-triggered buzzer melody. kind is a raw melody id (0 = stop —
     # silences immediately + cancels a pending repeat; 1-3 = fixed severity
     # melodies; 4-15 reserved; >=16 collapses to 0), owned entirely by
@@ -352,6 +357,8 @@ parameters:
     type: bytes
     size: 16
     write_once: true   # written once at commissioning via `config claim-token`, then immutable
+    # Not kept by vendor_reset (#471): the window closes, and claim_active then
+    # generates a new token (or takes new_claim_token).
     persistent: [device_reset, factory_reset]
     help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
 
