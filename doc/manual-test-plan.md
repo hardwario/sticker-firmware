@@ -230,7 +230,15 @@ effect once it comes back (old key no longer decrypts); an all-zero key is rejec
 > `config secret-key`, which should now read the supplied key) is back to defaults/blank, and
 > `ats claim status` → `done` (#471).
 
-- [ ] Pass
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):**
+> - `settings factory-reset`: serial / `secret-key` / DevEUI / JoinEUI kept, LoRaWAN keys zero,
+>   hall-left count 5 → 0, `history info` 1 → 0 segments, claim window unchanged. After re-keying
+>   (`radio-mode lorawan` + AppKey + ChirpStack `FlushDevNonces`) the unit joined afresh.
+> - `settings vendor-reset <key>` with `vendor-reset-allow false` → refused (-13), nothing erased;
+>   no argument → refused; with a key → serial / `vendor-token` kept, `secret-key` = supplied key,
+>   claim token blank, `ats claim status` → `done`.
+
+- [x] Pass — 2026-10-09
 
 ### G6a-NFC — vendor_reset over the vendor mailbox channel `0x02` (#299, #316, v1.5.0 #414)
 
@@ -275,7 +283,19 @@ the Manager-App guide §4.4 and `tests/nfc_crypto` `test_vendor_channel_vector`)
 >
 > Restore the bench identity (secret key, claim token, LoRaWAN keys via N1) afterwards. Report results.
 
-- [ ] Pass — v1.5.0 mailbox run pending
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, Pixel + nfc-proxy-app):** in one tap —
+> `vendor_reset` on `0x01` → `NOT_READY "transport not allowed"`; on `0x02` with
+> `vendor-reset-allow false` → `NOT_READY "vendor_reset disabled"`; 
+> `set_param{application{vendor_reset_allow = true}}` on `0x02` → `ack`; no key → `BAD_REQUEST "missing key"`; zero key →
+> `BAD_REQUEST "zero key"`; valid key → `ack`, RTT `session end (deferred action), 7 reply(ies)`,
+> reboot. Afterwards serial / `vendor-token` kept, `secret-key` = supplied key, `nonce_counter` not
+> reset (`get_basic_info` 301), claim token wiped, window `done`, DevEUI zero.
+> `vendor_reset` injected as a LoRaWAN Command (`ats cmd lrw …`) → `Error{NOT_READY}`, nothing
+> erased. Not checked: the LED pattern, and old-key rejection (the supplied key equalled the bench
+> key). Caveat: `ats claim status` read within ~1.5 s after boot shows the compile-time default
+> `active` until `app_nfc` loads `clm/state` — re-read after init.
+
+- [x] Pass — v1.5.0 mailbox, 2026-10-09
 
 > **Earlier runs (for reference):** 2026-07-13, HIL with a hand-crafted frame on the removed
 > `hio.stck:rst` magic-byte channel. After #316 the `hio.stck:vnd` protobuf channel was verified
@@ -2037,7 +2057,13 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 > `test_set_secret_key`, `test_set_secret_key_over_vendor`) and by `tests/nfc_hw`
 > (`test_mb_deferred_action_ends_poll_while_field_held`).
 
-- [ ] Pass — v1.5.0 mailbox run pending
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868) — step 2 only:** `factory_reset` over `0x01` → `ack`, RTT
+> `session end (deferred action)`, reboot. Afterwards serial / `secret-key` / claim token kept,
+> claim window unchanged, LoRaWAN keys zero, `radio-mode off`, history empty. `factory_reset`
+> injected as a LoRaWAN Command (`ats cmd lrw 0801ba0100`) → `Error{NOT_READY}`, nothing erased.
+> Steps 1, 3, 4 (`device_reset`, `set_secret_key`) not re-run on the mailbox.
+
+- [ ] Pass — v1.5.0 mailbox: step 2 PASS 2026-10-09, steps 1/3/4 pending
 
 ### N10 — Claim window: explicit two-state latch (`active`/`done`) + `get_claim_info` (#247, #415)
 
@@ -2104,7 +2130,19 @@ in the encrypted `get_info` mirrors the window.
 The shell part (reflash survival, `vendor_reset` reopen) is still to be re-run on v1.5.0.
 
 - [x] Pass — phone part, 2026-09-23
-- [ ] Pass — shell part (v1.5.0)
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, #471 claim flow):**
+> - Shell 4: `ats claim done` → `done`, survived a `settings save` reboot.
+> - Shell 5 / G6a-NFC: `vendor_reset` → `done`, token wiped.
+> - Phone: `get_claim_info` → `NOT_READY "claimed"`; `claim_active` (no token) → `ClaimInfo` with a
+>   new random token, reboot, `active`, `config claim-token` = that token; `get_claim_info` → same
+>   token; `claim_done` → `ack`, then `NOT_READY "claimed"`; `claim_active` → `ClaimInfo` with the
+>   **same** token; `claim_active{new_claim_token}` → `ClaimInfo` with that token, persisted.
+> - Shell 6 via `ats cmd` inject: `ClaimInfo` with a new token. The inject does not run the deferred
+>   save/reboot, but the token is staged into config and a later `settings save` persists it.
+> - Not re-run: shell 1–3 (erase / reflash survival), phone 2 (many `get_info`).
+
+- [x] Pass — #471 claim flow (shell 4–6, phone 1, 3–5), 2026-10-09
+- [ ] Pass — shell part 1–3 (v1.5.0)
 
 > **Superseded v1.4.0 run (2026-07-14, for reference only):** with the old auto-arm + implicit
 > close, `config claim-token` + `settings save` armed `pending`; `nfc dump` showed the two-record
