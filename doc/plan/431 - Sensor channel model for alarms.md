@@ -589,6 +589,23 @@ of every step.
      `alarm_eval` (+2: mismatch alarm suppresses / replaces no-data), `compose` (+1:
      type-only readings), `cmd` (+1: `sensor_type` only on slot events), `ttn.test.js`
      (+3).
+   - HIL 2026-10-09 on 2162165132 (machine probe on the bus, debug + `CONFIG_W1=y`,
+     `CONFIG_LOG=n` to fit, ChirpStack EU868, decoded with this PR's `ttn.js`):
+     - a slot provisioned with only `sensor1-type 3` auto-enrolls the probe at boot;
+       Info `w1_slot_state` `[ok,none,none,none]`, ConfigDump `w1_slot_type`
+       machine-probe;
+     - all slots `sensorN-type 2` → `w1 list` MISMATCH "found machine-probe" + 3×
+       absent; Info `w1_slot_state` `[mismatch,absent,absent,absent]` with
+       `active_alarms` sensor_mismatch and status bit 6; fPort 3 activate
+       `sensor_type` dallas / `detected_type` machine-probe; telemetry 4× dallas
+       with `null`;
+     - `w1 enroll 1` / `w1 enroll 1 <rom>` refused with the type hint;
+     - `w1 clear 1` → probe re-enrolled live, fPort 3 deactivate, telemetry values back.
+     - Two bugs found and fixed: the boot rebind was skipped for type-only slots
+       (`app_w1_slots_any_taught()` looked at ROMs only), and a live shell slot change
+       left the slot without a reading until the next sample, so the 5 s no-data
+       watchdog raised a spurious no_data pair (pre-existing for `w1 enroll`); the
+       shell now queues a sample after scan / enroll / clear.
 4. **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
    18 B blob with `sensor_type`, stale-rule detection, validity/kind/scale/liveness/
    watchdogs from the registry, `AlarmEvent` / `AlarmStatus` changes (incl. the
