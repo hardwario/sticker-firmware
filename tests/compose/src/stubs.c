@@ -21,16 +21,28 @@ uint8_t test_budget = 200;
 struct app_hall_data test_hall;
 struct app_input_data test_input;
 
-/* Per-slot type the composer reads to decide which slots emit a SensorReading
- * (0 = APP_W1_SLOT_EMPTY = no reading). Tests set this. */
+/* Per-slot expected type the composer reads to decide which slots emit a
+ * SensorReading (0 = APP_W1_SLOT_EMPTY = no reading), and the slot state that
+ * decides whether values are encoded (default 0 = treated as OK). Tests set
+ * these. */
 enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
+enum app_w1_slot_state test_w1_states[APP_W1_SLOT_COUNT];
 
-enum app_w1_slot_type app_w1_slot_get_type(int slot)
+uint8_t app_w1_slot_get_expected_type(int slot)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
 		return APP_W1_SLOT_EMPTY;
 	}
-	return test_w1_types[slot];
+	return (uint8_t)test_w1_types[slot];
+}
+
+enum app_w1_slot_state app_w1_slot_get_state(int slot)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
+		return APP_W1_SLOT_STATE_NONE;
+	}
+	return test_w1_states[slot] != APP_W1_SLOT_STATE_NONE ? test_w1_states[slot]
+							      : APP_W1_SLOT_STATE_OK;
 }
 
 /* Mirror the real per-type encode (app_w1_slots.c dallas_encode/machine_probe_

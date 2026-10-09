@@ -20,8 +20,11 @@
 #include "app_hall.h"
 #include "app_radio.h"
 #include "app_sensor.h"
+#include "app_sensor_types.h"
+#include "app_w1_slots.h"
 
 #include <math.h>
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
@@ -34,6 +37,10 @@ extern size_t test_alarm_max_events;
 extern int32_t test_radio_data_hold_ms;
 extern uint32_t test_radio_alarm_free;
 extern size_t test_alarm_frames;
+extern bool test_w1_configured[APP_W1_SLOT_COUNT];
+extern enum app_w1_slot_state test_w1_state[APP_W1_SLOT_COUNT];
+extern uint8_t test_w1_expected[APP_W1_SLOT_COUNT];
+extern uint8_t test_w1_detected[APP_W1_SLOT_COUNT];
 
 static void before(void *unused)
 {
@@ -50,6 +57,11 @@ static void before(void *unused)
 	test_alarm_max_events = SIZE_MAX;
 	test_radio_data_hold_ms = 0;
 	test_radio_alarm_free = APP_RADIO_TX_QUEUE_DEPTH;
+	g_app_config.cap_w1_sensors = false;
+	memset(test_w1_configured, 0, sizeof(test_w1_configured));
+	memset(test_w1_state, 0, sizeof(test_w1_state));
+	memset(test_w1_expected, 0, sizeof(test_w1_expected));
+	memset(test_w1_detected, 0, sizeof(test_w1_detected));
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
 	 * (source, quantity) changes or the slot was never used — several tests
@@ -1018,4 +1030,119 @@ ZTEST(alarm_eval, test_cap_sht_gates_onboard_nodata)
 	k_sleep(K_MSEC(5100));
 	app_alarm_poll();
 	zassert_equal(test_alarm_event_count, 0, "cap_sht off: %zu events", test_alarm_event_count);
+}
+
+/* Flush a batch an earlier case left collecting (alarm_limit > 0), so the
+ * capture starts empty. */
+static void flush_stale_alarms(void)
+{
+	g_app_config.alarm_limit = 0; /* flush synchronously inside poll */
+	(void)app_alarm_flush_pending();
+	k_sleep(K_MSEC(10)); /* let the batch work item run */
+	test_alarm_event_count = 0;
+}
+
+static size_t count_events(uint8_t source, uint8_t type, uint8_t edge)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < test_alarm_event_count; i++) {
+		const struct app_cmd_alarm_event *e = &test_alarm_events[i];
+
+		if (e->source == source && e->type == type && e->edge == edge) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/* #430 step 3: a 1-Wire slot in mismatch raises one TYPE_SENSOR_MISMATCH (5)
+ * with sensor_type = expected and value = detected; the slot's no-data watchdog
+ * stays quiet although its temperature is NaN. Re-teaching the slot (state OK)
+ * emits the deactivate edge naming the same types. */
+ZTEST(alarm_eval, test_sensor_mismatch_alarm_suppresses_nodata)
+{
+	flush_stale_alarms();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_configured[1] = true;
+	test_w1_state[1] = APP_W1_SLOT_STATE_MISMATCH;
+	test_w1_expected[1] = APP_SENSOR_TYPE_MACHINE_PROBE;
+	test_w1_detected[1] = APP_SENSOR_TYPE_DALLAS;
+	app_sensor_w1_clear(&g_app_sensor_data.w1[1], APP_SENSOR_TYPE_MACHINE_PROBE);
+
+	test_alarm_event_count = 0;
+	k_sleep(K_MSEC(10)); /* nodata_poll() uses 0 as "not armed" */
+	zassert_true(app_alarm_poll(), "mismatch counts as an active alarm");
+	k_sleep(K_MSEC(5100));
+	app_alarm_poll();
+
+	zassert_equal(test_alarm_event_count, 1, "expected one event, got %zu",
+		      test_alarm_event_count);
+	const struct app_cmd_alarm_event *e = &test_alarm_events[0];
+
+	zassert_equal(e->type, 5, "type sensor_mismatch");
+	zassert_equal(e->source, APP_ALARM_SRC_SLOT2);
+	zassert_equal(e->edge, 0, "activate");
+	zassert_equal(e->slot, 0xFF, "watchdog event");
+	zassert_equal(e->sensor_type, APP_SENSOR_TYPE_MACHINE_PROBE, "expected type");
+	zassert_true(e->has_value && e->value == APP_SENSOR_TYPE_DALLAS, "detected type");
+
+	uint32_t flags = app_alarm_status_flags();
+
+	zassert_true(flags & APP_DEVICE_STATUS_ALARM_SENSOR_MISMATCH, "status bit");
+	zassert_false(flags & APP_DEVICE_STATUS_ALARM_NO_DATA, "no-data suppressed");
+
+	struct app_alarm_active act[8];
+	size_t n = app_alarm_active_snapshot(act, ARRAY_SIZE(act));
+
+	zassert_equal(n, 1, "one active alarm, got %zu", n);
+	zassert_equal(act[0].type, 5);
+	zassert_equal(act[0].source, APP_ALARM_SRC_SLOT2);
+
+	/* Re-taught: the right probe is back and reads. */
+	test_w1_state[1] = APP_W1_SLOT_STATE_OK;
+	test_w1_detected[1] = 0;
+	app_sensor_put_f(APP_SENSOR_TYPE_MACHINE_PROBE, g_app_sensor_data.w1[1].v,
+			 &g_app_sensor_data.w1[1].valid, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE,
+			 21.0f);
+	test_alarm_event_count = 0;
+	zassert_false(app_alarm_poll(), "nothing active after re-teach");
+	zassert_equal(count_events(APP_ALARM_SRC_SLOT2, 5, 1), 1, "deactivate edge");
+	zassert_equal(test_alarm_events[0].sensor_type, APP_SENSOR_TYPE_MACHINE_PROBE);
+	zassert_equal(test_alarm_events[0].value, APP_SENSOR_TYPE_DALLAS);
+	zassert_equal(test_alarm_event_count, 1, "no no-data edges");
+}
+
+/* A mismatch that appears while the slot's no-data alarm is latched replaces
+ * it: the no-data deactivate edge, then the mismatch activate edge. */
+ZTEST(alarm_eval, test_sensor_mismatch_replaces_latched_nodata)
+{
+	flush_stale_alarms();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_configured[0] = true;
+	test_w1_state[0] = APP_W1_SLOT_STATE_ABSENT;
+	test_w1_expected[0] = APP_SENSOR_TYPE_DALLAS;
+	app_sensor_w1_clear(&g_app_sensor_data.w1[0], APP_SENSOR_TYPE_DALLAS);
+
+	test_alarm_event_count = 0;
+	k_sleep(K_MSEC(10));
+	app_alarm_poll();
+	k_sleep(K_MSEC(5100));
+	app_alarm_poll();
+	zassert_equal(count_events(APP_ALARM_SRC_SLOT1, 4, 0), 1, "absent probe: no_data");
+
+	test_w1_state[0] = APP_W1_SLOT_STATE_MISMATCH;
+	test_w1_detected[0] = APP_SENSOR_TYPE_MACHINE_PROBE;
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(count_events(APP_ALARM_SRC_SLOT1, 4, 1), 1, "no_data cleared");
+	zassert_equal(count_events(APP_ALARM_SRC_SLOT1, 5, 0), 1, "mismatch raised");
+
+	/* Slot cleared: the mismatch deactivates, nothing else fires. */
+	test_w1_configured[0] = false;
+	test_w1_state[0] = APP_W1_SLOT_STATE_NONE;
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(count_events(APP_ALARM_SRC_SLOT1, 5, 1), 1, "mismatch cleared");
+	zassert_equal(test_alarm_event_count, 1);
 }

@@ -3161,3 +3161,31 @@ ZTEST(cmd, test_action_reboots_classification)
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
+
+/* #430 step 3: AlarmEvent.sensor_type (field 11) is sent only for a 1-Wire
+ * slot event (sensor_type != 0), e.g. TYPE_SENSOR_MISMATCH with value = the
+ * detected type; an on-board event stays without it. */
+ZTEST(cmd, test_alarm_report_sensor_type_only_for_slot_events)
+{
+	const struct app_cmd_alarm_event ev[] = {
+		{.slot = 0xFF, .source = 2, .type = 5, .sensor_type = 3, .has_value = true,
+		 .value = 2},
+		{.slot = 3, .source = 0, .quantity = 0, .type = 2, .has_value = true,
+		 .value = 2660},
+	};
+	uint8_t out[64];
+	size_t len = 0;
+
+	zassert_ok(app_cmd_build_alarm_report(0, 2, false, ev, 2, 0, 1, out, sizeof(out), &len));
+
+	AlarmReport r = AlarmReport_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, len - 1); /* skip version byte */
+
+	zassert_true(pb_decode(&is, AlarmReport_fields, &r), "decode");
+	zassert_equal(r.events_count, 2);
+	zassert_equal(r.events[0].type, AlarmEvent_Type_TYPE_SENSOR_MISMATCH);
+	zassert_true(r.events[0].has_sensor_type && r.events[0].sensor_type == 3,
+		     "expected type on the mismatch event");
+	zassert_true(r.events[0].has_value && r.events[0].value == 2, "detected type");
+	zassert_false(r.events[1].has_sensor_type, "on-board event without sensor_type");
+}

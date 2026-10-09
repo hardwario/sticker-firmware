@@ -35,6 +35,7 @@ extern uint32_t test_alarm_flags;
 extern struct app_hall_data test_hall;
 extern struct app_input_data test_input;
 extern enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
+extern enum app_w1_slot_state test_w1_states[APP_W1_SLOT_COUNT];
 
 #define SYSTEM_FLAG_BOOT 0x1
 
@@ -45,6 +46,7 @@ static void set_clean(void)
 	memset(&test_hall, 0, sizeof(test_hall));
 	memset(&test_input, 0, sizeof(test_input));
 	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
+	memset(test_w1_states, 0, sizeof(test_w1_states)); /* = OK */
 	test_budget = 200;
 	test_alarm_flags = 0;
 
@@ -327,6 +329,39 @@ ZTEST(compose, test_dallas_temperature_only)
 	zassert_false(sr->has_illuminance, "dallas lux leaked");
 	zassert_false(sr->has_magnetic_field, "dallas field leaked");
 	zassert_false(sr->has_accel_x, "dallas accel leaked");
+}
+
+/* #430 step 3: a slot in mismatch (or with its probe absent) is still sent,
+ * with type = the expected type and no values, so the decoder emits null. The
+ * stale readings in g_app_sensor_data must not leak into it. */
+ZTEST(compose, test_mismatch_and_absent_slots_send_type_only)
+{
+	Telemetry fr[4];
+	size_t n;
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_types[0] = APP_W1_SLOT_MACHINE_PROBE;
+	test_w1_states[0] = APP_W1_SLOT_STATE_MISMATCH;
+	test_w1_types[2] = APP_W1_SLOT_DALLAS;
+	test_w1_states[2] = APP_W1_SLOT_STATE_ABSENT;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 21.5f;
+	g_app_sensor_data.w1[2].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f = 19.0f;
+
+	run_report(fr, 4, &n);
+
+	zassert_equal(fr[0].w1_sensors_count, 2, "expected two w1 readings");
+	const SensorReading *a = &fr[0].w1_sensors[0];
+	const SensorReading *b = &fr[0].w1_sensors[1];
+
+	zassert_equal(a->slot, 1);
+	zassert_equal(a->type, 3, "expected type = machine-probe registry id");
+	zassert_false(a->has_temperature || a->has_humidity || a->has_flags ||
+			      a->has_illuminance || a->has_magnetic_field || a->has_accel_x,
+		      "mismatched slot carries values");
+	zassert_equal(b->slot, 3);
+	zassert_equal(b->type, 2, "expected type = dallas registry id");
+	zassert_false(b->has_temperature, "absent slot carries a temperature");
 }
 
 ZTEST(compose, test_system_always_present)

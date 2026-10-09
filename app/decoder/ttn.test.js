@@ -150,14 +150,14 @@ test("config_dump renders cap_buzzer + cap_sht (sensors tags 19, 22) (#465)", ()
 });
 
 // #412: the boot settings-info uplink carries the detected 1-Wire slot type per
-// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Names mirror
-// enum app_w1_slot_type: 0=empty, 1=dallas, 2=machine-probe (same _W1_SLOT_TYPES
-// map as the fPort-2 telemetry per-slot type).
+// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Values are
+// the sensor type ids (#430): 0=empty, 2=dallas, 3=machine-probe (same
+// _W1_SLOT_TYPES map as the fPort-2 telemetry per-slot type).
 test("config_dump decodes w1_slot_type (packed, #412)", () => {
-  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[2,1,0,0] } },
+  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[3,2,0,0] } },
   // 1-byte version prefix: 01 | 22 08 (config_dump, len 8) | 10 01 (page_count=1)
-  //                              | 3a 04 02 01 00 00 (field7 packed: 2,1,0,0)
-  const dump = hex("01220810013a0402010000");
+  //                              | 3a 04 03 02 00 00 (field7 packed: 3,2,0,0)
+  const dump = hex("01220810013a0403020000");
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.page_count, 1);
   assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
@@ -431,6 +431,22 @@ test("decodeUplink decodes get_info active_alarms (fPort 85)", () => {
   ]);
 });
 
+// #430 step 3: Info.w1_slot_state (field 19, packed) + a sensor-mismatch entry
+// in active_alarms. Inner Info: fw 1.4.2 | 70 41 (device_status = alarm_any |
+// alarm_sensor_mismatch) | 7a 04 08 02 18 05 (AlarmStatus s2, type 5) |
+// 9a 01 04 01 04 00 00 (w1_slot_state ok, mismatch, none, none).
+test("decodeUplink decodes get_info w1_slot_state + sensor_mismatch (#430)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a150801100418027041" + "7a0408021805" + "9a010401040000"),
+    fPort: 85,
+  }).data;
+  assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_sensor_mismatch"]);
+  assert.deepEqual(got.info.active_alarms, [
+    { source: "s2", quantity: null, type: "sensor_mismatch" },
+  ]);
+  assert.deepEqual(got.info.w1_slot_state, ["ok", "mismatch", "none", "none"]);
+});
+
 // A healthy device sends no active_alarms (empty repeated field) -> [].
 test("decodeUplink get_info active_alarms defaults to [] when absent (fPort 85)", () => {
   const got = codec.decodeUplink({
@@ -543,12 +559,12 @@ test("fPort-2 telemetry: pressure/altitude/illuminance numeric scaling", () => {
 //     08 01 | 10 01 | 18 cc 21                   (7 B body)
 test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da010b0803100218fa24206c2801da01070801100118cc21"),
+    bytes: hex("01da010b0803100318fa24206c2801da01070801100218cc21"),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 2);
   assert.deepEqual(got.w1_sensors[0], {
-    slot: 3, type: 2, type_name: "machine-probe",
+    slot: 3, type: 3, type_name: "machine-probe",
     temperature: 23.65, humidity: 54, tilt_alert: true,
   });
   assert.equal(got.w1_sensors[1].slot, 1);
@@ -558,19 +574,35 @@ test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
 });
 
 // Machine-probe sensor cluster: a single reading carrying the full set
-// (slot=1 type=2 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
-//   08 01 | 10 02 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
+// (slot=1 type=3 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
+//   08 01 | 10 03 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
 test("fPort-2 telemetry decodes machine-probe sensor cluster (fields 6-10)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da011208011002 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
+    bytes: hex("01da011208011003 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 1);
   assert.deepEqual(got.w1_sensors[0], {
-    slot: 1, type: 2, type_name: "machine-probe",
+    slot: 1, type: 3, type_name: "machine-probe",
     temperature: 21.5, illuminance: 27, magnetic_field: 0.062,
     accel_x: 0.38, accel_y: -9.35, accel_z: -0.54,
   });
+});
+
+// #430 step 3: a slot whose probe is absent or mismatched is sent with slot +
+// type only; every value of that type decodes to null. A dallas slot with a
+// value keeps the other keys undefined (unchanged).
+//   da 01 04 | 08 01 10 03          (slot 1, machine-probe, no values)
+//   da 01 04 | 08 02 10 02          (slot 2, dallas, no values)
+test("fPort-2 telemetry: type-only SensorReading decodes to nulls (#430)", () => {
+  const got = codec.decodeUplink({ bytes: hex("01da010408011003da010408021002"), fPort: 2 }).data;
+  assert.equal(got.w1_sensors.length, 2);
+  assert.deepEqual(got.w1_sensors[0], {
+    slot: 1, type: 3, type_name: "machine-probe",
+    temperature: null, humidity: null, tilt_alert: null, illuminance: null,
+    magnetic_field: null, accel_x: null, accel_y: null, accel_z: null,
+  });
+  assert.deepEqual(got.w1_sensors[1], { slot: 2, type: 2, type_name: "dallas", temperature: null });
 });
 
 // Legacy flat 1-Wire fields (10-17, pre-SensorReading firmware) stay decodable
@@ -854,6 +886,21 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   assert.equal(d.alarms[1].type, "trigger");
   assert.equal(d.alarms[1].value, 1); // digital level
   assert.equal(d.alarms[1].time, base + 15);
+});
+
+// #430 step 3: TYPE_SENSOR_MISMATCH (5) on slot s1: slot 0xFF (watchdog),
+// sensor_type (field 11) = expected machine-probe (3), value = detected dallas
+// (2). Then the deactivate edge naming the same types.
+test("fPort-3 batch: sensor mismatch names expected + detected type (#430)", () => {
+  const ev = (edge) => alarmEvent(1, 0, edge, 5, 3, 2, 0xff).concat(pbTV(11, 3));
+  const d = codec.decodeUplink({ bytes: buildAlarmReport(1780000000, 2, [ev(0), ev(1)]), fPort: 3 }).data;
+  assert.equal(d.alarms.length, 2);
+  assert.deepEqual(d.alarms[0], {
+    slot: 255, source: "s1", quantity: null, event: "activate", type: "sensor_mismatch",
+    value: 2, time: 1780000003, sensor_type: "machine-probe", detected_type: "dallas",
+  });
+  assert.equal(d.alarms[1].event, "deactivate");
+  assert.equal(d.alarms[1].detected_type, "dallas");
 });
 
 test("fPort-3 batch time_synced=false → per-event time null (L-3/L-4)", () => {
