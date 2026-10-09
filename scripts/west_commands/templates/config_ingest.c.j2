@@ -25,32 +25,33 @@
 
 LOG_MODULE_REGISTER({{ module.name }}_ingest, LOG_LEVEL_DBG);
 
-/* Record the first offending proto field tag and mark the result invalid. The
- * apply still processes the remaining fields (best effort) so a caller inspecting
- * fault_field learns the FIRST offender; the rc reflects that first fault too
- * (value → -EINVAL). */
-#define FAULT(tag)                                                                                 \
-	do {                                                                                       \
-		if (fault_field && *fault_field == 0) {                                            \
-			*fault_field = (tag);                                                      \
-		}                                                                                  \
-		if (ret == 0) {                                                                    \
-			ret = -EINVAL;                                                             \
-		}                                                                                  \
-	} while (0)
+/* Record the first offending proto field tag in fault_field and the first fault's
+ * rc in *ret. The apply still processes the remaining fields (best effort) so a
+ * caller inspecting fault_field learns the FIRST offender; the rc reflects that
+ * first fault too.
+ *
+ * Deliberately out of line: with the check inlined at every field, GCC's jump
+ * threading cloned the rest of each apply_<group>() once per fault state
+ * (ret == 0 or not, fault_field set or not), ~500 B per field — the lorawan
+ * group alone grew to 8 KB. Passing the state by pointer through a call the
+ * compiler cannot see into stops that and saves ~5 KB flash. Do not turn this
+ * back into an inline macro. */
+static __noinline void fault_at(int *ret, uint32_t *fault_field, uint32_t tag, int rc)
+{
+	if (fault_field && *fault_field == 0) {
+		*fault_field = tag;
+	}
+	if (*ret == 0) {
+		*ret = rc;
+	}
+}
 
-/* Reject a write of this field over a transport not in its `writable` list (M-3).
- * Distinct rc (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than
- * OUT_OF_RANGE; records the first offending tag like FAULT. */
-#define FAULT_TRANSPORT(tag)                                                                       \
-	do {                                                                                       \
-		if (fault_field && *fault_field == 0) {                                            \
-			*fault_field = (tag);                                                      \
-		}                                                                                  \
-		if (ret == 0) {                                                                    \
-			ret = -EACCES;                                                             \
-		}                                                                                  \
-	} while (0)
+/* Value out of range / not a valid enum value → OUT_OF_RANGE. */
+#define FAULT(tag) fault_at(&ret, fault_field, (tag), -EINVAL)
+
+/* Write over a transport not in the field's `writable` list (M-3). Distinct rc
+ * (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than OUT_OF_RANGE. */
+#define FAULT_TRANSPORT(tag) fault_at(&ret, fault_field, (tag), -EACCES)
 
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 {

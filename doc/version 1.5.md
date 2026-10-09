@@ -125,6 +125,10 @@ technical detail.
   build without the patch fails on purpose (§5, §10).
 - `debug.conf` ships a lean default (1-Wire, accelerometer, buzzer and PIR off). Re-enable
   one with `-DCONFIG_<X>=y` (§2).
+- Release has no `printk` and prints no fault dump (`CONFIG_PRINTK=n`, `CONFIG_FAULT_DUMP=0`).
+  Debug log levels are compile-time only (`CONFIG_LOG_RUNTIME_FILTERING=n`). Thread stacks
+  were cut to measured high-water marks + margin. A new deep call path on a thread needs a
+  re-measure (§39).
 
 ---
 
@@ -170,6 +174,7 @@ technical detail.
 | Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 | LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
+| Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 47 396 B; debug FLASH 236 104 → 224 880 B, RAM 63 860 → 55 924 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39. |
 
 ---
 
@@ -2021,6 +2026,89 @@ in LSEDRV.
 The crystal on 2162165625 runs ~21 ppm fast, slightly outside the ABS07 ±20 ppm. This
 suggests a CL mismatch with C20/C21, which is worth a HW check. It is irrelevant to the
 LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time syncs.
+
+
+## 39. Flash and RAM trim (#479)
+
+v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
+(debug, 1.7 KB free). #479 frees space without changing behaviour.
+
+| Variant | FLASH before → after | RAM before → after |
+|---|---|---|
+| release | 182 164 → **174 140 B** (81.8 %) | 55 076 → **47 396 B** (72.3 %) |
+| debug | 236 104 → **224 880 B** (91.5 %) | 63 860 → **55 924 B** (85.3 %) |
+
+**What changed**
+
+| Change | Variant | FLASH | RAM |
+|---|---|---:|---:|
+| `CONFIG_PRINTK=n` + `CONFIG_FAULT_DUMP=0` (`prj.conf`; `debug.conf` turns both back on) | release | −2 960 B | 0 |
+| `CONFIG_LOG_RUNTIME_FILTERING=n` (`debug.conf`) | debug | −6 168 B | −256 B |
+| Config ingest records faults out of line (`fault_at()` in `config_ingest.c.j2`) | both | −5 064 B | 0 |
+| Thread stacks sized from HW high-water marks | both | 0 | −7 680 B |
+
+- **printk / fault dump.** Release has no console backend, so `printk()` output and the fault
+  text went nowhere. A fault still resets the device, and the reset cause is still reported in
+  `GetInfo`.
+- **Runtime log filtering.** Nothing in the debug image changes log levels at runtime
+  (`CONFIG_LOG_CMDS` is off). Compile-time `CONFIG_LOG_MAX_LEVEL=2` is unchanged. Raising it
+  to 3 (INF) now fits into roughly the space this freed.
+- **Config ingest.** The `FAULT()` / `FAULT_TRANSPORT()` macros of the generated
+  `app_config_ingest.c` tested `ret` / `fault_field` inline at every field. GCC jump threading
+  then cloned the rest of every `app_config_apply_*()` per fault state, ~500 B per field. One
+  `static __noinline fault_at()` removes the cloning. The semantics are identical: the first
+  fault wins, and a bad value returns `-EINVAL` (`OUT_OF_RANGE`) while a forbidden transport
+  returns `-EACCES` (`NOT_WRITABLE`). Do not turn it back into an inline macro; the template
+  comment explains why.
+
+**Stacks.** Measured with `CONFIG_INIT_STACKS` (0xAA fill read over J-Link,
+`sticker_stack_watermark.py`) on 2162165625. The release measurement image was release +
+`INIT_STACKS` + `THREAD_STACK_INFO` + `PM=n`. Load: join, reports, LoRaWAN downlinks
+(GetConfig, SetParam), real-RF NFC mailbox commands from a phone, and shell `ats cmd` inject in
+debug.
+
+| Stack | Before | Used (release) | Used (debug) | After |
+|---|---:|---:|---:|---:|
+| `nfc_poll` | 6144 | 2704 | 2656 | **4096** |
+| main | 4096 | 992 | 968 | **2048** |
+| ISR | 2048 | 192 | 192 | **1024** |
+| LED | 2048 | 456 | 456 | **1024** |
+| sensor WQ | 2048 | 656 | 624 | **1536** |
+| report WQ | 3072 | 440 | 288 | **2048** |
+| radio WQ | 4096 | 2288 | 1448 | 4096 |
+| system WQ | 2048 | 1256 | 1248 | 2048 |
+| shell (debug) | 4096 | — | 3120 | 4096 |
+
+- Each cut keeps at least 1.5× (`nfc_poll`) or 2× (the rest) over the measured mark. The MPU
+  stack guard stays on in release, so an overflow faults instead of corrupting RAM.
+- `nfc_poll` keeps ~1.4 KB for `SettingsSave` (an NVS write right before the reboot), which
+  could not be measured.
+- The radio WQ is unchanged because P2P `recv_ack` → `app_cmd_handle` was not exercised.
+- `debug_p2p_bench.conf` no longer sets its own `CONFIG_MAIN_STACK_SIZE`, because the base value
+  is now smaller.
+
+**Hardware verification (2026-10-09, 2162165625, EU868).** Every image was flashed without
+erase.
+
+| Image | Result |
+|---|---|
+| debug | PASS — boot, config unchanged, join, uplinks; SetParam no-op → `Ack`; out of range → `OUT_OF_RANGE` with `fault_field` 202 / 102 / 203 / 115; LoRaWAN write to a provisioning field → `NOT_WRITABLE` 102; first offender wins; a failed batch is rolled back; GetConfig, GetSettings, history, CCM self-test |
+| release (downlinks via the Hub) | PASS — join, Info / settings-info / alarm / telemetry; GetConfig 5 pages, SetParam `Ack` / `OUT_OF_RANGE` 202 / `NOT_WRITABLE` 102; FCnt contiguous; identical bytes before and after the stack cut |
+| debug + release, phone NFC mailbox | PASS — GetConfig (2 pages), SetParam `Ack` / `OUT_OF_RANGE` 202 / 102, GetSettings, GetInfo, history page, GetBasicInfo |
+
+Native ztest suites and `pytest scripts/west_commands/tests` pass.
+
+**Not fixed here.** The `debug.conf;debug-history-flash.conf` variant already overflowed FLASH on
+`v1.5.0` (by 7 916 B). It now overflows by ~1.7 KB. CI does not build it.
+
+**Further levers (measured, not applied).**
+
+| Lever | Saving | Why not now |
+|---|---|---|
+| Debug RTT dictionary logging | −16 KB debug | Needs a host decoder |
+| Dropping AS923 / AU915 / US915 | −8.9 KB, −768 B RAM | Product decision |
+| Table-driven settings loader `h_set` | ≈ −1.5 KB release / −4 KB debug | Code change |
+| Radio WQ stack | ≈ −1 KB RAM | Needs a P2P HIL |
 
 ---
 
