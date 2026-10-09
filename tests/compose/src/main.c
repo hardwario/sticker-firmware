@@ -94,8 +94,9 @@ static Telemetry decode(const uint8_t *buf, size_t len)
 	return t;
 }
 
-/* Drive one full report to completion; return the frames and their count. */
-static void run_report(Telemetry *frames, size_t max, size_t *n)
+/* Drive one full report to completion; return the frames and their count.
+ * `oversized_ok` allows frames over the budget (a single unit sent alone). */
+static void run_report_ex(Telemetry *frames, size_t max, size_t *n, bool oversized_ok)
 {
 	uint8_t buf[256];
 	bool more = true;
@@ -106,13 +107,62 @@ static void run_report(Telemetry *frames, size_t max, size_t *n)
 		int ret = app_compose(buf, sizeof(buf), &len, &more);
 
 		zassert_equal(ret, 0, "app_compose ret %d", ret);
-		zassert_true(len <= test_budget, "frame %zuB > budget %uB", len, test_budget);
+		zassert_true(oversized_ok || len <= test_budget, "frame %zuB > budget %uB", len,
+			     test_budget);
 		if (len == 0) {
 			break; /* nothing-to-report case */
 		}
 		zassert_true(*n < max, "too many frames");
 		frames[(*n)++] = decode(buf, len);
 	}
+}
+
+static void run_report(Telemetry *frames, size_t max, size_t *n)
+{
+	run_report_ex(frames, max, n, false);
+}
+
+/* #425: every frame of a multi-frame report is numbered 0..n-1 of n; a
+ * single-frame report carries no page fields. */
+static void assert_pages(const Telemetry *fr, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		zassert_equal(fr[i].page_count, n > 1 ? n : 0, "frame %zu page_count %u", i,
+			      fr[i].page_count);
+		zassert_equal(fr[i].page_index, n > 1 ? i : 0, "frame %zu page_index %u", i,
+			      fr[i].page_index);
+	}
+}
+
+/* Collect the channels of slot `slot` (1-based) over all frames: the reading
+ * must come exactly once, every channel once, in ascending order. */
+static uint32_t merge_slot(const Telemetry *fr, size_t n, uint32_t slot, int32_t *values)
+{
+	uint32_t seen = 0;
+	int last = -1;
+
+	for (size_t i = 0; i < n; i++) {
+		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
+			const SensorReading *r = &fr[i].w1_sensors[j];
+			pb_size_t k = 0;
+
+			if (r->slot != slot) {
+				continue;
+			}
+			for (int ch = 0; ch < 32; ch++) {
+				if (!(r->valid & BIT(ch))) {
+					continue;
+				}
+				zassert_false(seen & BIT(ch), "channel %d sent twice", ch);
+				zassert_true(ch > last, "channel %d out of order", ch);
+				seen |= BIT(ch);
+				last = ch;
+				values[ch] = r->value[k++];
+			}
+			zassert_equal(k, r->value_count, "valid bits vs values");
+		}
+	}
+	return seen;
 }
 
 /* NOTE: tests run in source order. test_debug_probe_before_first_uplink_preserves_boot_flag
@@ -259,9 +309,10 @@ ZTEST(compose, test_multiframe_split)
 	test_hall.left_count = 42;
 
 	/* Small budget forces several frames, but must still hold the largest
-	 * single unit alone (a w1 SensorReading ~10 B); smaller would trip the
-	 * oversized-unit stall-guard rather than test the split. */
-	test_budget = 16;
+	 * single unit alone (a dallas SensorReading 13 B + 6 B page fields + the
+	 * version byte); smaller would trip the oversized-unit stall-guard rather
+	 * than test the split. */
+	test_budget = 20;
 	run_report(fr, 16, &n);
 
 	zassert_true(n > 1, "expected a multi-frame split, got %zu", n);
@@ -282,6 +333,117 @@ ZTEST(compose, test_multiframe_split)
 	zassert_equal(illum, 1, "illuminance not exactly once");
 	zassert_equal(w1, 1, "w1 reading not exactly once (%d)", w1);
 	zassert_equal(hall, 1, "hall_left not exactly once");
+	assert_pages(fr, n);
+}
+
+static void fill_machine_probe(int slot)
+{
+	w1_bind(slot, APP_SENSOR_TYPE_MACHINE_PROBE);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 23.65f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, 54.0f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, 22.5f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, 27.0f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, 0.062f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1.0f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, 0.38f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, -9.35f);
+	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, -0.54f);
+}
+
+/* A machine-probe reading bigger than a page is never split: it goes out whole,
+ * alone on its own page (the stall guard), the other content on the other
+ * pages within the budget, pages numbered. */
+ZTEST(compose, test_w1_reading_bigger_than_page_sent_alone)
+{
+	Telemetry fr[16];
+	size_t n;
+	int32_t v[32];
+	static const int32_t want[] = {2365, 108, 2250, 27, 62, 1, 38, -935, -54};
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	fill_machine_probe(1);
+	w1_bind(3, APP_SENSOR_TYPE_DALLAS);
+	w1_put(3, APP_SENSOR_CH_DALLAS_TEMPERATURE, 21.5f);
+	test_budget = 24;
+
+	run_report_ex(fr, 16, &n, true);
+
+	zassert_true(n > 1, "expected a paged report, got %zu", n);
+	assert_pages(fr, n);
+	for (size_t i = 0; i < n; i++) {
+		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
+			const SensorReading *r = &fr[i].w1_sensors[j];
+
+			zassert_equal(r->type, r->slot == 2 ? APP_SENSOR_TYPE_MACHINE_PROBE
+							    : APP_SENSOR_TYPE_DALLAS);
+			if (r->slot == 2) {
+				zassert_equal(fr[i].w1_sensors_count, 1, "probe not alone");
+				zassert_equal(r->valid, 0x1FF, "probe split");
+			}
+		}
+	}
+	zassert_equal(merge_slot(fr, n, 2, v), 0x1FF, "machine-probe channels");
+	for (size_t ch = 0; ch < ARRAY_SIZE(want); ch++) {
+		zassert_equal(v[ch], want[ch], "ch %zu: %d", ch, v[ch]);
+	}
+	zassert_equal(merge_slot(fr, n, 4, v), BIT(0), "dallas channel");
+	zassert_equal(v[0], 2150);
+}
+
+/* A reading that fits one page is never split, even when it does not fit
+ * beside the groups of the first page: it moves to the next page whole. */
+ZTEST(compose, test_w1_reading_moves_whole_when_it_fits_a_page)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
+	g_app_config.cap_barometer = true;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 990.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = 250.0f;
+	g_app_config.cap_light_sensor = true;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
+	g_app_config.cap_w1_sensors = true;
+	fill_machine_probe(0);
+	test_budget = 40;
+
+	run_report(fr, 8, &n);
+
+	zassert_equal(n, 2, "expected two pages, got %zu", n);
+	assert_pages(fr, n);
+	zassert_equal(fr[0].w1_sensors_count, 0, "probe packed beside the groups");
+	zassert_equal(fr[1].w1_sensors_count, 1);
+	zassert_equal(fr[1].w1_sensors[0].valid, 0x1FF);
+}
+
+/* 11 B tier (US915 DR0 / AU915 DR2): the reading does not fit a page, so it is
+ * sent whole and alone (the MAC rejects it, as before paging); the report
+ * still ends. */
+ZTEST(compose, test_w1_at_11_byte_tier)
+{
+	Telemetry fr[24];
+	size_t n;
+	int32_t v[32];
+
+	set_clean();
+	g_app_config.cap_sht = false;
+	g_app_config.cap_w1_sensors = true;
+	fill_machine_probe(0);
+	test_budget = 11;
+
+	run_report_ex(fr, 24, &n, true);
+
+	assert_pages(fr, n);
+	zassert_equal(merge_slot(fr, n, 1, v), 0x1FF, "machine-probe channels");
+	for (size_t i = 0; i < n; i++) {
+		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
+			zassert_equal(fr[i].w1_sensors[j].valid, 0x1FF, "page %zu: probe split",
+				      i);
+		}
+	}
 }
 
 ZTEST(compose, test_machine_probe_cluster)
@@ -533,7 +695,7 @@ ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42; /* "abandoned cycle" value */
 
-	test_budget = 16;
+	test_budget = 20;
 	int ret = app_compose(buf, sizeof(buf), &len, &more);
 	zassert_equal(ret, 0, "app_compose ret %d", ret);
 	zassert_true(more, "setup must leave a pending multi-frame snapshot; "

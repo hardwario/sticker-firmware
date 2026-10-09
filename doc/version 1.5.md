@@ -62,6 +62,10 @@ technical detail.
   jitter (§15).
 - **Uplink timing.** A periodic report is sent at a fixed per-device offset of up to 60 s
   after its time slot (was up to 10 s), so devices rebooted together do not collide (§27).
+- **Telemetry is paged (#480).** A periodic report that does not fit one frame goes out
+  as numbered pages (`page_index` / `page_count`, decoded as `pages: "i/N"`): sensor groups
+  first, then whole 1-Wire readings. A 1-Wire reading is never split; one bigger than a page
+  is sent alone (§13).
 - **Alarm state in every telemetry frame** (`system_flags`, decoded as `alarm_status`),
   and alarm batches are split across frames instead of being cut (§9).
 - **LoRaWAN `GetConfig`** leaves out the 1-Wire slot ROMs (4 pages instead of 6 at EU868
@@ -162,7 +166,7 @@ technical detail.
 | LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
 | LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
-| LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
+| LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport` and, since #480, `Telemetry`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
 | LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
 | LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
@@ -768,6 +772,7 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 |---|---|
 | `Response` (fPort 85, every body type) | `page_index = 12`, `page_count = 13` |
 | `AlarmReport` (fPort 3) | `page_index = 5`, `page_count = 6` |
+| `Telemetry` (fPort 2, #480) | `page_index = 28`, `page_count = 29` |
 
 - Absent (`page_count` 0/1) = the whole answer is in this one frame, byte-identical to
   an unpaged answer. `page_count >= 2` = page `page_index` (0-based) of `page_count`.
@@ -785,6 +790,7 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 | W1Scan | ROMs (radio: scan result kept, no rescan per page; NFC: rescan per page, bus order is deterministic) |
 | History replay (`req_history`) | records (as before, numbering now in the envelope) |
 | AlarmReport | events (every page keeps its own `base_time` / `total`) |
+| Telemetry (#480) | sensor groups, then whole 1-Wire `SensorReading`s |
 
 - **Device-driven on the radio**: page 0 answers the request (or is the autonomous
   uplink), the rest follow one per send cycle, paced by the duty cycle; one stream at a
@@ -804,11 +810,24 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 - **Physical floor**: a unit that does not fit even alone is left out (at the 11 B tier
   e.g. the serial number, unix time, an alarm entry or rule); when nothing fits the
   answer is `Error BUDGET_TOO_SMALL`.
-- **Telemetry (fPort 2)** is not paged: it keeps its per-sensor-group split, every
-  frame already a complete snapshot slice.
+- **Telemetry (fPort 2, #480)** is paged like the rest. Each page is a slice of one
+  snapshot, the same as the earlier per-group split, now numbered.
+  - **Layout.** All pages are laid out at the report start, for the budget at that moment.
+    If the DR drops mid-report, the rest keeps the old page size.
+  - **Packing.** Whole groups go first, by priority, then the 1-Wire readings in order.
+  - **No split.** A 1-Wire reading is **never split**. If it does not fit beside other
+    content, it moves to the next page whole.
+  - **Too big alone.** A reading bigger than an empty page goes out alone, oversized, and
+    the MAC rejects it. This happens to every reading at the 11 B tier, and to a machine
+    probe (~37 B) on pages below its size. Splitting a reading by channel is #482.
+  - **HIL (2026-10-09, 2162165132, EU868, machine probe on s1 + barometer / hall / inputs
+    / PIR / accel caps):**
+    - DR0: 2 pages, 43 B (groups, page 1/2) and 32–33 B (the whole probe reading, page
+      2/2), in 2 runs.
+    - DR5: one 66 B frame without page fields.
 
 **Decoders (TTN / ChirpStack) are stateless.** `ttn.js` decodes each page on its own and
-adds `pages: "i/N"`; an Info page lists only the fields it carries (no default zeros).
+adds `pages: "i/N"` (also on fPort 2); an Info page lists only the fields it carries (no default zeros).
 Nothing is buffered or merged in the decoder — a consumer that wants the whole answer
 merges pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`. A consumer
 that ignores `pages` just sees several partial answers.
