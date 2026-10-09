@@ -226,6 +226,12 @@ static const struct app_w1_sensor_type m_types[] = {
 	 machine_probe_encode},
 };
 
+/* The slot type enum is the registry type id (#430 step 3). */
+BUILD_ASSERT((int)APP_W1_SLOT_EMPTY == (int)APP_SENSOR_TYPE_NONE &&
+		     (int)APP_W1_SLOT_DALLAS == (int)APP_SENSOR_TYPE_DALLAS &&
+		     (int)APP_W1_SLOT_MACHINE_PROBE == (int)APP_SENSOR_TYPE_MACHINE_PROBE,
+	     "enum app_w1_slot_type must equal the registry type ids");
+
 static const struct app_w1_sensor_type *type_desc(enum app_w1_slot_type type)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(m_types); i++) {
@@ -255,7 +261,8 @@ struct slot_rt {
 	const struct app_w1_sensor_type *desc; /* bound type descriptor, NULL if empty */
 	int driver_index;                      /* index into the type's driver; -1 = absent */
 	bool present;
-	bool replaced;           /* configured ROM absent but a same-type device showed up */
+	enum app_w1_slot_state state;
+	uint8_t detected;        /* MISMATCH: registry type of the foreign device */
 	bool ds18b20_pending_85; /* DS18B20: a +85.0 C sample awaiting confirmation (#180) */
 };
 
@@ -420,6 +427,8 @@ int app_w1_slots_rebind(void)
 
 	/* Load persisted slot identity (ROM only) and reset runtime state. The
 	 * type/driver are resolved from the discovered device's family below. */
+	bool same_type_seen[APP_W1_SLOT_COUNT] = {0};
+
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		m_slots[s].rom = cfg_rom_get(s);
 		m_slots[s].type = APP_W1_SLOT_EMPTY;
@@ -427,7 +436,8 @@ int app_w1_slots_rebind(void)
 		m_slots[s].desc = NULL;
 		m_slots[s].driver_index = -1;
 		m_slots[s].present = false;
-		m_slots[s].replaced = false;
+		m_slots[s].state = APP_W1_SLOT_STATE_NONE;
+		m_slots[s].detected = APP_SENSOR_TYPE_NONE;
 		m_slots[s].ds18b20_pending_85 = false;
 	}
 
@@ -445,6 +455,7 @@ int app_w1_slots_rebind(void)
 				m_slots[s].type = dev[d].desc->type;
 				m_slots[s].driver_index = dev[d].driver_index;
 				m_slots[s].present = true;
+				m_slots[s].state = APP_W1_SLOT_STATE_OK;
 				/* No-op once set; fills sensorN_type on a unit taught
 				 * before it existed (#430). */
 				if (*cfg_type(&g_app_config, s) != dev[d].desc->sensor_type) {
@@ -455,42 +466,106 @@ int app_w1_slots_rebind(void)
 				break;
 			}
 		}
+	}
 
-		if (!m_slots[s].present) {
-			/* Configured ROM not seen. If any unclaimed device is present the
-			 * sensor was likely swapped — flag it, do NOT silently rebind
-			 * (alarm correctness). */
-			for (int d = 0; d < ndev; d++) {
-				if (!dev[d].claimed) {
-					m_slots[s].replaced = true;
-					break;
-				}
+	/* A configured ROM not seen while an unbound device of the slot's type is
+	 * on the bus: the probe was likely swapped. Checked before pass 2, which may
+	 * enroll that device into a free slot. */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].rom == 0 || m_slots[s].present) {
+			continue;
+		}
+		for (int d = 0; d < ndev; d++) {
+			if (!dev[d].claimed && (expected == APP_SENSOR_TYPE_NONE ||
+						dev[d].desc->sensor_type == expected)) {
+				same_type_seen[s] = true;
+				break;
 			}
-			LOG_WRN("Slot %d ROM %012llx absent%s", s + 1, m_slots[s].rom,
-				m_slots[s].replaced ? " (REPLACED? different device present)" : "");
 		}
 	}
 
-	/* Pass 2: auto-enroll unclaimed devices into the lowest empty slot (ROM
-	 * persisted; type stays runtime). Idempotent until `config save`. */
+	/* Pass 2: auto-enroll unclaimed devices into the lowest slot without a ROM
+	 * whose expected type is the device's type, or none. Idempotent until
+	 * `settings save`. */
 	for (int d = 0; d < ndev; d++) {
 		if (dev[d].claimed) {
 			continue;
 		}
 		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-			if (m_slots[s].rom == 0) {
-				m_slots[s].rom = dev[d].serial;
-				m_slots[s].type = dev[d].desc->type;
-				m_slots[s].desc = dev[d].desc;
-				m_slots[s].driver_index = dev[d].driver_index;
-				m_slots[s].present = true;
-				cfg_rom_set(s, dev[d].serial);
-				cfg_type_set(s, dev[d].desc->sensor_type);
-				LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1,
-					dev[d].desc->name, dev[d].serial);
+			uint8_t expected = *cfg_type(&g_app_config, s);
+
+			if (m_slots[s].rom != 0 || (expected != APP_SENSOR_TYPE_NONE &&
+						    expected != dev[d].desc->sensor_type)) {
+				continue;
+			}
+			m_slots[s].rom = dev[d].serial;
+			m_slots[s].type = dev[d].desc->type;
+			m_slots[s].desc = dev[d].desc;
+			m_slots[s].driver_index = dev[d].driver_index;
+			m_slots[s].present = true;
+			m_slots[s].state = APP_W1_SLOT_STATE_OK;
+			cfg_rom_set(s, dev[d].serial);
+			cfg_type_set(s, dev[d].desc->sensor_type);
+			LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1, dev[d].desc->name,
+				dev[d].serial);
+			dev[d].claimed = true;
+			break;
+		}
+	}
+
+	/* Pass 3: state of every slot left without a device. A device still
+	 * unclaimed found no free slot expecting its type. First a taught slot
+	 * claims a same-type one as its likely replacement (REPLACED); every other
+	 * unclaimed device puts the lowest slot that expects another type in
+	 * MISMATCH (one slot per foreign device). */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].present || m_slots[s].rom == 0) {
+			continue;
+		}
+		for (int d = 0; d < ndev; d++) {
+			if (!dev[d].claimed && (expected == APP_SENSOR_TYPE_NONE ||
+						dev[d].desc->sensor_type == expected)) {
 				dev[d].claimed = true;
+				same_type_seen[s] = true;
 				break;
 			}
+		}
+	}
+
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].present ||
+		    (m_slots[s].rom == 0 && expected == APP_SENSOR_TYPE_NONE)) {
+			continue;
+		}
+
+		m_slots[s].state =
+			same_type_seen[s] ? APP_W1_SLOT_STATE_REPLACED : APP_W1_SLOT_STATE_ABSENT;
+		if (!same_type_seen[s] && expected != APP_SENSOR_TYPE_NONE) {
+			for (int d = 0; d < ndev; d++) {
+				if (!dev[d].claimed && dev[d].desc->sensor_type != expected) {
+					dev[d].claimed = true;
+					m_slots[s].state = APP_W1_SLOT_STATE_MISMATCH;
+					m_slots[s].detected = dev[d].desc->sensor_type;
+					break;
+				}
+			}
+		}
+
+		if (m_slots[s].state == APP_W1_SLOT_STATE_MISMATCH) {
+			LOG_WRN("Slot %d MISMATCH: expects %s, found %s", s + 1,
+				app_w1_slot_type_name(expected),
+				app_w1_slot_type_name(m_slots[s].detected));
+		} else {
+			LOG_WRN("Slot %d ROM %012llx absent%s", s + 1, m_slots[s].rom,
+				m_slots[s].state == APP_W1_SLOT_STATE_REPLACED
+					? " (REPLACED? different device present)"
+					: "");
 		}
 	}
 
@@ -647,15 +722,33 @@ bool app_w1_slot_is_present(int slot)
 	return present;
 }
 
-bool app_w1_slot_is_replaced(int slot)
+enum app_w1_slot_state app_w1_slot_get_state(int slot)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
-		return false;
+		return APP_W1_SLOT_STATE_NONE;
 	}
 	k_mutex_lock(&m_lock, K_FOREVER);
-	bool replaced = m_slots[slot].replaced;
+	enum app_w1_slot_state state = m_slots[slot].state;
 	k_mutex_unlock(&m_lock);
-	return replaced;
+	return state;
+}
+
+uint8_t app_w1_slot_get_expected_type(int slot)
+{
+	const uint8_t *t = cfg_type(&g_app_config, slot);
+
+	return t != NULL ? *t : APP_SENSOR_TYPE_NONE;
+}
+
+uint8_t app_w1_slot_get_detected_type(int slot)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
+		return APP_SENSOR_TYPE_NONE;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint8_t detected = m_slots[slot].detected;
+	k_mutex_unlock(&m_lock);
+	return detected;
 }
 
 /* ---- enrollment (sensor shell) ----------------------------------------- */
@@ -721,6 +814,15 @@ int app_w1_slots_scan(struct app_w1_scan_entry *out, int max)
 	return n;
 }
 
+/* A slot with a set expected type only takes a device of that type (#430
+ * step 3); clearing the slot first resets the expectation. */
+static bool type_allowed(int slot, enum app_w1_slot_type type)
+{
+	uint8_t expected = app_w1_slot_get_expected_type(slot);
+
+	return expected == APP_SENSOR_TYPE_NONE || expected == (uint8_t)type;
+}
+
 int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
@@ -747,6 +849,9 @@ int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 	}
 	if (new_count > 1) {
 		return -E2BIG; /* ambiguous — caller should steer to assign */
+	}
+	if (!type_allowed(slot, e[new_idx].type)) {
+		return -EINVAL;
 	}
 
 	cfg_rom_set(slot, e[new_idx].serial);
@@ -777,6 +882,9 @@ int app_w1_slots_assign(int slot, uint64_t serial)
 
 	for (int i = 0; i < n; i++) {
 		if (e[i].serial == serial) {
+			if (!type_allowed(slot, e[i].type)) {
+				return -EINVAL;
+			}
 			cfg_rom_set(slot, serial);
 			dedupe_rom(serial, slot);
 			(void)app_w1_slots_rebind();
@@ -824,22 +932,34 @@ static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+	static const char *const state_name[] = {
+		[APP_W1_SLOT_STATE_NONE] = "-",
+		[APP_W1_SLOT_STATE_OK] = "present",
+		[APP_W1_SLOT_STATE_ABSENT] = "absent",
+		[APP_W1_SLOT_STATE_REPLACED] = "REPLACED?",
+		[APP_W1_SLOT_STATE_MISMATCH] = "MISMATCH",
+	};
+
 	shell_print(shell, "SLOT  TYPE           ROM           STATE      READING");
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		enum app_w1_slot_type t = app_w1_slot_get_type(s);
+		enum app_w1_slot_state st = app_w1_slot_get_state(s);
+		/* The expected type also names an absent / mismatched slot. */
+		enum app_w1_slot_type t = (enum app_w1_slot_type)app_w1_slot_get_expected_type(s);
 
-		if (t == APP_W1_SLOT_EMPTY) {
+		if (st == APP_W1_SLOT_STATE_NONE) {
 			shell_print(shell, "%-4d  (empty)", s + 1);
 			continue;
 		}
 
-		const char *state = app_w1_slot_is_present(s)    ? "present"
-				    : app_w1_slot_is_replaced(s) ? "REPLACED?"
-								 : "absent";
+		const char *state = state_name[st];
 
 		struct app_sensor_w1 r;
 		char reading[40] = "--";
-		if (app_w1_slots_read(s, &r) == 0 && r.present) {
+		if (st == APP_W1_SLOT_STATE_MISMATCH) {
+			snprintf(reading, sizeof(reading), "found %s",
+				 app_w1_slot_type_name(
+					 (enum app_w1_slot_type)app_w1_slot_get_detected_type(s)));
+		} else if (app_w1_slots_read(s, &r) == 0 && r.present) {
 			float temp = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
 			float hum = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
 			bool tilt = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
@@ -939,6 +1059,11 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 		case -EEXIST:
 			shell_error(shell, "ROM %012llx already bound to another slot", serial);
 			return ret;
+		case -EINVAL:
+			shell_error(shell,
+				    "sensor type differs from sensor%d-type — `w1 clear %d` first",
+				    slot + 1, slot + 1);
+			return ret;
 		default:
 			shell_error(shell, "enroll failed: %d", ret);
 			return ret;
@@ -960,6 +1085,10 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 	case -E2BIG:
 		shell_error(shell, "more than one new sensor — pass the ROM: "
 				   "`w1 enroll <slot> <rom>`");
+		return ret;
+	case -EINVAL:
+		shell_error(shell, "sensor type differs from sensor%d-type — `w1 clear %d` first",
+			    slot + 1, slot + 1);
 		return ret;
 	default:
 		shell_error(shell, "enroll failed: %d", ret);

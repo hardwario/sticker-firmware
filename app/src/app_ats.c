@@ -550,7 +550,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	 * actually provides are non-NaN (a thermometer shows temperature only; a
 	 * machine probe shows the full cluster). */
 	for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
-		enum app_w1_slot_type type = app_w1_slot_get_type(i);
+		/* Expected type (#430): an absent / mismatched slot keeps its name. */
+		enum app_w1_slot_type type =
+			(enum app_w1_slot_type)app_w1_slot_get_expected_type(i);
 		const struct app_sensor_w1 *s = &d->w1[i];
 
 		if (type == APP_W1_SLOT_EMPTY) {
@@ -559,7 +561,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		}
 #define W1(NAME) app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_##NAME)
 		shell_print(shell, "== s%d: %s%s ==", i + 1, app_w1_slot_type_name(type),
-			    s->present ? "" : " (absent)");
+			    s->present                                               ? ""
+			    : app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_MISMATCH ? " (MISMATCH)"
+										     : " (absent)");
 		print_float(shell, "temperature:", W1(TEMPERATURE), "C");
 		print_float(shell, "temperature-aux:", W1(TEMPERATURE_AUX), "C");
 		print_float(shell, "humidity:", W1(HUMIDITY), "%");

@@ -46,7 +46,8 @@ uint32_t app_alarm_status_flags(void);
 /* One currently-active alarm, for a status snapshot (Response.Info.active_alarms).
  * Same taxonomy as a configured rule / fPort 3 AlarmEvent: source and quantity are
  * enum app_alarm_source / app_alarm_quantity; type is the AlarmEvent.Type value
- * (1=low, 2=high, 3=trigger, 4=no_data). */
+ * (1=low, 2=high, 3=trigger, 4=no_data, 5=sensor_mismatch; quantity 0 for the
+ * last). */
 struct app_alarm_active {
 	uint8_t source;
 	uint8_t quantity;

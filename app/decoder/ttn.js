@@ -77,6 +77,7 @@ var _DEVICE_STATUS = [
   [1 << 3, "alarm_rate"],
   [1 << 4, "alarm_no_data"],
   [1 << 5, "alarm_low_battery"],
+  [1 << 6, "alarm_sensor_mismatch"],
   // Radio (8-11)
   [1 << 8, "radio_off"],
   [1 << 9, "lrw_disabled"],
@@ -388,6 +389,8 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
+      // field 19 = w1_slot_state, non-packed fallback (one varint per entry).
+      else if (field === 19) (info.w1_slot_state = info.w1_slot_state || []).push(_W1_SLOT_STATES[v.value] || ("state" + v.value));
       // 12 (lrw_state) and 16-18 (last_dl_*) are retired: the link state and
       // quality are read with get_radio_state (Response.radio_state, #446).
     } else if (wire === 2) {
@@ -401,6 +404,15 @@ function _decodeInfo(bytes, start, end) {
       // field 15 = repeated AlarmStatus active_alarms (#288): one entry per alarm
       // latched active when Info was built. Same enums as the fPort 3 AlarmReport.
       else if (field === 15) info.active_alarms.push(_decodeAlarmStatus(bytes, pos, pos + len.value));
+      // field 19 = repeated uint32 w1_slot_state (#430), packed: 1-Wire slot
+      // state for slots 1..4; omitted while every slot is unused.
+      else if (field === 19) {
+        info.w1_slot_state = [];
+        for (var sp = pos; sp < pos + len.value;) {
+          var st = _pbReadVarint(bytes, sp); sp = st.next;
+          info.w1_slot_state.push(_W1_SLOT_STATES[st.value] || ("state" + st.value));
+        }
+      }
 
       // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
@@ -432,7 +444,8 @@ var _INFO_FIELD_KEYS = {
   1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
   5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
   10: ["battery"], 11: ["reset_cause", "reset_cause_flags"],
-  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"]
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  19: ["w1_slot_state"]
 };
 function _pruneInfoPage(info) {
   var seen = info._seen || {};
@@ -786,9 +799,26 @@ function _pbZigzag(n) {
   return (n >>> 1) ^ -(n & 1);
 }
 
-// enum app_w1_slot_type → label (mirrors app_w1_slots.h). Shared by the fPort-2
-// telemetry per-slot type and the fPort-85 ConfigDump.w1_slot_type list (#412).
-var _W1_SLOT_TYPES = { 0: "empty", 1: "dallas", 2: "machine-probe" };
+// 1-Wire slot type id → label: the sensor type ids of app_sensor_types.yaml
+// (#430; 0 = empty, 1 = motherboard is never a slot type). Shared by the fPort-2
+// telemetry per-slot type, the fPort-85 ConfigDump.w1_slot_type list (#412) and
+// the sensor-mismatch alarm.
+var _W1_SLOT_TYPES = (function () {
+  var m = { 0: "empty" };
+  for (var id in _SENSOR_TYPES) { if (Number(id) !== 1) m[id] = _SENSOR_TYPES[id].name; }
+  return m;
+})();
+
+// SensorReading value keys per slot type. A reading that carries only slot +
+// type (probe absent or mismatched, #430) decodes to null for each of them.
+var _SR_KEYS = {
+  2: ["temperature"],
+  3: ["temperature", "humidity", "tilt_alert", "illuminance", "magnetic_field",
+    "accel_x", "accel_y", "accel_z"]
+};
+
+// Info.w1_slot_state (field 19, #430): enum app_w1_slot_state.
+var _W1_SLOT_STATES = ["none", "ok", "absent", "replaced", "mismatch"];
 
 // One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
 // sensorN config / `w1 list`), type=2,
@@ -825,6 +855,9 @@ function _decodeSensorReading(bytes, start, end) {
       default: break;
     }
   }
+  var keys = _SR_KEYS[sr.type] || [];
+  var hasValue = keys.some(function (k) { return sr[k] !== undefined; });
+  if (!hasValue) { keys.forEach(function (k) { sr[k] = null; }); }
   return sr;
 }
 
@@ -1306,7 +1339,8 @@ var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-righ
 var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
   "magnetic-field", "tilt", "state", "count", "voltage"];
 var _ALARM_EDGES = ["activate", "deactivate"];
-var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
+var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data", "sensor_mismatch"];
+var _ALARM_TYPE_SENSOR_MISMATCH = 5;
 
 function _alarmUnscale(quantity, raw) {
   switch (quantity) {
@@ -1338,13 +1372,15 @@ function _decodeAlarmStatus(bytes, start, end) {
   }
   return {
     source: _ALARM_SOURCES[a.source] || ("src" + a.source),
-    quantity: _ALARM_QUANTITIES[a.quantity] || ("q" + a.quantity),
+    // A sensor mismatch (#430) concerns the whole slot, not a quantity.
+    quantity: a.type === _ALARM_TYPE_SENSOR_MISMATCH ? null
+      : (_ALARM_QUANTITIES[a.quantity] || ("q" + a.quantity)),
     type: _ALARM_TYPES[a.type] || "none",
   };
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null };
+  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null, sensor_type: null };
   var p = start;
   while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -1358,6 +1394,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 6) ev.quantity = v.value;
       else if (field === 7) ev.slot = v.value;
       else if (field === 9) ev.type = v.value;
+      else if (field === 11) ev.sensor_type = v.value; // #430, 1-Wire slot events only
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -1386,15 +1423,21 @@ function decodeAlarmBatch(bytes) {
       var endE = pos + len.value;
       if (field === 3) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
-        out.alarms.push({
+        var mismatch = ev.type === _ALARM_TYPE_SENSOR_MISMATCH;
+        var a = {
           slot: ev.slot,
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
-          quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
+          quantity: mismatch ? null : (_ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity)),
           event: _ALARM_EDGES[ev.edge] || "activate",
           type: _ALARM_TYPES[ev.type] || "none",
-          value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
+          value: ev.value === null ? null : (mismatch ? ev.value : _alarmUnscale(ev.quantity, ev.value)),
           time: 0,
-        });
+        };
+        // #430: the slot's expected sensor type; a mismatch also names the
+        // detected type (carried in value).
+        if (ev.sensor_type !== null) a.sensor_type = _W1_SLOT_TYPES[ev.sensor_type] || ("type" + ev.sensor_type);
+        if (mismatch && ev.value !== null) a.detected_type = _W1_SLOT_TYPES[ev.value] || ("type" + ev.value);
+        out.alarms.push(a);
         rels.push(ev.rel_s);
       }
       pos = endE;

@@ -237,16 +237,18 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->motion_count = APP_SENSOR_MB_U(&d, PIR_COUNT);
 	}
 
-	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
-	 * The composer owns the slot index, type and the repeated array; the
-	 * per-type value fields are filled by the slot's driver via the registry
-	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
-	 * type travels with the reading; the composer may split the list across
-	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+	/* 1-wire ROM-bound slots → one repeated SensorReading per slot with an
+	 * expected type (sensorN_type, #430). The composer owns the slot index,
+	 * type and the repeated array; the per-type value fields are filled by the
+	 * slot's driver via the registry vtable (app_w1_slot_encode), so adding a
+	 * sensor type needs no change here. A slot whose probe is absent or
+	 * mismatched is still sent, with no values, so the decoder emits null.
+	 * The composer may split the list across frames (each reading is
+	 * indivisible). Absent quantities stay omitted. */
 #if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
-			enum app_w1_slot_type type = app_w1_slot_get_type(i);
+			uint8_t type = app_w1_slot_get_expected_type(i);
 			if (type == APP_W1_SLOT_EMPTY) {
 				continue; /* unconfigured slot → no reading */
 			}
@@ -257,7 +259,9 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			 * stays 0-based internally. */
 			sr->slot = i + 1;
 			sr->type = type;
-			app_w1_slot_encode(i, &d.w1[i], sr);
+			if (app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_OK) {
+				app_w1_slot_encode(i, &d.w1[i], sr);
+			}
 			t->w1_sensors_count++;
 		}
 	}

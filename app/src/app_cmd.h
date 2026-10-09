@@ -66,7 +66,9 @@ enum app_cmd_transport {
 #define APP_DEVICE_STATUS_ALARM_RATE      (1u << 3) /* counter-rate rule active */
 #define APP_DEVICE_STATUS_ALARM_NO_DATA   (1u << 4) /* no-data watchdog latched */
 #define APP_DEVICE_STATUS_ALARM_LOW_BATT  (1u << 5) /* low-battery watchdog latched (#210) */
-/* bits 6-7 reserved (alarms) */
+#define APP_DEVICE_STATUS_ALARM_SENSOR_MISMATCH                                                    \
+	(1u << 6) /* a 1-Wire slot holds a device of another type (#430) */
+/* bit 7 reserved (alarms) */
 /* Radio (8-11). */
 #define APP_DEVICE_STATUS_RADIO_OFF    (1u << 8) /* radio_mode == off: deliberately silent (#350) */
 #define APP_DEVICE_STATUS_LRW_DISABLED (1u << 9) /* radio-silent: DevEUI all-zero (#98) */
@@ -257,14 +259,16 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
  * including the nanopb header). value is the scaled current reading and is only
  * meaningful when has_value is true (discrete sources leave it absent). */
 struct app_cmd_alarm_event {
-	uint8_t slot;     /* alarm rule slot index (0..APP_ALARM_SLOT_COUNT-1) that fired */
-	uint8_t source;   /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
-	uint8_t quantity; /* enum app_alarm_quantity */
-	uint8_t edge;     /* AlarmEvent_Edge: 0=activate, 1=deactivate */
-	uint8_t type;     /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212) */
-	bool has_value;   /* value present */
-	int32_t value;    /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
-	uint32_t rel_s;   /* seconds since base_time */
+	uint8_t slot;        /* alarm rule slot index (0..APP_ALARM_SLOT_COUNT-1) that fired */
+	uint8_t source;      /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
+	uint8_t quantity;    /* enum app_alarm_quantity */
+	uint8_t edge;        /* AlarmEvent_Edge: 0=activate, 1=deactivate */
+	uint8_t type;        /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212),
+			      * 5=sensor_mismatch (#430) */
+	uint8_t sensor_type; /* registry type id of a 1-Wire slot event; 0 = not sent */
+	bool has_value;      /* value present */
+	int32_t value;       /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
+	uint32_t rel_s;      /* seconds since base_time */
 };
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.

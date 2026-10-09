@@ -62,13 +62,14 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 static int32_t alarm_scale(enum app_alarm_quantity q, float v);
 
 /* Wire enum values (AlarmEvent.Type / .Edge). type says WHAT fired (#212). */
-#define ALARM_TYPE_NONE    0
-#define ALARM_TYPE_LOW     1
-#define ALARM_TYPE_HIGH    2
-#define ALARM_TYPE_TRIGGER 3
-#define ALARM_TYPE_NO_DATA 4
-#define ALARM_EDGE_ACT     0
-#define ALARM_EDGE_DEACT   1
+#define ALARM_TYPE_NONE            0
+#define ALARM_TYPE_LOW             1
+#define ALARM_TYPE_HIGH            2
+#define ALARM_TYPE_TRIGGER         3
+#define ALARM_TYPE_NO_DATA         4
+#define ALARM_TYPE_SENSOR_MISMATCH 5
+#define ALARM_EDGE_ACT             0
+#define ALARM_EDGE_DEACT           1
 
 /* ---- per-rule runtime state, keyed 1:1 on the alarm slot index -----------
  * m_rt[slot] is the runtime latch for the rule in that slot. source/quantity are
@@ -546,6 +547,25 @@ static void alarm_collect_nodata(uint8_t source, uint8_t quantity, bool active)
 	alarm_queue(ev);
 }
 
+/* Sensor-mismatch watchdog event (#430): a 1-Wire slot holds a device of
+ * another type than its sensorN_type. sensor_type = the expected type, value =
+ * the detected type; quantity is unused (0). Not tied to a rule slot (0xFF). */
+static void alarm_collect_mismatch(uint8_t w1_slot, uint8_t expected, uint8_t detected, bool active)
+{
+	struct app_cmd_alarm_event ev = {
+		.slot = APP_ALARM_NO_DATA_SLOT,
+		.source = APP_ALARM_SRC_SLOT1 + w1_slot,
+		.quantity = 0,
+		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
+		.type = ALARM_TYPE_SENSOR_MISMATCH,
+		.sensor_type = expected,
+		.has_value = true,
+		.value = detected,
+		.rel_s = 0,
+	};
+	alarm_queue(ev);
+}
+
 /* Low-battery watchdog event (#210): supply dropped below / recovered above the
  * threshold. type=low always (a falling supply); the deactivate edge marks the
  * recovery. Carries the current voltage (V×100) and slot = 0xFE. */
@@ -1017,6 +1037,25 @@ static bool m_nodata_active[NODATA_COUNT];       /* no_data alarm latched */
 
 static bool m_battery_low_active; /* low-battery watchdog latched (#210) */
 
+/* Sensor-mismatch watchdog (#430), one latch per 1-Wire slot. The expected and
+ * detected types are cached so the deactivate edge names what cleared. */
+#define MISMATCH_COUNT APP_W1_SLOT_COUNT
+static bool m_mismatch_active[MISMATCH_COUNT];
+static uint8_t m_mismatch_expected[MISMATCH_COUNT];
+static uint8_t m_mismatch_detected[MISMATCH_COUNT];
+
+/* Is 1-Wire slot `s` in mismatch under the current config? */
+static bool mismatch_now(int s)
+{
+#if defined(CONFIG_W1)
+	return g_app_config.cap_w1_sensors &&
+	       app_w1_slot_get_state(s) == APP_W1_SLOT_STATE_MISMATCH;
+#else
+	ARG_UNUSED(s);
+	return false;
+#endif /* defined(CONFIG_W1) */
+}
+
 /* Is this monitored sensor expected to report under the current config? */
 static bool nodata_enabled(uint8_t source, uint8_t quantity)
 {
@@ -1035,8 +1074,11 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 		 * probe taught to this slot but absent from the bus has runtime type EMPTY;
 		 * keying on that silently dropped it from monitoring. Keying on the
 		 * configured ROM keeps it monitored so its absence raises a no_data alarm. */
+		/* A mismatched slot reports TYPE_SENSOR_MISMATCH instead (#430):
+		 * one alarm, not two. */
 		return g_app_config.cap_w1_sensors &&
-		       app_w1_slot_is_configured(source - APP_ALARM_SRC_SLOT1);
+		       app_w1_slot_is_configured(source - APP_ALARM_SRC_SLOT1) &&
+		       !m_mismatch_active[source - APP_ALARM_SRC_SLOT1];
 #else
 		return false;
 #endif /* defined(CONFIG_W1) */
@@ -1044,6 +1086,35 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 		return true; /* L-41: battery monitor always expected to report */
 	default:
 		return false;
+	}
+}
+
+/* Sensor-mismatch watchdog (#430): an ACTIVATE edge when a slot goes into
+ * mismatch (rebind at boot or after a scan / teach), a DEACTIVATE edge when it
+ * leaves it (the right type is back, the slot is re-taught or cleared, or
+ * cap_w1_sensors is turned off). Runs before nodata_poll(), which skips a
+ * mismatched slot. Caller holds g_app_sensor_data_lock (the latches share it
+ * with the no-data watchdog). */
+static void mismatch_poll(bool *should_send)
+{
+	for (int s = 0; s < MISMATCH_COUNT; s++) {
+		bool mm = mismatch_now(s);
+
+		if (mm && !m_mismatch_active[s]) {
+#if defined(CONFIG_W1)
+			m_mismatch_expected[s] = app_w1_slot_get_expected_type(s);
+			m_mismatch_detected[s] = app_w1_slot_get_detected_type(s);
+#endif /* defined(CONFIG_W1) */
+			m_mismatch_active[s] = true;
+			alarm_collect_mismatch(s, m_mismatch_expected[s], m_mismatch_detected[s],
+					       true);
+			*should_send = true;
+		} else if (!mm && m_mismatch_active[s]) {
+			m_mismatch_active[s] = false;
+			alarm_collect_mismatch(s, m_mismatch_expected[s], m_mismatch_detected[s],
+					       false);
+			*should_send = true;
+		}
 	}
 }
 
@@ -1127,9 +1198,11 @@ static void battery_poll(bool *should_send)
  * — rule slots first, then the no-data watchdogs, then low-battery. 16 + 8 + 1
  * bits today; BUILD_ASSERT below guards a future m_nodata_tab growth past what
  * a uint32_t holds. */
-#define ALARM_MASK_NODATA_SHIFT  APP_ALARM_SLOT_COUNT
-#define ALARM_MASK_BATTERY_SHIFT (APP_ALARM_SLOT_COUNT + NODATA_COUNT)
-BUILD_ASSERT(ALARM_MASK_BATTERY_SHIFT < 32, "alarm active mask no longer fits in uint32_t");
+#define ALARM_MASK_NODATA_SHIFT   APP_ALARM_SLOT_COUNT
+#define ALARM_MASK_BATTERY_SHIFT  (APP_ALARM_SLOT_COUNT + NODATA_COUNT)
+#define ALARM_MASK_MISMATCH_SHIFT (ALARM_MASK_BATTERY_SHIFT + 1)
+BUILD_ASSERT(ALARM_MASK_MISMATCH_SHIFT + MISMATCH_COUNT <= 32,
+	     "alarm active mask no longer fits in uint32_t");
 
 bool app_alarm_poll(void)
 {
@@ -1183,7 +1256,9 @@ bool app_alarm_poll(void)
 
 	/* No-data watchdog over every config-enabled analog sensor (independent of
 	 * the rule slots above). Same lock — it reads g_app_sensor_data too, so it
-	 * must run before the sensor-data lock is dropped (#205). */
+	 * must run before the sensor-data lock is dropped (#205). The mismatch
+	 * watchdog runs first: a mismatched slot suppresses its no-data alarm. */
+	mismatch_poll(&should_send);
 	nodata_poll(now, &should_send);
 
 	/* Low-battery watchdog (#210). Reads the battery-voltage channel, so it must
@@ -1205,6 +1280,11 @@ bool app_alarm_poll(void)
 	 * alarm. Read here under g_app_sensor_data_lock, like the no-data sweep. */
 	if (m_battery_low_active) {
 		active_mask |= BIT(ALARM_MASK_BATTERY_SHIFT);
+	}
+	for (int s = 0; s < MISMATCH_COUNT; s++) {
+		if (m_mismatch_active[s]) {
+			active_mask |= BIT(ALARM_MASK_MISMATCH_SHIFT + s);
+		}
 	}
 
 	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */
@@ -1342,6 +1422,13 @@ uint32_t app_alarm_status_flags(void)
 	if (m_battery_low_active) {
 		flags |= APP_DEVICE_STATUS_ALARM_LOW_BATT | APP_DEVICE_STATUS_ALARM_ANY;
 	}
+	for (int s = 0; s < MISMATCH_COUNT; s++) {
+		if (m_mismatch_active[s]) {
+			flags |= APP_DEVICE_STATUS_ALARM_SENSOR_MISMATCH |
+				 APP_DEVICE_STATUS_ALARM_ANY;
+			break;
+		}
+	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	k_mutex_lock(&m_lock, K_FOREVER);
@@ -1392,6 +1479,15 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 		out[n].source = APP_ALARM_SRC_BATTERY;
 		out[n].quantity = APP_ALARM_Q_VOLTAGE;
 		out[n].type = ALARM_TYPE_LOW;
+		n++;
+	}
+	for (int s = 0; s < MISMATCH_COUNT && n < max; s++) {
+		if (!m_mismatch_active[s]) {
+			continue;
+		}
+		out[n].source = APP_ALARM_SRC_SLOT1 + s;
+		out[n].quantity = 0;
+		out[n].type = ALARM_TYPE_SENSOR_MISMATCH;
 		n++;
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);

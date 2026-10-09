@@ -205,7 +205,8 @@ void app_cmd_get_info(struct app_cmd_info *info)
  * here keeps the list variable-length (only the active alarms are sent, empty
  * when all is well) and avoids a large static array in the Info struct — the
  * debug build's RAM is tight. Shared by the LoRaWAN and NFC info paths. */
-#define ACTIVE_ALARM_SNAPSHOT_MAX (APP_ALARM_SLOT_COUNT + 9) /* +8 no-data +1 battery */
+#define ACTIVE_ALARM_SNAPSHOT_MAX                                                                  \
+	(APP_ALARM_SLOT_COUNT + 13) /* +8 no-data +1 battery +4 sensor mismatch */
 
 static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
@@ -329,6 +330,18 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
+
+#if defined(APP_CMD_HAVE_W1)
+	/* 1-Wire slot state (#430), omitted while every slot is unused. */
+	BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(info->w1_slot_state),
+		     "w1_slot_state array too small for APP_W1_SLOT_COUNT");
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		info->w1_slot_state[s] = (uint32_t)app_w1_slot_get_state(s);
+		if (info->w1_slot_state[s] != APP_W1_SLOT_STATE_NONE) {
+			info->w1_slot_state_count = APP_W1_SLOT_COUNT;
+		}
+	}
+#endif
 
 	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
 	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
@@ -2047,13 +2060,12 @@ static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint
 
 #if defined(APP_CMD_HAVE_W1)
 	if (mask & BIT(CS_ITEMS - 1)) {
-		/* Detected 1-Wire slot type per slot (runtime state; see app_w1_slot_type
-		 * in app_w1_slots.h — the single source of truth). Wire values are pinned
-		 * here so reordering the enum can never silently change the on-air
-		 * meaning. */
-		BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 1 &&
-				     APP_W1_SLOT_MACHINE_PROBE == 2,
-			     "w1_slot_type wire values must stay 0/empty 1/dallas 2/machine-probe");
+		/* Detected 1-Wire slot type per slot (runtime state): the registry type
+		 * id (#430). Wire values are pinned here so reordering the enum can
+		 * never silently change the on-air meaning. */
+		BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 2 &&
+				     APP_W1_SLOT_MACHINE_PROBE == 3,
+			     "w1_slot_type wire values must stay 0/empty 2/dallas 3/machine-probe");
 		BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(cd->w1_slot_type),
 			     "w1_slot_type array too small for APP_W1_SLOT_COUNT");
 		cd->w1_slot_type_count = APP_W1_SLOT_COUNT;
@@ -2248,6 +2260,7 @@ enum {
 	INFO_U_BATTERY,
 	INFO_U_RESET_CAUSE,
 	INFO_U_DEVICE_STATUS,
+	INFO_U_W1_SLOT_STATE,
 	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
 	INFO_U_CLAIM_TOKEN,
 	INFO_U_DEV_EUI,
@@ -2301,6 +2314,10 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
+	if (mask & BIT(INFO_U_W1_SLOT_STATE)) {
+		pi->w1_slot_state_count = all->w1_slot_state_count;
+		memcpy(pi->w1_slot_state, all->w1_slot_state, sizeof(pi->w1_slot_state));
+	}
 	if (mask & BIT(INFO_U_CLAIM_TOKEN)) {
 		pi->has_claim_token = all->has_claim_token;
 		memcpy(pi->claim_token, all->claim_token, sizeof(pi->claim_token));
@@ -2342,6 +2359,8 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->reset_cause == 0;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
+	case INFO_U_W1_SLOT_STATE:
+		return in->w1_slot_state_count == 0;
 	case INFO_U_CLAIM_TOKEN:
 		return !in->has_claim_token;
 	case INFO_U_DEV_EUI:
@@ -3229,6 +3248,8 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 		ev->rel_s = events[i].rel_s;
 		ev->has_value = events[i].has_value;
 		ev->value = events[i].value;
+		ev->has_sensor_type = events[i].sensor_type != 0;
+		ev->sensor_type = events[i].sensor_type;
 	}
 	report.events_count = (pb_size_t)n;
 
