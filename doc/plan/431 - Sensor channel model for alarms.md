@@ -372,39 +372,62 @@ History becomes selectable per `(slot, channel)`. It replaces the fixed
 `enum app_history_sensor` (`APP_HISTORY_S1_TEMP`, `APP_HISTORY_HALL_LEFT`, …) and the
 `history_sensors` bitmask.
 
-- **Selection:** a new config key `history_channels`, a `bytes` list of up to **24**
-  entries, one byte each: `slot << 5 | ch` (slot 0..4, ch 0..31). The order of the list
-  is the order of values in a record. An entry is valid only if:
-  - the channel has a `history` encoding,
+- **Every channel is recordable:** the registry requires a `history: [enc, scale]` on
+  every non-retired channel (sensorgen rule). State channels record `u8` 0/1; altitude
+  is `i16` metres.
+- **Selection:** config key `history_channels` (application group, proto_id 9), a
+  fixed 24-byte `bytes` list, one byte per entry: `slot << 5 | ch` (slot 0..4,
+  ch 0..31), `0xFF` = unused. The default is `00 01` (onboard temperature +
+  humidity), padded with `0xFF`. The order of the list is the order of values in a
+  record. The old `history_sensors` (proto_id 5) is reserved. An entry is recorded only
+  while:
   - its `cap` is on (motherboard),
-  - `sensorN_type` is set (1-Wire slot).
-- **Record layout:** the concatenation of each selected channel's history width
-  (`i16` / `u8` / `u16` / `u32`). The layout is derived from the selection plus the
-  expected slot types, not from what happens to be plugged in, so it stays stable when a
-  probe is absent or mismatched.
-  - A change of `history_channels` or of any selected slot's `sensorN_type` changes the
-    layout. The ring restarts, as it does today when the sample size changes (page-header
-    `sample_size` guard).
-- **Absent value:** the encoding's sentinel (`INT16_MAX` for `i16`, all-ones for
-  unsigned). This covers a missing sub-sensor, a probe that is not present, and a
-  mismatched slot, and the decoder emits `null` for all three.
+  - `sensorN_type` is set and the channel exists for that type (1-Wire slot).
+  Other entries stay in the selection and are skipped until they become recordable.
+- **Slot type:** `sensorN_type` (sensors group, proto_ids 23..26) is written by the
+  1-Wire bind / auto-enroll and cleared with the slot ROM, so a slot keeps its type
+  (and the history layout) across reboots before the first read.
+- **Record layout:** the concatenation of each recordable entry's history width
+  (`u8` / `i16` / `u16` / `i32` / `u32`). It is derived from the selection, the slot
+  types and the caps, not from what happens to be plugged in, so it stays stable when
+  a probe is absent or mismatched.
+  - The layout is rebuilt at every capture. A change (selection, a slot re-typed, a cap
+    toggled) restarts the ring, as the sample-size change did before.
+  - The flash page header stores a CRC-32 of the layout (`entry`, `type`, encoding and
+    scale per column) in place of the old sensor mask; a page with another CRC is not
+    read back.
+- **Absent value:** the top value of the encoding (`0xFF`, `INT16_MAX`, `0xFFFF`,
+  `INT32_MAX`, `0xFFFFFFFF`); real values are clamped below it. This covers a missing
+  sub-sensor, a probe that is not present, and a mismatched slot (the slot's `valid`
+  bits are used only while it holds the type the layout was built with). The decoder
+  emits `null`.
+- **Momentary channels** (PIR / accel motion) are never sampled as a level. The
+  registry key `pulses: <counter channel>` links them to their event counter, and the
+  history records `1` when that counter moved since the previous record, else `0`. The
+  first record after a (re)start has no base and is absent.
 - **`HistoryFrame` stays self-describing for the stateless decoder:**
-  - new `bytes channels = 10`: the selection list (1 B per entry);
-  - new `bytes w1_types = 11`: the expected type of s1..s4 (4 B), needed to resolve slot
-    entries;
-  - `present` (bit i = list entry i has data in this frame) and the sample format are
-    unchanged in spirit.
-  - The decoder resolves each entry to `(type, channel)` → name, encoding and scale from
-    its generated table.
+  - new `bytes channels = 10`: the recorded columns (1 B per entry, max 24);
+  - new `bytes w1_types = 11`: the type of s1..s4 the layout was built with (4 B,
+    fixed length), needed to resolve slot entries;
+  - `present` = one bit per column, all set.
+  - `ttn.js` resolves each entry to `(type, channel)` → name, encoding and scale from
+    its generated table. Output keys are the snake_case channel name, with an `sN_`
+    prefix for 1-Wire slots (`temperature`, `s1_temperature`, `pir_motion`, …). A
+    frame without `channels` takes the pre-#430 present-mask path. An entry the table
+    does not know leaves `channels: null` and no records (the record size is unknown).
+- **Shell:** `history sensors` lists every channel of the motherboard and of each typed
+  slot with its selection and capability state; `history sensors <name> on|off` stages
+  `history_channels` (names as above, slots `s1-temperature`).
 - **Manager-App:** it offers the `history`-capable, enabled channels of each slot, from
   `app_sensor_types.yaml` plus the device's caps and `sensorN_type`, and writes
   `history_channels`.
 - **Budget:**
-  - The worst case record is 24 × 4 B = 96 B (all counters), against today's
+  - The worst case record is 24 × 4 B = 96 B (`MAX_RECORD_SIZE`), against the old
     19-channel maximum of 44 B.
   - A realistic selection (on-board temp/hum + 4 slots × temp/hum) is 1×2+1 + 4×(2+1)
-    = 15 B, the same as today.
-  - `MAX_RECORD_SIZE` is sized from 24 entries.
+    = 15 B, the same as before.
+  - Cost vs `v1.5.0` `e716aa66`: release +3 920 B flash / +512 B RAM (186 084 B /
+    55 588 B), debug +4 784 B / +576 B (240 888 B / 64 436 B, RAM 98.3 %).
 
 ## Wire changes (breaking)
 
@@ -547,8 +570,13 @@ of every step.
    `slot` / `rule` renames), `ttn.js`, shell, ATS.
 5. **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
    output with units, `i32` history encoding.
-6. **History per channel.** `history_channels`, derived layout, `HistoryFrame`
-   `channels` / `w1_types`, decoder.
+6. ✅ **History per channel.** `history_channels`, `sensorN_type`, derived layout with
+   a layout CRC in the page header, momentary columns from their pulse counters,
+   `HistoryFrame` `channels` / `w1_types`, decoder. Tests: `history` (17),
+   `history_flash` (25), `cmd` (frame `channels` / `w1_types`), `test_configen`
+   (bytes default fill), `test_sensorgen` (`pulses`, history required), `ttn.test.js`
+   (+2). HW smoke 2026-10-09 on 2162190413 (debug): 6-column selection survives a
+   reboot, records read back, momentary column absent in the first record.
 
 Parallel work outside this repo:
 

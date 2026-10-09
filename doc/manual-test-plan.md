@@ -968,7 +968,7 @@ in the alarms or in the history; the settings-info reports the flag.
 the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors.cap_buzzer`.
 
 **Prompt for Claude:**
-> On a joined unit with `history-enable true` and `history-sensors` incl. temperature/humidity,
+> On a joined unit with `history-enable true` and `history-channels` incl. temperature/humidity,
 > confirm the boot `ConfigDump` shows `cap_sht: 1` and `cap_buzzer`. Run `config cap-sht false`
 > and `settings save` (reboots). Confirm the new boot `ConfigDump` shows `cap_sht: 0`, and that
 > the next fPort 2 telemetry frames decode without `temperature` / `humidity` (other groups
@@ -1064,15 +1064,19 @@ calibration uplinks. The flag is one-shot, so the next reboot returns to normal.
 
 - [ ] Pass
 
-### H2 — Sensor selection
+### H2 — Channel selection (#430)
 
-**Goal:** Per-sensor recording can be toggled.
-**Observable:** `history sensors` lists sensors + selection; `history sensors <name> on|off` toggles.
+**Goal:** any registry channel can be recorded; the selection persists as `history_channels`.
+**Observable:** `history sensors` lists every motherboard channel (and every channel of a typed
+1-Wire slot as `sN-<channel>`) with its selection and capability state; `history sensors <name>
+on|off` toggles it and stages `config history-channels` (`slot << 5 | ch` per byte, `ff` unused).
 
 **Prompt for Claude:**
-> Run `history sensors` and report the list with current selection. Toggle one sensor off then on
-> (e.g. `history sensors temperature off` / `... on`) and confirm the listing updates accordingly.
-> Note which sensors are gated by capability flags.
+> Run `history sensors` and report the list with current selection. Toggle one channel off then on
+> (e.g. `history sensors temperature off` / `... on`) and confirm the listing and
+> `config history-channels` update accordingly. Enable a channel that was not recordable before
+> #430 (e.g. `battery-voltage`), `settings save` (reboots), and confirm `history info` still lists
+> it after the reboot. Note which channels are gated by capability flags or by an untyped slot.
 
 - [ ] Pass
 
@@ -1178,26 +1182,29 @@ it resets to 0.
 
 - [ ] Pass
 
-### H9 — Pressure / illuminance / orientation / accel-motion channels (#311)
+### H9 — Pressure / illuminance / orientation / accel channels (#311, #430)
 
-**Goal:** the 4 new history channels (barometer pressure, light-sensor illuminance, accelerometer
-orientation, accelerometer any-motion event count) record and read back correctly, gated on their
-own capability flags (`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates
-both `orientation` and `accel-motion`), and are absent (not recorded) when the capability is off.
-**Observable:** `history sensors` lists all 4 new names; enabling them + capturing records values
-consistent with a live sensor read; disabling the capability drops the channel from both the
-selection list and stored records.
+**Goal:** the barometer pressure, light-sensor illuminance, accelerometer orientation and
+accelerometer motion channels record and read back correctly, gated on their own capability flags
+(`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates `accel-orientation`,
+`accel-motion` and `accel-count`), and are skipped (not recorded) when the capability is off.
+`accel-motion` is momentary: `1` when the accel event counter moved since the previous record.
+**Observable:** `history sensors` lists the channels; enabling them + capturing records values
+consistent with a live sensor read; disabling the capability drops the channel from the recorded
+columns (it stays in `history-channels`).
 
 **Prompt for Claude:**
-> Confirm the board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell
-> or `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `orientation`,
-> `accel-motion` are all listed and available. Enable all 4 (`history sensors pressure on`, etc.),
-> `history capture`, then `history read 1` and confirm the printed values are in a plausible range
-> (pressure ~950–1050 hPa, illuminance a small non-negative number, orientation 0–5, accel-motion a
-> non-negative count) and roughly match a fresh sensor reading (`sample` command or `get_info`).
-> Then flip `cap_accelerometer` off via `config` + `settings save`, reboot, and confirm
-> `orientation`/`accel-motion` no longer appear in `history sensors` and are silently dropped from
-> the selection mask (no crash, no stale values). Report all observations.
+> Use a build with `CONFIG_LIS2DH=y` (the debug variant drops the accelerometer, #395). Confirm the
+> board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell or
+> `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `accel-orientation`,
+> `accel-motion`, `accel-count` are listed and available. Enable them (`history sensors pressure
+> on`, etc.), `history capture` twice (move the board in between), then `history read` and confirm
+> the printed values are plausible (pressure ~950–1050 hPa, illuminance a small non-negative
+> number, orientation 1–6, `accel-motion` absent in the first record then 0/1, `accel-count` a
+> non-negative count) and roughly match `ats sensors sample`. Then flip `cap_accelerometer` off via
+> `config` + `settings save`, and confirm the accel columns are gone from `history info` (buffer
+> restarted, no crash, no stale values) while `config history-channels` still lists them.
+> Report all observations.
 
 - [ ] Pass
 
