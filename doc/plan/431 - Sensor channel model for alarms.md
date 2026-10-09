@@ -116,7 +116,7 @@ generates two things. Both are committed, like the configen output.
     `app_sensor_type_by_name()`, `app_sensor_channel_get(type, ch)`,
     `app_sensor_channel_by_name()`.
 
-  The slot → type mapping (`sensorN_type`) is runtime config and comes in step 3.
+  The slot → type mapping (`sensorN_type`) is runtime config (step 3).
 - **The `// BEGIN GENERATED SENSOR_TYPES` region of `ttn.js`:** `_SENSOR_TYPES` (type
   id → name + channels `{n, u, k, s, h}`) and `_SENSOR_MB_TYPE`. The decoder must stay
   one strict-ES5 file with no `require()` (LNS sandboxes), so the table is written into
@@ -562,8 +562,33 @@ of every step.
    TMP112 + MPL3115A2 temperatures, altitude channel, all readers moved. Telemetry,
    history and alarm wire formats are unchanged. Tests: `alarm_eval` (+4: machine-probe
    / dallas slot channels, hPa pressure) and `sensor_types` (+4: channel helpers).
-3. **Expected slot type + mismatch.** `sensorN_type`, new type ids, rebind by type,
+3. ✅ **Expected slot type + mismatch.** `sensorN_type`, new type ids, rebind by type,
    `TYPE_SENSOR_MISMATCH`, null values in telemetry, Info slot state.
+   - Type ids on the wire are the registry ids (0 none, 2 dallas, 3 machine-probe) in
+     `SensorReading.type` and `ConfigDump.w1_slot_type`; `enum app_w1_slot_type` equals
+     them (BUILD_ASSERT).
+   - Rebind order: bind by ROM → auto-enroll into the lowest free slot whose
+     `sensorN_type` is none or the detected type → an absent taught slot claims a
+     same-type newcomer (**replaced**, checked first so a swap is never a mismatch
+     elsewhere) → a slot still without its device goes to **mismatch** when an unclaimed
+     device of another type is left (one slot per device, lowest slot wins), else
+     **absent**. A foreign device that auto-enrolls into a free slot is not a mismatch.
+   - Until step 4 changes the alarm wire, the mismatch `AlarmEvent` uses today's layout:
+     `slot` 0xFF (watchdog), `source` = SLOT1+N, `quantity` 0, new
+     `sensor_type` (field 11) = expected, `value` = detected. Device status bit 6
+     `alarm_sensor_mismatch`; `Info.active_alarms` lists it with type 5.
+   - `Info.w1_slot_state` (field 19, packed): 0 none, 1 ok, 2 absent, 3 replaced,
+     4 mismatch; its own Info page unit.
+   - Telemetry sends a slot with an expected type even when absent / mismatched, as
+     `slot` + `type` only; the decoder emits `null` values (step 5 adds `valid`).
+   - Cost: release +960 B flash, RAM unchanged (187 044 B / 55 588 B); debug RAM
+     unchanged (98.32 %).
+   - Tests: new `tests/w1_slots` (9: registry ids, auto-enroll writes the type, skip a
+     slot expecting another type, provisioned / taught mismatch + recovery, foreign
+     device into a free slot, same-type swap = replaced, teach/assign refusal),
+     `alarm_eval` (+2: mismatch alarm suppresses / replaces no-data), `compose` (+1:
+     type-only readings), `cmd` (+1: `sensor_type` only on slot events), `ttn.test.js`
+     (+3).
 4. **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
    18 B blob with `sensor_type`, stale-rule detection, validity/kind/scale/liveness/
    watchdogs from the registry, `AlarmEvent` / `AlarmStatus` changes (incl. the

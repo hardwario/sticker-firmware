@@ -345,11 +345,13 @@ source of truth, `enum app_w1_slot_type` (`app_w1_slots.h`):
 | Value | Meaning |
 |:-:|---|
 | 0 | empty |
-| 1 | dallas (DS18B20) |
-| 2 | machine-probe (DS28E17) |
+| 2 | dallas (DS18B20) |
+| 3 | machine-probe (DS28E17) |
 
-Adding a new sensor family is a one-place change to that enum + the type registry
-in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
+Since #430 step 3 (PR #431) these are the sensor-type registry ids
+(`app_sensor_types.yaml`, 1 = motherboard), the same ids as `SensorReading.type`;
+before that the values were 1 = dallas, 2 = machine-probe. Adding a new sensor family
+is a registry entry + driver in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
 stays a raw `uint32`, so no schema change). A decoder that predates a value renders
 it as `type<N>` rather than failing.
 
