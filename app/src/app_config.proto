@@ -440,9 +440,8 @@ message Response {
         // Currently-active alarms, one entry per latched alarm at the moment the
         // Info was built (rule slots + no-data / low-battery watchdogs). Only the
         // active ones are emitted, so the list is empty when all is well and its
-        // length varies. Each entry names its source/quantity/type using the same
-        // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
-        // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
+        // length varies. Each entry names its slot/channel/type like the alarm
+        // rules and the fPort 3 AlarmReport (#430) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
 
         // 16..18 were last_dl_rssi / last_dl_snr / last_dl_age_s (#423), moved
@@ -508,12 +507,14 @@ message Response {
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a
     // configured alarm rule / fPort 3 AlarmEvent, trimmed to just what a status
-    // read needs: no slot/value/edge/time (this is a live snapshot, not an edge
+    // read needs: no rule/value/edge/time (this is a live snapshot, not an edge
     // report). Encoded as a nanopb callback so only the active alarms are sent.
     message AlarmStatus {
-        uint32 source   = 1;  // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel/battery
-        uint32 quantity = 2;  // enum app_alarm_quantity: temperature/humidity/.../state/count/voltage
-        uint32 type     = 3;  // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)
+        reserved 2;                         // was: quantity — replaced by channel (#430)
+        uint32 slot     = 1;                // 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
+        uint32 type     = 3;                // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)/sensor_mismatch(5)
+        uint32 channel  = 4;                // channel of the slot's sensor type (app_sensor_types.yaml)
+        optional uint32 sensor_type = 5;    // sensor type id of a 1-Wire slot; absent for slot 0
     }
 
     message ConfigDump {
@@ -625,12 +626,13 @@ message AlarmReport {
 }
 
 message AlarmEvent {
-    // One alarm edge from a dynamic alarm rule. The rule's target is (source,
-    // quantity); the event reports what fired (type) and the transition (edge),
-    // plus the current value. The rule config (from/to, lo/hi, rate N) is NOT on
-    // the wire — only the resulting edge. type and edge are orthogonal: type says
-    // WHAT fired, edge says rising/falling, so a recovery still names the
-    // condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
+    // One alarm edge from a dynamic alarm rule or a built-in watchdog. The target
+    // is (slot, channel) of the sensor channel model (#430,
+    // app_sensor_types.yaml); the event reports what fired (type) and the
+    // transition (edge), plus the current value. The rule config (from/to, lo/hi,
+    // rate N) is NOT on the wire — only the resulting edge. type and edge are
+    // orthogonal: type says WHAT fired, edge says rising/falling, so a recovery
+    // still names the condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
     enum Edge {
@@ -641,7 +643,7 @@ message AlarmEvent {
     // What kind of condition fired (#212). Threshold rules report LOW/HIGH (which
     // bound); state/count/PIR/accel rules report TRIGGER; the no-data watchdog
     // reports NO_DATA; a 1-Wire slot with a device of another type than its
-    // sensorN_type reports SENSOR_MISMATCH (#430: source = the slot, slot = 0xFF,
+    // sensorN_type reports SENSOR_MISMATCH (#430: rule = 0xFF, no channel,
     // sensor_type = expected type, value = detected type). NONE is unused on the
     // wire (default guard).
     enum Type {
@@ -654,15 +656,16 @@ message AlarmEvent {
     }
 
     reserved 3, 8;               // was: side (3), no_data (8) — folded into type (#212)
+    reserved 6;                  // was: quantity — replaced by channel (#430)
 
-    uint32 source   = 1;         // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel
+    uint32 slot     = 1;         // sensor slot: 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
     Edge   edge     = 2;         // activate / deactivate
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
-    optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
-    uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
-    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
+    optional sint32 value = 5;   // current value × the channel's wire scale, digital 0/1, or counter
+    uint32 rule     = 7;         // alarm rule index that fired (stable identity), 0xFF = watchdog, 0xFE = low battery (#430; was `slot`)
     Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
-    optional uint32 sensor_type = 11;  // sensor type id (app_sensor_types.yaml) of a 1-Wire slot event; absent for on-board sources (#430)
+    uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml)
+    optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

@@ -194,9 +194,9 @@ static enum app_mode detect_mode(void)
 	return APP_MODE_NORMAL;
 }
 
-static void event_led_handler(enum app_alarm_source source, bool active, void *user_data)
+static void event_led_handler(uint8_t channel, bool active, void *user_data)
 {
-	ARG_UNUSED(source);
+	ARG_UNUSED(channel);
 	ARG_UNUSED(user_data);
 
 	static int64_t last_blink_ms;

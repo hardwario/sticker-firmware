@@ -23,147 +23,129 @@
 LOG_MODULE_REGISTER(app_alarm_rules, LOG_LEVEL_INF);
 
 /* Packed wire/storage layout of one rule, mirrored in app_config.yml and the
- * manager-app. 17 bytes, little-endian. */
-#define RULE_PACK_LEN     17
-#define RULE_FLAG_PRESENT 0x01 /* slot occupied */
+ * manager-app. 18 bytes, little-endian (#430). */
+#define RULE_PACK_LEN     18
+#define RULE_FLAG_PRESENT 0x01 /* rule occupied */
 #define RULE_FLAG_ENABLED 0x02 /* rule evaluated */
 
-struct app_alarm_slot {
+struct app_alarm_entry {
 	bool used;
 	struct app_alarm_rule rule;
 };
 
-static struct app_alarm_slot m_slots[APP_ALARM_SLOT_COUNT];
+static struct app_alarm_entry m_rules[APP_ALARM_RULE_COUNT];
 static K_MUTEX_DEFINE(m_lock);
 
-/* ---- names -------------------------------------------------------------- */
+/* ---- slot names ---------------------------------------------------------- */
 
-static const char *const m_source_names[APP_ALARM_SRC_COUNT] = {
-	[APP_ALARM_SRC_ONBOARD] = "onboard",
-	[APP_ALARM_SRC_SLOT1] = "s1",
-	[APP_ALARM_SRC_SLOT2] = "s2",
-	[APP_ALARM_SRC_SLOT3] = "s3",
-	[APP_ALARM_SRC_SLOT4] = "s4",
-	[APP_ALARM_SRC_HALL_LEFT] = "hall-left",
-	[APP_ALARM_SRC_HALL_RIGHT] = "hall-right",
-	[APP_ALARM_SRC_INPUT_A] = "input-a",
-	[APP_ALARM_SRC_INPUT_B] = "input-b",
-	[APP_ALARM_SRC_PIR] = "pir",
-	[APP_ALARM_SRC_ACCEL] = "accel",
-	[APP_ALARM_SRC_BATTERY] = "battery",
-};
+static const char *const m_slot_names[APP_ALARM_SLOT_MAX + 1] = {"mb", "s1", "s2", "s3", "s4"};
 
-static const char *const m_quantity_names[APP_ALARM_Q_QUANTITY_COUNT] = {
-	[APP_ALARM_Q_TEMPERATURE] = "temperature",
-	[APP_ALARM_Q_HUMIDITY] = "humidity",
-	[APP_ALARM_Q_PRESSURE] = "pressure",
-	[APP_ALARM_Q_ILLUMINANCE] = "illuminance",
-	[APP_ALARM_Q_MAGNETIC_FIELD] = "magnetic-field",
-	[APP_ALARM_Q_TILT] = "tilt",
-	[APP_ALARM_Q_STATE] = "state",
-	[APP_ALARM_Q_COUNT] = "count",
-	[APP_ALARM_Q_VOLTAGE] = "voltage",
-};
-
-const char *app_alarm_source_name(enum app_alarm_source source)
+const char *app_alarm_slot_name(uint8_t slot)
 {
-	if ((unsigned)source >= APP_ALARM_SRC_COUNT || !m_source_names[source]) {
-		return "?";
-	}
-	return m_source_names[source];
+	return slot <= APP_ALARM_SLOT_MAX ? m_slot_names[slot] : "?";
 }
 
-const char *app_alarm_quantity_name(enum app_alarm_quantity quantity)
+int app_alarm_slot_by_name(const char *name)
 {
-	if ((unsigned)quantity >= APP_ALARM_Q_QUANTITY_COUNT || !m_quantity_names[quantity]) {
-		return "?";
-	}
-	return m_quantity_names[quantity];
-}
-
-int app_alarm_source_by_name(const char *name)
-{
-	for (int i = 0; i < APP_ALARM_SRC_COUNT; i++) {
-		if (m_source_names[i] && strcmp(name, m_source_names[i]) == 0) {
+	for (int i = 0; i <= APP_ALARM_SLOT_MAX; i++) {
+		if (strcmp(name, m_slot_names[i]) == 0) {
 			return i;
 		}
 	}
 	return -1;
 }
 
-int app_alarm_quantity_by_name(const char *name)
-{
-	for (int i = 0; i < APP_ALARM_Q_QUANTITY_COUNT; i++) {
-		if (m_quantity_names[i] && strcmp(name, m_quantity_names[i]) == 0) {
-			return i;
-		}
-	}
-	return -1;
-}
+/* ---- slot type / validity ------------------------------------------------ */
 
-/* ---- kind / validity ---------------------------------------------------- */
-
-enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+/* Registry type of `slot` under config `c`: the motherboard for slot 0, the
+ * configured sensorN_type for a 1-Wire slot. */
+static uint8_t slot_type_in(const struct app_config *c, uint8_t slot)
 {
-	switch (q) {
-	case APP_ALARM_Q_TILT:
-	case APP_ALARM_Q_STATE:
-		return APP_ALARM_KIND_STATE;
-	case APP_ALARM_Q_COUNT:
-		return APP_ALARM_KIND_RATE;
+	switch (slot) {
+	case 0:
+		return APP_SENSOR_TYPE_MOTHERBOARD;
+	case 1:
+		return c->sensor1_type;
+	case 2:
+		return c->sensor2_type;
+	case 3:
+		return c->sensor3_type;
+	case 4:
+		return c->sensor4_type;
 	default:
-		return APP_ALARM_KIND_THRESHOLD;
+		return APP_SENSOR_TYPE_NONE;
 	}
 }
 
-bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity quantity)
+uint8_t app_alarm_slot_type(uint8_t slot)
 {
-	switch (source) {
-	case APP_ALARM_SRC_ONBOARD:
-		return quantity == APP_ALARM_Q_TEMPERATURE || quantity == APP_ALARM_Q_HUMIDITY ||
-		       quantity == APP_ALARM_Q_PRESSURE || quantity == APP_ALARM_Q_ILLUMINANCE;
-	case APP_ALARM_SRC_SLOT1:
-	case APP_ALARM_SRC_SLOT2:
-	case APP_ALARM_SRC_SLOT3:
-	case APP_ALARM_SRC_SLOT4:
-		/* Structural: any quantity a 1-Wire slot could provide. The sensor need
-		 * not be enrolled yet; eval yields NaN (inert) if it isn't present or
-		 * its type doesn't supply the quantity. */
-		return quantity == APP_ALARM_Q_TEMPERATURE || quantity == APP_ALARM_Q_HUMIDITY ||
-		       quantity == APP_ALARM_Q_ILLUMINANCE ||
-		       quantity == APP_ALARM_Q_MAGNETIC_FIELD || quantity == APP_ALARM_Q_TILT;
-	case APP_ALARM_SRC_HALL_LEFT:
-	case APP_ALARM_SRC_HALL_RIGHT:
-	case APP_ALARM_SRC_INPUT_A:
-	case APP_ALARM_SRC_INPUT_B:
-	case APP_ALARM_SRC_PIR:
-	case APP_ALARM_SRC_ACCEL:
-		return quantity == APP_ALARM_Q_STATE || quantity == APP_ALARM_Q_COUNT;
-	default:
+	return slot_type_in(&g_app_config, slot);
+}
+
+bool app_alarm_rule_valid(uint8_t slot, uint8_t channel, uint8_t sensor_type)
+{
+	const struct app_sensor_type *t = app_sensor_type_get(sensor_type);
+
+	if (t == NULL || slot > APP_ALARM_SLOT_MAX) {
 		return false;
 	}
-}
-
-/* A STATE rule on a momentary source (PIR/ACCEL) is only meaningful as an edge
- * (from != to): those sources only ever assert — they never report a steady
- * level — so a level rule (from == to) cannot deactivate and is silently treated
- * as a one-shot by eval_state. Reject it at validation time so the
- * misconfiguration surfaces instead of behaving unexpectedly (#203). */
-static bool rule_state_shape_valid(const struct app_alarm_rule *r)
-{
-	bool momentary = (r->source == APP_ALARM_SRC_PIR || r->source == APP_ALARM_SRC_ACCEL);
-
-	if (r->quantity == APP_ALARM_Q_STATE && momentary && r->from_state == r->to_state) {
+	/* Slot 0 is the motherboard; slots 1..4 take 1-Wire types only. */
+	if ((slot == APP_ALARM_SLOT_MB) != (sensor_type == APP_SENSOR_TYPE_MOTHERBOARD) ||
+	    (slot != APP_ALARM_SLOT_MB && t->w1_family == 0)) {
 		return false;
 	}
-	return true;
+
+	const struct app_sensor_channel *c = app_sensor_channel_get(sensor_type, channel);
+
+	return c != NULL && c->kind != APP_SENSOR_KIND_NONE &&
+	       !(c->flags & (APP_SENSOR_F_RETIRED | APP_SENSOR_F_WATCHDOG_ONLY));
+}
+
+const struct app_sensor_channel *app_alarm_rule_channel(const struct app_alarm_rule *r)
+{
+	if (!app_alarm_rule_valid(r->slot, r->channel, r->sensor_type)) {
+		return NULL;
+	}
+	return app_sensor_channel_get(r->sensor_type, r->channel);
+}
+
+static bool rule_stale_in(const struct app_config *c, const struct app_alarm_rule *r)
+{
+	return r->sensor_type != slot_type_in(c, r->slot);
+}
+
+bool app_alarm_rule_stale(const struct app_alarm_rule *r)
+{
+	return rule_stale_in(&g_app_config, r);
+}
+
+bool app_alarm_rule_armed(const struct app_alarm_rule *r)
+{
+	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
+
+	if (c == NULL || !r->enabled || app_alarm_rule_stale(r)) {
+		return false;
+	}
+	/* A motherboard rule may be provisioned before its capability is on; it
+	 * stays inert until then. */
+	return c->cap_off == APP_SENSOR_NO_CAP ||
+	       *(const bool *)((const char *)&g_app_config + c->cap_off);
+}
+
+/* A STATE rule on a momentary channel (PIR / accelerometer motion) is only
+ * meaningful as an edge (from != to): those channels only ever assert — they
+ * never report a steady level — so a level rule (from == to) could never
+ * deactivate. Reject it so the misconfiguration surfaces (#203). */
+static bool rule_state_shape_valid(const struct app_alarm_rule *r,
+				   const struct app_sensor_channel *c)
+{
+	return !(c->kind == APP_SENSOR_KIND_STATE && (c->flags & APP_SENSOR_F_MOMENTARY) &&
+		 r->from_state == r->to_state);
 }
 
 /* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
  * that uses it — bound it to a sane range regardless of kind (same cap as the
- * old alarm_light_confirm_delay it replaces) rather than the previous
- * THRESHOLD-only "band can't collapse" check, which no longer applies now that
- * activation/deactivation don't use dwell as a value offset. */
+ * old alarm_light_confirm_delay it replaces). */
 #define RULE_DWELL_MAX_S 3600.0f
 
 static bool rule_dwell_range_valid(const struct app_alarm_rule *r)
@@ -175,32 +157,29 @@ static bool rule_dwell_range_valid(const struct app_alarm_rule *r)
  * (value >= lo && value <= hi). hi <= lo (empty or inverted band, or a NaN
  * bound making both comparisons false) makes that deactivate condition
  * unsatisfiable by any real reading, so a rule that ever activates would
- * latch forever — the same class of stuck-alarm bug the old hysteresis
- * band-collapse guard caught (#203), now checked directly on the plain band
- * since dwell no longer offsets it. Non-THRESHOLD kinds don't use the band. */
-static bool rule_threshold_band_valid(const struct app_alarm_rule *r)
+ * latch forever (#203). Non-THRESHOLD kinds don't use the band. */
+static bool rule_threshold_band_valid(const struct app_alarm_rule *r,
+				      const struct app_sensor_channel *c)
 {
-	if (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity) !=
-	    APP_ALARM_KIND_THRESHOLD) {
-		return true;
-	}
-	return r->hi > r->lo;
+	return c->kind != APP_SENSOR_KIND_THRESHOLD || r->hi > r->lo;
 }
 
-/* All shape checks a decoded rule must pass before it is stored or accepted. */
-static bool rule_shape_valid(const struct app_alarm_rule *r)
+/* Target + shape checks a decoded rule must pass before it is stored. */
+static bool rule_valid(const struct app_alarm_rule *r)
 {
-	return rule_state_shape_valid(r) && rule_dwell_range_valid(r) &&
-	       rule_threshold_band_valid(r);
+	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
+
+	return c != NULL && rule_state_shape_valid(r, c) && rule_dwell_range_valid(r) &&
+	       rule_threshold_band_valid(r, c);
 }
 
-/* ---- app_config storage (per-slot bytes) -------------------------------- */
+/* ---- app_config storage (per-rule bytes) -------------------------------- */
 
 /* The 16 alarm_N config fields are separate `uint8_t[RULE_PACK_LEN]` members;
- * map a slot index to its field. Returns NULL for an out-of-range slot. */
-static uint8_t *slot_field(struct app_config *c, uint8_t slot)
+ * map a rule index to its field. Returns NULL for an out-of-range index. */
+static uint8_t *rule_field(struct app_config *c, uint8_t rule)
 {
-	switch (slot) {
+	switch (rule) {
 	case 0:
 		return c->alarm_0;
 	case 1:
@@ -239,108 +218,110 @@ static uint8_t *slot_field(struct app_config *c, uint8_t slot)
 }
 
 BUILD_ASSERT(sizeof(((struct app_config *)0)->alarm_0) == RULE_PACK_LEN,
-	     "alarm slot config field must be RULE_PACK_LEN bytes");
+	     "alarm rule config field must be RULE_PACK_LEN bytes");
 
 static void pack_rule(const struct app_alarm_rule *r, uint8_t out[RULE_PACK_LEN])
 {
 	out[0] = RULE_FLAG_PRESENT | (r->enabled ? RULE_FLAG_ENABLED : 0);
-	out[1] = r->source;
-	out[2] = r->quantity;
-	out[3] = r->from_state;
-	out[4] = r->to_state;
-	memcpy(&out[5], &r->lo, sizeof(float));
-	memcpy(&out[9], &r->hi, sizeof(float));
-	memcpy(&out[13], &r->dwell, sizeof(float));
+	out[1] = r->slot;
+	out[2] = r->channel;
+	out[3] = r->sensor_type;
+	out[4] = r->from_state;
+	out[5] = r->to_state;
+	memcpy(&out[6], &r->lo, sizeof(float));
+	memcpy(&out[10], &r->hi, sizeof(float));
+	memcpy(&out[14], &r->dwell, sizeof(float));
 }
 
-/* Decode `in` into `*r`. Returns true if the slot is present (occupied). */
+/* Decode `in` into `*r`. Returns true if the rule is present (occupied). */
 static bool unpack_rule(const uint8_t in[RULE_PACK_LEN], struct app_alarm_rule *r)
 {
 	if (!(in[0] & RULE_FLAG_PRESENT)) {
 		return false;
 	}
+	*r = (struct app_alarm_rule){0};
 	r->enabled = (in[0] & RULE_FLAG_ENABLED) ? 1 : 0;
-	r->source = in[1];
-	r->quantity = in[2];
-	r->from_state = in[3];
-	r->to_state = in[4];
-	memcpy(&r->lo, &in[5], sizeof(float));
-	memcpy(&r->hi, &in[9], sizeof(float));
-	memcpy(&r->dwell, &in[13], sizeof(float));
+	r->slot = in[1];
+	r->channel = in[2];
+	r->sensor_type = in[3];
+	r->from_state = in[4];
+	r->to_state = in[5];
+	memcpy(&r->lo, &in[6], sizeof(float));
+	memcpy(&r->hi, &in[10], sizeof(float));
+	memcpy(&r->dwell, &in[14], sizeof(float));
 	return true;
 }
 
-/* ---- CRUD (slot-addressed) ---------------------------------------------- */
+/* ---- CRUD (rule-addressed) ---------------------------------------------- */
 
 uint8_t app_alarm_rules_count(void)
 {
 	uint8_t n = 0;
-	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
-		if (m_slots[i].used) {
+	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		if (m_rules[i].used) {
 			n++;
 		}
 	}
 	return n;
 }
 
-bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
+bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 {
 	bool ok = false;
 
 	/* M-6: copy the rule out under the rules lock instead of returning a raw
-	 * pointer. The alarm poll otherwise read &m_slots[slot].rule holding only
-	 * app_alarm.c's lock, racing reload_from_config() which rewrites the ~17 B
-	 * rule under this lock — a torn read that could evaluate a half-written rule. */
+	 * pointer. The alarm poll otherwise read the cache holding only
+	 * app_alarm.c's lock, racing reload_from_config() which rewrites the rule
+	 * under this lock — a torn read that could evaluate a half-written rule. */
 	k_mutex_lock(&m_lock, K_FOREVER);
-	if (slot < APP_ALARM_SLOT_COUNT && m_slots[slot].used) {
-		*out = m_slots[slot].rule;
+	if (rule < APP_ALARM_RULE_COUNT && m_rules[rule].used) {
+		*out = m_rules[rule].rule;
 		ok = true;
 	}
 	k_mutex_unlock(&m_lock);
 	return ok;
 }
 
-bool app_alarm_rules_occupied(uint8_t slot)
+bool app_alarm_rules_occupied(uint8_t rule)
 {
-	return slot < APP_ALARM_SLOT_COUNT && m_slots[slot].used;
+	return rule < APP_ALARM_RULE_COUNT && m_rules[rule].used;
 }
 
 int app_alarm_rules_first_free(void)
 {
-	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
-		if (!m_slots[i].used) {
+	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		if (!m_rules[i].used) {
 			return i;
 		}
 	}
 	return -1;
 }
 
-int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t rule, const struct app_alarm_rule *r)
 {
-	if (slot >= APP_ALARM_SLOT_COUNT || rule == NULL ||
-	    !app_alarm_rule_valid((enum app_alarm_source)rule->source,
-				  (enum app_alarm_quantity)rule->quantity) ||
-	    !rule_shape_valid(rule)) {
+	if (rule >= APP_ALARM_RULE_COUNT || r == NULL || !rule_valid(r)) {
 		return -EINVAL;
 	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	pack_rule(rule, slot_field(app_config(), slot));
-	m_slots[slot].rule = *rule;
-	m_slots[slot].used = true;
+	pack_rule(r, rule_field(app_config(), rule));
+	/* Normalized through the packed form, so padding and the enabled flag
+	 * compare equal to a reload of the same bytes. */
+	(void)unpack_rule(rule_field(app_config(), rule), &m_rules[rule].rule);
+	m_rules[rule].used = true;
 	k_mutex_unlock(&m_lock);
 	return 0;
 }
 
-int app_alarm_rules_clear(uint8_t slot)
+int app_alarm_rules_clear(uint8_t rule)
 {
-	if (slot >= APP_ALARM_SLOT_COUNT) {
+	if (rule >= APP_ALARM_RULE_COUNT) {
 		return -EINVAL;
 	}
 	k_mutex_lock(&m_lock, K_FOREVER);
-	int ret = m_slots[slot].used ? 0 : -ENOENT;
-	memset(slot_field(app_config(), slot), 0, RULE_PACK_LEN);
-	m_slots[slot].used = false;
+	int ret = m_rules[rule].used ? 0 : -ENOENT;
+	memset(rule_field(app_config(), rule), 0, RULE_PACK_LEN);
+	m_rules[rule].used = false;
 	k_mutex_unlock(&m_lock);
 	return ret;
 }
@@ -349,55 +330,74 @@ void app_alarm_rules_clear_all(void)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
 	struct app_config *c = app_config();
-	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
-		memset(slot_field(c, (uint8_t)i), 0, RULE_PACK_LEN);
-		m_slots[i].used = false;
+	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		memset(rule_field(c, (uint8_t)i), 0, RULE_PACK_LEN);
+		m_rules[i].used = false;
 	}
 	k_mutex_unlock(&m_lock);
 }
 
 /* ---- persistence (app_config storage) ----------------------------------- */
 
+int app_alarm_rules_stale_count(void)
+{
+	const struct app_config *c = app_config();
+	int n = 0;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		if (m_rules[i].used && rule_stale_in(c, &m_rules[i].rule)) {
+			n++;
+		}
+	}
+	k_mutex_unlock(&m_lock);
+	return n;
+}
+
 int app_alarm_rules_reload_from_config(void)
 {
 	struct app_config *c = app_config();
-	int dropped = 0; /* non-empty slots that failed validation and were sanitized */
+	int faults = 0; /* invalid rules sanitized + stale rules kept */
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
+	for (uint8_t i = 0; i < APP_ALARM_RULE_COUNT; i++) {
 		struct app_alarm_rule r;
-		uint8_t *field = slot_field(c, s);
-		/* Drop a slot that decodes to a pair that no longer validates
-		 * (e.g. enum changed across FW, or a host wrote garbage). */
-		if (unpack_rule(field, &r) &&
-		    app_alarm_rule_valid((enum app_alarm_source)r.source,
-					 (enum app_alarm_quantity)r.quantity) &&
-		    rule_shape_valid(&r)) {
-			m_slots[s].rule = r;
-			m_slots[s].used = true;
+		uint8_t *field = rule_field(c, i);
+
+		if (unpack_rule(field, &r) && rule_valid(&r)) {
+			/* A stale rule (#430: its sensor type is not the slot's staged
+			 * type) is kept — the type may be provisioned or put back —
+			 * but reported, so a SetParam does not ACK a rule that cannot
+			 * fire. */
+			if (rule_stale_in(c, &r)) {
+				LOG_WRN("Alarm rule %u: stale (type %u, slot %u has %u)", i,
+					r.sensor_type, r.slot, slot_type_in(c, r.slot));
+				faults++;
+			}
+			m_rules[i].rule = r;
+			m_rules[i].used = true;
 		} else {
 			/* Zero the persisted bytes too, not just the live cache, so a
-			 * rejected slot doesn't linger in NVS and get echoed by
-			 * GetParam/dump — keeping stored state consistent with live
-			 * state (#197). Non-empty-but-invalid is the case worth a log
-			 * (and worth reporting to the caller — H-10). */
+			 * rejected rule doesn't linger in NVS and get echoed by
+			 * GetParam/dump (#197). Non-empty-but-invalid is the case worth
+			 * a log (and worth reporting to the caller — H-10). */
 			if (field[0] & RULE_FLAG_PRESENT) {
-				LOG_WRN("Alarm slot %u: invalid persisted rule sanitized", s);
-				dropped++;
+				LOG_WRN("Alarm rule %u: invalid persisted rule sanitized", i);
+				faults++;
 			}
 			memset(field, 0, RULE_PACK_LEN);
-			m_slots[s].used = false;
+			m_rules[i].used = false;
 		}
 	}
 	k_mutex_unlock(&m_lock);
 
 	LOG_INF("Loaded %u alarm rule(s)", app_alarm_rules_count());
-	return dropped;
+	return faults;
 }
 
 int app_alarm_rules_save(void)
 {
-	/* Rules live in the app_config slots; persist the config (no reboot),
+	/* Rules live in the app_config entries; persist the config (no reboot),
 	 * clear of any radio exchange. */
 	app_radio_flash_hold();
 	int ret = settings_save();

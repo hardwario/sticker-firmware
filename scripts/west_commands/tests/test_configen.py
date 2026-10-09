@@ -90,7 +90,7 @@ def test_build_options_lines_matches_committed():
         "AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true",
         "AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true",
     ] + [
-        f"AppConfigMessage.Alarms.alarm_{i} max_size:17 fixed_length:true" for i in range(16)
+        f"AppConfigMessage.Alarms.alarm_{i} max_size:18 fixed_length:true" for i in range(16)
     ])
     assert not any("secret_key" in ln for ln in lines)
 

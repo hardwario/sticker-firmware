@@ -231,13 +231,13 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 	zassert_equal(r.which_body, Response_ack_tag, "seed apply failed, which=%d", r.which_body);
 	zassert_equal(g_app_config.interval_report, 120, "seed not applied");
 
-	/* seq5 set_param{ application{interval_report=200}, alarms{alarm_0=<17
+	/* seq5 set_param{ application{interval_report=200}, alarms{alarm_0=<18
 	 * packed rule bytes>} }. app_config_apply_alarms() just memcpy's the raw
 	 * bytes (no shape validation at apply time), so rc==0 for the whole batch
 	 * and interval_report=200 lands in the staging struct; the forced dropped
 	 * count then rolls the whole batch back. */
 	test_alarm_reload_dropped = 1;
-	const char *hex = "0805121a120318c8012a131a110100060000000000000000000000000000";
+	const char *hex = "0805121b120318c8012a141a12010006" "000000000000000000000000000000";
 	enum app_cmd_action a = handle(hex, &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
@@ -282,26 +282,27 @@ static bool slot_is(const uint8_t *slot, size_t n, uint8_t v)
 ZTEST(cmd, test_set_param_alarms_replace_keeps_only_sent_slots)
 {
 	Response r;
-	static const uint8_t rule_a[17] = {0x01, 0x00, 0x06};
-	static const uint8_t rule_b[17] = {0x01, 0x02, 0x03};
+	static const uint8_t rule_a[18] = {0x01, 0x00, 0x06, 0x01};
+	static const uint8_t rule_b[18] = {0x01, 0x02, 0x03};
 
 	reset_cfg();
 	seed_alarm_slots();
 	test_alarm_clear_all_calls = 0;
 
 	/* seq7 set_param{ alarms{ alarm_2=rule_a, alarm_5=rule_b }, alarms_replace } */
-	enum app_cmd_action a = handle("0807122a2a262a110100060000000000000000000000000000421101020"
-				       "300000000000000000000000000003001",
+	enum app_cmd_action a = handle("0807122c2a282a12010006010000000000000000000000000000"
+				       "4212010203000000000000000000000000000000"
+				       "3001",
 				       &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no save requested");
 	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
 	zassert_equal(test_alarm_clear_all_calls, 1, "slots must be cleared once");
-	zassert_mem_equal(g_app_config.alarm_2, rule_a, 17, "alarm_2");
-	zassert_mem_equal(g_app_config.alarm_5, rule_b, 17, "alarm_5");
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "old alarm_1 must be gone");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "old alarm_3 must be gone");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "old alarm_7 must be gone");
+	zassert_mem_equal(g_app_config.alarm_2, rule_a, 18, "alarm_2");
+	zassert_mem_equal(g_app_config.alarm_5, rule_b, 18, "alarm_5");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0), "old alarm_1 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0), "old alarm_3 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0), "old alarm_7 must be gone");
 }
 
 ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
@@ -314,9 +315,9 @@ ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
 
 	handle("080812023001", &r); /* seq8 set_param{ alarms_replace } */
 	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "alarm_1");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "alarm_3");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "alarm_7");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0), "alarm_1");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0), "alarm_3");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0), "alarm_7");
 	zassert_equal(g_app_config.alarm_limit, 30, "alarm_limit is not a rule slot");
 }
 
@@ -331,17 +332,17 @@ ZTEST(cmd, test_set_param_alarms_replace_rolls_back)
 	 * (stubbed) reload reports as invalid: the whole batch rolls back, so the
 	 * cleared slots come back and the new rule does not stick. */
 	test_alarm_reload_dropped = 1;
-	handle("080912172a132a1101000600000000000000000000000000003001", &r);
+	handle("080912182a142a120100060100000000000000000000000000003001", &r);
 	test_alarm_reload_dropped = 0;
 
 	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
 		      r.body.error.code);
 	zassert_equal(r.body.error.fault_field, 400, "fault_field %u", r.body.error.fault_field);
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 restored");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0x33), "alarm_3 restored");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0x77), "alarm_7 restored");
-	zassert_true(slot_is(g_app_config.alarm_2, 17, 0), "rejected alarm_2 must not stick");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0x11), "alarm_1 restored");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0x33), "alarm_3 restored");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0x77), "alarm_7 restored");
+	zassert_true(slot_is(g_app_config.alarm_2, 18, 0), "rejected alarm_2 must not stick");
 }
 
 ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
@@ -357,7 +358,7 @@ ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
 		      r.body.error.code);
 	zassert_equal(test_alarm_clear_all_calls, 0, "vendor must not clear the table");
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 intact");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0x11), "alarm_1 intact");
 }
 
 /* Two back-to-back SetParam calls: the first fails and rolls back, the second
@@ -2008,24 +2009,24 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
  * no_write_nfc used to get set, so the template's write-gate block never
  * fired for this field at all: app_config_apply_alarms() had a bare
  * ARG_UNUSED(tp) and an unconditional memcpy for alarm_0..alarm_15. This test
- * constructs `set_param{ alarms{ alarm_0 = <17 bytes> } }` over lrw/nfc
+ * constructs `set_param{ alarms{ alarm_0 = <18 bytes> } }` over lrw/nfc
  * (control, must still be accepted) and vendor (must now be rejected). */
 ZTEST(cmd, test_alarm_slot_writable_excludes_vendor)
 {
 	Response r;
-	uint8_t payload[17];
-	uint8_t zero17[17];
+	uint8_t payload[18];
+	uint8_t zero18[18];
 
 	memset(payload, 0x01, sizeof(payload));
-	memset(zero17, 0, sizeof(zero17));
+	memset(zero18, 0, sizeof(zero18));
 
-	/* seq1 set_param{ alarms{ alarm_0 = 17x0x01 } }
+	/* seq1 set_param{ alarms{ alarm_0 = 18x0x01 } }
 	 * Command:  08 01                      seq=1
-	 *           12 15                      set_param, len 21
-	 *             2a 13                    .alarms (SetParam field5), len 19
-	 *               1a 11 <17x01>           .alarm_0 (Alarms field3), len 17
+	 *           12 16                      set_param, len 22
+	 *             2a 14                    .alarms (SetParam field5), len 20
+	 *               1a 12 <18x01>           .alarm_0 (Alarms field3), len 18
 	 */
-	const char *hex = "080112152a131a110101010101010101010101010101010101";
+	const char *hex = "080112162a141a12010101010101010101010101010101010101";
 
 	/* Control: lrw is IN writable -> correctly accepted. */
 	reset_cfg();
@@ -2049,7 +2050,7 @@ ZTEST(cmd, test_alarm_slot_writable_excludes_vendor)
 	reset_cfg();
 	a = handle_via(APP_CMD_TRANSPORT_VENDOR, hex, &r);
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
-	zassert_mem_equal(g_app_config.alarm_0, zero17, sizeof(zero17),
+	zassert_mem_equal(g_app_config.alarm_0, zero18, sizeof(zero18),
 			  "C2 REGRESSION: alarm_0 was written to 0x%02x... over VENDOR "
 			  "transport despite writable:[nfc,lrw] excluding vendor",
 			  g_app_config.alarm_0[0]);
@@ -3162,30 +3163,40 @@ ZTEST(cmd, test_action_reboots_classification)
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
 
-/* #430 step 3: AlarmEvent.sensor_type (field 11) is sent only for a 1-Wire
- * slot event (sensor_type != 0), e.g. TYPE_SENSOR_MISMATCH with value = the
- * detected type; an on-board event stays without it. */
+/* #430: AlarmEvent carries rule / slot / channel; sensor_type (field 11) is
+ * sent only for a 1-Wire slot event, e.g. TYPE_SENSOR_MISMATCH (rule 0xFF)
+ * with value = the detected type; a motherboard event stays without it. */
 ZTEST(cmd, test_alarm_report_sensor_type_only_for_slot_events)
 {
 	const struct app_cmd_alarm_event ev[] = {
-		{.slot = 0xFF, .source = 2, .type = 5, .sensor_type = 3, .has_value = true,
-		 .value = 2},
-		{.slot = 3, .source = 0, .quantity = 0, .type = 2, .has_value = true,
-		 .value = 2660},
+		{.rule = 0xFF, .slot = 2, .channel = 0, .type = 5, .sensor_type = 3,
+		 .has_value = true, .value = 2},
+		{.rule = 3, .slot = 0, .channel = 1, .type = 2, .sensor_type = 1,
+		 .has_value = true, .value = 133},
+		{.rule = 4, .slot = 1, .channel = 2, .type = 1, .sensor_type = 3,
+		 .has_value = true, .value = -500},
 	};
 	uint8_t out[64];
 	size_t len = 0;
 
-	zassert_ok(app_cmd_build_alarm_report(0, 2, false, ev, 2, 0, 1, out, sizeof(out), &len));
+	zassert_ok(app_cmd_build_alarm_report(0, 3, false, ev, 3, 0, 1, out, sizeof(out), &len));
 
 	AlarmReport r = AlarmReport_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, len - 1); /* skip version byte */
 
 	zassert_true(pb_decode(&is, AlarmReport_fields, &r), "decode");
-	zassert_equal(r.events_count, 2);
+	zassert_equal(r.events_count, 3);
 	zassert_equal(r.events[0].type, AlarmEvent_Type_TYPE_SENSOR_MISMATCH);
+	zassert_equal(r.events[0].rule, 0xFF);
+	zassert_equal(r.events[0].slot, 2);
 	zassert_true(r.events[0].has_sensor_type && r.events[0].sensor_type == 3,
 		     "expected type on the mismatch event");
 	zassert_true(r.events[0].has_value && r.events[0].value == 2, "detected type");
-	zassert_false(r.events[1].has_sensor_type, "on-board event without sensor_type");
+	zassert_false(r.events[1].has_sensor_type, "motherboard event without sensor_type");
+	zassert_equal(r.events[1].rule, 3);
+	zassert_equal(r.events[1].channel, 1);
+	zassert_true(r.events[2].has_sensor_type && r.events[2].sensor_type == 3);
+	zassert_equal(r.events[2].slot, 1);
+	zassert_equal(r.events[2].channel, 2);
+	zassert_equal(r.events[2].value, -500);
 }

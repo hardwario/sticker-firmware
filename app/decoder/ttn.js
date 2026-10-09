@@ -137,8 +137,10 @@ var _ALM_NAMES = {
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
-// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 3..18, each a packed
-// 17-byte rule carried as native bytes (presented/authored as a 34-char hex string).
+// Dynamic alarm rules alarm_0..alarm_15 = proto fields 3..18, each a packed
+// 18-byte rule carried as native bytes (presented/authored as a 36-char hex
+// string). Layout (#430): flags, slot, channel, sensor_type, from, to, then
+// float32 LE lo, hi, dwell.
 var _ALM_HEX = {};
 var _ALM_HEX_ENC = {};
 (function () {
@@ -1326,75 +1328,84 @@ function decodeDownlink(input) {
 }
 
 // fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
-// total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
-// source(1), edge(2), rel_s(4) varints + optional sint32 value(5) + quantity(6) +
-// slot(7) + type(9). source = enum app_alarm_source, quantity = enum
-// app_alarm_quantity; type says WHAT fired (low/high/trigger/no_data) and edge
-// the rising/falling transition — orthogonal (#212). value is scaled per quantity
-// (temp/hum ×100, pressure ×10, magnetic_field µT, digital 0/1, counter) and
-// absent for some edges. Per-event time = base_time + rel_s. `total` may exceed
-// events present (dropped to fit the data rate).
-var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
-  "input-a", "input-b", "pir", "accel", "battery"];
-var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
-  "magnetic-field", "tilt", "state", "count", "voltage"];
+// total(2), repeated AlarmEvent events(3). AlarmEvent (#430 sensor channel
+// model): slot(1), edge(2), rel_s(4) varints + optional sint32 value(5) +
+// rule(7) + type(9) + channel(10) + sensor_type(11). slot = 0 motherboard,
+// 1..4 = 1-Wire s1..s4; channel = channel of the slot's sensor type
+// (_SENSOR_TYPES; sensor_type is sent for 1-Wire slots only). rule = the alarm
+// rule index, 0xFF = no-data / sensor-mismatch watchdog, 0xFE = low battery.
+// type says WHAT fired (low/high/trigger/no_data/sensor_mismatch) and edge the
+// rising/falling transition — orthogonal (#212). value is the channel value
+// times its wire scale (the registry `s`), absent for some edges; a sensor
+// mismatch carries the detected type in value. Per-event time = base_time +
+// rel_s. `total` may exceed events present (dropped to fit the data rate).
+var _ALARM_SLOTS = ["mb", "s1", "s2", "s3", "s4"];
 var _ALARM_EDGES = ["activate", "deactivate"];
 var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data", "sensor_mismatch"];
 var _ALARM_TYPE_SENSOR_MISMATCH = 5;
+var _ALARM_RULE_COUNT = 16;
 
-function _alarmUnscale(quantity, raw) {
-  switch (quantity) {
-    case 0: case 1: return raw / 100;   // temperature, humidity
-    case 2: return raw / 10;            // pressure (hPa×10)
-    case 4: return raw / 1000;          // magnetic-field (µT -> mT)
-    case 8: return raw / 100;           // voltage (V×100)
-    default: return raw;                // illuminance / state / count
+// Channel descriptor of an alarm on (slot, channel); the motherboard type for
+// slot 0, else the sent sensor_type. undefined when unknown.
+function _alarmChannel(slot, sensorType, ch) {
+  var t = _SENSOR_TYPES[slot === 0 ? _SENSOR_MB_TYPE : sensorType];
+  return t ? t.ch[ch] : undefined;
+}
+
+// Common JSON shape of an alarm target: slot name, channel name (null for a
+// sensor mismatch, which concerns the whole slot) and the 1-Wire sensor type.
+function _alarmTarget(slot, ch, sensorType, type) {
+  var c = _alarmChannel(slot, sensorType, ch);
+  var o = {
+    slot: _ALARM_SLOTS[slot] || ("slot" + slot),
+    channel: type === _ALARM_TYPE_SENSOR_MISMATCH ? null : (c ? c.n : "ch" + ch),
+  };
+  if (sensorType !== null && slot !== 0) {
+    o.sensor_type = _W1_SLOT_TYPES[sensorType] || ("type" + sensorType);
   }
+  return o;
 }
 
 // Response.Info.active_alarms entry (#288): a live alarm snapshot trimmed to
-// source(1)/quantity(2)/type(3) — no slot/value/edge/time (that is the fPort 3
-// AlarmEvent). Reuses the fPort 3 enum name maps for a consistent JSON shape.
+// slot(1)/type(3)/channel(4)/sensor_type(5) — no rule/value/edge/time (that is
+// the fPort 3 AlarmEvent). Same target shape as the fPort 3 events.
 function _decodeAlarmStatus(bytes, start, end) {
-  var a = { source: 0, quantity: 0, type: 0 };
+  var a = { slot: 0, channel: 0, type: 0, sensor_type: null };
   var p = start;
   while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, p); p = v.next;
-      if (field === 1) a.source = v.value;
-      else if (field === 2) a.quantity = v.value;
+      if (field === 1) a.slot = v.value;
       else if (field === 3) a.type = v.value;
+      else if (field === 4) a.channel = v.value;
+      else if (field === 5) a.sensor_type = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
   }
-  return {
-    source: _ALARM_SOURCES[a.source] || ("src" + a.source),
-    // A sensor mismatch (#430) concerns the whole slot, not a quantity.
-    quantity: a.type === _ALARM_TYPE_SENSOR_MISMATCH ? null
-      : (_ALARM_QUANTITIES[a.quantity] || ("q" + a.quantity)),
-    type: _ALARM_TYPES[a.type] || "none",
-  };
+  var o = _alarmTarget(a.slot, a.channel, a.sensor_type, a.type);
+  o.type = _ALARM_TYPES[a.type] || "none";
+  return o;
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null, sensor_type: null };
+  var ev = { rule: 0, slot: 0, channel: 0, edge: 0, type: 0, rel_s: 0, value: null, sensor_type: null };
   var p = start;
   while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, p); p = v.next;
-      if (field === 1) ev.source = v.value;
+      if (field === 1) ev.slot = v.value;
       else if (field === 2) ev.edge = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
-      else if (field === 6) ev.quantity = v.value;
-      else if (field === 7) ev.slot = v.value;
+      else if (field === 7) ev.rule = v.value;
       else if (field === 9) ev.type = v.value;
-      else if (field === 11) ev.sensor_type = v.value; // #430, 1-Wire slot events only
+      else if (field === 10) ev.channel = v.value;
+      else if (field === 11) ev.sensor_type = v.value; // 1-Wire slot events only
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -1424,18 +1435,17 @@ function decodeAlarmBatch(bytes) {
       if (field === 3) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
         var mismatch = ev.type === _ALARM_TYPE_SENSOR_MISMATCH;
-        var a = {
-          slot: ev.slot,
-          source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
-          quantity: mismatch ? null : (_ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity)),
-          event: _ALARM_EDGES[ev.edge] || "activate",
-          type: _ALARM_TYPES[ev.type] || "none",
-          value: ev.value === null ? null : (mismatch ? ev.value : _alarmUnscale(ev.quantity, ev.value)),
-          time: 0,
-        };
-        // #430: the slot's expected sensor type; a mismatch also names the
-        // detected type (carried in value).
-        if (ev.sensor_type !== null) a.sensor_type = _W1_SLOT_TYPES[ev.sensor_type] || ("type" + ev.sensor_type);
+        var c = _alarmChannel(ev.slot, ev.sensor_type, ev.channel);
+        var a = _alarmTarget(ev.slot, ev.channel, ev.sensor_type, ev.type);
+        // Rules 0..15; the watchdogs (no-data / mismatch 0xFF, battery 0xFE)
+        // have none — type and channel say which one fired.
+        a.rule = ev.rule < _ALARM_RULE_COUNT ? ev.rule : null;
+        a.event = _ALARM_EDGES[ev.edge] || "activate";
+        a.type = _ALARM_TYPES[ev.type] || "none";
+        a.value = ev.value === null ? null
+          : (mismatch || !c ? ev.value : ev.value / c.s);
+        a.time = 0;
+        // A mismatch names the detected type (carried in value).
         if (mismatch && ev.value !== null) a.detected_type = _W1_SLOT_TYPES[ev.value] || ("type" + ev.value);
         out.alarms.push(a);
         rels.push(ev.rel_s);

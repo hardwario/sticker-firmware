@@ -205,8 +205,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
  * here keeps the list variable-length (only the active alarms are sent, empty
  * when all is well) and avoids a large static array in the Info struct — the
  * debug build's RAM is tight. Shared by the LoRaWAN and NFC info paths. */
-#define ACTIVE_ALARM_SNAPSHOT_MAX                                                                  \
-	(APP_ALARM_SLOT_COUNT + 13) /* +8 no-data +1 battery +4 sensor mismatch */
+#define ACTIVE_ALARM_SNAPSHOT_MAX (APP_ALARM_RULE_COUNT + APP_ALARM_WATCHDOG_MAX)
 
 static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
@@ -223,9 +222,11 @@ static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, 
 
 	for (size_t i = 0; i < n; i++) {
 		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
-		e.source = list[i].source;
-		e.quantity = list[i].quantity;
+		e.slot = list[i].slot;
+		e.channel = list[i].channel;
 		e.type = list[i].type;
+		e.has_sensor_type = list[i].slot != 0 && list[i].sensor_type != 0;
+		e.sensor_type = list[i].sensor_type;
 		if (!pb_encode_tag_for_field(stream, field)) {
 			return false;
 		}
@@ -439,6 +440,9 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	 * was removed with the fixed alarm keys — alarm rules validate on their own
 	 * SET path in app_alarm_rules.) */
 	struct app_config snapshot = *app_config();
+	/* Rules already stale before this batch (#430) do not fail it; only a
+	 * batch that makes more rules stale or invalid does. */
+	const int stale_before = app_alarm_rules_stale_count();
 
 	/* alarms_replace: the host is the source of truth for the whole alarm table
 	 * (ProXimos Portal). Empty every rule slot in staging first, so the alarms
@@ -500,8 +504,10 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		 * reboot (whether or not this batch is persisted). reload sanitizes and
 		 * reports any rule that fails validation — surface that as a fault instead
 		 * of a misleading ACK for a rule that was silently dropped (H-10). */
-		if ((sp->has_alarms || alarms_replace) &&
-		    app_alarm_rules_reload_from_config() > 0) {
+		/* A sensors-group change of sensorN_type can turn rules stale
+		 * (#430), so it reloads (and is checked) like an alarms change. */
+		if ((sp->has_alarms || sp->has_sensors || alarms_replace) &&
+		    app_alarm_rules_reload_from_config() > stale_before) {
 			*app_config() = snapshot;                   /* roll back the batch */
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
@@ -614,22 +620,22 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 17, 3, false, false},
 	{DUMP_SECTION_SENSORS, 18, 3, false, false},
 	{DUMP_SECTION_ALARMS, 1, 3, false, false},
-	{DUMP_SECTION_ALARMS, 3, 19, false, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false, false},
-	{DUMP_SECTION_ALARMS, 5, 19, false, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false, false},
-	{DUMP_SECTION_ALARMS, 7, 19, false, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false, false},
-	{DUMP_SECTION_ALARMS, 9, 19, false, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false, false},
-	{DUMP_SECTION_ALARMS, 11, 19, false, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false, false},
-	{DUMP_SECTION_ALARMS, 13, 19, false, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false, false},
-	{DUMP_SECTION_ALARMS, 15, 19, false, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false, false},
-	{DUMP_SECTION_ALARMS, 17, 20, false, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false, false},
+	{DUMP_SECTION_ALARMS, 3, 20, false, false},
+	{DUMP_SECTION_ALARMS, 4, 20, false, false},
+	{DUMP_SECTION_ALARMS, 5, 20, false, false},
+	{DUMP_SECTION_ALARMS, 6, 20, false, false},
+	{DUMP_SECTION_ALARMS, 7, 20, false, false},
+	{DUMP_SECTION_ALARMS, 8, 20, false, false},
+	{DUMP_SECTION_ALARMS, 9, 20, false, false},
+	{DUMP_SECTION_ALARMS, 10, 20, false, false},
+	{DUMP_SECTION_ALARMS, 11, 20, false, false},
+	{DUMP_SECTION_ALARMS, 12, 20, false, false},
+	{DUMP_SECTION_ALARMS, 13, 20, false, false},
+	{DUMP_SECTION_ALARMS, 14, 20, false, false},
+	{DUMP_SECTION_ALARMS, 15, 20, false, false},
+	{DUMP_SECTION_ALARMS, 16, 21, false, false},
+	{DUMP_SECTION_ALARMS, 17, 21, false, false},
+	{DUMP_SECTION_ALARMS, 18, 21, false, false},
 	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	{DUMP_SECTION_ALARMS, 21, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
@@ -643,8 +649,8 @@ static const struct {
  * config_dump wrapper + page_index + page_count + the two submessage wrappers),
  * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
  * worst-case frame near 44 B with margin. Conservative — a page can never
- * overflow (the largest single field is 20 B: a 17-byte alarm rule with a
- * two-byte tag). */
+ * overflow (the largest single field is 21 B: an 18-byte alarm rule with a
+ * two-byte tag and its length byte). */
 #define DUMP_PAGE_BUDGET 30
 
 /* Over NFC the response travels in the ST25DV Fast-Transfer-Mode mailbox, a
@@ -1947,10 +1953,10 @@ enum page_stream_kind {
 };
 
 /* Info snapshot for paging: the LoRaWAN view of the scalars plus the active
- * alarms as (source, quantity, type) triples. */
+ * alarms as app_alarm_active entries (slot, channel, sensor type, type). */
 struct info_snap {
 	Response_Info info;
-	uint8_t alarm[ACTIVE_ALARM_SNAPSHOT_MAX][3];
+	struct app_alarm_active alarm[ACTIVE_ALARM_SNAPSHOT_MAX];
 	uint8_t n_alarms;
 	uint32_t seq; /* echoed on every page; part of the page size */
 };
@@ -2280,9 +2286,11 @@ static bool encode_alarm_range(pb_ostream_t *stream, const pb_field_t *field, vo
 	for (uint8_t i = r->start; i < r->end; i++) {
 		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
 
-		e.source = r->snap->alarm[i][0];
-		e.quantity = r->snap->alarm[i][1];
-		e.type = r->snap->alarm[i][2];
+		e.slot = r->snap->alarm[i].slot;
+		e.channel = r->snap->alarm[i].channel;
+		e.type = r->snap->alarm[i].type;
+		e.has_sensor_type = e.slot != 0 && r->snap->alarm[i].sensor_type != 0;
+		e.sensor_type = r->snap->alarm[i].sensor_type;
 		if (!pb_encode_tag_for_field(stream, field) ||
 		    !pb_encode_submessage(stream, Response_AlarmStatus_fields, &e)) {
 			return false;
@@ -2481,9 +2489,7 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 	fill_info(APP_CMD_TRANSPORT_LRW, &snap->info, SIZE_MAX);
 	snap->info.active_alarms.funcs.encode = NULL;
 	for (size_t i = 0; i < n; i++) {
-		snap->alarm[i][0] = (uint8_t)list[i].source;
-		snap->alarm[i][1] = (uint8_t)list[i].quantity;
-		snap->alarm[i][2] = (uint8_t)list[i].type;
+		snap->alarm[i] = list[i];
 	}
 	snap->n_alarms = (uint8_t)n;
 	snap->seq = seq;
@@ -2768,9 +2774,7 @@ static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, ui
 	fill_info(tp, &snap.info, SIZE_MAX);
 	snap.info.active_alarms.funcs.encode = NULL;
 	for (size_t i = 0; i < n; i++) {
-		snap.alarm[i][0] = (uint8_t)list[i].source;
-		snap.alarm[i][1] = (uint8_t)list[i].quantity;
-		snap.alarm[i][2] = (uint8_t)list[i].type;
+		snap.alarm[i] = list[i];
 	}
 	snap.n_alarms = (uint8_t)n;
 	snap.seq = seq;
@@ -3240,15 +3244,16 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
+		ev->rule = events[i].rule;
 		ev->slot = events[i].slot;
-		ev->source = events[i].source;
-		ev->quantity = events[i].quantity;
+		ev->channel = events[i].channel;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;
 		ev->type = (AlarmEvent_Type)events[i].type;
 		ev->rel_s = events[i].rel_s;
 		ev->has_value = events[i].has_value;
 		ev->value = events[i].value;
-		ev->has_sensor_type = events[i].sensor_type != 0;
+		/* Slot 0 is always the motherboard: no type on the wire (#430). */
+		ev->has_sensor_type = events[i].slot != 0 && events[i].sensor_type != 0;
 		ev->sensor_type = events[i].sensor_type;
 	}
 	report.events_count = (pb_size_t)n;

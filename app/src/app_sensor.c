@@ -167,7 +167,7 @@ static void pyq1648_event_handler(void *user_data)
 	APP_SENSOR_MB_U(&g_app_sensor_data, PIR_COUNT)++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	app_alarm_event(APP_ALARM_SRC_PIR, true);
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
 }
 #endif /* defined(CONFIG_APP_PYQ1648) */
 
@@ -222,7 +222,7 @@ static void accel_motion_handler(void *user_data)
 	APP_SENSOR_MB_U(&g_app_sensor_data, ACCEL_COUNT)++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	app_alarm_event(APP_ALARM_SRC_ACCEL, true);
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_ACCEL_MOTION, true);
 	k_work_submit(&m_accel_classify_work);
 }
 #endif /* defined(CONFIG_LIS2DH) */

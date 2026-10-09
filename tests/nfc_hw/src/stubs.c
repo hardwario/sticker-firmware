@@ -203,16 +203,16 @@ bool app_history_is_ready(void)
 }
 
 /* Dynamic alarm rules — inert; no test here exercises alarm_rule mutation. */
-int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t rule_idx, const struct app_alarm_rule *rule)
 {
-	(void)slot;
+	(void)rule_idx;
 	(void)rule;
 	return 0;
 }
 
-int app_alarm_rules_clear(uint8_t slot)
+int app_alarm_rules_clear(uint8_t rule)
 {
-	(void)slot;
+	(void)rule;
 	return 0;
 }
 
@@ -225,17 +225,16 @@ int app_alarm_rules_reload_from_config(void)
 	return 0;
 }
 
-bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
+bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 {
-	(void)slot;
+	(void)rule;
 	(void)out;
 	return false;
 }
 
-enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+int app_alarm_rules_stale_count(void)
 {
-	(void)q;
-	return APP_ALARM_KIND_THRESHOLD;
+	return 0;
 }
 
 enum app_radio_state app_radio_get_state(void)

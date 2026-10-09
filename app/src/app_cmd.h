@@ -254,20 +254,20 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 				uint32_t interval_s, bool time_synced, const uint8_t *samples,
 				size_t samples_len, uint8_t *out, size_t out_cap, size_t *out_len);
 
-/* One alarm edge for app_cmd_build_alarm_report(). source/edge/type carry the
- * AlarmEvent_Source/Edge/Type enum values (app_alarm fills these without
- * including the nanopb header). value is the scaled current reading and is only
- * meaningful when has_value is true (discrete sources leave it absent). */
+/* One alarm edge for app_cmd_build_alarm_report(). edge/type carry the
+ * AlarmEvent_Edge/Type enum values (app_alarm fills these without including the
+ * nanopb header). value is the reading × the channel's wire scale and is only
+ * meaningful when has_value is true. */
 struct app_cmd_alarm_event {
-	uint8_t slot;        /* alarm rule slot index (0..APP_ALARM_SLOT_COUNT-1) that fired */
-	uint8_t source;      /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
-	uint8_t quantity;    /* enum app_alarm_quantity */
-	uint8_t edge;        /* AlarmEvent_Edge: 0=activate, 1=deactivate */
-	uint8_t type;        /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212),
-			      * 5=sensor_mismatch (#430) */
-	uint8_t sensor_type; /* registry type id of a 1-Wire slot event; 0 = not sent */
+	uint8_t rule;    /* alarm rule index (0..APP_ALARM_RULE_COUNT-1), 0xFF/0xFE = watchdog */
+	uint8_t slot;    /* sensor slot: 0 = motherboard, 1..4 = s1..s4 (#430) */
+	uint8_t channel; /* channel of the slot's sensor type */
+	uint8_t edge;    /* AlarmEvent_Edge: 0=activate, 1=deactivate */
+	uint8_t type;    /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212),
+			  * 5=sensor_mismatch (#430) */
+	uint8_t sensor_type; /* registry type id; sent for slots 1..4 only */
 	bool has_value;      /* value present */
-	int32_t value;       /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
+	int32_t value;       /* reading × wire scale, digital 0/1, counter or detected type */
 	uint32_t rel_s;      /* seconds since base_time */
 };
 

@@ -204,16 +204,16 @@ uint32_t app_history_get_interval(void)
 
 /* Dynamic alarm rules — app_cmd's handle_alarm_rule mutates the list; the unit
  * test only checks the command path, so these are inert. */
-int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t rule_idx, const struct app_alarm_rule *rule)
 {
-	(void)slot;
+	(void)rule_idx;
 	(void)rule;
 	return 0;
 }
 
-int app_alarm_rules_clear(uint8_t slot)
+int app_alarm_rules_clear(uint8_t rule)
 {
-	(void)slot;
+	(void)rule;
 	return 0;
 }
 
@@ -259,19 +259,17 @@ int app_alarm_rules_reload_from_config(void)
 }
 
 /* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
- * dump comes back empty. quantity_kind only needs to resolve for the linker.
- * Signature follows the M-6 lock-copy API (bool + out param). */
-bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
+ * dump comes back empty. Signature follows the M-6 lock-copy API (bool + out param). */
+bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 {
-	(void)slot;
+	(void)rule;
 	(void)out;
 	return false;
 }
 
-enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+int app_alarm_rules_stale_count(void)
 {
-	(void)q;
-	return APP_ALARM_KIND_THRESHOLD;
+	return 0;
 }
 
 enum app_radio_state app_radio_get_state(void)
@@ -337,8 +335,8 @@ uint32_t app_alarm_status_flags(void)
  * app_alarm_status_flags() above), but test_set_active_alarm_count() lets a
  * test report N synthetic alarms to exercise the DR-budget trimming in
  * app_cmd_build_info() / app_cmd_handle() (#335 tier-2) without needing the
- * real rule-evaluation pipeline. Fixed non-zero (source, quantity, type) so
- * every entry costs its real 8 B on the wire. */
+ * real rule-evaluation pipeline. Fixed non-zero (slot, channel, type) and no
+ * sensor_type, so every entry costs 8 B on the wire. */
 static size_t m_test_active_alarm_count;
 
 void test_set_active_alarm_count(size_t n)
@@ -353,9 +351,11 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 		n = max;
 	}
 	for (size_t i = 0; i < n; i++) {
-		out[i].source = APP_ALARM_SRC_SLOT1;
-		out[i].quantity = APP_ALARM_Q_HUMIDITY;
-		out[i].type = 2; /* ALARM_TYPE_HIGH */
+		out[i] = (struct app_alarm_active){
+			.slot = 1,
+			.channel = APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY,
+			.type = 2, /* ALARM_TYPE_HIGH */
+		};
 	}
 	return n;
 }
