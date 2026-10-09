@@ -39,12 +39,14 @@ static const struct app_config m_app_config_defaults = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
+	.cap_sht = true,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -75,12 +77,14 @@ static struct app_config m_app_config = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
+	.cap_sht = true,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -150,6 +154,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		     sizeof(m_app_config.vendor_reset_allow));
+	SETTINGS_SET("interval-announce", &m_app_config.interval_announce,
+		     sizeof(m_app_config.interval_announce));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -183,6 +189,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
 	SETTINGS_SET("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	SETTINGS_SET("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -307,6 +314,12 @@ static int h_commit(void)
 	if (m_app_config.battery_level > 3600) {
 		m_app_config.battery_level = 3600;
 	}
+	if (m_app_config.interval_announce < 1 && m_app_config.interval_announce != 0) {
+		m_app_config.interval_announce = 1;
+	}
+	if (m_app_config.interval_announce > 168) {
+		m_app_config.interval_announce = 168;
+	}
 	if (m_app_config.alarm_limit < 0) {
 		m_app_config.alarm_limit = 0;
 	}
@@ -403,6 +416,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		    sizeof(m_app_config.vendor_reset_allow));
+	EXPORT_FUNC("interval-announce", &m_app_config.interval_announce,
+		    sizeof(m_app_config.interval_announce));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -436,6 +451,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
 	EXPORT_FUNC("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	EXPORT_FUNC("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -698,6 +714,11 @@ static void print_vendor_reset_allow(const struct shell *shell)
 		    m_app_config.vendor_reset_allow ? "true" : "false");
 }
 
+static void print_interval_announce(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " interval-announce %d", m_app_config.interval_announce);
+}
+
 static void print_alarm_limit(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
@@ -929,6 +950,11 @@ static void print_cap_buzzer(const struct shell *shell)
 		    m_app_config.cap_buzzer ? "true" : "false");
 }
 
+static void print_cap_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-sht %s", m_app_config.cap_sht ? "true" : "false");
+}
+
 static void print_cap_w1_sensors(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
@@ -1083,6 +1109,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_sensors(shell);
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
+	print_interval_announce(shell);
 	print_alarm_limit(shell);
 	print_lrw_region(shell);
 	print_radio_mode(shell);
@@ -1108,6 +1135,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
 	print_cap_buzzer(shell);
+	print_cap_sht(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_alarm_buzzer_mode(shell);
@@ -1321,6 +1349,36 @@ static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char *
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
 			print_vendor_reset_allow);
+}
+
+static int cmd_interval_announce(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_interval_announce(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	int a = strtol(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (a != 0 && (a < 1 || a > 168)) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.interval_announce = a;
+
+	return 0;
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1607,6 +1665,11 @@ static int cmd_cap_buzzer(const struct shell *shell, size_t argc, char **argv)
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_buzzer, print_cap_buzzer);
 }
 
+static int cmd_cap_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_sht, print_cap_sht);
+}
+
 static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
@@ -1836,6 +1899,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel.",
 	              cmd_vendor_reset_allow, 1, 1),
 
+	SHELL_CMD_ARG(interval-announce, NULL,
+	              "Get/Set periodic Info + settings-info announce interval (range 1 to 168 hours; 0 = off).",
+	              cmd_interval_announce, 1, 1),
+
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
 	              cmd_alarm_limit, 1, 1),
@@ -1935,6 +2002,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-buzzer, NULL,
 	              "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled).",
 	              cmd_cap_buzzer, 1, 1),
+
+	SHELL_CMD_ARG(cap-sht, NULL,
+	              "Get/Set onboard SHT4x temperature/humidity capability (true/false).",
+	              cmd_cap_sht, 1, 1),
 
 	SHELL_CMD_ARG(cap-w1-sensors, NULL,
 	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",

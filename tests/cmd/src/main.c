@@ -660,6 +660,7 @@ ZTEST(cmd, test_build_config_status)
 	g_app_config.history_enable = true;
 	g_app_config.cap_hall_left = true;
 	g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
 
 	bool more;
 	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len, &more);
@@ -699,12 +700,43 @@ ZTEST(cmd, test_build_config_status)
 	zassert_true(r.body.config_dump.sensors.has_cap_barometer,
 		     "cap_barometer must be explicit");
 	zassert_false(r.body.config_dump.sensors.cap_barometer, "cap_barometer default false");
+	/* #465: cap_buzzer (19) and cap_sht (22) complete the capability picture. */
+	zassert_true(r.body.config_dump.sensors.has_cap_buzzer, "cap_buzzer must be explicit");
+	zassert_true(r.body.config_dump.sensors.has_cap_sht, "cap_sht missing");
+	zassert_true(r.body.config_dump.sensors.cap_sht, "cap_sht value");
 
 	/* This native build has no CONFIG_W1 (APP_CMD_HAVE_W1 undefined), so the
 	 * runtime-only slot-type list is compiled out; the wire encoding of
 	 * w1_slot_type is covered by the decoder regression test (ttn.test.js). */
 	zassert_equal(r.body.config_dump.w1_slot_type_count, 0,
 		      "w1_slot_type must be empty without CONFIG_W1");
+}
+
+/* #465: worst case of the boot settings-info — every cap_* true (a false bool
+ * costs the same 2-3 B, so this is about values, not flags) and the widest
+ * in-range interval varints — still fits one EU868 DR0 frame (51 B), so adding
+ * cap_buzzer/cap_sht does not make the boot dump page there. */
+ZTEST(cmd, test_build_config_status_worst_case_dr0)
+{
+	uint8_t out[51];
+	size_t out_len = 0;
+	bool more = true;
+
+	reset_cfg();
+	g_app_config.interval_sample = 3600;  /* yml max */
+	g_app_config.interval_report = 86400; /* yml max */
+	g_app_config.history_enable = true;
+	g_app_config.cap_hall_left = g_app_config.cap_hall_right = true;
+	g_app_config.cap_input_a = g_app_config.cap_input_b = true;
+	g_app_config.cap_light_sensor = g_app_config.cap_barometer = true;
+	g_app_config.cap_pir_detector = g_app_config.cap_buzzer = true;
+	g_app_config.cap_w1_sensors = g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
+
+	zassert_equal(app_cmd_build_config_status(out, sizeof(out), &out_len, &more), 0, "build");
+	TC_PRINT("settings-info worst case: %zu B\n", out_len);
+	zassert_false(more, "worst-case settings-info pages at DR0 (%zu B)", out_len);
+	zassert_true(out_len <= 51, "%zu B > DR0", out_len);
 }
 
 /* sample over NFC: the device answers synchronously with the fresh telemetry
@@ -2454,10 +2486,11 @@ static void visit_settings_page(const uint8_t *buf, size_t len, const Response *
 			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_input_a +
 			     cd->sensors.has_cap_input_b + cd->sensors.has_cap_light_sensor +
 			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_pir_detector +
-			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer;
+			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer +
+			     cd->sensors.has_cap_buzzer + cd->sensors.has_cap_sht;
 }
 
-/* #425: settings-info that does not fit is paged; all 12 settings arrive. */
+/* #425: settings-info that does not fit is paged; all 14 settings arrive. */
 ZTEST(cmd, test_settings_info_paged_at_small_budget)
 {
 	uint8_t out[64];
@@ -2471,12 +2504,12 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	zassert_true(more, "expected more pages at 16 B");
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 0, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings: the boot settings-info content on request. At the EU868 DR0
  * budget it is one frame, carries the command's seq (not the boot dump's 0) and
- * the same 12 settings; no page fields, no stream. */
+ * the same 14 settings; no page fields, no stream. */
 ZTEST(cmd, test_get_settings_one_frame)
 {
 	uint8_t in[8], out[64], boot[64];
@@ -2503,7 +2536,7 @@ ZTEST(cmd, test_get_settings_one_frame)
 	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left");
 	g_seen_cfg_fields = 0;
 	visit_settings_page(out, out_len, &r);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 
 	/* Same bytes as the autonomous boot dump apart from the seq field
 	 * (08 07 right after the version byte). */
@@ -2533,7 +2566,7 @@ ZTEST(cmd, test_get_settings_paged)
 	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 42, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings over NFC: one frame with the seq, never a radio page stream. */

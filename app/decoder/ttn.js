@@ -110,7 +110,7 @@ var _RESET_CAUSES = [
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
   4: "history_enable", 5: "history_sensors", 6: "battery_level",
-  7: "vendor_reset_allow"
+  7: "vendor_reset_allow", 8: "interval_announce"
 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
@@ -120,7 +120,7 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer"
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer", 22: "cap_sht"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};

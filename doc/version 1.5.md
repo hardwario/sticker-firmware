@@ -4,6 +4,130 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 
 ---
 
+## What's new in v1.5.0 — summary for users
+
+This chapter is the short version for anyone who installs, configures or integrates
+STICKER: what is new, what behaves differently, and what has to be done when a fleet
+moves from v1.4.x to v1.5.0. The numbered sections below (§1–§37) carry the full
+technical detail.
+
+### Highlights
+
+| | What you get | Details |
+|---|---|---|
+| **P2P radio** | A second radio mode for sites with no LoRaWAN network: `radio-mode p2p` talks directly to a HARDWARIO FIBER modem and a ProXimos Hub. Telemetry, alarms, commands, history backfill, network time and link supervision work as over LoRaWAN; the same firmware image does both, the choice is made at boot. | §6, §23–§34 |
+| **One-tap NFC, iOS included** | All phone commands go through the ST25DV Fast-Transfer-Mode mailbox: one tap, phone held still, a full configuration read or write in one hold (~0.1–0.3 s per exchange). iOS now works the same as Android. | §18 |
+| **Safer claiming** | The claim token is no longer readable from an unpowered box. The claim window is an explicit `active` / `done` switch that the app closes with `claim_done`; a corrupted NVS value closes it. After a `vendor_reset` the owner re-opens it with `claim_active`, which also creates a new token. | §19, §35 |
+| **The network knows the configuration** | After every boot/join the device sends its Info **and** its key settings (intervals, every sensor capability flag, detected 1-Wire sensors). The same pair is re-sent every `interval-announce` hours (default 24 h), and `GetSettings` asks for it at any time. | §4, §14, §37 |
+| **Audible alarms** | On the buzzer HW variant the buzzer plays a melody when an alarm activates, and repeats it while the alarm lasts, set with `alarm-buzzer-mode`. | §1 |
+| **More robust LoRaWAN** | A device that lost its gateway first lowers the data rate and raises the TX power, and rejoins only when that fails: about 4–5 h from link loss to rejoin (was 9–10 h). Fixes: a stale join result, a wedged radio work queue, the missing `DevStatusAns` (battery/margin in ChirpStack), rejoins that broke the EU868 duty cycle, alarms lost in a burst or to a reboot after a command. | §5, §10, §12, §22, §31, §32 |
+| **New region and fixed data rate** | `lrw-region as923` (AS923-1). With ADR off, `lrw-datarate dr0`…`dr7` fixes the uplink data rate. | §8, §11 |
+| **Radio diagnostics** | `get_radio_state` returns the link state, SF/DR, TX power, RSSI/SNR of both link directions, gateway count, duty-cycle use and counters since boot, over NFC or a radio, for both radio modes. | §24 |
+| **Long answers always arrive** | Any answer that does not fit one radio frame is split into self-contained pages that the device sends by itself. At the lowest data rates a command is still answered (`BUDGET_TOO_SMALL`), never left silent. | §9, §13 |
+| **Correct history timestamps** | History records keep their real time across reboots, power loss, debugger halts and replays. Before, they could be shifted by the length of an outage. | §21 |
+| **Switchable onboard sensor** | `cap-sht` turns the onboard temperature/humidity sensor off like every other sensor. | §36 |
+| **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
+
+### New configuration parameters
+
+| Parameter | Default | Values | Purpose | § |
+|---|---|---|---|---|
+| `alarm-buzzer-mode` | `off` | `off` / `once` / `slow` (120 s) / `normal` (30 s) / `fast` (10 s) / `continuous` | Buzzer while an alarm is active; needs `cap-buzzer` | §1 |
+| `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
+| `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
+| `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
+| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power` | — | shell only | P2P radio parameters; must match the Hub | §6, §28 |
+| `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
+| `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
+| `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
+
+### New commands
+
+| Command | What it does | § |
+|---|---|---|
+| `get_settings` (31) | The settings-info (key settings + 1-Wire slot types) on request | §14 |
+| `get_radio_state` (32) | Radio link state and diagnostics | §24 |
+| `get_claim_info` (29) | Serial + claim token over plaintext NFC, only while the claim window is active | §19 |
+| `get_basic_info` | Identity bootstrap for the phone (serial, nonce, versions); replaces the NDEF identity record | §18 |
+| `SetParam.alarms_replace` | Rewrite the whole alarm table in one message | §17 |
+
+### Changed behaviour
+
+- **Answer pairing.** Every answer can be paired with its request by `seq`: `clock_sync`
+  is answered by an Info with the command's `seq`, and a request that fails to decode gets
+  `BAD_REQUEST` with its `seq`. `force_send` / `sample` send at once, without the fleet
+  jitter (§15).
+- **Uplink timing.** A periodic report is sent at a fixed per-device offset of up to 60 s
+  after its time slot (was up to 10 s), so devices rebooted together do not collide (§27).
+- **Alarm state in every telemetry frame** (`system_flags`, decoded as `alarm_status`),
+  and alarm batches are split across frames instead of being cut (§9).
+- **LoRaWAN `GetConfig`** leaves out the 1-Wire slot ROMs (4 pages instead of 6 at EU868
+  DR0) and sends all its pages after one request. NFC and `GetParam` still return the
+  ROMs (§9, §16).
+- **Info** no longer carries `lrw_state` and the last-downlink RSSI/SNR. Use
+  `get_radio_state` (§24).
+- **`factory_reset`** now also clears the pulse counters and the history. `vendor_reset`
+  closes the claim window (§35).
+- **Region not in the image.** If the stored `lrw-region` is not compiled into the image,
+  the radio stays silent and reports `lrw_disabled`. It never falls back to another band (§7).
+- **LED.** Red and green are plain GPIO again, as in v1.4.0. The boot carousel no longer
+  delays the boot, and NFC answers ~1.2 s after reset (was ~6 s). During a tap only the
+  NFC LED shows (§3, §18).
+- **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
+  retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
+  `p2p-frequency` (§31).
+
+### Upgrading from v1.4.x — action required
+
+1. **Manager-App: update together with the firmware.** v1.5.0 answers on the NFC mailbox
+   only. An older app cannot configure a v1.5.0 device. The app must also read
+   `Response.page_count`, accept `claim_info` as the answer to `claim_active`, send
+   `claim_done` after a claim, and read the link state with `get_radio_state`
+   (§13, §18, §19, §24, §35).
+2. **NFC needs a powered device.** Battery-less configuration, configuration staged into a
+   switched-off unit, and Android tap-to-launch are gone. A generic NFC reader, or a unit
+   with a dead battery, shows a blank tag (§18).
+3. **Wipe the old NDEF records once.** v1.5.0 never writes the NFC EEPROM, so a unit
+   upgraded from v1.4.x keeps its old records, including the plaintext `hio.stck:clm` claim
+   token. Clear them with `nfc clear` on a debug build or by writing an empty NDEF message
+   from the phone (§18, §35).
+4. **Renamed shell parameters** (no aliases; update production and bench scripts):
+
+   | v1.4.x | v1.5.0 | Stored value after the upgrade |
+   |---|---|---|
+   | `lrw-deveui`, `lrw-appkey` | `radio-deveui`, `radio-appkey` | **kept** (§33) |
+   | `lrw-link-check-interval`, `lrw-link-check-fail-rejoin` | `radio-link-check-interval`, `radio-link-check-fail-rejoin` | **not kept**: back to the defaults 5 / 5; set them again if you changed them (§26) |
+
+5. **Decoder and integrations.** Use the v1.5.0 `ttn.js`. Integrations that read decoded
+   keys must use `lorawan.radio_link_check_interval` / `radio_link_check_fail_rejoin`. A
+   consumer that wants a whole paged answer merges the pages by (DevEUI, fPort, `seq`).
+   The deprecated `ConfigDump.page_*` fields are no longer set (§13, §26).
+6. **Host duty-cycle etiquette at low DR.** A full `GetConfig` at SF12 takes a large part of
+   the hourly airtime. Ask only for the keys you need, do not re-request a missing page at
+   once, and allow ≥ 1 h for page assembly at a low DR (§13).
+7. **Downgrade.** History pages written by v1.5.0 are not readable by older firmware: run
+   `history clear` after a downgrade (§21).
+8. **P2P deployments only:** the P2P frame header changed (flag day). Nodes and the Hub must
+   be updated together (§28).
+
+### Known limitations
+
+- Not tested on hardware (no 915/923 MHz gateway on the bench): US915/AU915/AS923 on air
+  and the 11 B budget tier. Code review and unit tests only (§9, §11, §12).
+- P2P: no listen-before-talk yet, no NFC configuration of the P2P radio parameters (§6).
+- With `radio-alarm-ack false` (the default) an alarm frame lost on the air is not repeated;
+  the alarm state still reaches the network in the next telemetry frame (§9, §30, §32).
+
+### For developers
+
+- Builds need the `sticker-zephyr` `v4.3.0-sticker2-branch` fork (`west update`) and the
+  `loramac-node` patch (`west patch apply`, re-run after every `west update`). A LoRaWAN
+  build without the patch fails on purpose (§5, §10).
+- `debug.conf` ships a lean default (1-Wire, accelerometer, buzzer and PIR off). Re-enable
+  one with `-DCONFIG_<X>=y` (§2).
+
+---
+
 ## Overview of changes
 
 | Area | Change |
@@ -43,6 +167,8 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Fix** — alarm frames no longer lost on a burst or to a command's reboot (#462): a batch that does not fit the free slots of the 4-frame alarm queue waits and collects the next edges, and a deferred command action waits for the queued alarm frames and sends a collecting batch first. See §32. |
 | LoRaWAN / P2P | **Renamed** — `lrw-deveui` / `lrw-appkey` → `radio-deveui` / `radio-appkey`: both radios use the DevEUI and the AppKey. Shell names only; the NVS keys, proto field names and numbers are unchanged, so the stored identity survives the upgrade and a downgrade. See §33. |
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
+| Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
+| LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
 
 ---
 
@@ -209,7 +335,7 @@ after every persisted change — no diff-tracking, no extra state.
 | Group | Fields |
 |---|---|
 | `application` | `interval_sample`, `interval_report`, `history_enable` |
-| `sensors` | `cap_hall_left` … `cap_accelerometer` (all nine capability flags, emitted explicitly incl. `false`) |
+| `sensors` | every capability flag, emitted explicitly incl. `false`: `cap_hall_left` … `cap_accelerometer` (1–9), `cap_buzzer` (19) and `cap_sht` (22) — the last two since #465 (§36) |
 | `w1_slot_type` | detected 1-Wire sensor type per logical slot 1..4 |
 
 `w1_slot_type` (`ConfigDump` field 7, packed `repeated uint32`) reports what is
@@ -235,7 +361,8 @@ config reply, bool fields decode as `0`/`1`):
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
                  "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
-                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0 },
+                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
+                 "cap_buzzer": 0, "cap_sht": 1 },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
 
@@ -243,7 +370,9 @@ config reply, bool fields decode as `0`/`1`):
 
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
-  interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
+  interval values. `cap_buzzer` + `cap_sht` (#465) add 6 B (3 B each, tag ≥ 16);
+  the worst case is then 40 B without / 46 B with 1-Wire (§36). It fits the EU868 DR0 budget (51 B)
+  and the 64 B response buffer; below that it pages (§13).
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
   budget the settings-info is paged (§13); a setting that does not fit even alone is
   left out, and when nothing fits the device sends it once a DR change makes room.
@@ -707,8 +836,8 @@ the §4 content on request.
 |---|---|
 | Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
 | Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
-| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
-| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, every `sensors.cap_*` flag (incl. `cap_buzzer` / `cap_sht`, #465), runtime `w1_slot_type` (1-Wire builds) |
+| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire before #465, +6 B for `cap_buzzer`/`cap_sht`, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
 | Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
 | Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
 
@@ -1650,8 +1779,6 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
   - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
 
----
-
 ## 35. Claiming and reset tiers (#471)
 
 Four changes to the claim lifecycle and the reset ladder.
@@ -1743,6 +1870,117 @@ Release +136 B flash, RAM unchanged. `tests/nfc_hw` `test_clm_latch_fails_closed
 (0/1 → `active`, 2 / 0x7F / 0xFF / wrong length / read error → `done`);
 `tests/cmd` `test_claim_active` (kept, replaced and generated token, always
 `claim_info`, rejected over LoRaWAN without generating).
+
+HW-verified (2026-10-09, STICKER 2162190413, PR #474 head): the shell and NFC
+reset tiers (G6a), NFC `factory_reset` (N9), the NFC claim flow (`get_claim_info`,
+`claim_active` generating and then keeping a token, `claim_done`,
+`new_claim_token`, N10) and the LoRaWAN refusal (`NOT_READY`).
+
+---
+
+## 36. Onboard SHT4x capability flag `cap_sht` (#465)
+
+The onboard SHT4x was the only sensor without a runtime switch: it was always
+read, and its temperature/humidity were always on the wire (`null` on a fault).
+A host could neither see nor turn it off. `cap_sht` adds the switch.
+
+| | |
+|---|---|
+| Key | `cap_sht` = `sensors` **22**, `bool`, default **`true`**; shell `config cap-sht`, NVS `cap-sht` |
+| proto_id | 22, not 20: draft PR #407 (analog inputs) claims `sensors` 20/21 |
+| Access | the same as every other `cap_*` flag |
+| Reset tiers | not persistent: a device/factory/vendor reset restores `true` |
+| Upgrade | the key is new; a unit with no stored value gets the default `true`, so it behaves as before. An older image ignores the key on a downgrade |
+
+With `cap_sht` = `false`:
+
+- `app_sensor_sample()` does not call `app_sht4x_read()`, and the skipped read is
+  left out of the wedged-I2C accounting (`i2c_tried` / `i2c_failed`).
+- Telemetry carries no `temperature` / `humidity` fields (the onboard group is
+  absent, not `null`).
+- The no-data watchdog does not watch the onboard temperature/humidity, so no
+  `no_data` alarm fires. Turning the flag off while a `no_data` alarm is latched
+  sends its deactivate edge. A threshold rule on onboard temperature/humidity sees
+  `NaN` and stays inactive.
+- History drops the onboard channels (`history_sensors` bits 0/1) from the active
+  mask, like any other channel whose capability is off, instead of storing `NaN`.
+- The production test (`ats`) and the calibration still read the SHT4x directly,
+  regardless of the flag.
+
+The battery ADC stays the only sensor without a switch: undervoltage,
+`battery_level` and `Info.battery` depend on it.
+
+**Settings-info.** The boot settings-info (§4) and `GetSettings` (§14) now carry
+`cap_buzzer` (19) and `cap_sht` (22) as well, so the host sees every capability
+flag. `cap_buzzer` reports the effective value: `app_sensor_init()` clears it when
+`cap_pir_detector` is also set. The two flags add 6 B. The worst case (every
+flag `true`, `interval_sample` 3600, `interval_report` 86400) is 40 B without
+1-Wire (measured by `cmd/test_build_config_status_worst_case_dr0`) and 46 B with
+the four `w1_slot_type` entries, so it still fits one EU868 DR0 frame (51 B).
+There is no hard 51 B limit anyway: the settings-info pages when it does not
+fit (§13).
+
+**Decoder:** `ttn.js` learns `_SEN_NAMES[22] = "cap_sht"` (decode + encode).
+
+**Consumers:** the Manager-App needs a `cap_sht` toggle; Hub / Portal get the new
+`sensors` field, and `cap_buzzer` now also arrives in the boot announce.
+
+Tests: `compose/test_cap_sht_gating`, `history/test_cap_sht_off_drops_onboard_channels`,
+`alarm_eval/test_cap_sht_gates_onboard_nodata`,
+`cmd/test_build_config_status_worst_case_dr0`, the settings-info field counts
+(12 → 14) and the `ttn.js` decoder tests.
+
+HW-verified (2026-10-09, STICKER 2162190413, PR #475 head): `cap_buzzer` and
+`cap_sht` in the boot settings-info (L4b) and the `cap_sht` gating (S10b).
+
+---
+
+## 37. Periodic Info + settings-info announce (#445)
+
+The network side (LNS, Hub central, Portal) keeps a retained copy of each
+node's identity, firmware and effective configuration. Until now it was
+refreshed only by the boot/join announce (§4, §23) or by polling (GetInfo,
+`GetSettings`, §14). The copy went stale after a config change without
+a reboot (Hub, 2026-09-26: `interval_sample` stayed 60 after a set-config to
+45), after a node-remove / node-add or a DB restore, and on a node that never
+reboots.
+
+- **New parameter `interval-announce`** (`application.interval_announce`,
+  proto_id 8): hours, default **24**, range 1..168, **0 = off**. Writable over
+  shell, NFC and the radio, like the other intervals.
+- **Behaviour** (`app_radio.c`, one path for both radios):
+  - every boot/join announce (`app_radio_announce()`) also arms the periodic
+    one; a re-join therefore restarts the period;
+  - the period ends at a random point of its last 10 % (24 h: 21.6–24 h), so
+    a fleet powered on together drifts apart and every node still announces
+    at least once per period; the next period is anchored on this announce;
+  - it sends the same frames as the boot/join announce: `Info` (seq 0), then
+    the settings-info `ConfigDump` (seq 0), paged (#425), deferred while the
+    answer queue is full or a page stream runs, re-armed when the budget drops
+    under a queued frame. A duty-cycle hold delays it like any queued answer;
+    nothing is dropped;
+  - unlike the boot/join announce it holds no data: there is no spread, and
+    alarms and telemetry are not held (the frames simply queue as answers,
+    which go ahead of telemetry);
+  - when the link is not ready at the end of the period (joining,
+    reconnecting, unpaired) nothing is sent and nothing retries: every return
+    to a ready link runs `app_radio_announce()`, which announces and restarts
+    the period anyway;
+  - nothing is reset: counters, history and the link state stay as they are.
+- **A changed value** takes effect at the next arming. `settings save` reboots,
+  so a persisted change applies at once; a staged change without save applies
+  at the end of the running period (from 0, only at the next boot/join).
+- **Cost:** release +456 B flash, +64 B RAM. Two answers per period, i.e. ~2 frames per day at the default
+  (more when paged at a low LoRaWAN DR).
+- **Tests:** `tests/radio_common`, both profiles: repeats within [0.9, 1.0] of
+  the period, off at 0, deferred to the link-up while the link is down,
+  restarted by a re-join; the delay bounds. `ttn.test.js`: the
+  `set_param application.interval_announce` round-trip. Manual: L4d.
+- **HIL so far** (2026-10-09, STICKER 2162190413, LoRaWAN EU868, PR #472 head):
+  boot announce Info → settings-info → telemetry, then the first periodic
+  announce after `interval-announce 1` carrying a staged `interval-sample`.
+- **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
+  `interval-announce 0`) and P2P.
 
 ---
 

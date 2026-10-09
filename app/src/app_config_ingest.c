@@ -378,6 +378,15 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 	} else if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
 	}
+	if (src->has_interval_announce) {
+		int val = src->interval_announce;
+
+		if (val == 0 || (val >= 1 && val <= 168)) {
+			config->interval_announce = val;
+		} else {
+			FAULT(8);
+		}
+	}
 	return ret;
 }
 
@@ -412,6 +421,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 7)) {
 		dst->has_vendor_reset_allow = true;
 		dst->vendor_reset_allow = c->vendor_reset_allow;
+	}
+	if (requested(ids, n, 8)) {
+		dst->has_interval_announce = true;
+		dst->interval_announce = c->interval_announce;
 	}
 }
 
@@ -492,6 +505,9 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	}
 	if (src->has_cap_buzzer) {
 		config->cap_buzzer = src->cap_buzzer;
+	}
+	if (src->has_cap_sht) {
+		config->cap_sht = src->cap_sht;
 	}
 	return ret;
 }
@@ -576,6 +592,10 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 19)) {
 		dst->has_cap_buzzer = true;
 		dst->cap_buzzer = c->cap_buzzer;
+	}
+	if (requested(ids, n, 22)) {
+		dst->has_cap_sht = true;
+		dst->cap_sht = c->cap_sht;
 	}
 }
 

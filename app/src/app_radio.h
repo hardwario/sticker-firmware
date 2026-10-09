@@ -705,8 +705,16 @@ void app_radio_suspend(void);
  * yet, or that waits for a running page stream, stays pending and goes out on
  * a later run on the radio work queue: when a page stream ends, when the
  * backend reports room (app_radio_announce_kick()), and every 5 s while
- * something stays pending. */
+ * something stays pending.
+ * It also (re)starts the periodic announce (#445): every interval_announce
+ * hours (0 = off) the same Info + settings-info go again, without holding
+ * data; the period ends at a random point of its last 10 %. When the link is
+ * not ready at that moment the next link-up's announce takes its place. */
 void app_radio_announce(void);
+
+/* Delay (ms) from one announce to the next periodic one: in
+ * [0.9, 1.0) x `hours` (capped at 168), placed by `rnd`; 0 when `hours` is 0. */
+uint32_t app_radio_periodic_announce_delay_ms(uint32_t hours, uint32_t rnd);
 
 /* Backend: room may have appeared (LoRaWAN DR rise); run a pending announce
  * now. No-op when nothing is pending. */

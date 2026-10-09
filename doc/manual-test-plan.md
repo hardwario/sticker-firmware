@@ -424,7 +424,8 @@ on TTN.
 settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
 **Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
 fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
-(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+(`interval_sample`, `interval_report`, `history_enable`), every `sensors.cap_*` flag (since #465
+incl. `cap_buzzer` and `cap_sht`) and,
 on a 1-Wire build, `w1_slot_type` (4 entries).
 
 **Prompt for Claude:**
@@ -448,7 +449,12 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 > they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
 > covered: both boot frames are dropped whole there, see #418.
 
+> **Re-verified with #465 (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** join → Info (fCnt 1, DR0) → `ConfigDump`
+> (fCnt 2, 37 B, DR5) → telemetry (fCnt 3); a changed `history_enable` is reflected, and the new
+> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `ttn.js`.
+
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+- [x] Pass — `cap_sht` / `cap_buzzer` fields, 2026-10-09
 
 ### L4c — GetSettings: settings-info on request (v1.5.0, #428)
 
@@ -477,6 +483,31 @@ interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_sl
 > step.
 
 - [x] Pass (EU868 one-frame answer)
+
+### L4d — Periodic Info + settings-info announce (v1.5.0, #445)
+
+**Goal:** A node that runs without a reboot re-announces its Info + settings-info every
+`interval_announce` hours, so the network's retained identity/config heals by itself. LoRaWAN and
+P2P behave the same.
+**Observable:** RTT `Periodic announce`, then `Info announced` and `Settings-info announced`, and
+on the network side a fPort-85 (P2P: `0x55`) `Info` seq 0 followed by the settings-info
+`ConfigDump` seq 0, between 0.9 and 1.0 × `interval_announce` after the previous announce. No
+reboot, no re-join, no counter / history reset; telemetry keeps its cadence.
+
+**Prompt for Claude:**
+> On a joined (LoRaWAN) or paired (P2P) bench node set `config interval-announce 1` and
+> `settings save`; note the time of the boot/join announce. Leave RTT attached (debug: keep the
+> 20 min keepalive). Within 54–60 min confirm `Periodic announce` and the two frames on the network
+> side, decoded with `app/decoder/ttn.js`, and that the next one follows 54–60 min after it. Change
+> a setting over the shell **without** a reboot (`config interval-sample 30`, no save) and confirm
+> the next periodic settings-info carries the staged value. Then (a) set `interval-announce 0` +
+> save: after the boot announce no periodic one for > 1 h; (b) with `interval-announce 1`, take the
+> link down at the 50 min mark (LoRaWAN: gateway off; P2P: Hub off) so the period ends while the
+> link is down: RTT `Periodic announce deferred to the next link-up`, nothing sent; after the
+> re-join the join announce goes and the next periodic one comes ~1 h after it. Run on both radios.
+> Restore `interval-announce 24`.
+
+- [ ] Pass
 
 
 **Goal:** Telemetry is sent on the configured interval.
@@ -928,6 +959,29 @@ requires `cap_barometer` / `cap_light_sensor`.
 > light sensor and confirm illuminance changes. Confirm all three reach fPort 2 telemetry.
 
 - [ ] Pass
+
+### S10b — Onboard SHT4x switched off: `cap_sht` (v1.5.0, #465)
+
+**Goal:** With `cap_sht` off the onboard SHT4x is not read and leaves no trace on the wire,
+in the alarms or in the history; the settings-info reports the flag.
+**Observable:** fPort 2 telemetry without `temperature` / `humidity`; no `no_data` alarm for
+the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors.cap_buzzer`.
+
+**Prompt for Claude:**
+> On a joined unit with `history-enable true` and `history-sensors` incl. temperature/humidity,
+> confirm the boot `ConfigDump` shows `cap_sht: 1` and `cap_buzzer`. Run `config cap-sht false`
+> and `settings save` (reboots). Confirm the new boot `ConfigDump` shows `cap_sht: 0`, and that
+> the next fPort 2 telemetry frames decode without `temperature` / `humidity` (other groups
+> unchanged). Wait > 5 s past a sample and confirm no fPort 3 `no_data` alarm for
+> `onboard` temperature/humidity. Run `history info` and confirm the `sensors:` line no longer
+> lists temperature/humidity. Restore `config cap-sht true` + `settings save` and confirm the fields return.
+
+> **HW-verified (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** boot `ConfigDump` `cap_sht: 1`, `cap_buzzer: 0`.
+> `cap-sht false` + save → `ConfigDump` `cap_sht: 0`; the next two fPort 2 frames are 9 B with no
+> `temperature` / `humidity` (voltage / accel unchanged); no fPort 3 within two cycles;
+> `history info` lists no sensors. `cap-sht true` + save → 14 B telemetry with T 23.27 °C / H 50.5 %.
+
+- [x] Pass — 2026-10-09
 
 ### S11 — Battery voltage
 

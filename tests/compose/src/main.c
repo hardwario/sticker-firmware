@@ -41,6 +41,7 @@ extern enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
 static void set_clean(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default */
 	memset(&test_hall, 0, sizeof(test_hall));
 	memset(&test_input, 0, sizeof(test_input));
 	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
@@ -174,6 +175,25 @@ ZTEST(compose, test_capability_gating)
 		}
 	}
 	zassert_true(seen, "pressure missing with cap on");
+}
+
+/* #465: cap_sht off drops the onboard temperature/humidity from the wire, even
+ * with a valid reading; the system group still goes out. */
+ZTEST(compose, test_cap_sht_gating)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	g_app_sensor_data.temperature = 23.5f;
+	g_app_sensor_data.humidity = 50.0f;
+	g_app_config.cap_sht = false;
+	run_report(fr, 8, &n);
+
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_true(fr[0].has_voltage, "system group must stay");
+	zassert_false(fr[0].has_temperature, "temperature leaked with cap_sht off");
+	zassert_false(fr[0].has_humidity, "humidity leaked with cap_sht off");
 }
 
 ZTEST(compose, test_counter_flags)

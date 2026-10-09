@@ -128,6 +128,27 @@ test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
   assert.equal(u.config_dump.sensors.cap_buzzer, 1);
 });
 
+// #465: cap_sht (sensors tag 22) — onboard SHT4x capability; the settings-info
+// carries it next to cap_buzzer.
+test("set_param cap_sht (tag 22) is reachable both ways (#465)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { sensors: { cap_sht: false } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.sensors.cap_sht, 0);
+});
+
+test("config_dump renders cap_buzzer + cap_sht (sensors tags 19, 22) (#465)", () => {
+  // Response{ seq:1, config_dump: ConfigDump{ page_count:1,
+  //   sensors: Sensors{ cap_buzzer:true, cap_sht:false } } }, version prefix 01:
+  // 01 08 01 22 0a 10 01 2a 06 98 01 01 b0 01 00 (field22 tag 0xb0 0x01).
+  const dump = hex("010801220a10012a06980101b00100");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.sensors.cap_buzzer, 1);
+  assert.equal(u.config_dump.sensors.cap_sht, 0);
+});
+
 // #412: the boot settings-info uplink carries the detected 1-Wire slot type per
 // slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Names mirror
 // enum app_w1_slot_type: 0=empty, 1=dallas, 2=machine-probe (same _W1_SLOT_TYPES
@@ -973,6 +994,15 @@ test("set_param application.vendor_reset_allow round-trips (#H2)", () => {
   assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
   assert.equal(back.set_param.application.vendor_reset_allow, 1);
+});
+
+test("set_param application.interval_announce round-trips (#445)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 3, command: "set_param", set_param: { application: { interval_announce: 12 } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.interval_announce, 12);
 });
 
 test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)", () => {
