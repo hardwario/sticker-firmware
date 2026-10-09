@@ -8,7 +8,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v1.5.0. The numbered sections below (§1–§37) carry the full
+moves from v1.4.x to v1.5.0. The numbered sections below (§1–§40) carry the full
 technical detail.
 
 ### Highlights
@@ -26,6 +26,7 @@ technical detail.
 | **Long answers always arrive** | Any answer that does not fit one radio frame is split into self-contained pages that the device sends by itself. At the lowest data rates a command is still answered (`BUDGET_TOO_SMALL`), never left silent. | §9, §13 |
 | **Correct history timestamps** | History records keep their real time across reboots, power loss, debugger halts and replays. Before, they could be shifted by the length of an outage. | §21 |
 | **Switchable onboard sensor** | `cap-sht` turns the onboard temperature/humidity sensor off like every other sensor. | §36 |
+| **Every sensor value is a channel** | Each sensor type publishes its own channel table (`app_sensor_types.yaml`). Alarm rules, telemetry and history address a value as (slot, channel): two temperatures on one machine probe, the barometer temperature, any on-board value can be alarmed and recorded. A 1-Wire slot expects a sensor type; a different sensor raises a `sensor_mismatch` alarm. | §40 |
 | **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
 
 ### New configuration parameters
@@ -40,6 +41,8 @@ technical detail.
 | `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
 | `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
+| `sensor1-type`…`sensor4-type` | `0` (none) | type id: `2` dallas, `3` machine-probe | Sensor type a 1-Wire slot expects; set by teach/auto-enroll or by provisioning | §40 |
+| `history-channels` | onboard temperature + humidity | up to 24 (slot, channel) entries | Replaces `history-sensors` | §40 |
 
 ### New commands
 
@@ -73,6 +76,11 @@ technical detail.
 - **LED.** Red and green are plain GPIO again, as in v1.4.0. The boot carousel no longer
   delays the boot, and NFC answers ~1.2 s after reset (was ~6 s). During a tap only the
   NFC LED shows (§3, §18).
+- **Alarm rules and sensor values (breaking).** A rule is (rule, slot, channel) with the
+  sensor type it was written for (18 B, was 17 B); `AlarmEvent` / `AlarmStatus` say `slot` +
+  `channel` (`source` is now `slot`, the old `slot` is `rule`). A 1-Wire `SensorReading` is a
+  valid mask + packed channel values, decoded as `values` / `units` by channel name. 1-Wire
+  no-data is reported per chip and per device (§40).
 - **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
   retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
   `p2p-frequency` (§31).
@@ -107,7 +115,11 @@ technical detail.
    once, and allow ≥ 1 h for page assembly at a low DR (§13).
 7. **Downgrade.** History pages written by v1.5.0 are not readable by older firmware: run
    `history clear` after a downgrade (§21).
-8. **P2P deployments only:** the P2P frame header changed (flag day). Nodes and the Hub must
+8. **Re-provision alarms and history (#430).** The alarm rule blob, the 1-Wire type ids
+   (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
+   wire format changed with no migration. Rewrite the alarm rules and the history selection,
+   and update the Hub/Portal decoder (§40).
+9. **P2P deployments only:** the P2P frame header changed (flag day). Nodes and the Hub must
    be updated together (§28).
 
 ### Known limitations
@@ -115,6 +127,8 @@ technical detail.
 - Not tested on hardware (no 915/923 MHz gateway on the bench): US915/AU915/AS923 on air
   and the 11 B budget tier. Code review and unit tests only (§9, §11, §12).
 - P2P: no listen-before-talk yet, no NFC configuration of the P2P radio parameters (§6).
+- At the 11 B tier a dallas `SensorReading` is 14 B with the version byte, so that frame is
+  refused there; the encoding is not trimmed yet (§40).
 - With `radio-alarm-ack false` (the default) an alarm frame lost on the air is not repeated;
   the alarm state still reaches the network in the next telemetry frame (§9, §30, §32).
 
@@ -125,6 +139,10 @@ technical detail.
   build without the patch fails on purpose (§5, §10).
 - `debug.conf` ships a lean default (1-Wire, accelerometer, buzzer and PIR off). Re-enable
   one with `-DCONFIG_<X>=y` (§2).
+- Release has no `printk` and prints no fault dump (`CONFIG_PRINTK=n`, `CONFIG_FAULT_DUMP=0`).
+  Debug log levels are compile-time only (`CONFIG_LOG_RUNTIME_FILTERING=n`). Thread stacks
+  were cut to measured high-water marks + margin. A new deep call path on a thread needs a
+  re-measure (§39).
 
 ---
 
@@ -169,6 +187,9 @@ technical detail.
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
 | Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 | LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
+| Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
+| Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
+| Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
 
 ---
 
@@ -1998,6 +2019,234 @@ reboots.
   announce after `interval-announce 1` carrying a staged `interval-sample`.
 - **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
   `interval-announce 0`) and P2P.
+
+
+## 38. LSE crystal drive strength (#477)
+
+The board DTS (`boards/sticker/sticker.dts`, `&clk_lse`) now sets `driving-capability = <3>`
+(LSEDRV = high). Before this change it was `<1>` (medium-low). Zephyr's clock init applies the
+new value on every boot, even while the LSE is already running, so an upgraded unit picks it up
+with an ordinary firmware update.
+
+**Why.** The board's 32.768 kHz crystal is an Abracon ABS07 (Y2), loaded with C20/C21 =
+18 pF (CL ≈ 12.5 pF), ESR up to 70 kΩ. ST AN2867 gives
+`gm_crit = 4 · ESR · (2πF)² · (C0 + CL)²` ≈ 2.3 µA/V. Only LSEDRV = high (Gmcritmax 2.7 µA/V)
+covers that. Medium-low (0.75 µA/V) is below it in the worst case (maximum ESR, cold,
+part-to-part spread). The LSE clocks the RTC and the LPTIM1 tick, so a marginal oscillator
+would show up as RX-window and P2P-slot timing errors.
+
+The other half of the original "better range" tip, switching the PA to `rfo-hp`, is **not
+possible** on HW rev 2.1. The RFO_HP pin is unconnected, and the RF path is RFO_LP →
+BALFHB-WL-05D3 balun → BGS12P2L6 switch. TX power therefore stays capped at
+`rfo-lp-max-power` = 14 dBm, so `p2p-tx-power` values above 14 have no effect.
+
+**Hardware verification (2026-10-09).** Images were built from the same tree and differ only
+in LSEDRV.
+
+| Test | LSEDRV 1 | LSEDRV 3 |
+|---|---|---|
+| LSE start-up, cold backup domain (5 runs, 2162165625) | 126–131 ms | 126–136 ms |
+| RTC drift vs NTP, 1 h each (2162165625, `RTC_CALR` = 0) | +20.6 ppm | +21.7 ppm |
+| Idle current excl. TX, PPK2 3.0 V, A/B/A/B (2162165722) | 120.1 / 120.2 µA | 120.6 / 120.6 µA |
+
+- The ~125 ms is the fixed LSERDY qualification (4096 LSE cycles). The oscillator starts
+  promptly at every drive level on these units at room temperature.
+- The cost is +0.45 µA, ≈ 0.13 % of the battery capacity per year.
+- Radio traffic (P2P and the LoRaWAN join + uplinks) ran normally on LSEDRV 3.
+
+**Open.** A margin test is a HW task: series-R negative-resistance check or a cold chamber.
+The crystal on 2162165625 runs ~21 ppm fast, slightly outside the ABS07 ±20 ppm. This
+suggests a CL mismatch with C20/C21, which is worth a HW check. It is irrelevant to the
+LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time syncs.
+
+
+## 39. Flash and RAM trim (#479, #481)
+
+v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
+(debug, 1.7 KB free). #479 frees space without changing behaviour.
+
+| Variant | FLASH before → after | RAM before → after |
+|---|---|---|
+| release | 182 164 → **174 140 B** (81.8 %) | 55 076 → **46 884 B** (71.5 %) |
+| debug | 236 104 → **224 872 B** (91.5 %) | 63 860 → **55 412 B** (84.6 %) |
+
+**What changed**
+
+| Change | Variant | FLASH | RAM |
+|---|---|---:|---:|
+| `CONFIG_PRINTK=n` + `CONFIG_FAULT_DUMP=0` (`prj.conf`; `debug.conf` turns both back on) | release | −2 960 B | 0 |
+| `CONFIG_LOG_RUNTIME_FILTERING=n` (`debug.conf`) | debug | −6 168 B | −256 B |
+| Config ingest records faults out of line (`fault_at()` in `config_ingest.c.j2`) | both | −5 064 B | 0 |
+| Thread stacks sized from HW high-water marks | both | 0 | −8 192 B |
+
+- **printk / fault dump.** Release has no console backend, so `printk()` output and the fault
+  text went nowhere. A fault still resets the device, and the reset cause is still reported in
+  `GetInfo`.
+- **Runtime log filtering.** Nothing in the debug image changes log levels at runtime
+  (`CONFIG_LOG_CMDS` is off). Compile-time `CONFIG_LOG_MAX_LEVEL=2` is unchanged. Raising it
+  to 3 (INF) now fits into roughly the space this freed.
+- **Config ingest.** The `FAULT()` / `FAULT_TRANSPORT()` macros of the generated
+  `app_config_ingest.c` tested `ret` / `fault_field` inline at every field. GCC jump threading
+  then cloned the rest of every `app_config_apply_*()` per fault state, ~500 B per field. One
+  `static __noinline fault_at()` removes the cloning. The semantics are identical: the first
+  fault wins, and a bad value returns `-EINVAL` (`OUT_OF_RANGE`) while a forbidden transport
+  returns `-EACCES` (`NOT_WRITABLE`). Do not turn it back into an inline macro; the template
+  comment explains why.
+
+**Stacks.** Measured with `CONFIG_INIT_STACKS` (0xAA fill read over J-Link,
+`sticker_stack_watermark.py`) on 2162165625. The release measurement image was release +
+`INIT_STACKS` + `THREAD_STACK_INFO` + `PM=n`. Load: join, reports, LoRaWAN downlinks
+(GetConfig, SetParam), real-RF NFC mailbox commands from a phone, and shell `ats cmd` inject in
+debug.
+
+| Stack | Before | Used (release) | Used (debug) | After |
+|---|---:|---:|---:|---:|
+| `nfc_poll` | 6144 | 2704 | 2656 | **4096** |
+| main | 4096 | 992 | 968 | **2048** |
+| ISR | 2048 | 192 | 192 | **1024** |
+| LED | 2048 | 456 | 456 | **1024** |
+| sensor WQ | 2048 | 656 | 624 | **1536** |
+| report WQ | 3072 | 440 | 288 | **2048** |
+| radio WQ | 4096 | 2288 (2272 TOWER P2P) | 1448 | **3584** |
+| system WQ | 2048 | 1256 | 1248 | 2048 |
+| shell (debug) | 4096 | — | 3120 | 4096 |
+
+- Each cut keeps at least 1.5× (`nfc_poll`) or 2× (the rest) over the measured mark. The MPU
+  stack guard stays on in release, so an overflow faults instead of corrupting RAM.
+- `nfc_poll` keeps ~1.4 KB for `SettingsSave` (an NVS write right before the reboot), which
+  could not be measured.
+- The radio WQ was measured on LoRaWAN and on TOWER P2P (`recv_ack` → `app_cmd_handle`, #470
+  image on the current Hub). Both peak at ~2.3 KB. 3584 B keeps ~1.3 KB (1.58×), because the
+  static worst case is ~3.2 KB.
+- `debug_p2p_bench.conf` no longer sets its own `CONFIG_MAIN_STACK_SIZE`, because the base value
+  is now smaller.
+
+**Hardware verification (2026-10-09, 2162165625, EU868).** Every image was flashed without
+erase.
+
+| Image | Result |
+|---|---|
+| debug | PASS — boot, config unchanged, join, uplinks; SetParam no-op → `Ack`; out of range → `OUT_OF_RANGE` with `fault_field` 202 / 102 / 203 / 115; LoRaWAN write to a provisioning field → `NOT_WRITABLE` 102; first offender wins; a failed batch is rolled back; GetConfig, GetSettings, history, CCM self-test |
+| release (downlinks via the Hub) | PASS — join, Info / settings-info / alarm / telemetry; GetConfig 5 pages, SetParam `Ack` / `OUT_OF_RANGE` 202 / `NOT_WRITABLE` 102; FCnt contiguous; identical bytes before and after the stack cut |
+| release, TOWER P2P (#470 image, Hub NB 0.4.0), radio WQ 4096 and 3584 | PASS — Hello, TimeReq; GetConfig 6 pages (byte-identical in both runs), SetParam `Ack` / `OUT_OF_RANGE` 202 / transport not allowed 102 |
+| debug + release, phone NFC mailbox | PASS — GetConfig (2 pages), SetParam `Ack` / `OUT_OF_RANGE` 202 / 102, GetSettings, GetInfo, history page, GetBasicInfo |
+
+Native ztest suites and `pytest scripts/west_commands/tests` pass.
+
+**Not fixed here.** The `debug.conf;debug-history-flash.conf` variant already overflowed FLASH on
+`v1.5.0` (by 7 916 B). It now overflows by ~1.7 KB. CI does not build it.
+
+**Further levers (measured, not applied).**
+
+| Lever | Saving | Why not now |
+|---|---|---|
+| Debug RTT dictionary logging | −16 KB debug | Needs a host decoder |
+| Dropping AS923 / AU915 / US915 | −8.9 KB, −768 B RAM | Product decision |
+| Table-driven settings loader `h_set` | ≈ −1.5 KB release / −4 KB debug | Code change |
+
+## 40. Sensor channel model (#430, PR #431)
+
+An alarm rule used to target `(source, quantity)` with one global quantity enum, so a
+source had one value per quantity (the machine-probe TMP112 and the MPL3115A2 temperature
+were never read) and every new sensor touched the alarm code, the decoder, the history
+table and the Manager-App. Each sensor type now describes its own channels. Design and
+decisions D1–D9: `doc/plan/431 - Sensor channel model for alarms.md`.
+
+**Registry.** `app/src/app_sensor_types.yaml` lists every sensor type and its channels
+(`ch → name, label, quantity, unit, kind, wire scale, history encoding, range, liveness, cap`).
+`west sensorgen` generates the C tables and a marked block in `app/decoder/ttn.js`; the
+Manager-App reads the YAML. CI checks that the outputs are in sync and that the numbering is
+append-only (a channel is never renumbered; a removed one stays `retired`).
+
+| Type id | Type | Channels |
+|:-:|---|---|
+| 1 | `motherboard` (slot 0, fixed) | climate, barometer (incl. its temperature, altitude), light, hall left/right, inputs A/B digital + analog, PIR, accelerometer, battery: 21 of max 32 |
+| 2 | `dallas` (DS18B20) | temperature |
+| 3 | `machine-probe` (DS28E17) | temperature, humidity, illuminance, magnetic field, tilt, accel x/y/z, TMP112 `temperature-aux` (max 10 per 1-Wire type) |
+
+**Alarm rules.** A rule is `(rule 0..15, slot, channel)`: slot 0 = motherboard, 1..4 = s1..s4.
+Kind (threshold / state / rate), scale, validation and no-data liveness come from the channel.
+
+- The `alarm_N` blob is **18 B** (was 17 B):
+  `[0]flags [1]slot [2]channel [3]sensor_type [4]from [5]to [6..9]lo [10..13]hi [14..17]dwell`.
+- `sensor_type` is the type the rule was written for. If the slot now expects another type,
+  the rule is **stale**: kept, shown `STALE` in `alarm list`, never evaluated. A `SetParam`
+  that makes a rule stale answers an error unless the same batch fixes or clears it.
+- Shell: `alarm set <rule> <slot> <channel> lo <v> hi <v> dwell <s>` (or `from`/`to`), slots
+  `mb`, `s1`…`s4`, channels by name or number; `sensor types [<type>]` lists the channels.
+
+**Expected type per 1-Wire slot.** `sensor1_type`…`sensor4_type` (`sensors` 23..26) hold the
+type a slot expects. Teach / auto-enroll set it, provisioning can set it before the probe is
+plugged in, and clearing the ROM clears it. A slot whose expected device is missing while an
+unbound device of another type is on the bus goes to **mismatch**:
+
+- one `AlarmEvent` `TYPE_SENSOR_MISMATCH` (5) on the slot, `value` = the detected type id
+  (ACTIVATE, then DEACTIVATE when the right type is back or the slot is re-taught);
+- the slot's rules are inert, its telemetry and history values are `null`;
+- `Info.w1_slot_state` shows `ok` / `absent` / `replaced` / `mismatch` per slot.
+
+**1-Wire no-data (D9).** While the device answers, a silent part (chip) raises one no-data
+alarm on its first channel. When the whole device stops answering, one alarm on channel 255
+(`device`) replaces the per-channel alarms; the slot state is `absent` without a reboot, and
+a re-powered LIS2DH12 is re-initialised when the probe comes back.
+
+**Telemetry `SensorReading`** (field 27) keeps `slot` and `type`; fields 3..10 are reserved
+and replaced by `valid = 11` (bit = channel has a value) and `repeated sint32 value = 12`
+(packed, values of the set bits only, `round(value × scale)`). An absent or mismatched slot is
+`valid = 0`. The decoder emits `values` and `units` keyed by channel name, `null` for a
+missing channel. The motherboard groups (climate, hall, …) keep their typed fields.
+
+| `SensorReading` | Size incl. the 3 B tag |
+|---|---|
+| mismatch / absent | 7 B |
+| dallas | 13 B (was 10 B) |
+| full machine-probe | ~25–30 B |
+
+**History per channel.** `history_channels` (`application` 9, 24 B, one byte `slot << 5 | ch`
+per entry, `0xFF` unused, default onboard temperature + humidity) replaces `history_sensors`.
+Every channel is recordable; momentary channels (PIR, accel motion) record whether their
+pulse counter moved. The record layout follows from the selection, the slot types and the
+caps; a layout change restarts the ring (page header stores the layout CRC-32). Absent values
+are the top value of the encoding and decode as `null`. `HistoryFrame` carries
+`channels = 10` and `w1_types = 11`, so the decoder stays stateless. Shell:
+`history sensors [<name> on|off]`, 1-Wire entries as `s1-temperature`.
+
+**Wire changes (breaking, no migration).**
+
+| Message | Change |
+|---|---|
+| `AlarmEvent` | `source = 1` → `slot = 1`, `slot = 7` → `rule = 7` (numbers kept); `quantity = 6` reserved; new `channel = 10`, `optional sensor_type = 11` (slots 1..4 only); new `TYPE_SENSOR_MISMATCH = 5` |
+| `Info.AlarmStatus` | `source = 1` → `slot = 1`; `quantity = 2` reserved; new `channel = 4`, `optional sensor_type = 5` |
+| `Info` | new `w1_slot_state` |
+| `SensorReading.type`, `ConfigDump.w1_slot_type` | new type ids: 2 = dallas, 3 = machine-probe (were 1, 2) |
+| `SensorReading` | fields 3..10 reserved; new `valid = 11`, `value = 12` |
+| `HistoryFrame` | new `channels = 10`, `w1_types = 11` |
+| config | `alarm_N` 18 B; new `sensorN_type`, `history_channels`; `history_sensors` removed |
+
+Hub/Portal follow-up: proximos/proximos-v2#119. The Manager-App needs the new rule editor and
+history selection from `app_sensor_types.yaml`.
+
+**Known limitation.** At the 11 B tier (US915 DR0 / AU915 DR2) a dallas frame is 14 B with
+the version byte (was exactly 11 B). The composer sends it alone and the MAC refuses it.
+Not decided yet: accept it, or trim the encoding (for example, omit `valid` when every
+channel is present).
+
+**Cost** (on v1.5.0 `0fa29dea`): release 179 644 B flash / 47 524 B RAM (+5.5 KB / +640 B),
+debug 231 680 B / 56 180 B (94.3 % / 85.7 %), debug + W1 214 484 B / 52 148 B (`LOG=n`).
+
+**Tests.** native_sim 16/16 suites (new `sensor_types`, `w1_slots`; `alarm_rules`,
+`alarm_eval`, `compose`, `cmd`, `history`, `history_flash` reworked), pytest 80
+(`test_sensorgen`), `ttn.test.js` 112.
+
+**Hardware (STICKER 2162165132, machine probe, ChirpStack EU868, 2026-10-09).** Step 3:
+slot binding by expected type and the mismatch alarm. Step 4: rules by channel name and
+number, rejections (wrong channel for the type, untyped slot, `from`/`to` on a threshold),
+AlarmEvent with slot/channel/sensor_type/rule, AlarmStatus in a paged Info, the 18 B blob
+over GetConfig, STALE rules after a type change. Step 5: machine-probe and absent-dallas
+`SensorReading`, two slots in one frame, `w1_slot_state`. No-data model: unplug → one
+`device` alarm and `absent`, re-plug → deactivate and values back without a reboot. History
+per channel on 2162190413: a 6-column selection survives a reboot. Not tested on HW: dwell
+on 1-Wire channels.
 
 ---
 
