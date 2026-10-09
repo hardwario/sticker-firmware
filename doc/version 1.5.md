@@ -174,7 +174,7 @@ technical detail.
 | Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 | LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
-| Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 47 396 B; debug FLASH 236 104 → 224 880 B, RAM 63 860 → 55 924 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39. |
+| Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
 
 ---
 
@@ -2028,15 +2028,15 @@ suggests a CL mismatch with C20/C21, which is worth a HW check. It is irrelevant
 LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time syncs.
 
 
-## 39. Flash and RAM trim (#479)
+## 39. Flash and RAM trim (#479, #481)
 
 v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
 (debug, 1.7 KB free). #479 frees space without changing behaviour.
 
 | Variant | FLASH before → after | RAM before → after |
 |---|---|---|
-| release | 182 164 → **174 140 B** (81.8 %) | 55 076 → **47 396 B** (72.3 %) |
-| debug | 236 104 → **224 880 B** (91.5 %) | 63 860 → **55 924 B** (85.3 %) |
+| release | 182 164 → **174 140 B** (81.8 %) | 55 076 → **46 884 B** (71.5 %) |
+| debug | 236 104 → **224 872 B** (91.5 %) | 63 860 → **55 412 B** (84.6 %) |
 
 **What changed**
 
@@ -2045,7 +2045,7 @@ v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.
 | `CONFIG_PRINTK=n` + `CONFIG_FAULT_DUMP=0` (`prj.conf`; `debug.conf` turns both back on) | release | −2 960 B | 0 |
 | `CONFIG_LOG_RUNTIME_FILTERING=n` (`debug.conf`) | debug | −6 168 B | −256 B |
 | Config ingest records faults out of line (`fault_at()` in `config_ingest.c.j2`) | both | −5 064 B | 0 |
-| Thread stacks sized from HW high-water marks | both | 0 | −7 680 B |
+| Thread stacks sized from HW high-water marks | both | 0 | −8 192 B |
 
 - **printk / fault dump.** Release has no console backend, so `printk()` output and the fault
   text went nowhere. A fault still resets the device, and the reset cause is still reported in
@@ -2075,7 +2075,7 @@ debug.
 | LED | 2048 | 456 | 456 | **1024** |
 | sensor WQ | 2048 | 656 | 624 | **1536** |
 | report WQ | 3072 | 440 | 288 | **2048** |
-| radio WQ | 4096 | 2288 | 1448 | 4096 |
+| radio WQ | 4096 | 2288 (2272 TOWER P2P) | 1448 | **3584** |
 | system WQ | 2048 | 1256 | 1248 | 2048 |
 | shell (debug) | 4096 | — | 3120 | 4096 |
 
@@ -2083,7 +2083,9 @@ debug.
   stack guard stays on in release, so an overflow faults instead of corrupting RAM.
 - `nfc_poll` keeps ~1.4 KB for `SettingsSave` (an NVS write right before the reboot), which
   could not be measured.
-- The radio WQ is unchanged because P2P `recv_ack` → `app_cmd_handle` was not exercised.
+- The radio WQ was measured on LoRaWAN and on TOWER P2P (`recv_ack` → `app_cmd_handle`, #470
+  image on the current Hub). Both peak at ~2.3 KB. 3584 B keeps ~1.3 KB (1.58×), because the
+  static worst case is ~3.2 KB.
 - `debug_p2p_bench.conf` no longer sets its own `CONFIG_MAIN_STACK_SIZE`, because the base value
   is now smaller.
 
@@ -2094,6 +2096,7 @@ erase.
 |---|---|
 | debug | PASS — boot, config unchanged, join, uplinks; SetParam no-op → `Ack`; out of range → `OUT_OF_RANGE` with `fault_field` 202 / 102 / 203 / 115; LoRaWAN write to a provisioning field → `NOT_WRITABLE` 102; first offender wins; a failed batch is rolled back; GetConfig, GetSettings, history, CCM self-test |
 | release (downlinks via the Hub) | PASS — join, Info / settings-info / alarm / telemetry; GetConfig 5 pages, SetParam `Ack` / `OUT_OF_RANGE` 202 / `NOT_WRITABLE` 102; FCnt contiguous; identical bytes before and after the stack cut |
+| release, TOWER P2P (#470 image, Hub NB 0.4.0), radio WQ 4096 and 3584 | PASS — Hello, TimeReq; GetConfig 6 pages (byte-identical in both runs), SetParam `Ack` / `OUT_OF_RANGE` 202 / transport not allowed 102 |
 | debug + release, phone NFC mailbox | PASS — GetConfig (2 pages), SetParam `Ack` / `OUT_OF_RANGE` 202 / 102, GetSettings, GetInfo, history page, GetBasicInfo |
 
 Native ztest suites and `pytest scripts/west_commands/tests` pass.
@@ -2108,7 +2111,6 @@ Native ztest suites and `pytest scripts/west_commands/tests` pass.
 | Debug RTT dictionary logging | −16 KB debug | Needs a host decoder |
 | Dropping AS923 / AU915 / US915 | −8.9 KB, −768 B RAM | Product decision |
 | Table-driven settings loader `h_set` | ≈ −1.5 KB release / −4 KB debug | Code change |
-| Radio WQ stack | ≈ −1 KB RAM | Needs a P2P HIL |
 
 ---
 
