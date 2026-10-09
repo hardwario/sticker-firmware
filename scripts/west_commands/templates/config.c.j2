@@ -461,9 +461,9 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 {% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
-	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+	SETTINGS_SET("{{ param | nvs_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% else %}
-	SETTINGS_SET("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+	SETTINGS_SET("{{ param | nvs_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
 		     sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}
@@ -539,9 +539,9 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+	EXPORT_FUNC("{{ param | nvs_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% else %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+	EXPORT_FUNC("{{ param | nvs_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
 		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}

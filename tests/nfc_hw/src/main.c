@@ -676,6 +676,7 @@ ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
 /* ---- NFC interaction LED (#414) --------------------------------------------- */
 
 extern int g_led_ch[3]; /* stubs.c: last state per channel, indexed R=0, G=1, Y=2 */
+extern int g_led_hold;  /* stubs.c: last app_led_hold() value */
 
 #define LED_RESULT_MS 2000
 #define LED_DETECT_MS 5000
@@ -685,6 +686,7 @@ static void led_settle(void)
 {
 	k_msleep(LED_DETECT_MS + 100);
 	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_OFF, "LED did not settle");
+	zassert_equal(g_led_hold, 0, "indicator still held with the NFC LED off");
 }
 
 static void assert_led(bool r, bool g, bool y, const char *what)
@@ -715,6 +717,7 @@ ZTEST(nfc_hw, test_led_session_ok_green_yellow_2s)
 	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_RESULT_OK, "result state %d",
 		      app_nfc_led_state_get());
 	assert_led(false, true, true, "result OK");
+	zassert_equal(g_led_hold, 1, "the result must hold the indicator");
 
 	int64_t t0 = k_uptime_get();
 
@@ -788,6 +791,7 @@ ZTEST(nfc_hw, test_led_unread_reply_is_error)
  * hold (no mailbox); ends the hold by dropping the field. */
 static enum app_nfc_led_state m_led_at_1s, m_led_at_6s;
 static int m_led_g_at_1s;
+static int m_led_hold_at_1s;
 
 static void led_probe_fn(void *a, void *b, void *c)
 {
@@ -798,6 +802,7 @@ static void led_probe_fn(void *a, void *b, void *c)
 	k_msleep(1000);
 	m_led_at_1s = app_nfc_led_state_get();
 	m_led_g_at_1s = g_led_ch[APP_LED_CHANNEL_G];
+	m_led_hold_at_1s = g_led_hold;
 	k_msleep(5000);
 	m_led_at_6s = app_nfc_led_state_get();
 	st25dv_emul_set_field_on(false);
@@ -817,6 +822,7 @@ ZTEST(nfc_hw, test_led_detected_green_capped_5s)
 
 	zassert_equal(m_led_at_1s, APP_NFC_LED_DETECTED, "state at 1 s: %d", m_led_at_1s);
 	zassert_equal(m_led_g_at_1s, 1, "green must be on at 1 s");
+	zassert_equal(m_led_hold_at_1s, 1, "\"detected\" must hold the indicator");
 	zassert_equal(m_led_at_6s, APP_NFC_LED_OFF, "state at 6 s: %d", m_led_at_6s);
 }
 

@@ -129,7 +129,7 @@ ZTEST(history, test_clock_sync_base_fixup)
 /* #267: history reconstructs each record's time as base + ordinal*interval_report
  * — a FIXED interval, independent of the actual capture wall-time. This is why the
  * report timer must stay a fixed cadence (the fleet-uplink jitter was moved onto
- * the uplink in app_lrw): a jittered capture period would make the real sample
+ * the uplink in app_radio_lrw): a jittered capture period would make the real sample
  * times drift from this fixed-interval reconstruction, biasing every timestamp.
  * Guard the invariant: consecutive records are exactly interval_report apart. */
 ZTEST(history, test_fixed_interval_reconstruction)

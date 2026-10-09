@@ -7,6 +7,7 @@
 #include "app_history.h"
 #include "app_log.h"
 #include "app_config.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 #if defined(__has_include) && __has_include("app_clock.h")
@@ -130,7 +131,7 @@ static uint16_t m_capacity;
 static uint16_t m_count;    /* logical record count (cached from the backend ring) */
 static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
 			     * are periodic so per-record time = base + ord*interval */
-/* True while app_lrw streams a replay. Capture keeps running (the replay cursor
+/* True while app_radio_lrw streams a replay. Capture keeps running (the replay cursor
  * is absolute, see app_history_export_abs()); only the flash backend's page
  * rollover (a ~20 ms erase that stalls the CPU) is held off until it ends. */
 static bool m_replay_active;
@@ -300,6 +301,24 @@ BUILD_ASSERT(sizeof(struct hist_page_fixup) == DW_SIZE, "fix-up must be one doub
 static const struct flash_area *m_fa;
 static bool m_ready;
 
+/* Every history program/erase goes through these, clear of any radio exchange:
+ * the flash stall would land a TX's receive windows late (app_radio_flash_hold()). */
+static int hist_flash_write(off_t off, const void *data, size_t len)
+{
+	app_radio_flash_hold();
+	int ret = flash_area_write(m_fa, off, data, len);
+	app_radio_flash_release();
+	return ret;
+}
+
+static int hist_flash_erase(off_t off, size_t len)
+{
+	app_radio_flash_hold();
+	int ret = flash_area_erase(m_fa, off, len);
+	app_radio_flash_release();
+	return ret;
+}
+
 /* In-RAM ring state (reconstructed on mount, maintained on append). */
 struct live_page {
 	uint32_t first_ord; /* absolute ordinal of the page's first record */
@@ -432,8 +451,7 @@ static int flush_stage_pad(void)
 	memcpy(dw, m_stage, m_stage_len);
 	dw[DW_DATA] = FRAME_BYTE;
 	const struct live_page *head = &m_live[m_nlive - 1];
-	int ret = flash_area_write(m_fa,
-				   page_off(head->phys) + page_data_off(head->flags & LP_V2) +
+	int ret = hist_flash_write(page_off(head->phys) + page_data_off(head->flags & LP_V2) +
 					   (off_t)m_head_dw * DW_SIZE,
 				   dw, DW_SIZE);
 	if (ret) {
@@ -478,7 +496,7 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 					  : (m_abs_ord - m_live[0].first_ord);
 	}
 
-	int ret = flash_area_erase(m_fa, page_off(next), PAGE_SIZE);
+	int ret = hist_flash_erase(page_off(next), PAGE_SIZE);
 	if (ret) {
 		return ret;
 	}
@@ -496,7 +514,7 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 		.base_synced = synced ? 1 : 0,
 	};
 	hdr_crc_set(&h);
-	ret = flash_area_write(m_fa, page_off(next), &h, sizeof(h));
+	ret = hist_flash_write(page_off(next), &h, sizeof(h));
 	if (ret) {
 		return ret;
 	}
@@ -726,8 +744,7 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool sy
 			uint8_t dw[DW_SIZE];
 			memcpy(dw, m_stage, DW_DATA);
 			dw[DW_DATA] = FRAME_BYTE;
-			int ret = flash_area_write(m_fa, data + (off_t)m_head_dw * DW_SIZE, dw,
-						   DW_SIZE);
+			int ret = hist_flash_write(data + (off_t)m_head_dw * DW_SIZE, dw, DW_SIZE);
 			/* Drop the staged double word on error too -- leaving m_stage_len
 			 * stuck at DW_DATA would run this loop's next byte past the end of
 			 * m_stage[] on the following capture (C1). */
@@ -842,7 +859,7 @@ static void backend_flush_fixups(void)
 		};
 		f.crc = crc16_ccitt(h.crc, (const uint8_t *)&f,
 				    offsetof(struct hist_page_fixup, crc));
-		int ret = flash_area_write(m_fa, page_off(lp->phys) + HIST_HDR_SIZE, &f, sizeof(f));
+		int ret = hist_flash_write(page_off(lp->phys) + HIST_HDR_SIZE, &f, sizeof(f));
 		if (ret) {
 			LOG_WRN("history fix-up write failed: %d", ret);
 		}
@@ -880,7 +897,7 @@ static void backend_erase(void)
 	if (!m_ready) {
 		return;
 	}
-	(void)flash_area_erase(m_fa, 0, FIXED_PARTITION_SIZE(history_partition));
+	(void)hist_flash_erase(0, FIXED_PARTITION_SIZE(history_partition));
 	backend_reset_logical();
 }
 
