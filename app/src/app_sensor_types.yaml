@@ -41,7 +41,11 @@
 #             channel records 1 when it asserted at least once during the interval
 #             CI: range * scale must fit both `wire` and `history` (sentinel kept free)
 #   range     [min, max] valid physical range; a reading outside is absent
-#   liveness  true = channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
+#   liveness  motherboard only: channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
+#   part      1-Wire only (required): chip the channel is read from. The no-data watchdog
+#             raises one alarm per part (on its first channel) while the device still
+#             answers, and one alarm on channel 255 ("device") when the whole device stops
+#             answering. A part that never reported since boot (not fitted) is not watched
 #   alarm_only_watchdog  true = evaluated by a built-in watchdog, not a rule target
 
 version: 1
@@ -102,19 +106,19 @@ types:
     label: DS18B20 thermometer
     w1_family: 0x28
     channels:
-      - {ch: 0, name: temperature, label: "Temperature", quantity: temperature, unit: degC, kind: threshold, wire: [sint32, 100], history: [i16, 100], range: [-55.0, 125.0], liveness: true}
+      - {ch: 0, name: temperature, label: "Temperature", quantity: temperature, unit: degC, kind: threshold, wire: [sint32, 100], history: [i16, 100], range: [-55.0, 125.0], part: ds18b20}
 
   - id: 3
     name: machine-probe
     label: Machine probe (DS28E17 bridge)
     w1_family: 0x19
     channels:
-      - {ch: 0, name: temperature,     label: "Temperature (SHT)",          quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0], liveness: true}
-      - {ch: 1, name: humidity,        label: "Relative humidity (SHT)",    quantity: humidity,       unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],    range: [0.0, 100.0]}
-      - {ch: 2, name: temperature-aux, label: "Temperature (TMP112)",       quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0]}
-      - {ch: 3, name: illuminance,     label: "Illuminance (OPT3001)",      quantity: illuminance,    unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5], range: [0.0, 83865.6]}
-      - {ch: 4, name: magnetic-field,  label: "Magnetic field (Si7210)",    quantity: magnetic_field, unit: mT,    kind: threshold, wire: [sint32, 1000], history: [i16, 100], range: [-204.7, 204.7]}
-      - {ch: 5, name: tilt,            label: "Tilt alert (LIS2DH12)",      quantity: tilt,           unit: bool,  kind: state,     wire: [uint32, 1],    history: [u8, 1]}
-      - {ch: 6, name: accel-x,         label: "Acceleration X (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
-      - {ch: 7, name: accel-y,         label: "Acceleration Y (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
-      - {ch: 8, name: accel-z,         label: "Acceleration Z (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
+      - {ch: 0, name: temperature,     label: "Temperature (SHT)",          quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0], part: sht}
+      - {ch: 1, name: humidity,        label: "Relative humidity (SHT)",    quantity: humidity,       unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],    range: [0.0, 100.0], part: sht}
+      - {ch: 2, name: temperature-aux, label: "Temperature (TMP112)",       quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0], part: tmp112}
+      - {ch: 3, name: illuminance,     label: "Illuminance (OPT3001)",      quantity: illuminance,    unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5], range: [0.0, 83865.6], part: opt3001}
+      - {ch: 4, name: magnetic-field,  label: "Magnetic field (Si7210)",    quantity: magnetic_field, unit: mT,    kind: threshold, wire: [sint32, 1000], history: [i16, 100], range: [-204.7, 204.7], part: si7210}
+      - {ch: 5, name: tilt,            label: "Tilt alert (LIS2DH12)",      quantity: tilt,           unit: bool,  kind: state,     wire: [uint32, 1],    history: [u8, 1], part: lis2dh12}
+      - {ch: 6, name: accel-x,         label: "Acceleration X (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9], part: lis2dh12}
+      - {ch: 7, name: accel-y,         label: "Acceleration Y (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9], part: lis2dh12}
+      - {ch: 8, name: accel-z,         label: "Acceleration Z (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9], part: lis2dh12}

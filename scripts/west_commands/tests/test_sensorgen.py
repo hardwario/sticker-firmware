@@ -108,7 +108,7 @@ def test_guard_accepts_unchanged_and_appended():
     committed = _header(reg)
     grown = copy.deepcopy(reg)
     ch = _type(grown, "dallas")["channels"]
-    ch.append(dict(ch[0], ch=1, name="temperature-2", liveness=False))
+    ch.append(dict(ch[0], ch=1, name="temperature-2"))
     assert sensorgen.guard_no_renumber(_header(reg), committed) == []
     assert sensorgen.guard_no_renumber(_header(grown), committed) == []
 
@@ -212,6 +212,12 @@ def test_history_sentinel_is_kept_free():
      "momentary needs `pulses"),
     (lambda r: _type(r, "motherboard")["channels"][5].update(pulses="hall-left-count"),
      "pulses only applies"),
+    (lambda r: _type(r, "machine-probe")["channels"][2].pop("part"), "needs `part"),
+    (lambda r: _type(r, "machine-probe")["channels"][2].update(part="TMP 112"), "needs `part"),
+    (lambda r: _type(r, "dallas")["channels"][0].update(liveness=True),
+     "liveness only applies to motherboard"),
+    (lambda r: _type(r, "motherboard")["channels"][0].update(part="sht"),
+     "part only applies to 1-Wire"),
     (lambda r: r.update(max_channels_w1=5), "9 channels > limit 5"),
     (lambda r: r["types"].append(dict(_type(r, "motherboard"), id=99, name="board-2")),
      "exactly one motherboard"),
@@ -219,6 +225,12 @@ def test_history_sentinel_is_kept_free():
 def test_invalid_registry_is_rejected(mutate, message):
     ok, e = _has(_mutated(mutate), message)
     assert ok, e
+
+
+def test_parts_are_indexed_in_order_of_first_appearance():
+    mp = next(t for t in sensorgen.build_model(_registry())["types"] if t["name"] == "machine-probe")
+    assert mp["parts"] == ["sht", "tmp112", "opt3001", "si7210", "lis2dh12"]
+    assert [c["part"] for c in mp["channels"]] == [0, 0, 1, 2, 3, 4, 4, 4, 4]
 
 
 def test_retired_channel_needs_no_history():

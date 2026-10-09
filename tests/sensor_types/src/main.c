@@ -57,9 +57,17 @@ ZTEST(sensor_types, test_two_temperatures_on_one_probe)
 	zassert_str_equal(tmp->name, "temperature-aux");
 	zassert_equal(sht->kind, APP_SENSOR_KIND_THRESHOLD);
 	zassert_equal(tmp->kind, APP_SENSOR_KIND_THRESHOLD);
-	/* Only the primary temperature is the no-data liveness channel. */
-	zassert_true(sht->flags & APP_SENSOR_F_LIVENESS);
+	/* 1-Wire channels are watched per part (chip), not as liveness channels:
+	 * the SHT and the TMP112 are separate parts of the probe. */
+	zassert_false(sht->flags & APP_SENSOR_F_LIVENESS);
 	zassert_false(tmp->flags & APP_SENSOR_F_LIVENESS);
+	zassert_not_equal(sht->part, tmp->part);
+	zassert_equal(sht->part, app_sensor_channel_get(APP_SENSOR_TYPE_MACHINE_PROBE,
+							APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY)
+					 ->part);
+	zassert_equal(app_sensor_type_get(APP_SENSOR_TYPE_MACHINE_PROBE)->part_count, 5);
+	zassert_equal(app_sensor_type_get(APP_SENSOR_TYPE_DALLAS)->part_count, 1);
+	zassert_equal(app_sensor_type_get(APP_SENSOR_TYPE_MOTHERBOARD)->part_count, 0);
 }
 
 ZTEST(sensor_types, test_channel_by_name)

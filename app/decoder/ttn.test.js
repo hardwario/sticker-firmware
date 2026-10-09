@@ -430,7 +430,19 @@ test("decodeUplink decodes get_info active_alarms (fPort 85)", () => {
   assert.equal(got.info.device_status, 0x11);
   assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_no_data"]);
   assert.deepEqual(got.info.active_alarms, [
-    { slot: "s1", channel: "temperature", sensor_type: "dallas", type: "no_data" },
+    { slot: "s1", channel: "temperature", part: "ds18b20", sensor_type: "dallas", type: "no_data" },
+  ]);
+});
+
+// The same with channel 255 (20 ff 01): the whole 1-Wire device stopped
+// answering, one alarm instead of one per part.
+test("decodeUplink decodes get_info active_alarms device no_data (channel 255)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a1308011004180270117a090801180420ff012803"),
+    fPort: 85,
+  }).data;
+  assert.deepEqual(got.info.active_alarms, [
+    { slot: "s1", channel: "device", sensor_type: "machine-probe", type: "no_data" },
   ]);
 });
 
@@ -1030,6 +1042,24 @@ test("fPort-3 batch: no-data watchdog event (type=no_data, rule 0xFF)", () => {
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].type, "no_data");
   assert.equal(d.alarms[0].value, null);
+});
+
+test("fPort-3 batch: 1-Wire no_data per part and per device", () => {
+  const base = 1780000000;
+  // s2 machine probe: the LIS2DH12 failed (alarm on its first channel, tilt =
+  // ch 5), then the whole probe was unplugged (channel 255).
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(2, 5, 0, 4, 0, null, 255, 3),
+    alarmEvent(2, 255, 0, 4, 10, null, 255, 3),
+  ]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.alarms.length, 2);
+  assert.equal(d.alarms[0].channel, "tilt");
+  assert.equal(d.alarms[0].part, "lis2dh12");
+  assert.equal(d.alarms[0].sensor_type, "machine-probe");
+  assert.equal(d.alarms[1].channel, "device");
+  assert.equal(d.alarms[1].part, undefined);
+  assert.equal(d.alarms[1].type, "no_data");
 });
 
 test("fPort-3 batch: version prefix is stripped, body decodes after byte 0", () => {

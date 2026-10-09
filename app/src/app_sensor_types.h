@@ -28,6 +28,12 @@ extern "C" {
 #define APP_SENSOR_MB_CH_MAX 32
 #define APP_SENSOR_W1_CH_MAX 10
 
+/* Most parts (chips) of a 1-Wire type; sizes the per-part no-data latches. */
+#define APP_SENSOR_W1_PART_MAX 5
+
+/* No-data alarm channel of a whole 1-Wire device (it stopped answering). */
+#define APP_SENSOR_CH_DEVICE 0xFF
+
 enum app_sensor_type_id {
 	APP_SENSOR_TYPE_NONE = 0,
 	APP_SENSOR_TYPE_MOTHERBOARD = 1,
@@ -118,6 +124,9 @@ enum app_sensor_hist_enc {
 /* No channel (app_sensor_channel.pulses_ch of a non-momentary channel). */
 #define APP_SENSOR_NO_CH 0xFF
 
+/* No part (app_sensor_channel.part of a motherboard / retired channel). */
+#define APP_SENSOR_NO_PART 0xFF
+
 struct app_sensor_channel {
 	const char *name;
 	uint8_t kind;      /* enum app_sensor_kind */
@@ -126,6 +135,7 @@ struct app_sensor_channel {
 	uint8_t hist_enc;  /* enum app_sensor_hist_enc */
 	uint16_t cap_off;  /* offsetof(struct app_config, cap_*) or APP_SENSOR_NO_CAP */
 	uint8_t pulses_ch; /* momentary: counter channel of its pulses, else APP_SENSOR_NO_CH */
+	uint8_t part;      /* 1-Wire: index of the chip it is read from, else APP_SENSOR_NO_PART */
 	float wire_scale;  /* wire value = round(phys * wire_scale) */
 	float hist_scale;  /* history value = round(phys * hist_scale) */
 	float range_min;   /* valid physical range (APP_SENSOR_F_RANGE) */
@@ -138,6 +148,7 @@ struct app_sensor_type {
 	uint8_t id;            /* enum app_sensor_type_id */
 	uint8_t w1_family;     /* 1-Wire family code, 0 = motherboard */
 	uint8_t channel_count; /* incl. retired channels */
+	uint8_t part_count;    /* 1-Wire: chips the channels are read from, 0 = motherboard */
 };
 
 /* Type by id / by 1-Wire family code / by name; NULL if unknown. */

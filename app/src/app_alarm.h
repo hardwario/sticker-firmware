@@ -20,11 +20,12 @@ extern "C" {
 #endif
 
 /* Most watchdog alarms active at once: no-data on up to APP_ALARM_NODATA_MB_MAX
- * motherboard and APP_ALARM_NODATA_W1_MAX liveness channels per 1-Wire slot,
- * low battery and one sensor mismatch per 1-Wire slot. Sizes
+ * motherboard liveness channels, per 1-Wire slot one for the whole device
+ * (channel APP_SENSOR_CH_DEVICE) plus one per part (chip) of its type, low
+ * battery and one sensor mismatch per 1-Wire slot. Sizes
  * app_alarm_active_snapshot() buffers. */
 #define APP_ALARM_NODATA_MB_MAX 4
-#define APP_ALARM_NODATA_W1_MAX 2
+#define APP_ALARM_NODATA_W1_MAX (1 + APP_SENSOR_W1_PART_MAX)
 #define APP_ALARM_NODATA_MAX                                                                       \
 	(APP_ALARM_NODATA_MB_MAX + APP_ALARM_SLOT_MAX * APP_ALARM_NODATA_W1_MAX)
 #define APP_ALARM_WATCHDOG_MAX (APP_ALARM_NODATA_MAX + 1 + APP_ALARM_SLOT_MAX)

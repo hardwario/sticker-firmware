@@ -35,6 +35,7 @@ static const struct app_sensor_channel m_ch_{{ t.cname }}[] = {
 		.cap_off = APP_SENSOR_NO_CAP,
 {% endif %}
 		.pulses_ch = {{ c.pulses_sym }},
+		.part = {{ c.part }},{{ (' /* ' ~ c.part_name ~ ' */') if c.part_name }}
 		.wire_scale = {{ c.wire_scale }}f,
 		.hist_scale = {{ c.hist_scale }}f,
 		.range_min = {{ c.range_min }}f,
@@ -59,6 +60,7 @@ static const struct app_sensor_type m_types[] = {
 		.id = {{ t.sym }},
 		.w1_family = 0x{{ '%02x' % t.w1_family }},
 		.channel_count = ARRAY_SIZE(m_ch_{{ t.cname }}),
+		.part_count = {{ t.parts | length }},
 	},
 {% endfor %}
 };

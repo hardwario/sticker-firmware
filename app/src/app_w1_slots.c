@@ -103,29 +103,16 @@ static void mp_put(struct app_sensor_w1 *out, uint8_t ch, float value)
 
 static int machine_probe_read(int index, uint64_t *serial, struct app_sensor_w1 *out)
 {
-	/* Temperature + humidity (SHT) is the primary reading — its result decides
-	 * the slot read's success. The remaining probe sub-sensors are best-effort:
-	 * a failure (e.g. an absent TMP112 on older revisions) leaves that channel
-	 * NaN without failing the whole read. */
+	/* Every probe sub-sensor (chip) is read best-effort: a failed chip leaves
+	 * its channels NaN without failing the others, so the no-data watchdog can
+	 * name the chip (one alarm per part). The read fails only when no chip
+	 * answered at all — the probe itself is gone (one device alarm). */
 	float temperature, humidity;
 	int ret = app_machine_probe_read_hygrometer(index, serial, &temperature, &humidity);
 
 	if (ret == 0) {
 		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, temperature);
 		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, humidity);
-	}
-
-	if (index >= 0 && index < (int)ARRAY_SIZE(m_tmp112_fails) &&
-	    m_tmp112_fails[index] < TMP112_FAIL_LIMIT) {
-		float aux;
-
-		if (app_machine_probe_read_thermometer(index, serial, &aux) == 0) {
-			m_tmp112_fails[index] = 0;
-			mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, aux);
-		} else if (++m_tmp112_fails[index] == TMP112_FAIL_LIMIT) {
-			LOG_WRN("Machine probe idx %d: TMP112 not responding, skipped until rebind",
-				index);
-		}
 	}
 
 	float illuminance;
@@ -150,7 +137,23 @@ static int machine_probe_read(int index, uint64_t *serial, struct app_sensor_w1 
 	if (app_machine_probe_get_tilt_alert(index, serial, &tilt) == 0) {
 		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TILT, tilt ? 1.0f : 0.0f);
 	}
-	return ret;
+
+	/* TMP112 is not fitted on every probe revision. Count its failures only
+	 * while the rest of the probe answers: a probe that is merely unplugged
+	 * must not get its TMP112 skipped for good. */
+	if (index >= 0 && index < (int)ARRAY_SIZE(m_tmp112_fails) &&
+	    m_tmp112_fails[index] < TMP112_FAIL_LIMIT) {
+		float aux;
+
+		if (app_machine_probe_read_thermometer(index, serial, &aux) == 0) {
+			m_tmp112_fails[index] = 0;
+			mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, aux);
+		} else if (out->valid != 0 && ++m_tmp112_fails[index] == TMP112_FAIL_LIMIT) {
+			LOG_WRN("Machine probe idx %d: TMP112 not responding, skipped until rebind",
+				index);
+		}
+	}
+	return out->valid != 0 ? 0 : (ret != 0 ? ret : -EIO);
 }
 
 static const struct app_w1_sensor_type m_types[] = {
@@ -547,17 +550,34 @@ int app_w1_slots_read(int slot, struct app_sensor_w1 *out)
 
 	uint64_t serial;
 	int ret = desc->read(driver_index, &serial, out);
-	if (ret) {
-		return ret;
-	}
 
 	/* A concurrent rescan may have reshuffled the driver indices under us —
 	 * reject a reading whose serial no longer matches the slot's ROM rather
 	 * than report another sensor's values under this slot's identity. */
-	if (serial != rom) {
+	if (ret == 0 && serial != rom) {
+		ret = -ENODEV;
+	}
+	if (ret) {
 		app_sensor_w1_clear(out, desc->sensor_type);
 		out->present = present;
-		return -ENODEV;
+	}
+
+	/* Live presence for Info.w1_slot_state: a bound device that stops
+	 * answering reads "absent" until it answers again. Only OK <-> ABSENT;
+	 * REPLACED / MISMATCH are decided by the rebind. */
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (m_slots[slot].rom == rom) {
+		if (ret && m_slots[slot].state == APP_W1_SLOT_STATE_OK) {
+			m_slots[slot].state = APP_W1_SLOT_STATE_ABSENT;
+			LOG_WRN("Slot %d: device not answering", slot + 1);
+		} else if (!ret && m_slots[slot].state == APP_W1_SLOT_STATE_ABSENT) {
+			m_slots[slot].state = APP_W1_SLOT_STATE_OK;
+			LOG_INF("Slot %d: device answering again", slot + 1);
+		}
+	}
+	k_mutex_unlock(&m_lock);
+	if (ret) {
+		return ret;
 	}
 
 	/* DS18B20 +85.0 C POR-sentinel debounce (#180). The sentinel is in range so

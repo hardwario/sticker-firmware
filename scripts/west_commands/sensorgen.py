@@ -52,7 +52,7 @@ TYPE_KEYS = {"id", "name", "label", "slot", "w1_family", "channels"}
 CHANNEL_KEYS = {
     "ch", "name", "label", "quantity", "unit", "kind", "momentary", "counter",
     "cap", "wire", "history", "range", "liveness", "alarm_only_watchdog", "retired",
-    "pulses",
+    "pulses", "part",
 }
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
@@ -167,6 +167,18 @@ def validate(reg, caps):
                 err.append(f"{cw}: kind rate needs counter: true")
             if c.get("alarm_only_watchdog") and kind != "threshold":
                 err.append(f"{cw}: alarm_only_watchdog only applies to kind threshold")
+            # A 1-Wire device is watched per chip (`part`) plus as a whole
+            # (no-data channel 255); `liveness` is the motherboard's model.
+            if is_mb:
+                if "part" in c:
+                    err.append(f"{cw}: part only applies to 1-Wire channels")
+            else:
+                if c.get("liveness"):
+                    err.append(f"{cw}: liveness only applies to motherboard channels "
+                               f"(1-Wire channels are watched per part)")
+                if not c.get("retired") and not (isinstance(c.get("part"), str)
+                                                 and NAME_RE.match(c["part"])):
+                    err.append(f"{cw}: 1-Wire channel needs `part: <chip name>`")
             if c.get("cap") is not None:
                 if not is_mb:
                     err.append(f"{cw}: cap only applies to motherboard channels")
@@ -226,6 +238,10 @@ def build_model(reg):
     for t in reg["types"]:
         tid_sym = f"APP_SENSOR_TYPE_{c_ident(t['name'])}"
         chans = []
+        parts = []  # chip names in order of first appearance
+        for c in t["channels"]:
+            if c.get("part") and c["part"] not in parts:
+                parts.append(c["part"])
         for c in t["channels"]:
             wire = c["wire"]
             hist = c.get("history")
@@ -252,6 +268,8 @@ def build_model(reg):
                 "hist_scale": float(hist[1]) if hist else 0.0,
                 "range_min": float(rng[0]) if rng else 0.0,
                 "range_max": float(rng[1]) if rng else 0.0,
+                "part": parts.index(c["part"]) if c.get("part") else "APP_SENSOR_NO_PART",
+                "part_name": c.get("part"),
                 "cap": c.get("cap") if c.get("cap") not in pending else None,
                 "cap_pending": c.get("cap") if c.get("cap") in pending else None,
                 # decoder
@@ -270,6 +288,7 @@ def build_model(reg):
             "is_mb": "slot" in t,
             "w1_family": t.get("w1_family", 0),
             "channels": chans,
+            "parts": parts,
         })
     return {
         "version": reg["version"],
@@ -278,6 +297,7 @@ def build_model(reg):
         "types": types,
         "mb": next(t for t in types if t["is_mb"]),
         "w1_types": [t for t in types if not t["is_mb"]],
+        "w1_part_max": max((len(t["parts"]) for t in types if not t["is_mb"]), default=0),
         "pending_caps": pending,
     }
 

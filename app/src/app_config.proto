@@ -513,7 +513,7 @@ message Response {
         reserved 2;                         // was: quantity — replaced by channel (#430)
         uint32 slot     = 1;                // 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
         uint32 type     = 3;                // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)/sensor_mismatch(5)
-        uint32 channel  = 4;                // channel of the slot's sensor type (app_sensor_types.yaml)
+        uint32 channel  = 4;                // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
         optional uint32 sensor_type = 5;    // sensor type id of a 1-Wire slot; absent for slot 0
     }
 
@@ -642,7 +642,9 @@ message AlarmEvent {
 
     // What kind of condition fired (#212). Threshold rules report LOW/HIGH (which
     // bound); state/count/PIR/accel rules report TRIGGER; the no-data watchdog
-    // reports NO_DATA; a 1-Wire slot with a device of another type than its
+    // reports NO_DATA (on a 1-Wire slot: channel 255 = the whole device stopped
+    // answering, else the first channel of the one chip that stopped); a 1-Wire
+    // slot with a device of another type than its
     // sensorN_type reports SENSOR_MISMATCH (#430: rule = 0xFF, no channel,
     // sensor_type = expected type, value = detected type). NONE is unused on the
     // wire (default guard).
@@ -664,7 +666,7 @@ message AlarmEvent {
     optional sint32 value = 5;   // current value × the channel's wire scale, digital 0/1, or counter
     uint32 rule     = 7;         // alarm rule index that fired (stable identity), 0xFF = watchdog, 0xFE = low battery (#430; was `slot`)
     Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
-    uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml)
+    uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
     optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
 }
 

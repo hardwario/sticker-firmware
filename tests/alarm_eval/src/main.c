@@ -1329,7 +1329,8 @@ ZTEST(alarm_eval, test_low_battery_on_battery_channel)
 }
 
 /* The no-data latches are sized per slot; a registry type with more liveness
- * channels than that would silently go unwatched. */
+ * channels (motherboard) or parts (1-Wire) than that would silently go
+ * unwatched. */
 ZTEST(alarm_eval, test_registry_liveness_fits_nodata_latches)
 {
 	for (uint8_t id = 1; id < 255; id++) {
@@ -1347,7 +1348,157 @@ ZTEST(alarm_eval, test_registry_liveness_fits_nodata_latches)
 		if (id == APP_SENSOR_TYPE_MOTHERBOARD) {
 			zassert_true(n <= APP_ALARM_NODATA_MB_MAX, "%s: %d", t->name, n);
 		} else {
-			zassert_true(n <= APP_ALARM_NODATA_W1_MAX, "%s: %d", t->name, n);
+			zassert_equal(n, 0, "%s: 1-Wire is watched per part", t->name);
+			zassert_true(1 + t->part_count <= APP_ALARM_NODATA_W1_MAX, "%s: %d parts",
+				     t->name, t->part_count);
 		}
 	}
+}
+
+/* ---- 1-Wire no-data: whole device vs. one part ------------------------- */
+
+static size_t count_nodata(uint8_t slot, uint8_t channel, uint8_t edge)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < test_alarm_event_count; i++) {
+		const struct app_cmd_alarm_event *e = &test_alarm_events[i];
+
+		if (e->slot == slot && e->type == 4 /* no_data */ && e->channel == channel &&
+		    e->edge == edge) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/* Machine probe in s1 reading every chip but TMP112 (not fitted). `sht` /
+ * `accel` = false leaves that chip's channels NaN. */
+static void mp_reads(bool sht, bool accel)
+{
+	const uint8_t mp = APP_SENSOR_TYPE_MACHINE_PROBE;
+	struct app_sensor_w1 *w = &g_app_sensor_data.w1[0];
+
+	app_sensor_w1_clear(w, mp);
+	w->present = true;
+	if (sht) {
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 21.0f);
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, 40.0f);
+	}
+	w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, 100.0f);
+	w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, 0.1f);
+	if (accel) {
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0.0f);
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, 9.8f);
+	}
+}
+
+static void mp_slot_armed(void)
+{
+	flush_stale_alarms();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_configured[0] = true;
+	test_w1_state[0] = APP_W1_SLOT_STATE_OK;
+	test_w1_expected[0] = APP_SENSOR_TYPE_MACHINE_PROBE;
+	mp_reads(true, true);
+	app_alarm_poll();
+	test_alarm_event_count = 0;
+}
+
+/* Poll, wait past APP_ALARM_NO_DATA_MS, poll again. */
+static void poll_past_nodata(void)
+{
+	app_alarm_poll();
+	k_sleep(K_MSEC(5100));
+	app_alarm_poll();
+}
+
+/* An unplugged probe raises ONE no_data on channel 255 (the device), not one
+ * per channel; it clears when the probe answers again. TMP112, never seen,
+ * stays quiet throughout. */
+ZTEST(alarm_eval, test_w1_unplugged_probe_raises_one_device_alarm)
+{
+	mp_slot_armed();
+
+	app_sensor_w1_clear(&g_app_sensor_data.w1[0], APP_SENSOR_TYPE_NONE);
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_DEVICE, 0), 1, "device no_data");
+	zassert_equal(test_alarm_events[0].sensor_type, APP_SENSOR_TYPE_MACHINE_PROBE);
+	zassert_true(is_active(1, APP_SENSOR_CH_DEVICE));
+	zassert_true(app_alarm_status_flags() & APP_DEVICE_STATUS_ALARM_NO_DATA);
+
+	mp_reads(true, true);
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_DEVICE, 1), 1, "device recovered");
+	zassert_false(is_active(1, APP_SENSOR_CH_DEVICE));
+}
+
+/* One failed chip while the probe still answers raises no_data on that chip's
+ * first channel only (SHT -> temperature, LIS2DH12 -> tilt). */
+ZTEST(alarm_eval, test_w1_failed_part_names_its_first_channel)
+{
+	mp_slot_armed();
+
+	mp_reads(false, true);
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 0), 1, "sht");
+
+	mp_reads(false, false);
+	test_alarm_event_count = 0;
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0), 1, "lis2dh12");
+
+	mp_reads(true, true);
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(test_alarm_event_count, 2, "two events, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 1), 1);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1), 1);
+}
+
+/* A part alarm latched before the probe is unplugged is held (no false
+ * recovery) and the unplug adds only the device alarm; both clear once the
+ * probe answers with that part working again. */
+ZTEST(alarm_eval, test_w1_device_alarm_holds_part_alarm)
+{
+	mp_slot_armed();
+
+	mp_reads(false, true);
+	poll_past_nodata();
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 0), 1);
+
+	app_sensor_w1_clear(&g_app_sensor_data.w1[0], APP_SENSOR_TYPE_NONE);
+	test_alarm_event_count = 0;
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_DEVICE, 0), 1, "device no_data");
+	zassert_true(is_active(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE), "part held");
+
+	mp_reads(true, true);
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(test_alarm_event_count, 2, "two events, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_DEVICE, 1), 1);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 1), 1);
+}
+
+/* A part that has not reported since the slot was armed (chip not fitted) is
+ * not watched, even while the rest of the probe reports. */
+ZTEST(alarm_eval, test_w1_unseen_part_is_not_watched)
+{
+	flush_stale_alarms();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_configured[0] = true;
+	test_w1_state[0] = APP_W1_SLOT_STATE_OK;
+	test_w1_expected[0] = APP_SENSOR_TYPE_MACHINE_PROBE;
+	mp_reads(false, true); /* SHT dead from the start */
+
+	test_alarm_event_count = 0;
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 0, "%zu events", test_alarm_event_count);
 }

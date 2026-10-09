@@ -37,12 +37,12 @@
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
-/* No-data watchdog: a liveness channel (app_sensor_types.yaml) of an enabled
- * sensor that reads NaN continuously for this long is reported as stopped (a
- * no_data AlarmEvent). Drivers already retry transient I2C/1-Wire errors, so a
- * NaN here is a confirmed read failure; the window only rejects a single missed
- * sample. The watchdogs are independent of the 16 alarm rules, so their events
- * carry rule = APP_ALARM_WATCHDOG_RULE. */
+/* No-data watchdog: a motherboard liveness channel (app_sensor_types.yaml) of an
+ * enabled sensor, a 1-Wire part or a whole 1-Wire device that reads NaN
+ * continuously for this long is reported as stopped (a no_data AlarmEvent).
+ * Drivers already retry transient I2C/1-Wire errors, so a NaN here is a
+ * confirmed read failure; the window only rejects a single missed sample. The watchdogs are
+ * independent of the 16 alarm rules, so their events carry rule = APP_ALARM_WATCHDOG_RULE. */
 #define APP_ALARM_NO_DATA_MS    5000
 #define APP_ALARM_WATCHDOG_RULE 0xFF
 
@@ -547,8 +547,9 @@ static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool a
 	alarm_queue(ev);
 }
 
-/* No-data watchdog event: a liveness channel stopped reporting (NaN for
- * >= APP_ALARM_NO_DATA_MS) or recovered. Not tied to a rule (rule = 0xFF). */
+/* No-data watchdog event: a liveness channel, a 1-Wire part (its first
+ * channel) or a whole 1-Wire device (APP_SENSOR_CH_DEVICE) stopped reporting
+ * (NaN for >= APP_ALARM_NO_DATA_MS) or recovered. Not tied to a rule (rule = 0xFF). */
 static void alarm_collect_nodata(uint8_t slot, uint8_t channel, uint8_t sensor_type, bool active)
 {
 	struct app_cmd_alarm_event ev = {
@@ -964,19 +965,27 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 
 /* ---- no-data watchdog (config-driven, independent of the rules) --------- */
 
-/* Every `liveness` channel (app_sensor_types.yaml, #430) of an enabled sensor
- * is watched for "stopped reporting": on the motherboard SHT4x temperature /
- * humidity, pressure and the battery monitor (L-41), on a 1-Wire slot the
- * primary temperature of its type. Digital channels are not liveness channels —
- * a disconnected line still reads a level, it never goes NaN. Latch k of a slot
- * is the k-th liveness channel of the slot's type. */
+/* Motherboard: every `liveness` channel (app_sensor_types.yaml, #430) of an
+ * enabled sensor is watched for "stopped reporting" — SHT4x temperature /
+ * humidity, pressure and the battery monitor (L-41). Digital channels are not
+ * liveness channels — a disconnected line still reads a level, it never goes
+ * NaN. Latch k is the k-th liveness channel.
+ *
+ * 1-Wire slot: latch 0 watches the whole device — no channel at all means it
+ * stopped answering (unplugged, cable cut) and raises ONE no_data alarm on
+ * channel APP_SENSOR_CH_DEVICE instead of one per channel. Latch 1 + p watches
+ * part (chip) p of the slot's type while the device still answers; its alarm
+ * names the part's first channel. A part is only watched once it has reported
+ * since the slot was armed, so a chip that is not fitted on this probe
+ * (e.g. TMP112) never alarms. */
 #define NODATA_SLOTS (APP_ALARM_SLOT_MAX + 1)
 
 struct nodata_latch {
 	uint32_t nan_since; /* k_uptime_get_32() of the first NaN */
 	bool nan;           /* NaN since nan_since */
 	bool active;        /* no_data alarm latched */
-	uint8_t channel;    /* channel it watches, for the deactivate edge */
+	bool seen;          /* 1-Wire part: reported since the slot was armed */
+	uint8_t channel;    /* channel it reports, for the deactivate edge */
 };
 
 /* Flat: the motherboard latches first, then APP_ALARM_NODATA_W1_MAX per slot. */
@@ -1014,7 +1023,7 @@ static bool mismatch_now(int s)
 #endif /* defined(CONFIG_W1) */
 }
 
-/* Type whose liveness channels are watched in `slot` now, or NONE. */
+/* Type whose channels are watched in `slot` now, or NONE. */
 static uint8_t nodata_slot_type(uint8_t slot)
 {
 	if (slot == APP_ALARM_SLOT_MB) {
@@ -1060,6 +1069,34 @@ static void nodata_reset(uint8_t slot, uint8_t type, struct nodata_latch *l, boo
 	}
 	l->nan = false;
 	l->active = false;
+	l->seen = false;
+}
+
+/* Advance latch `l` of `slot` by one sample; `ok` = its input reported. Fires
+ * once the input has been missing for APP_ALARM_NO_DATA_MS. */
+static void nodata_step(uint8_t slot, uint8_t type, struct nodata_latch *l, bool ok, uint32_t now,
+			bool *should_send)
+{
+	if (ok) {
+		l->nan = false;
+		if (l->active) {
+			l->active = false;
+			alarm_collect_nodata(slot, l->channel, type, false); /* recovered */
+			*should_send = true;
+		}
+		return;
+	}
+
+	/* Missing: arm / age the timer; fire once it has been missing long enough. */
+	if (!l->nan) {
+		l->nan = true;
+		l->nan_since = now;
+	}
+	if (!l->active && (now - l->nan_since) >= APP_ALARM_NO_DATA_MS) {
+		l->active = true;
+		alarm_collect_nodata(slot, l->channel, type, true);
+		*should_send = true;
+	}
 }
 
 /* Sensor-mismatch watchdog (#430): an ACTIVATE edge when a slot goes into
@@ -1091,6 +1128,78 @@ static void mismatch_poll(bool *should_send)
 	}
 }
 
+/* Motherboard: latch k = the k-th liveness channel. */
+static void nodata_poll_mb(const struct app_sensor_type *t, struct nodata_latch *latch, int n,
+			   uint32_t now, bool *should_send)
+{
+	int k = 0;
+
+	for (uint8_t ch = 0; ch < t->channel_count; ch++) {
+		const struct app_sensor_channel *c = &t->channels[ch];
+
+		if (!(c->flags & APP_SENSOR_F_LIVENESS) || (c->flags & APP_SENSOR_F_RETIRED)) {
+			continue;
+		}
+		if (k >= n) {
+			break; /* tests/alarm_eval guards the registry against this */
+		}
+
+		struct nodata_latch *l = &latch[k++];
+
+		l->channel = ch;
+		if (!nodata_channel_enabled(c)) {
+			nodata_reset(APP_ALARM_SLOT_MB, t->id, l, should_send);
+			continue;
+		}
+		nodata_step(APP_ALARM_SLOT_MB, t->id, l,
+			    !isnan(read_value(APP_ALARM_SLOT_MB, ch, t->id)), now, should_send);
+	}
+}
+
+/* 1-Wire slot: latch 0 = the whole device, latch 1 + p = part p. */
+static void nodata_poll_w1(uint8_t slot, const struct app_sensor_type *t,
+			   struct nodata_latch *latch, int n, uint32_t now, bool *should_send)
+{
+	uint32_t reported = 0; /* bit ch = channel ch has a value */
+
+	for (uint8_t ch = 0; ch < t->channel_count; ch++) {
+		if (!isnan(read_value(slot, ch, t->id))) {
+			reported |= BIT(ch);
+		}
+	}
+
+	latch[0].channel = APP_SENSOR_CH_DEVICE;
+	nodata_step(slot, t->id, &latch[0], reported != 0, now, should_send);
+
+	for (uint8_t p = 0; p < t->part_count && 1 + p < n; p++) {
+		struct nodata_latch *l = &latch[1 + p];
+		uint32_t mask = 0;
+
+		for (uint8_t ch = 0; ch < t->channel_count; ch++) {
+			const struct app_sensor_channel *c = &t->channels[ch];
+
+			if (c->part == p && !(c->flags & APP_SENSOR_F_RETIRED)) {
+				if (mask == 0) {
+					l->channel = ch; /* the part's first channel */
+				}
+				mask |= BIT(ch);
+			}
+		}
+		if (reported == 0) {
+			/* The device alarm covers every part: hold the part latch as is
+			 * (no second alarm, no false recovery) until it answers again. */
+			l->nan = false;
+			continue;
+		}
+		if (reported & mask) {
+			l->seen = true;
+		}
+		if (l->seen) {
+			nodata_step(slot, t->id, l, (reported & mask) != 0, now, should_send);
+		}
+	}
+}
+
 /* Evaluate the no-data watchdog over every liveness channel. Caller holds
  * g_app_sensor_data_lock (read_value reads g_app_sensor_data). */
 static void nodata_poll(bool *should_send)
@@ -1112,46 +1221,14 @@ static void nodata_poll(bool *should_send)
 		}
 
 		const struct app_sensor_type *t = app_sensor_type_get(type);
-		int k = 0;
 
-		for (uint8_t ch = 0; t != NULL && ch < t->channel_count; ch++) {
-			const struct app_sensor_channel *c = &t->channels[ch];
-
-			if (!(c->flags & APP_SENSOR_F_LIVENESS) ||
-			    (c->flags & APP_SENSOR_F_RETIRED)) {
-				continue;
-			}
-			if (k >= n) {
-				break; /* tests/alarm_eval guards the registry against this */
-			}
-
-			struct nodata_latch *l = &latch[k++];
-
-			l->channel = ch;
-			if (!nodata_channel_enabled(c)) {
-				nodata_reset(slot, type, l, should_send);
-				continue;
-			}
-			if (!isnan(read_value(slot, ch, type))) {
-				l->nan = false;
-				if (l->active) {
-					l->active = false;
-					alarm_collect_nodata(slot, ch, type, false); /* recovered */
-					*should_send = true;
-				}
-				continue;
-			}
-
-			/* NaN: arm / age the timer; fire once it has been NaN long enough. */
-			if (!l->nan) {
-				l->nan = true;
-				l->nan_since = now;
-			}
-			if (!l->active && (now - l->nan_since) >= APP_ALARM_NO_DATA_MS) {
-				l->active = true;
-				alarm_collect_nodata(slot, ch, type, true);
-				*should_send = true;
-			}
+		if (t == NULL) {
+			continue;
+		}
+		if (slot == APP_ALARM_SLOT_MB) {
+			nodata_poll_mb(t, latch, n, now, should_send);
+		} else {
+			nodata_poll_w1(slot, t, latch, n, now, should_send);
 		}
 	}
 }
