@@ -78,17 +78,6 @@ int app_w1_slots_rebind(void);
  * a read error. */
 int app_w1_slots_read(int slot, struct app_sensor_w1 *out);
 
-/* Encode a slot's reading into its telemetry SensorReading (Telemetry field 27),
- * dispatched to the slot type's driver — the caller (composer) owns the slot
- * index, type and the repeated array; this fills only the value fields the
- * driver provides (a Dallas slot fills temperature, a machine-probe the whole
- * cluster). NaN quantities stay absent. `sr` is a nanopb SensorReading
- * (forward-declared so this header stays protobuf-free; the dispatch lives in
- * app_w1_slots.c, the HW drivers never see the wire schema). No-op for an
- * unknown/empty type. */
-struct _SensorReading;
-void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, struct _SensorReading *sr);
-
 /* Human-readable name for a slot type ("dallas", "machine-probe", "empty"),
  * from the sensor-type registry. */
 const char *app_w1_slot_type_name(enum app_w1_slot_type type);

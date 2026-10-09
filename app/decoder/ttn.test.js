@@ -554,59 +554,94 @@ test("fPort-2 telemetry: pressure/altitude/illuminance numeric scaling", () => {
 });
 
 // 1-Wire slots are a repeated SensorReading on field 27 (tag 0xda 0x01,
-// length-delimited). slot is 1-based (matches sensorN / `w1 list`). type travels
-// with each reading; the firmware emits one per populated slot and may split the
-// list across frames. Two readings here:
-//   reading A: slot=3 type=2(machine-probe) temp=23.65 hum=54 flags=tilt
-//     08 03 | 10 02 | 18 fa 24 | 20 6c | 28 01   (11 B body)
-//   reading B: slot=1 type=1(dallas) temp=21.5 (temperature-only)
-//     08 01 | 10 01 | 18 cc 21                   (7 B body)
-test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
+// length-delimited), #430 channel model: slot=1 (1-based), type=2, valid=11
+// (bit ch = channel present), value=12 (packed sint32 of the set bits,
+// ascending ch, phys x wire scale). Every channel of the type is listed in
+// `values` (null when absent) with its unit in `units`. Two readings here:
+//   A: slot=3 machine-probe, valid 0x23 (temperature, humidity, tilt)
+//      08 03 | 10 03 | 58 23 | 62 05 fa24 d801 02          (13 B body)
+//   B: slot=1 dallas, valid 0x01, temperature 21.5
+//      08 01 | 10 02 | 58 01 | 62 02 cc21                  (10 B body)
+const MP_UNITS = {
+  temperature: "degC", humidity: "%RH", "temperature-aux": "degC", illuminance: "lx",
+  "magnetic-field": "mT", tilt: "bool", "accel-x": "m/s2", "accel-y": "m/s2", "accel-z": "m/s2",
+};
+test("fPort-2 telemetry decodes SensorReading valid mask + packed values (#430)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da010b0803100318fa24206c2801da01070801100218cc21"),
+    bytes: hex("01da010d0803100358236205fa24d80102da010a0801100258016202cc21"),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 2);
   assert.deepEqual(got.w1_sensors[0], {
     slot: 3, type: 3, type_name: "machine-probe",
-    temperature: 23.65, humidity: 54, tilt_alert: true,
+    values: {
+      temperature: 23.65, humidity: 54, "temperature-aux": null, illuminance: null,
+      "magnetic-field": null, tilt: 1, "accel-x": null, "accel-y": null, "accel-z": null,
+    },
+    units: MP_UNITS,
   });
-  assert.equal(got.w1_sensors[1].slot, 1);
-  assert.equal(got.w1_sensors[1].type_name, "dallas");
-  assert.equal(got.w1_sensors[1].temperature, 21.5);
-  assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
+  assert.deepEqual(got.w1_sensors[1], {
+    slot: 1, type: 2, type_name: "dallas",
+    values: { temperature: 21.5 }, units: { temperature: "degC" },
+  });
 });
 
-// Machine-probe sensor cluster: a single reading carrying the full set
-// (slot=1 type=3 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
-//   08 01 | 10 03 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
-test("fPort-2 telemetry decodes machine-probe sensor cluster (fields 6-10)", () => {
+// Machine-probe, all nine channels (incl. TMP112 temperature-aux, ch 2):
+// 21.5 degC, 45 %RH, 21.25 degC, 27 lx, 0.062 mT, tilt 0, 0.38/-9.35/-0.54 m/s2.
+test("fPort-2 telemetry decodes every machine-probe channel with its scale (#430)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da011208011003 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
+    bytes: hex("01da01160801100358ff03620dcc21b4019a21367c004ccd0e6b"),
     fPort: 2,
   }).data;
-  assert.equal(got.w1_sensors.length, 1);
-  assert.deepEqual(got.w1_sensors[0], {
-    slot: 1, type: 3, type_name: "machine-probe",
-    temperature: 21.5, illuminance: 27, magnetic_field: 0.062,
-    accel_x: 0.38, accel_y: -9.35, accel_z: -0.54,
+  assert.deepEqual(got.w1_sensors[0].values, {
+    temperature: 21.5, humidity: 45, "temperature-aux": 21.25, illuminance: 27,
+    "magnetic-field": 0.062, tilt: 0, "accel-x": 0.38, "accel-y": -9.35, "accel-z": -0.54,
+  });
+  assert.deepEqual(got.w1_sensors[0].units, MP_UNITS);
+});
+
+// A slot whose probe is absent or mismatched is sent with valid = 0 (slot +
+// type only); every channel of that type decodes to null.
+//   da 01 04 | 08 01 10 03          (slot 1, machine-probe, no values)
+//   da 01 04 | 08 02 10 02          (slot 2, dallas, no values)
+test("fPort-2 telemetry: valid = 0 SensorReading decodes to nulls (#430)", () => {
+  const got = codec.decodeUplink({ bytes: hex("01da010408011003da010408021002"), fPort: 2 }).data;
+  assert.equal(got.w1_sensors.length, 2);
+  assert.deepEqual(got.w1_sensors[0].values, {
+    temperature: null, humidity: null, "temperature-aux": null, illuminance: null,
+    "magnetic-field": null, tilt: null, "accel-x": null, "accel-y": null, "accel-z": null,
+  });
+  assert.deepEqual(got.w1_sensors[1], {
+    slot: 2, type: 2, type_name: "dallas", values: { temperature: null }, units: { temperature: "degC" },
   });
 });
 
-// #430 step 3: a slot whose probe is absent or mismatched is sent with slot +
-// type only; every value of that type decodes to null. A dallas slot with a
-// value keeps the other keys undefined (unchanged).
-//   da 01 04 | 08 01 10 03          (slot 1, machine-probe, no values)
-//   da 01 04 | 08 02 10 02          (slot 2, dallas, no values)
-test("fPort-2 telemetry: type-only SensorReading decodes to nulls (#430)", () => {
-  const got = codec.decodeUplink({ bytes: hex("01da010408011003da010408021002"), fPort: 2 }).data;
-  assert.equal(got.w1_sensors.length, 2);
-  assert.deepEqual(got.w1_sensors[0], {
-    slot: 1, type: 3, type_name: "machine-probe",
-    temperature: null, humidity: null, tilt_alert: null, illuminance: null,
-    magnetic_field: null, accel_x: null, accel_y: null, accel_z: null,
-  });
-  assert.deepEqual(got.w1_sensors[1], { slot: 2, type: 2, type_name: "dallas", temperature: null });
+// A channel newer than this decoder (dallas ch 9) still keeps the following
+// values aligned and surfaces raw as "ch9"; negative values round-trip.
+test("fPort-2 telemetry: unknown channel decodes raw as chN (#430)", () => {
+  const got = codec.decodeUplink({ bytes: hex("01da010c080410025881046203b3100e"), fPort: 2 }).data;
+  assert.deepEqual(got.w1_sensors[0].values, { temperature: -10.5, ch9: 7 });
+});
+
+// Every generated (type, channel) of a 1-Wire type survives an encode/decode
+// round trip at its wire scale.
+test("fPort-2 telemetry: every 1-Wire (type, channel) round-trips (#430)", () => {
+  const zz = (n) => (n < 0 ? (-n * 2 - 1) : n * 2);
+  const varint = (n) => { const o = []; do { let b = n % 128; n = Math.floor(n / 128); o.push(n ? b | 128 : b); } while (n); return o; };
+  for (const id of [2, 3]) {
+    const t = codec.sensorTypes[id];
+    t.ch.forEach((c, ch) => {
+      if (c.r) return;
+      const phys = c.u === "bool" ? 1 : 12.5;
+      const raw = Math.round(phys * c.s);
+      const packed = varint(zz(raw));
+      const body = [0x08, 1, 0x10, id, 0x58, ...varint(2 ** ch), 0x62, packed.length, ...packed];
+      const bytes = [0x01, 0xda, 0x01, body.length, ...body];
+      const got = codec.decodeUplink({ bytes, fPort: 2 }).data.w1_sensors[0];
+      assert.equal(got.values[c.n], raw / c.s, `${t.name}/${c.n}`);
+      assert.equal(got.units[c.n], c.u, `${t.name}/${c.n} unit`);
+    });
+  }
 });
 
 // Legacy flat 1-Wire fields (10-17, pre-SensorReading firmware) stay decodable

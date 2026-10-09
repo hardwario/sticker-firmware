@@ -811,31 +811,31 @@ var _W1_SLOT_TYPES = (function () {
   return m;
 })();
 
-// SensorReading value keys per slot type. A reading that carries only slot +
-// type (probe absent or mismatched, #430) decodes to null for each of them.
-var _SR_KEYS = {
-  2: ["temperature"],
-  3: ["temperature", "humidity", "tilt_alert", "illuminance", "magnetic_field",
-    "accel_x", "accel_y", "accel_z"]
-};
-
 // Info.w1_slot_state (field 19, #430): enum app_w1_slot_state.
 var _W1_SLOT_STATES = ["none", "ok", "absent", "replaced", "mismatch"];
 
-// One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
-// sensorN config / `w1 list`), type=2,
-// temperature=3 (sint32 ×100), humidity=4 (uint ×2), flags=5 (bit0 tilt),
-// illuminance=6 (uint lux), magnetic_field=7 (sint µT → mT /1000), accel
-// x/y/z=8/9/10 (sint m/s² ×100). Machine-probe carries 6-10; a sub-sensor that
-// did not respond is absent. Absent quantities stay undefined. `bytes[start..end)`
-// is the submessage body.
+// One SensorReading submessage (Telemetry field 27, #430 channel model):
+// slot=1 (1-based, matches sensorN config / `w1 list`), type=2 (sensor type
+// id), valid=11 (bit ch = channel ch has a value), value=12 (packed sint32, one
+// per set bit in ascending ch, each phys x channel wire scale). Every channel
+// of the type appears in `values` (null when its bit is clear, so a slot in
+// mismatch or with its probe absent is all null) with its unit in `units`.
+// `bytes[start..end)` is the submessage body.
 function _decodeSensorReading(bytes, start, end) {
   var sr = {};
+  var valid = 0;
+  var raw = [];
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    if (field === 12 && wire === 2) { // packed values
+      var pl = _pbReadVarint(bytes, pos); pos = pl.next;
+      var pend = pos + pl.value;
+      while (pos < pend) { var pv = _pbReadVarint(bytes, pos); pos = pv.next; raw.push(_pbZigzag(pv.value)); }
+      continue;
+    }
     if (wire !== 0) { // forward-compat: skip unknown non-varint
       if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
       if (wire === 5) { pos += 4; continue; }
@@ -846,20 +846,27 @@ function _decodeSensorReading(bytes, start, end) {
     switch (field) {
       case 1: sr.slot = v.value; break;
       case 2: sr.type = v.value; sr.type_name = _W1_SLOT_TYPES[v.value] || "unknown"; break;
-      case 3: { var _t = _pbZigzag(v.value); sr.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
-      case 4: sr.humidity = v.value / 2; break;
-      case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
-      case 6: sr.illuminance = v.value; break;
-      case 7: sr.magnetic_field = _pbZigzag(v.value) / 1000; break; // mT
-      case 8: sr.accel_x = _pbZigzag(v.value) / 100; break;         // m/s²
-      case 9: sr.accel_y = _pbZigzag(v.value) / 100; break;
-      case 10: sr.accel_z = _pbZigzag(v.value) / 100; break;
+      case 11: valid = v.value; break;
+      case 12: raw.push(_pbZigzag(v.value)); break; // unpacked encoding
       default: break;
     }
   }
-  var keys = _SR_KEYS[sr.type] || [];
-  var hasValue = keys.some(function (k) { return sr[k] !== undefined; });
-  if (!hasValue) { keys.forEach(function (k) { sr[k] = null; }); }
+  var t = _SENSOR_TYPES[sr.type];
+  sr.values = {};
+  sr.units = {};
+  var k = 0;
+  for (var ch = 0; ch < 32; ch++) {
+    var c = t ? t.ch[ch] : undefined;
+    var has = ((valid >>> ch) & 1) === 1;
+    var r = has ? raw[k++] : undefined;
+    if (c === undefined) {
+      if (has) sr.values["ch" + ch] = r; // channel newer than this decoder: raw
+      continue;
+    }
+    if (c.r) continue;
+    sr.values[c.n] = (r === undefined) ? null : r / c.s;
+    sr.units[c.n] = c.u;
+  }
   return sr;
 }
 

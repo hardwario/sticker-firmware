@@ -72,6 +72,10 @@ void app_sensor_w1_clear(struct app_sensor_w1 *s, uint8_t type);
 void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, uint8_t ch,
 		      float value);
 
+/* Value of channel `c` as sent on the wire (telemetry SensorReading.value):
+ * round(phys * wire scale), or the raw integer of a counter channel. */
+int32_t app_sensor_wire_value(const struct app_sensor_channel *c, union app_sensor_value v);
+
 /* Transitional (#430 step 2): a 1-Wire slot value addressed by its
  * machine-probe channel number, for the quantity-based readers (alarm rules,
  * history, ATS) until they address channels by the slot's own type (steps

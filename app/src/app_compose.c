@@ -48,7 +48,6 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
  * alarm state rides here. Bits 1..6 are in use today (varint stays 1 B). */
 #define SYSTEM_FLAG_ALARM_SHIFT 1
 #define SYSTEM_FLAG_ALARM_MASK  0xFFu
-/* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
 /* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
  * migration — notify is now an alarm rule, not a per-counter telemetry flag.
  * ACTIVE stays at bit 2 to keep the wire bit position stable. */
@@ -153,6 +152,32 @@ static bool m_active;
  * compose state-machine side effects, so it backs both the LoRaWAN snapshot
  * (fill_snapshot) and the synchronous Sample response (app_compose_snapshot).
  * `boot` sets the one-shot system boot flag. */
+#if defined(CONFIG_W1)
+BUILD_ASSERT(ARRAY_SIZE(((SensorReading *)0)->value) >= APP_SENSOR_W1_CH_MAX,
+	     "SensorReading.value max_count must cover APP_SENSOR_W1_CH_MAX");
+
+/* A slot's reading as the channel model on the wire (#430, D2 = c): bit ch of
+ * `valid` per channel holding a value, and the values of those channels in
+ * ascending ch order, each scaled by its registry wire scale. */
+static void encode_sensor_reading(SensorReading *sr, const struct app_sensor_w1 *r)
+{
+	const struct app_sensor_type *type = app_sensor_type_get(sr->type);
+
+	if (type == NULL || r->type != sr->type) {
+		return;
+	}
+	for (uint8_t ch = 0; ch < type->channel_count && ch < ARRAY_SIZE(sr->value); ch++) {
+		const struct app_sensor_channel *c = &type->channels[ch];
+
+		if (!(r->valid & BIT(ch)) || (c->flags & APP_SENSOR_F_RETIRED)) {
+			continue;
+		}
+		sr->valid |= BIT(ch);
+		sr->value[sr->value_count++] = app_sensor_wire_value(c, r->v[ch]);
+	}
+}
+#endif /* defined(CONFIG_W1) */
+
 static void fill_telemetry(Telemetry *t, bool boot)
 {
 	memset(t, 0, sizeof(*t));
@@ -238,13 +263,12 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	}
 
 	/* 1-wire ROM-bound slots → one repeated SensorReading per slot with an
-	 * expected type (sensorN_type, #430). The composer owns the slot index,
-	 * type and the repeated array; the per-type value fields are filled by the
-	 * slot's driver via the registry vtable (app_w1_slot_encode), so adding a
-	 * sensor type needs no change here. A slot whose probe is absent or
-	 * mismatched is still sent, with no values, so the decoder emits null.
+	 * expected type (sensorN_type, #430): the valid mask plus the values of the
+	 * present channels, scaled by the registry (encode_sensor_reading), so
+	 * adding a sensor type needs no change here. A slot whose probe is absent
+	 * or mismatched is still sent with valid = 0, so the decoder emits null.
 	 * The composer may split the list across frames (each reading is
-	 * indivisible). Absent quantities stay omitted. */
+	 * indivisible). */
 #if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
@@ -260,7 +284,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			sr->slot = i + 1;
 			sr->type = type;
 			if (app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_OK) {
-				app_w1_slot_encode(i, &d.w1[i], sr);
+				encode_sensor_reading(sr, &d.w1[i]);
 			}
 			t->w1_sensors_count++;
 		}

@@ -728,16 +728,12 @@ message Telemetry {
 // probe is absent or mismatched (#430) carries only slot + type. Fields 6-10
 // (lux/field/accel) are machine-probe only.
 message SensorReading {
-    uint32 slot              = 1;   // 1-based slot (matches sensorN config / `w1 list`)
-    uint32 type              = 2;   // sensor type id (app_sensor_types.yaml)
-    optional sint32 temperature = 3;  // degC x100
-    optional uint32 humidity    = 4;  // %RH  x2
-    optional uint32 flags       = 5;  // bit0 tilt (machine-probe only)
-    optional uint32 illuminance    = 6;  // lux           (OPT3001)
-    optional sint32 magnetic_field = 7;  // uT (mT x1000) (Si7210)
-    optional sint32 accel_x        = 8;  // m/s^2 x100    (LIS2DH12)
-    optional sint32 accel_y        = 9;  // m/s^2 x100
-    optional sint32 accel_z        = 10; // m/s^2 x100
+    reserved 3 to 10;                        // typed per-quantity fields, replaced by the channel model (#430)
+    uint32 slot             = 1;             // 1-based slot (matches sensorN config / `w1 list`)
+    uint32 type             = 2;             // sensor type id (app_sensor_types.yaml)
+    uint32 valid            = 11;            // bit ch = channel ch of `type` has a value
+    repeated sint32 value   = 12 [packed = true]; // values of the set bits, ascending ch,
+                                             // each round(phys * channel wire scale)
 }
 
 // Provisioning claim identity (#247/#415): {serial_number, claim_token}. Served

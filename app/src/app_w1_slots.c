@@ -12,12 +12,6 @@
 #include "app_sensor.h"
 #include "app_sensor_types.h"
 
-/* Nanopb includes — this framework layer owns the slot→telemetry encode so the
- * HW transport drivers (app_ds18b20, app_machine_probe) never see the wire
- * schema. Mirrors the chester serial app, where the per-device CBOR encode lives
- * in app_cbor.c, not in the device drivers. */
-#include "src/app_config.pb.h"
-
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -37,21 +31,16 @@ LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 /* Sensor-type registry — the extensibility point.                        */
 /*                                                                        */
 /* Adding a new 1-Wire sensor type is one entry in m_types[] plus its     */
-/* thin read + encode wrappers below (and a transport driver + devicetree */
-/* nodes, which any new hardware needs regardless). No changes to the slot */
-/* table, rebind, scan, read dispatch, or the telemetry composer — the     */
-/* per-type behaviour (read, encode) lives behind this vtable.             */
+/* thin read wrapper below, its channels in app_sensor_types.yaml (and a  */
+/* transport driver + devicetree nodes, which any new hardware needs      */
+/* regardless). No changes to the slot table, rebind, scan, read dispatch */
+/* or the telemetry composer, which encodes channels from the registry.   */
 /* ====================================================================== */
 
 /* Fill the channels of *out (already cleared to NaN for this type) for device
  * `index` of this type and return its ROM serial in *serial. Channels the read
  * does not produce stay NaN. Returns 0 or negative errno. */
 typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_sensor_w1 *out);
-
-/* Encode a reading's channels into its telemetry SensorReading. The caller
- * owns slot/type/array; this fills only the fields the type provides, each
- * omitted when NaN. */
-typedef void (*w1_encode_fn)(const struct app_sensor_w1 *r, SensorReading *sr);
 
 struct app_w1_sensor_type {
 	enum app_w1_slot_type type;
@@ -61,11 +50,7 @@ struct app_w1_sensor_type {
 	int (*scan)(void);   /* re-enumerate this transport's devices */
 	int (*get_count)(void);
 	w1_read_fn read;
-	w1_encode_fn encode;
 };
-
-/* Telemetry SensorReading.flags bit positions (mirrored in ttn.js). */
-#define MP_FLAG_TILT BIT(0)
 
 /* DS18B20 plausibility (#180). The Zephyr driver CRC-checks the scratchpad, so a
  * *missing* sensor errors out — but the part's power-on-reset / brownout /
@@ -168,62 +153,11 @@ static int machine_probe_read(int index, uint64_t *serial, struct app_sensor_w1 
 	return ret;
 }
 
-/* sint32 telemetry "no data" sentinel — keep in sync with app_compose.c
- * (TM_S32_NA) and the codec (ttn.js _TM_S32_NA). */
-#define TM_S32_NA INT32_MIN
-
-/* Dallas (DS18B20): temperature only. A NaN reading (sensor disconnected or
- * faulted) is sent as TM_S32_NA so the decoder surfaces temperature=null,
- * rather than dropping the field. */
-static void dallas_encode(const struct app_sensor_w1 *r, SensorReading *sr)
-{
-	float t = r->v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f;
-
-	sr->has_temperature = true;
-	sr->temperature = isnan(t) ? TM_S32_NA : (int32_t)(t * 100.0f);
-}
-
-/* Machine probe: the full sensor cluster. flags (tilt) is a real digital state
- * sent every report per #80; the analog quantities are omitted individually when
- * their sub-sensor did not respond (NaN). */
-static void machine_probe_encode(const struct app_sensor_w1 *r, SensorReading *sr)
-{
-#define MP(NAME) (r->v[APP_SENSOR_CH_MACHINE_PROBE_##NAME].f)
-	/* The TMP112 (temperature-aux) has no telemetry field until the
-	 * SensorReading channel encoding lands (#430 step 5). */
-	sr->has_temperature = true;
-	sr->temperature = isnan(MP(TEMPERATURE)) ? TM_S32_NA : (int32_t)(MP(TEMPERATURE) * 100.0f);
-	if (!isnan(MP(HUMIDITY))) {
-		sr->has_humidity = true;
-		sr->humidity = (uint32_t)(MP(HUMIDITY) * 2.0f);
-	}
-	sr->has_flags = true;
-	sr->flags = MP(TILT) == 1.0f ? MP_FLAG_TILT : 0;
-	if (!isnan(MP(ILLUMINANCE))) {
-		sr->has_illuminance = true;
-		sr->illuminance = (uint32_t)MP(ILLUMINANCE);
-	}
-	if (!isnan(MP(MAGNETIC_FIELD))) {
-		sr->has_magnetic_field = true;
-		sr->magnetic_field = (int32_t)(MP(MAGNETIC_FIELD) * 1000.0f);
-	}
-	if (!isnan(MP(ACCEL_X)) && !isnan(MP(ACCEL_Y)) && !isnan(MP(ACCEL_Z))) {
-		sr->has_accel_x = true;
-		sr->accel_x = (int32_t)(MP(ACCEL_X) * 100.0f);
-		sr->has_accel_y = true;
-		sr->accel_y = (int32_t)(MP(ACCEL_Y) * 100.0f);
-		sr->has_accel_z = true;
-		sr->accel_z = (int32_t)(MP(ACCEL_Z) * 100.0f);
-	}
-#undef MP
-}
-
 static const struct app_w1_sensor_type m_types[] = {
 	{APP_W1_SLOT_DALLAS, APP_SENSOR_TYPE_DALLAS, 0x28, "dallas", app_ds18b20_scan,
-	 app_ds18b20_get_count, dallas_read, dallas_encode},
+	 app_ds18b20_get_count, dallas_read},
 	{APP_W1_SLOT_MACHINE_PROBE, APP_SENSOR_TYPE_MACHINE_PROBE, 0x19, "machine-probe",
-	 app_machine_probe_scan, app_machine_probe_get_count, machine_probe_read,
-	 machine_probe_encode},
+	 app_machine_probe_scan, app_machine_probe_get_count, machine_probe_read},
 };
 
 /* The slot type enum is the registry type id (#430 step 3). */
@@ -651,23 +585,6 @@ int app_w1_slots_read(int slot, struct app_sensor_w1 *out)
 		k_mutex_unlock(&m_lock);
 	}
 	return 0;
-}
-
-/* ---- telemetry encode dispatch ------------------------------------------ */
-
-void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, SensorReading *sr)
-{
-	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || r == NULL || sr == NULL) {
-		return;
-	}
-
-	k_mutex_lock(&m_lock, K_FOREVER);
-	const struct app_w1_sensor_type *desc = m_slots[slot].desc;
-	k_mutex_unlock(&m_lock);
-
-	if (desc != NULL && desc->encode != NULL) {
-		desc->encode(r, sr);
-	}
 }
 
 /* ---- accessors ---------------------------------------------------------- */

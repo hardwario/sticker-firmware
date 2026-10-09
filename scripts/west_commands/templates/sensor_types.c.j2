@@ -155,6 +155,14 @@ void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, 
 	*valid |= BIT(ch);
 }
 
+int32_t app_sensor_wire_value(const struct app_sensor_channel *c, union app_sensor_value v)
+{
+	if (c->flags & APP_SENSOR_F_COUNTER) {
+		return (int32_t)v.u;
+	}
+	return (int32_t)lroundf(v.f * c->wire_scale);
+}
+
 float app_sensor_w1_f(const struct app_sensor_w1 *s, uint8_t mp_ch)
 {
 	if (s->type == APP_SENSOR_TYPE_MACHINE_PROBE && mp_ch < APP_SENSOR_CH_MACHINE_PROBE_COUNT) {
