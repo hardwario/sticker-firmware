@@ -117,20 +117,20 @@ def test_normalize_access_derives_internal_flags():
          "readable": ["shell"], "writable": ["shell"]},
         # claim: readable everywhere, write-once shell only; root bytes -> callback
         {"name": "claim_token", "proto_group": "root", "type": "bytes",
-         "readable": ["shell", "nfc", "lrw"], "writable": ["shell"]},
+         "readable": ["shell", "nfc", "radio"], "writable": ["shell"]},
         # key: NFC-readable only (never over LoRaWAN), writable everywhere
         {"name": "lrw_nwkkey", "proto_group": "lorawan", "type": "bytes",
          "readable": ["shell", "nfc"]},
         # packed slot: no shell entry, air read/write only
         {"name": "alarm_0", "proto_group": "alarms", "type": "bytes",
-         "readable": ["nfc", "lrw"], "writable": ["nfc", "lrw"]},
-        # lorawan provisioning field: readable everywhere, write blocked over lrw
-        # (writable:[shell,nfc]) -> no_write_lrw only (M-3)
+         "readable": ["nfc", "radio"], "writable": ["nfc", "radio"]},
+        # lorawan provisioning field: readable everywhere, write blocked over radio
+        # (writable:[shell,nfc]) -> no_write_lrw (the radio gate) only (M-3)
         {"name": "lrw_region", "proto_group": "lorawan", "type": "int",
          "writable": ["shell", "nfc"]},
         # plain param: lists omitted -> all transports, normal flags
         {"name": "interval_report", "proto_group": "application", "type": "int"},
-        # #316 vendor-only writable: writable:[vendor] blocks lrw+nfc writes and,
+        # #316 vendor-only writable: writable:[vendor] blocks radio+nfc writes and,
         # since shell is not in writable, makes the shell setter read-only; still
         # readable (dumpable) everywhere because readable defaults to all.
         {"name": "vendor_reset_allow", "proto_group": "application", "type": "bool",
@@ -164,7 +164,7 @@ def test_normalize_access_derives_internal_flags():
     assert "no_write_lrw" not in by["interval_report"]  # writable everywhere
     assert "no_write_nfc" not in by["interval_report"]
 
-    # #316 vendor-only write gate: writable:[vendor] blocks lrw + nfc (leaving only
+    # #316 vendor-only write gate: writable:[vendor] blocks radio + nfc (leaving only
     # the vendor transport in the negative-flag model) and, since shell is not in
     # writable, makes the shell setter read-only; still air-readable (dump).
     assert by["vendor_reset_allow"]["no_write_lrw"] is True
@@ -348,7 +348,7 @@ def test_migration_preserves_factory_fields(workdir):
     # The whole point of #87: identity/credentials are flagged in the YAML.
     assert {p["name"] for p in preserved} >= {
         "secret_key", "serial_number", "nonce_counter",
-        "lrw_deveui", "lrw_joineui", "lrw_appkey", "lrw_nwkkey",
+        "radio_deveui", "lrw_joineui", "radio_appkey", "lrw_nwkkey",
         "lrw_devaddr", "lrw_nwkskey", "lrw_appskey",
     }
 
@@ -410,6 +410,50 @@ def test_persistent_rejects_invalid_op_and_stray_preserve_on_reset(tmp_path):
     # Sanity: every real param in the committed YAML still validates clean.
     for p in cfg["parameters"]:
         configen.Configen()._validate_param(p)
+
+
+def test_stored_as_keeps_the_nvs_key_of_a_renamed_param(workdir):
+    """radio_deveui / radio_appkey were lrw_deveui / lrw_appkey (2026-09-28): the
+    value loads from and saves to the old settings key, the shell takes the new
+    name, and the proto field keeps its old name and number."""
+    _run_configen(workdir)
+    c = (workdir / "app_config.c").read_text()
+    proto = (workdir / "app_config.proto").read_text()
+    for new, old, field, num in (("radio_deveui", "lrw-deveui", "deveui", 6),
+                                 ("radio_appkey", "lrw-appkey", "appkey", 9)):
+        assert f'SETTINGS_SET("{old}", m_app_config.{new},' in c
+        assert f'EXPORT_FUNC("{old}", m_app_config.{new},' in c
+        assert f"SHELL_CMD_ARG({new.replace('_', '-')}, NULL," in c
+        assert f'"{new.replace("_", "-")}"' not in c.split("h_set")[1].split("return -ENOENT")[0]
+        assert f" {field} = {num};" in proto
+    # A param without stored_as is stored under its own shell name.
+    assert 'SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui,' in c
+
+
+def test_stored_as_is_validated():
+    v = configen.Configen()._validate_param
+    for bad in ("lrw-deveui", "LrwDevEui", "", 5):
+        with pytest.raises(SystemExit):
+            v({"name": "radio_deveui", "type": "bool", "stored_as": bad})
+    with pytest.raises(SystemExit):
+        v({"name": "radio_deveui", "type": "bool", "stored_as": "radio_deveui"})
+    v({"name": "radio_deveui", "type": "bool", "stored_as": "lrw_deveui"})
+
+
+def test_stored_as_must_not_collide():
+    ok = [{"name": "radio_deveui", "stored_as": "lrw_deveui"}, {"name": "lrw_joineui"}]
+    configen.check_nvs_keys(ok)
+    for clash in ([{"name": "radio_deveui", "stored_as": "lrw_deveui"}, {"name": "lrw_deveui"}],
+                  [{"name": "a", "stored_as": "x"}, {"name": "b", "stored_as": "x"}]):
+        with pytest.raises(SystemExit):
+            configen.check_nvs_keys(clash)
+
+
+def test_configen_run_rejects_an_nvs_key_clash(workdir):
+    y = workdir / "app_config.yml"
+    y.write_text(y.read_text().replace("stored_as: lrw_appkey", "stored_as: lrw_joineui", 1))
+    with pytest.raises(SystemExit):
+        _run_configen(workdir)
 
 
 def test_h_commit_clamps_loaded_values(workdir):
@@ -564,7 +608,9 @@ def test_build_commands_model_shape():
     assert by_name["reboot"]["action"] == "REBOOT"
     assert by_name["set_param"]["kind"] == "handler"
     # transport gating + no-immediate-response flags
-    assert by_name["force_send"]["lrw_only"] is True
+    # force_send is radio-agnostic since P2P parity (was [lrw] only).
+    assert by_name["force_send"]["lrw_only"] is False
+    assert by_name["force_send"]["transports"] == ["lrw", "p2p"]
     assert by_name["force_send"]["emits_response"] is False
     assert by_name["clock_sync"]["emits_response"] is False  # info_deferred
     assert by_name["set_param"]["lrw_only"] is False
@@ -662,10 +708,10 @@ def test_dispatch_template_routes_every_command():
     assert "tp != APP_CMD_TRANSPORT_VENDOR" in ssk
 
 
-def test_dump_lrw_false_marks_lrw_skip_rows():
-    """`dump_lrw: false` keeps a field in DUMP_FIELDS (NFC/shell/vendor dumps and
-    get_param still read it) but flags it lrw_skip, so a LoRaWAN get_config leaves
-    it out — the 1-Wire slot ROMs are the committed users of it."""
+def test_dump_radio_false_marks_lrw_skip_rows():
+    """`dump_radio: false` keeps a field in DUMP_FIELDS (NFC/shell/vendor dumps and
+    get_param still read it) but flags it lrw_skip, so a radio (LoRaWAN / P2P)
+    get_config leaves it out — the 1-Wire slot ROMs are the committed users of it."""
     cfg = _load_config()
     configen.normalize_access(cfg)
     rows = configen.build_dump_fields_model(cfg)["dump_fields"]

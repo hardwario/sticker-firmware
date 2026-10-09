@@ -32,6 +32,23 @@ extern "C" {
  * mutex, so it is safe even though NFC command processing is the only caller today.
  */
 
+/* Single-block AES-128 ECB forward encrypt: `out` = AES(`key`, `in`), no CCM
+ * framing (no nonce/AAD/tag). Uses the same backend (HW peripheral or soft-SE
+ * fallback) and mutex as the CCM calls below. For key derivation only (e.g. the
+ * P2P transport's one-block PRF, doc/p2p.md §4) — never for bulk encryption,
+ * where CCM's chaining/authentication is required. Always returns 0. */
+int app_ccm_ecb_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
+
+/* AES-128 CMAC (NIST SP 800-38B, equivalently RFC 4493): `out` = CMAC(`key`,
+ * `msg`). Same backend + mutex as the calls above. Used by the P2P
+ * transport (doc/p2p.md §4/§5.3) both for key derivation (session_key) and
+ * as a standalone MAC for the JoinRequest/JoinAccept handshake tags -- a
+ * proper PRF with domain-separated subkeys, replacing the bare one-block
+ * AES-ECB PRF a crypto review flagged as under-specified (#118 phase 2).
+ * `msg_len` may be 0 or span multiple blocks; no length limit beyond what
+ * fits in `size_t`. Always returns 0. */
+int app_ccm_cmac(const uint8_t key[16], const uint8_t *msg, size_t msg_len, uint8_t out[16]);
+
 /* Encrypt `pt_len` plaintext bytes and produce a `tag_len`-byte tag. `ct` receives
  * `pt_len` ciphertext bytes; `tag` receives `tag_len` bytes. `ct` may alias `pt`.
  * Returns 0, or -EINVAL on a parameter violation. */

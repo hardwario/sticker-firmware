@@ -13,6 +13,7 @@
 #include "app_nfc.h"
 #include "app_sensor.h"
 
+#include <pb_common.h>
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include "src/app_config.pb.h"
@@ -38,6 +39,7 @@ extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
 extern int8_t test_dl_snr;
 extern uint32_t test_dl_age_s;
+extern bool test_radio_full;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
@@ -55,6 +57,10 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 }
 
 /* Run app_cmd_handle on a hex command over `transport`; decode the Response. */
+extern int g_history_replay_start_calls;
+extern uint32_t g_history_replay_start_seq;
+extern int test_history_replay_start_ret;
+
 static enum app_cmd_action handle_via(enum app_cmd_transport transport, const char *hex,
 				      Response *resp)
 {
@@ -75,6 +81,31 @@ static enum app_cmd_action handle_via(enum app_cmd_transport transport, const ch
 	return action;
 }
 
+/* Like handle_via, but for commands that legitimately answer with NOTHING: a
+ * started history replay emits no Response body, because the first HistoryFrame
+ * uplink IS the reply (B8). Returns the emitted length so a test can assert on
+ * the silence itself. */
+static size_t handle_via_maybe_silent(enum app_cmd_transport transport, const char *hex,
+				      Response *resp)
+{
+	uint8_t in[64], out[128];
+	size_t in_len = unhex(hex, in, sizeof(in));
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+
+	*resp = (Response)Response_init_zero;
+	if (out_len == 0) {
+		return 0;
+	}
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
+	return out_len;
+}
+
 /* Most tests exercise the LoRaWAN transport. */
 static enum app_cmd_action handle(const char *hex, Response *resp)
 {
@@ -91,6 +122,7 @@ static void reset_cfg(void)
 	g_claim_active_calls = 0;
 	g_claim_state = APP_NFC_CLAIM_ACTIVE;
 	test_dl_valid = false;
+	test_radio_full = false;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
@@ -461,6 +493,76 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
 	zassert_false(r.body.config_dump.lorawan.has_nwkkey, "LRW: nwkkey leaked over LoRaWAN!");
 }
 
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power omit
+ * `readable`, so they default to every transport like lrw_region/lrw_adr/
+ * lrw_datarate — a GetParam(p2p_field) and a full GetConfig dump must return
+ * them over NFC (and, unlike the LoRaWAN keys, over the radio transports too;
+ * see test_set_param_p2p_rejected_over_radio for the write side, shell-only). */
+ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.p2p_frequency = 868300000;
+	g_app_config.p2p_spreading_factor = 9;
+	g_app_config.p2p_tx_power = 20;
+
+	/* seq2 get_param{ p2p_field=[1 frequency, 2 spreading_factor, 3 tx_power] } */
+	const char *gp_hex = "08021a053203010203";
+
+	handle_via(APP_CMD_TRANSPORT_NFC, gp_hex, &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_true(r.body.config_dump.has_p2p, "p2p section missing");
+	zassert_true(r.body.config_dump.p2p.has_frequency, "frequency not dumped");
+	zassert_equal(r.body.config_dump.p2p.frequency, 868300000, "frequency value");
+	zassert_true(r.body.config_dump.p2p.has_spreading_factor, "spreading_factor not dumped");
+	zassert_equal(r.body.config_dump.p2p.spreading_factor, 9, "spreading_factor value");
+	zassert_true(r.body.config_dump.p2p.has_tx_power, "tx_power not dumped");
+	zassert_equal(r.body.config_dump.p2p.tx_power, 20, "tx_power value");
+
+	/* A plain GetConfig{} dump (no field selection) covers the p2p group too.
+	 * Walk every page at the NFC mailbox cap (as test_get_config_pages_fit_
+	 * mailbox_frame does) — a full snapshot page can approach the 200 B NFC
+	 * field budget, which would not fit handle_via()'s 128 B buffer. */
+	const size_t mailbox_plain_cap = 256 - 1 - 8 - 16;
+	uint8_t in[16], out[mailbox_plain_cap];
+	bool found_p2p = false;
+	uint32_t page = 0, page_count = 1;
+
+	reset_cfg();
+	g_app_config.p2p_frequency = 868300000;
+	g_app_config.p2p_spreading_factor = 9;
+	g_app_config.p2p_tx_power = 20;
+
+	/* Bounded like test_get_config_pages_fit_mailbox_frame's page loop, so the
+	 * compiler can prove %02x never truncates in the hex[] buffer below. */
+	for (; page < page_count && page < 32; page++) {
+		char hex[16];
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+		/* seq9 get_config{page} */
+		snprintf(hex, sizeof(hex), "08092a0208%02x", (unsigned)page);
+		size_t in_len = unhex(hex, in, sizeof(in));
+
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out),
+					     &out_len, &action),
+			      0, "page %u: handle", page);
+		r = (Response)Response_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "page %u: decode", page);
+		zassert_equal(r.which_body, Response_config_dump_tag, "page %u: which=%d", page,
+			      r.which_body);
+		page_count = r.page_count ? r.page_count : 1;
+		if (r.body.config_dump.has_p2p) {
+			found_p2p = true;
+			zassert_true(r.body.config_dump.p2p.has_frequency, "gc frequency missing");
+			zassert_equal(r.body.config_dump.p2p.frequency, 868300000, "gc frequency");
+		}
+	}
+	zassert_true(found_p2p, "GetConfig over NFC never dumped the p2p group");
+}
+
 /* #313: over NFC the reply travels in the 256 B ST25DV mailbox frame — 1 B
  * channel prefix + 8 B header + 16 B CCM tag leave 231 B of plaintext (version
  * byte + Response). Every get_config page must fit that when the caller passes
@@ -672,6 +774,31 @@ ZTEST(cmd, test_sample_over_lrw_emits_no_body)
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
 }
 
+/* LoRaWAN parity: over P2P force_send and sample answer exactly as over
+ * LoRaWAN -- with their telemetry uplink only, no command-port body (the P2P
+ * central retires them on the next uplink by itself, proximos PN-4). */
+ZTEST(cmd, test_force_send_and_sample_emit_no_body_over_p2p)
+{
+	uint8_t in[16], out[128];
+	size_t out_len;
+	enum app_cmd_action action;
+	const char *cmds[] = {"080f4a00", "0810aa0100"}; /* force_send seq 15, sample seq 16 */
+
+	for (size_t i = 0; i < ARRAY_SIZE(cmds); i++) {
+		size_t in_len = unhex(cmds[i], in, sizeof(in));
+
+		reset_cfg();
+		out_len = 123;
+		action = APP_CMD_ACTION_NONE;
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out),
+					     &out_len, &action),
+			      0, "cmd %zu ret", i);
+		zassert_equal(out_len, 0, "cmd %zu: P2P must emit no body, out_len=%zu", i,
+			      out_len);
+		zassert_equal(action, APP_CMD_ACTION_NONE, "cmd %zu: no deferred action", i);
+	}
+}
+
 /* #170: claim_token is NFC-only. app_cmd_build_info() is the
  * device-info-on-join uplink and is hardcoded to APP_CMD_TRANSPORT_LRW, so it
  * must NOT carry the token — at 18 B it pushed the Info past the EU868 DR0
@@ -724,56 +851,163 @@ ZTEST(cmd, test_get_info_claim_token_present_over_nfc)
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
 }
 
-/* #409 A2: last-downlink RSSI/SNR + age are in the NFC Info only, and only
- * once a downlink was received; the LoRaWAN Info never carries them. */
-ZTEST(cmd, test_get_info_last_downlink_nfc_only)
+static Response decode_resp(const uint8_t *out, size_t len);
+static size_t get_radio_state(enum app_cmd_transport tp, bool with_page, uint32_t page,
+			      uint8_t *out, size_t cap, enum app_cmd_action *act);
+
+/* #446: the last-downlink group of get_radio_state appears only once a downlink
+ * was received. */
+ZTEST(cmd, test_get_radio_state_dl_group_after_downlink)
 {
 	uint8_t out[256];
-	size_t out_len = 0;
-	const uint8_t req[] = {0x08, 0x01, 0x22, 0x00}; /* seq=1, get_info */
+	enum app_cmd_action act;
 	Response r;
-	pb_istream_t is;
 
-	/* No downlink yet: fields absent even over NFC. */
 	reset_cfg();
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
-				     &out_len, NULL),
-		      0, "nfc ret");
-	r = (Response)Response_init_zero;
-	is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
-	zassert_false(r.body.info.has_last_dl_rssi, "rssi must be absent before a downlink");
-	zassert_false(r.body.info.has_last_dl_age_s, "age must be absent before a downlink");
+	r = decode_resp(out,
+			get_radio_state(APP_CMD_TRANSPORT_NFC, false, 0, out, sizeof(out), &act));
+	zassert_equal(r.which_body, Response_radio_state_tag, "body %d", r.which_body);
+	zassert_true(r.body.radio_state.has_state, "state");
+	zassert_equal(r.body.radio_state.state, Response_RadioState_State_HEALTHY, "state %d",
+		      r.body.radio_state.state);
+	zassert_false(r.body.radio_state.has_dl_rssi, "rssi must be absent before a downlink");
 
-	/* After a downlink: present over NFC, with the age. */
 	reset_cfg();
 	test_dl_valid = true;
 	test_dl_rssi = -97;
 	test_dl_snr = -7;
 	test_dl_age_s = 3600;
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
-				     &out_len, NULL),
-		      0, "nfc ret");
-	r = (Response)Response_init_zero;
-	is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
-	zassert_true(r.body.info.has_last_dl_rssi && r.body.info.has_last_dl_snr &&
-			     r.body.info.has_last_dl_age_s,
-		     "fields missing over NFC");
-	zassert_equal(r.body.info.last_dl_rssi, -97, "rssi %d", r.body.info.last_dl_rssi);
-	zassert_equal(r.body.info.last_dl_snr, -7, "snr %d", r.body.info.last_dl_snr);
-	zassert_equal(r.body.info.last_dl_age_s, 3600, "age %u", r.body.info.last_dl_age_s);
+	r = decode_resp(out,
+			get_radio_state(APP_CMD_TRANSPORT_NFC, false, 0, out, sizeof(out), &act));
+	zassert_true(r.body.radio_state.has_dl_rssi && r.body.radio_state.has_dl_age_s, "dl group");
+	zassert_equal(r.body.radio_state.dl_rssi, -97, "rssi %d", r.body.radio_state.dl_rssi);
+	zassert_equal(r.body.radio_state.dl_age_s, 3600, "age %u", r.body.radio_state.dl_age_s);
+}
 
-	/* Same state over LoRaWAN: never carried. */
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, req, sizeof(req), out, sizeof(out),
-				     &out_len, NULL),
-		      0, "lrw ret");
-	r = (Response)Response_init_zero;
-	is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
-	zassert_false(r.body.info.has_last_dl_rssi || r.body.info.has_last_dl_snr ||
-			      r.body.info.has_last_dl_age_s,
-		      "last-downlink fields must never go over LoRaWAN");
+/* get_radio_state = Command 32 (tag 0x82 0x02), seq 9, optional page. */
+static size_t get_radio_state(enum app_cmd_transport tp, bool with_page, uint32_t page,
+			      uint8_t *out, size_t cap, enum app_cmd_action *act)
+{
+	uint8_t req[16] = {0x08, 0x09, 0x82, 0x02, 0x00};
+	size_t req_len = 5;
+	size_t out_len = 0;
+
+	if (with_page) {
+		req[4] = 2;
+		req[5] = 0x08;
+		req[6] = (uint8_t)page;
+		req_len = 7;
+	}
+	*act = APP_CMD_ACTION_NONE;
+	zassert_equal(app_cmd_handle(tp, req, req_len, out, cap, &out_len, act), 0,
+		      "get_radio_state ret");
+	return out_len;
+}
+
+/* Merge the present fields of page `in` into `acc`, failing on a field that
+ * arrives twice; returns the number of fields on the page. */
+static int rs_merge(Response_RadioState *acc, const Response_RadioState *in)
+{
+	pb_field_iter_t a, b;
+	int n = 0;
+
+	zassert_true(pb_field_iter_begin(&a, Response_RadioState_fields, acc), "iter");
+	zassert_true(pb_field_iter_begin_const(&b, Response_RadioState_fields, in), "iter");
+	do {
+		if (*(const bool *)b.pSize) {
+			zassert_false(*(bool *)a.pSize, "field %u on two pages", b.tag);
+			*(bool *)a.pSize = true;
+			memcpy(a.pData, b.pData, b.data_size);
+			n++;
+		}
+	} while (pb_field_iter_next(&a) && pb_field_iter_next(&b));
+	return n;
+}
+
+/* #446: over NFC the whole RadioState is one frame; over a radio at a small
+ * budget it is paged field by field from one snapshot, the seq on every page,
+ * every field exactly once, the downlink group never split. */
+ZTEST(cmd, test_get_radio_state_nfc_one_frame_radio_paged)
+{
+	uint8_t out[256];
+	enum app_cmd_action act;
+	Response r, full;
+	Response_RadioState acc = Response_RadioState_init_zero;
+
+	reset_cfg();
+	test_dl_valid = true;
+	test_dl_rssi = -97;
+	test_dl_snr = -7;
+	test_dl_age_s = 3600;
+	test_radio_full = true;
+
+	size_t len = get_radio_state(APP_CMD_TRANSPORT_NFC, false, 0, out, sizeof(out), &act);
+
+	full = decode_resp(out, len);
+	zassert_equal(full.which_body, Response_radio_state_tag, "body %d", full.which_body);
+	zassert_equal(full.seq, 9, "seq");
+	zassert_equal(full.page_count, 0, "NFC: one frame");
+	zassert_equal(full.body.radio_state.fcnt_up, 2334, "fcnt_up");
+	zassert_equal(full.body.radio_state.ul_rssi, -58, "ul_rssi");
+	zassert_equal(full.body.radio_state.join_count, 105, "join_count");
+
+	/* LoRaWAN at 24 B (EU868-DR0-like small budget): streamed pages. */
+	len = get_radio_state(APP_CMD_TRANSPORT_LRW, false, 0, out, 24, &act);
+	r = decode_resp(out, len);
+	zassert_equal(act, APP_CMD_ACTION_PAGE_STREAM, "must stream (act %d)", act);
+	zassert_true(r.page_count > 1, "paged (%u)", r.page_count);
+
+	uint32_t count = r.page_count;
+	int fields = 0;
+
+	for (uint32_t p = 0; p < count; p++) {
+		if (p > 0) {
+			zassert_equal(app_cmd_stream_next(out, 24, &len), 0, "page %u", p);
+			r = decode_resp(out, len);
+		}
+		zassert_equal(r.which_body, Response_radio_state_tag, "page %u body", p);
+		zassert_equal(r.seq, 9, "page %u seq", p);
+		zassert_equal(r.page_index, p, "page index");
+		const Response_RadioState *in = &r.body.radio_state;
+
+		zassert_true(in->has_dl_rssi == in->has_dl_age_s &&
+				     in->has_dl_snr == in->has_dl_age_s,
+			     "page %u: downlink group split", p);
+		fields += rs_merge(&acc, in);
+	}
+	zassert_equal(app_cmd_stream_next(out, 24, &len), -ENODATA, "stream ends");
+	zassert_equal(fields, 25, "all 25 fields once (%d)", fields);
+	zassert_mem_equal(&acc, &full.body.radio_state, sizeof(acc), "pages == NFC frame");
+}
+
+/* #446: at the 11 B tier the groups do not fit and are left out, single fields
+ * still arrive; host paging past the end answers OUT_OF_RANGE. */
+ZTEST(cmd, test_get_radio_state_small_budget_and_out_of_range)
+{
+	uint8_t out[256];
+	enum app_cmd_action act;
+	Response r;
+
+	reset_cfg();
+	test_dl_valid = true;
+	test_dl_rssi = -97;
+	test_dl_snr = -7;
+	test_dl_age_s = 3600;
+	test_radio_full = true;
+
+	size_t len = get_radio_state(APP_CMD_TRANSPORT_LRW, false, 0, out, 11, &act);
+
+	r = decode_resp(out, len);
+	zassert_equal(r.which_body, Response_radio_state_tag, "body %d", r.which_body);
+	zassert_true(r.page_count > 1, "paged");
+	app_cmd_stream_cancel();
+
+	/* NFC host paging: page 1 of a one-frame answer does not exist. */
+	len = get_radio_state(APP_CMD_TRANSPORT_NFC, true, 1, out, sizeof(out), &act);
+	r = decode_resp(out, len);
+	zassert_equal(r.which_body, Response_error_tag, "OUT_OF_RANGE expected (%d)", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
 }
 
 /* Count Response.Info.active_alarms (field 15) entries by walking the raw
@@ -933,6 +1167,13 @@ static void visit_info_page(const uint8_t *buf, size_t len, const Response *r)
 	g_seen_alarms += count_info_active_alarms(buf, len);
 	g_seen_serial |= r->body.info.serial_number == 1234567890;
 	g_seen_battery |= r->body.info.battery == 3300;
+}
+
+static void visit_any_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(r);
 }
 
 /* #425 (was #335 alarm trimming): an Info that does not fit the budget is paged,
@@ -1524,6 +1765,91 @@ ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
 		      r.which_body);
 }
 
+/* req_history is answered by streaming the window back as N HistoryFrame
+ * uplinks, on either radio (the transport allow-list is [lrw, p2p]); the one
+ * replay lives in app_radio (doc/plan/460 F3c). */
+static void req_history_over(enum app_cmd_transport tp)
+{
+	Response r;
+
+	/* A stream was started: the first HistoryFrame IS the reply, so the
+	 * response body must stay unset (which_body == 0) rather than add a
+	 * redundant Ack the host would have to ignore. */
+	reset_cfg();
+	g_history_replay_start_calls = 0;
+	test_history_replay_start_ret = 0;
+	size_t emitted = handle_via_maybe_silent(tp, "08075a00", &r);
+
+	zassert_equal(g_history_replay_start_calls, 1, "no replay started (calls=%d)",
+		      g_history_replay_start_calls);
+	zassert_equal(g_history_replay_start_seq, 7u, "the stream must answer the request seq");
+	zassert_equal(emitted, 0,
+		      "a started replay must emit nothing -- the first HistoryFrame is the reply, "
+		      "and an extra Ack would cost a second uplink (emitted %zu B)",
+		      emitted);
+	zassert_equal(r.which_body, 0, "no response body (which=%d)", r.which_body);
+
+	/* Nothing in the window, or the link down: the host still needs a
+	 * definitive answer. */
+	const int none[] = {-ENODATA, -EAGAIN};
+
+	for (size_t i = 0; i < ARRAY_SIZE(none); i++) {
+		reset_cfg();
+		g_history_replay_start_calls = 0;
+		test_history_replay_start_ret = none[i];
+		handle_via(tp, "08075a00", &r);
+		zassert_equal(g_history_replay_start_calls, 1, "the handler should have tried");
+		zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+			      r.which_body);
+		zassert_equal(r.body.error.code, Response_Error_Code_HISTORY_UNAVAILABLE, "code %d",
+			      r.body.error.code);
+		/* Over LoRaWAN only the code survives (#409 3a). */
+		zassert_str_equal(r.body.error.detail,
+				  tp == APP_CMD_TRANSPORT_LRW ? "" : "no records", "message `%s`",
+				  r.body.error.detail);
+	}
+
+	/* Records exist, but not one fits the budget: the host retries at a
+	 * higher DR (#409 3f). */
+	reset_cfg();
+	test_history_replay_start_ret = -EMSGSIZE;
+	handle_via(tp, "08075a00", &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+ZTEST(cmd, test_req_history_over_lrw_starts_a_replay)
+{
+	req_history_over(APP_CMD_TRANSPORT_LRW);
+}
+
+ZTEST(cmd, test_req_history_over_p2p_starts_a_replay)
+{
+	req_history_over(APP_CMD_TRANSPORT_P2P);
+}
+
+/* The allow-list widened to [lrw, p2p] — not to everything. NFC must still be
+ * refused by the generated dispatch, before the handler is reached. */
+ZTEST(cmd, test_req_history_still_rejected_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	g_history_replay_start_calls = 0;
+	test_history_replay_start_ret = 0;
+	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
+	zassert_equal(g_history_replay_start_calls, 0,
+		      "the dispatch guard must refuse before the handler runs");
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_str_equal(r.body.error.detail, "transport not allowed", "message `%s`",
+			  r.body.error.detail);
+}
+
 /* #107: clock_sync carrying unix_time sets the RTC directly (NFC time bootstrap).
  * A bare clock_sync over NFC just acks here — there is no LoRaWAN in this build
  * to query for network time. */
@@ -1592,7 +1918,7 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 
 	memset(samples, 0x5A, sizeof(samples));
 
-	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. cap is
+	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
 	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
@@ -1734,6 +2060,62 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
 		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
 		      r.body.error.code);
+}
+
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power are
+ * readable everywhere but stay `writable: [shell]` — never over the very radio
+ * link they configure (same #271 argument as radio_mode), and not over NFC
+ * until the Manager-App / Hub side is agreed (doc/p2p.md §2). no_write_lrw also
+ * gates the raw-LoRa P2P transport (#118 B4). SHELL_DEBUG (untested here) has no
+ * per-field gate. */
+ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
+{
+	Response r;
+
+	/* seq1 set_param{ p2p{ frequency = 868300000 } }
+	 * Command:  08 01                seq=1
+	 *           12 08                set_param, len 8
+	 *             3a 06              .p2p (SetParam field7), len 6
+	 *               08 e0e9849e03    .frequency (P2P field1) = 868300000
+	 */
+	const char *hex = "080112083a0608e0e9849e03";
+	enum app_cmd_action a;
+
+	/* nfc is NOT in writable:[shell] either -> rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "nfc write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "nfc code %d",
+		      r.body.error.code);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000, "frequency applied over nfc");
+
+	/* lrw is NOT in writable:[shell] -> must be rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "lrw write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "lrw code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
+		      r.body.error.fault_field);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
+			  "frequency applied over LRW despite writable:[shell]");
+
+	/* p2p (raw-LoRa) mirrors lrw: not in writable either -> must be rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_P2P, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "p2p write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "p2p code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
+		      r.body.error.fault_field);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
+			  "frequency applied over raw P2P despite writable:[shell]");
 }
 
 /* #415 C1/K2: the plain_text transport is opt-in — a command answers on it only
@@ -1974,6 +2356,29 @@ ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
 		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
 	zassert_equal(ret, 0, "fallback Error must fit 11 B, ret %d", ret);
 	zassert_true(out_len >= 1 && out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+/* P2P parity: an answer that does not fit the P2P response budget is the same
+ * compact BUDGET_TOO_SMALL Error as over LoRaWAN (was UNKNOWN "response too
+ * large", which itself did not fit a small slot). */
+ZTEST(cmd, test_too_large_fallback_is_budget_error_over_p2p)
+{
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit, ret %d", ret);
 
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
@@ -2227,6 +2632,26 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
+/* #425 step 7: P2P pages exactly like LoRaWAN — a multi-page GetConfig over
+ * APP_CMD_TRANSPORT_P2P streams every page with the same seq, and the pages
+ * are dispatched on the P2P transport (same field gating). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_p2p)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("080b2a00", in, sizeof(in)); /* seq11 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	zassert_true(walk_pages(out, out_len, sizeof(out), 11, visit_any_page) > 1, "paged");
+}
+
 /* The 1-Wire slot ROMs (sensors 11..14, `dump_lrw: false`) are left out of a
  * LoRaWAN GetConfig — they only cost answer pages there — but an NFC GetConfig
  * and an explicit GetParam still return them. */
@@ -2237,33 +2662,48 @@ static bool rom_in_dump(const Response *r)
 	return s->has_sensor1_rom || s->has_sensor2_rom || s->has_sensor3_rom || s->has_sensor4_rom;
 }
 
+/* Run a GetConfig over a radio transport at the 51 B budget and walk the whole
+ * device-driven page stream: no page carries a ROM, none is empty, and the
+ * stream ends right after the announced page_count. */
+static void rom_free_stream(enum app_cmd_transport tp, const uint8_t *in, size_t in_len)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	uint32_t count;
+	Response r;
+
+	zassert_equal(app_cmd_handle(tp, in, in_len, out, 51, &out_len, &action), 0, "handle");
+	r = decode_resp(out, out_len);
+	count = r.page_count ? r.page_count : 1;
+	zassert_false(rom_in_dump(&r), "ROM on page 0 (tp %d)", tp);
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		r = decode_resp(out, out_len);
+		zassert_equal(r.page_index, p, "page_index %u != %u", r.page_index, p);
+		zassert_false(rom_in_dump(&r), "ROM on page %u (tp %d)", p, tp);
+		/* doc/plan/439: a page may now be entirely the new p2p group (readable
+		 * over every transport like the LoRaWAN radio params). */
+		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
+				     r.body.config_dump.has_application ||
+				     r.body.config_dump.has_alarms || r.body.config_dump.has_p2p,
+			     "empty page %u", p);
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+}
+
 ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
 {
 	uint8_t in[16], out[256];
 	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
-	uint32_t count;
 	Response r;
 
 	reset_cfg();
 
 	/* LoRaWAN: no page of the stream carries a ROM. */
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
-		      0, "handle");
-	r = decode_resp(out, out_len);
-	count = r.page_count ? r.page_count : 1;
-	zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page 0");
-	for (uint32_t p = 1; p < count; p++) {
-		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
-		r = decode_resp(out, out_len);
-		zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page %u", p);
-		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
-				     r.body.config_dump.has_application ||
-				     r.body.config_dump.has_alarms,
-			     "empty page %u", p);
-	}
-	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+	rom_free_stream(APP_CMD_TRANSPORT_LRW, in, in_len);
 
 	/* NFC: the host pages itself; the ROMs are still there. */
 	bool nfc_rom = false;
@@ -2289,6 +2729,57 @@ ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
 	r = decode_resp(out, out_len);
 	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
 	zassert_true(r.body.config_dump.sensors.has_sensor1_rom, "GetParam must return the ROM");
+}
+
+/* Review of #400: the P2P radio parameters are left out of a LoRaWAN device's
+ * radio get_config (its DR0 dump keeps the v1.5.0 page count), kept on a P2P
+ * device and over NFC. */
+static bool radio_dump_has_p2p(enum app_cmd_transport tp)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	bool found = false;
+	uint32_t count = 1;
+
+	for (uint32_t p = 0; p < count && p < 32; p++) {
+		/* seq9 get_config{page:p} */
+		const uint8_t cmd[] = {0x08, 0x09, 0x2a, 0x02, 0x08, (uint8_t)p};
+
+		zassert_equal(
+			app_cmd_handle(tp, cmd, sizeof(cmd), out, sizeof(out), &out_len, &action),
+			0, "page %u", p);
+		Response r = decode_resp(out, out_len);
+
+		count = r.page_count ? r.page_count : 1;
+		found |= r.body.config_dump.has_p2p;
+	}
+	return found;
+}
+
+ZTEST(cmd, test_get_config_p2p_group_only_on_a_p2p_device)
+{
+	reset_cfg();
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+	zassert_false(radio_dump_has_p2p(APP_CMD_TRANSPORT_LRW),
+		      "a LoRaWAN device's LoRaWAN GetConfig must leave the p2p group out");
+	zassert_true(radio_dump_has_p2p(APP_CMD_TRANSPORT_NFC), "NFC GetConfig keeps it");
+
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	zassert_true(radio_dump_has_p2p(APP_CMD_TRANSPORT_P2P), "a P2P device dumps it over P2P");
+	reset_cfg();
+}
+
+/* P2P is budget-limited like LoRaWAN, and request_page() lays its streamed
+ * pages out as LoRaWAN, so page 0 must skip the ROMs as well — otherwise its
+ * page_count (and layout) would disagree with the pages that follow. */
+ZTEST(cmd, test_get_config_skips_slot_roms_over_p2p)
+{
+	uint8_t in[16];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+
+	reset_cfg();
+	rom_free_stream(APP_CMD_TRANSPORT_P2P, in, in_len);
 }
 
 /* #425: a GetConfig over LoRaWAN keeps the fixed 30 B field pages at any DR, and
@@ -2363,21 +2854,16 @@ static size_t nfc_get_info(enum app_cmd_transport tp, uint32_t seq, bool has_pag
 
 static void nfc_info_setup(size_t alarms)
 {
-	static const uint8_t token[16] = {0xA1, 0xB2, 0xC3, 0xD4, 5, 6, 7, 8,
+	static const uint8_t token[16] = {0xA1, 0xB2, 0xC3, 0xD4, 5,  6,  7,  8,
 					  9,    10,   11,   12,   13, 14, 15, 16};
 	static const uint8_t deveui[8] = {0x58, 0x76, 0x07, 0x02, 0x3D, 0xD6, 0xFA, 0x91};
 
 	reset_cfg();
 	g_app_config.serial_number = 2162165682u;
 	memcpy(g_app_config.claim_token, token, sizeof(token));
-	memcpy(g_app_config.lrw_deveui, deveui, sizeof(deveui));
+	memcpy(g_app_config.radio_deveui, deveui, sizeof(deveui));
 	g_app_sensor_data.voltage = 3.3f;
 	test_set_active_alarm_count(alarms);
-	/* #423: a downlink was received, so the NFC-only last-downlink unit exists. */
-	test_dl_valid = true;
-	test_dl_rssi = -97;
-	test_dl_snr = -7;
-	test_dl_age_s = 3600;
 }
 
 /* Read every page of an Info over `tp` at `cap` (page 0 without `page`, then
@@ -2390,7 +2876,7 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 	Response r = decode_resp(out, len);
 	uint32_t count = r.page_count ? r.page_count : 1;
 	size_t seen_alarms = 0;
-	int seen_serial = 0, seen_token = 0, seen_eui = 0, seen_battery = 0, seen_dl = 0;
+	int seen_serial = 0, seen_token = 0, seen_eui = 0, seen_battery = 0;
 
 	for (uint32_t p = 0; p < count; p++) {
 		if (p > 0) {
@@ -2409,18 +2895,6 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 		seen_token += r.body.info.has_claim_token;
 		seen_eui += r.body.info.has_dev_eui;
 		seen_battery += r.body.info.battery == 3300;
-		/* #423: RSSI/SNR/age form one unit — never split across pages. */
-		const Response_Info *in = &r.body.info;
-
-		zassert_true(in->has_last_dl_rssi == in->has_last_dl_age_s &&
-				     in->has_last_dl_snr == in->has_last_dl_age_s,
-			     "page %u: last-downlink fields split", p);
-		if (in->has_last_dl_age_s) {
-			zassert_equal(in->last_dl_rssi, -97, "rssi %d", in->last_dl_rssi);
-			zassert_equal(in->last_dl_snr, -7, "snr %d", in->last_dl_snr);
-			zassert_equal(in->last_dl_age_s, 3600, "age %u", in->last_dl_age_s);
-			seen_dl++;
-		}
 	}
 	zassert_equal(seen_alarms, alarms, "%zu of %zu alarms", seen_alarms, alarms);
 	zassert_equal(seen_serial, 1, "serial on %d pages", seen_serial);
@@ -2428,9 +2902,6 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 	if (tp == APP_CMD_TRANSPORT_NFC) {
 		zassert_equal(seen_token, 1, "claim_token on %d pages", seen_token);
 		zassert_equal(seen_eui, 1, "dev_eui on %d pages", seen_eui);
-		zassert_equal(seen_dl, 1, "last-downlink unit on %d pages", seen_dl);
-	} else {
-		zassert_equal(seen_dl, 0, "last-downlink fields are NFC-only");
 	}
 
 	/* One past the end: OUT_OF_RANGE on the page field. */
@@ -2501,7 +2972,8 @@ ZTEST(cmd, test_w1_scan_host_pages)
 
 	zassert_true(count >= 2, "expected pages at 30 B (count %u)", count);
 	for (uint32_t p = 0; p < count; p++) {
-		zassert_equal(test_w1_scan_host_page(roms, 4, 9, p, out, 30, &len), 0, "page %u", p);
+		zassert_equal(test_w1_scan_host_page(roms, 4, 9, p, out, 30, &len), 0, "page %u",
+			      p);
 		zassert_true(len <= 30, "page %u: %zu B", p, len);
 		r = decode_resp(out, len);
 		zassert_equal(r.seq, 9, "seq");
@@ -2517,6 +2989,122 @@ ZTEST(cmd, test_w1_scan_host_pages)
 	zassert_equal(test_w1_scan_host_page(roms, 4, 9, count, out, 30, &len), 0, "past end");
 	r = decode_resp(out, len);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "past the end");
+}
+
+/* ---- #460 F3: the one executor of deferred actions (NFC, LoRaWAN, P2P) ---- */
+
+extern int test_run_settings_save_calls;
+extern int test_run_settings_save_ret;
+extern int test_run_device_reset_calls;
+extern int test_run_factory_reset_calls;
+extern int test_run_vendor_reset_calls;
+extern const uint8_t *test_run_vendor_reset_key;
+extern int test_run_counters_save_calls;
+extern int test_run_rejoin_calls;
+extern int test_run_reset_link_calls;
+
+static void run_action_reset(void)
+{
+	test_run_settings_save_calls = 0;
+	test_run_settings_save_ret = 0;
+	test_run_device_reset_calls = 0;
+	test_run_factory_reset_calls = 0;
+	test_run_vendor_reset_calls = 0;
+	test_run_vendor_reset_key = NULL;
+	test_run_counters_save_calls = 0;
+	test_run_rejoin_calls = 0;
+	test_run_reset_link_calls = 0;
+	g_claim_active_calls = 0;
+}
+
+static int run_action_calls(void)
+{
+	return test_run_settings_save_calls + test_run_device_reset_calls +
+	       test_run_factory_reset_calls + test_run_vendor_reset_calls +
+	       test_run_counters_save_calls + test_run_rejoin_calls + test_run_reset_link_calls +
+	       g_claim_active_calls;
+}
+
+/* Every action of the union table reaches its one callee, once. REBOOT and
+ * LRW_RESET end in sys_reboot(), which the stub turns into a test failure, so
+ * they are covered by the reboot classification below instead. */
+ZTEST(cmd, test_run_action_executes_each_action_once)
+{
+	static const struct {
+		enum app_cmd_action action;
+		int *calls;
+	} cases[] = {
+		{APP_CMD_ACTION_SETTINGS_SAVE, &test_run_settings_save_calls},
+		{APP_CMD_ACTION_SECRET_KEY_SAVE, &test_run_settings_save_calls},
+		{APP_CMD_ACTION_DEVICE_RESET, &test_run_device_reset_calls},
+		{APP_CMD_ACTION_FACTORY_RESET, &test_run_factory_reset_calls},
+		{APP_CMD_ACTION_VENDOR_RESET, &test_run_vendor_reset_calls},
+		{APP_CMD_ACTION_COUNTERS_SAVE, &test_run_counters_save_calls},
+		{APP_CMD_ACTION_LRW_JOIN, &test_run_rejoin_calls},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		run_action_reset();
+		app_cmd_run_action(cases[i].action);
+		zassert_equal(*cases[i].calls, 1, "action %d: its callee once", cases[i].action);
+		zassert_equal(run_action_calls(), 1, "action %d: nothing else", cases[i].action);
+	}
+
+	run_action_reset();
+	app_cmd_run_action(APP_CMD_ACTION_VENDOR_RESET);
+	zassert_equal_ptr(test_run_vendor_reset_key, app_cmd_take_pending_vendor_secret_key(),
+			  "vendor_reset installs the key staged by its request");
+}
+
+ZTEST(cmd, test_run_action_calibration_and_claim)
+{
+	run_action_reset();
+	g_app_config.calibration = false;
+	app_cmd_run_action(APP_CMD_ACTION_ENTER_CALIBRATION);
+	zassert_true(g_app_config.calibration, "the staging config carries calibration=true");
+	zassert_equal(test_run_settings_save_calls, 1, "and is saved (+ reboot)");
+	g_app_config.calibration = false;
+
+	/* The claim latch flips first, then the save persists the token with it. */
+	run_action_reset();
+	app_cmd_run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE);
+	zassert_equal(g_claim_active_calls, 1, "claim window re-opened");
+	zassert_equal(test_run_settings_save_calls, 1, "claim token saved (+ reboot)");
+}
+
+ZTEST(cmd, test_run_action_none_and_page_stream_do_nothing)
+{
+	run_action_reset();
+	app_cmd_run_action(APP_CMD_ACTION_NONE);
+	app_cmd_run_action(APP_CMD_ACTION_PAGE_STREAM);
+	zassert_equal(run_action_calls(), 0, "no callee for NONE / PAGE_STREAM");
+}
+
+/* NFC shows its LED result before exactly these: every action that ends in a
+ * reboot, and none of the two that do not. */
+ZTEST(cmd, test_action_reboots_classification)
+{
+	static const enum app_cmd_action reboots[] = {
+		APP_CMD_ACTION_SETTINGS_SAVE,     APP_CMD_ACTION_REBOOT,
+		APP_CMD_ACTION_DEVICE_RESET,      APP_CMD_ACTION_FACTORY_RESET,
+		APP_CMD_ACTION_VENDOR_RESET,      APP_CMD_ACTION_ENTER_CALIBRATION,
+		APP_CMD_ACTION_LRW_RESET,         APP_CMD_ACTION_SECRET_KEY_SAVE,
+		APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
+	};
+	static const enum app_cmd_action stays[] = {
+		APP_CMD_ACTION_NONE,
+		APP_CMD_ACTION_LRW_JOIN,
+		APP_CMD_ACTION_COUNTERS_SAVE,
+		APP_CMD_ACTION_PAGE_STREAM,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(reboots); i++) {
+		zassert_true(app_cmd_action_reboots(reboots[i]), "action %d reboots", reboots[i]);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(stays); i++) {
+		zassert_false(app_cmd_action_reboots(stays[i]), "action %d does not reboot",
+			      stays[i]);
+	}
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

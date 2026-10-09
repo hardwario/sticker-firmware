@@ -83,7 +83,7 @@ void app_history_capture_at(uint32_t slot, bool synced);
  * none), without a discontinuity check. */
 void app_history_capture(void);
 
-/* Tell history that a LoRaWAN replay is streaming records back (#126). app_lrw
+/* Tell history that a LoRaWAN replay is streaming records back (#126). app_radio_lrw
  * sets it true at replay start and false at finish. Capture goes on; only the
  * flash backend holds off its page rollover (a ~20 ms erase that would stall
  * the replay's RX windows) — a record that needs the next page meanwhile is

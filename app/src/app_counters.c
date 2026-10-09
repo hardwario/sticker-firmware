@@ -8,6 +8,7 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
+#include "app_radio.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -114,7 +115,9 @@ int app_counters_save(bool force)
 		return 0;
 	}
 
+	app_radio_flash_hold();
 	int ret = settings_save_one(SETTINGS_KEY, &blob, sizeof(blob));
+	app_radio_flash_release();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one", ret);
 		return ret;

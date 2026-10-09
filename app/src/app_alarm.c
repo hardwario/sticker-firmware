@@ -12,7 +12,7 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_w1_slots.h"
@@ -45,7 +45,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_NO_DATA_MS   5000
 #define APP_ALARM_NO_DATA_SLOT 0xFF
 
-/* Low-battery watchdog (#210): raise a fPort-3 alarm (source=battery,
+/* Low-battery watchdog (#210): raise an alarm (source=battery,
  * quantity=voltage, type=low) when the supply drops below the configurable
  * `battery_level` threshold (config in mV, default 2400 — Li cells discharge
  * non-linearly so the warning level is left to the integrator) and clear it once
@@ -57,7 +57,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_BATTERY_HYST_V 0.3f /* fixed: recover above threshold + 0.3 V (anti-chatter) */
 #define APP_ALARM_BATTERY_SLOT   0xFE
 
-/* fPort-3 wire scaling per quantity; defined later, forward-declared for the
+/* Alarm-batch wire scaling per quantity; defined later, forward-declared for the
  * battery watchdog's alarm_collect_battery(). */
 static int32_t alarm_scale(enum app_alarm_quantity q, float v);
 
@@ -100,12 +100,10 @@ struct rstate {
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
-#if defined(CONFIG_LORAWAN)
 /* -1 = "never sent" sentinel; k_uptime_get() legitimately returns 0 in the first
  * millisecond after boot, so 0 cannot mark "never sent" without a window where the
  * rate limit is silently skipped (#219). */
 static int64_t m_last_alarm_send_ms = -1;
-#endif /* defined(CONFIG_LORAWAN) */
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 
@@ -128,7 +126,7 @@ static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool a
  * already-active/pending latch would carry over under the edited rule's new
  * parameters. Returns NULL for an empty slot.
  *
- * Resetting an ACTIVE latch must also emit the fPort-3 deactivate edge here:
+ * Resetting an ACTIVE latch must also emit the alarm-batch deactivate edge here:
  * this reset runs before the eval_* dispatch, so eval_threshold()/eval_state()'s
  * own !rule->enabled deactivate branches can never see the pre-reset latch for
  * the disable/clear/edit transition — without this, a backend pairing
@@ -162,7 +160,7 @@ static bool rt_sync(uint8_t slot, struct app_alarm_rule *out, bool *should_send)
 	return true;
 }
 
-/* ---- Alarm-detail batch on fPort 3 (#27) -------------------------------- */
+/* ---- Alarm-detail batch (#27) ------------------------------------------- */
 
 #define ALARM_BATCH_MAX 8
 #define ALARM_FRAME_MAX 64
@@ -174,6 +172,10 @@ static uint32_t m_window_base_unix;
 static bool m_window_base_synced; /* m_window_base_unix is absolute UTC, not uptime */
 static int64_t m_window_start_ms;
 static bool m_window_open;
+/* The batch waits for the radio: link down, the boot/join announce is still
+ * going out (Info -> settings-info -> data, 2026-09-27), or its pages do not
+ * fit the free alarm slots (#462). m_lock. */
+static bool m_batch_held;
 static struct k_work_delayable m_alarm_batch_work;
 
 /* Per-rule dwell/hold duration in ms (#348): `dwell` is a plain duration in
@@ -190,17 +192,18 @@ static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 	return (int64_t)(s * 1000.0f);
 }
 
-static void alarm_lrw_send(void)
+/* Send the alarm state now, rate-limited by alarm_limit. Goes through
+ * app_report/app_radio, so it is the same on every radio. */
+static void alarm_send(void)
 {
-#if defined(CONFIG_LORAWAN)
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
 	bool send;
 
 	/* m_last_alarm_send_ms is read-modify-written from three contexts (main
 	 * poll, PIR thread, system WQ). A 64-bit RMW is not atomic on Cortex-M4, so
-	 * guard it under m_lock (#93.6); release before app_lrw_send() so the radio
-	 * call never runs while holding the alarm lock. */
+	 * guard it under m_lock (#93.6); release before app_report_trigger() so the
+	 * radio call never runs while holding the alarm lock. */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	if (limit > 0 && m_last_alarm_send_ms != -1 &&
 	    (now - m_last_alarm_send_ms) < (int64_t)limit * 1000) {
@@ -216,7 +219,6 @@ static void alarm_lrw_send(void)
 		return;
 	}
 	app_report_trigger();
-#endif
 }
 
 #if defined(CONFIG_APP_BUZZER)
@@ -310,10 +312,37 @@ static void alarm_batch_flush(void)
 		return;
 	}
 
+	/* Boot/join order (Hynek, 2026-09-27): Info -> settings-info -> data, and
+	 * an alarm is data. While the link is down or the announce is still going
+	 * out the batch waits with its window held open, so later edges join it;
+	 * app_radio flushes it once the announce is queued (app_alarm_flush_held()),
+	 * and the timer covers the announce's fallback deadline. */
+	int32_t hold_ms = app_radio_data_hold_ms();
+
+	if (hold_ms != 0) {
+		if (!m_batch_held) {
+			LOG_INF("Alarm batch held: %s",
+				hold_ms < 0 ? "link down" : "boot/join announce first");
+		}
+		m_batch_held = true;
+		m_window_open = true;
+		if (hold_ms > 0) {
+			k_work_reschedule(&m_alarm_batch_work, K_MSEC(hold_ms));
+		}
+		return;
+	}
+	bool was_held = m_batch_held;
+
+	m_batch_held = false;
+
 	size_t cap = ALARM_FRAME_MAX;
-#if defined(CONFIG_LORAWAN)
-	cap = app_lrw_payload_cap(cap);
-#endif
+	/* 0 = budget unknown right now: encode against the buffer and let the
+	 * radio defer (#409 3a). */
+	uint8_t dr = app_radio_get_max_payload();
+
+	if (dr > 0 && dr < cap) {
+		cap = dr;
+	}
 
 	/* L-4: if the window opened before the RTC synced but the clock is known
 	 * now, re-anchor base_time to absolute UTC (rel_s offsets are unaffected).
@@ -355,8 +384,8 @@ static void alarm_batch_flush(void)
 			n--;
 		}
 		if (ret != 0) {
-			/* Not even one event fits (the 11 B budget tier): no fPort 3
-			 * detail for the rest. The alarm state still reaches the LNS
+			/* Not even one event fits (the 11 B budget tier): no alarm
+			 * detail for the rest. The alarm state still reaches the server
 			 * through the alarm bits in every telemetry frame. */
 			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
 				"in telemetry system_flags",
@@ -365,6 +394,23 @@ static void alarm_batch_flush(void)
 		}
 		page_n[pages++] = n;
 		laid += n;
+	}
+
+	/* #462: a burst must not overflow the radio's alarm queue (4 frames). While
+	 * queued frames still drain, the batch waits held and later edges join it
+	 * (fewer, fuller frames); app_radio flushes it when it takes the next alarm
+	 * frame. An empty queue takes the batch whatever its size: there is no
+	 * frame left to release it. */
+	uint32_t room = app_radio_tx_alarm_free();
+
+	if (pages > room && room < APP_RADIO_TX_QUEUE_DEPTH) {
+		if (!was_held) {
+			LOG_INF("Alarm batch held: %u page(s), %u alarm slot(s) free", pages,
+				(unsigned)room);
+		}
+		m_batch_held = true;
+		m_window_open = true;
+		return;
 	}
 
 	for (uint8_t p = 0, first = 0; p < pages; first += page_n[p], p++) {
@@ -376,11 +422,9 @@ static void alarm_batch_flush(void)
 			LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
 			break;
 		}
-#if defined(CONFIG_LORAWAN)
-		(void)app_lrw_send_alarm(buf, len);
-#endif
-		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u on fPort 3 (%u B)", p + 1,
-			pages, first + 1, first + page_n[p], m_window_total, (unsigned)len);
+		(void)app_radio_send_alarm(buf, len);
+		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u (%u B)", p + 1, pages,
+			first + 1, first + page_n[p], m_window_total, (unsigned)len);
 	}
 
 	m_batch_count = 0;
@@ -396,7 +440,32 @@ static void alarm_batch_work_handler(struct k_work *work)
 	k_mutex_unlock(&m_lock);
 }
 
-/* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold
+void app_alarm_flush_held(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	bool held = m_batch_held;
+
+	k_mutex_unlock(&m_lock);
+	if (held) {
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
+	}
+}
+
+bool app_alarm_flush_pending(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	bool waiting = m_batch_count > 0 && app_radio_data_hold_ms() == 0;
+
+	k_mutex_unlock(&m_lock);
+	if (waiting) {
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
+	}
+	return waiting;
+}
+
+/* Record one alarm edge for the alarm-detail batch. Caller does NOT hold
  * m_lock (this takes it). */
 /* Queue one built alarm event into the rate-limit window (or flush immediately
  * when alarm_limit <= 0). Shared by the rule path (alarm_collect) and the
@@ -409,10 +478,18 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	k_mutex_lock(&m_lock, K_FOREVER);
 
 	if (limit <= 0) {
-		m_window_base_unix = now_seconds(&m_window_base_synced);
-		m_window_total = 1;
-		m_batch_count = 1;
-		m_batch[0] = ev;
+		/* Normally a batch of one; a batch held for the radio (see
+		 * alarm_batch_flush()) collects the edges until it can go. */
+		if (m_batch_count == 0) {
+			m_window_start_ms = now;
+			m_window_base_unix = now_seconds(&m_window_base_synced);
+			m_window_total = 0;
+		}
+		m_window_total++;
+		if (m_batch_count < ALARM_BATCH_MAX) {
+			ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
+			m_batch[m_batch_count++] = ev;
+		}
 		alarm_batch_flush();
 		k_mutex_unlock(&m_lock);
 		return;
@@ -489,7 +566,7 @@ static void alarm_collect_battery(bool active, float voltage)
 
 /* ---- value access (source, quantity) ------------------------------------ */
 
-/* Wire scaling per quantity for the fPort-3 detail value. */
+/* Wire scaling per quantity for the alarm-detail value. */
 static int32_t alarm_scale(enum app_alarm_quantity q, float v)
 {
 	switch (q) {
@@ -1159,7 +1236,7 @@ bool app_alarm_poll(void)
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
-		alarm_lrw_send();
+		alarm_send();
 	}
 
 	alarm_buzzer_sync(new_bits, all_cleared);
@@ -1214,7 +1291,7 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
-		alarm_lrw_send();
+		alarm_send();
 	}
 
 	if (cb) {
