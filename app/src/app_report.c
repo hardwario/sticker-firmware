@@ -29,11 +29,11 @@ LOG_MODULE_REGISTER(app_report, LOG_LEVEL_DBG);
  * write (app_history_capture) never run on the LoRaWAN TX work queue or the
  * system work queue (the latter also drives LoRaMacProcess()).
  *
- * 3072 B (was 2048): the report cycle nests sensor I2C reads + an NVS flash write
- * (app_history_capture / app_counters_save); release builds carry no stack canary
- * so an overflow corrupts RAM silently. Headroom over the measured high-water
- * mark; revisit with CONFIG_INIT_STACKS on hardware (#187). */
-static K_THREAD_STACK_DEFINE(m_work_stack, 3072);
+ * The report cycle nests sensor I2C reads + an NVS flash write
+ * (app_history_capture / app_counters_save). HW high-water mark with
+ * CONFIG_INIT_STACKS (#187, 2026-10-09): 440 B release, 288 B debug, history
+ * enabled. 2048 B keeps > 4x margin; an overflow hits the MPU stack guard. */
+static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
 
 static struct k_timer m_report_timer; /* interval_report cadence */

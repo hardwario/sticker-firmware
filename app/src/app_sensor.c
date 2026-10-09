@@ -64,7 +64,8 @@ struct app_sensor_data g_app_sensor_data = {
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
-static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 2048);
+/* HW high-water mark 656 B (CONFIG_INIT_STACKS, 2026-10-09); >= 2x margin. */
+static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 1536);
 static struct k_work_q m_sensor_work_q;
 
 static void sensor_work_handler(struct k_work *work)
