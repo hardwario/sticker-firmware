@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Config under test — seeded per test; app_config_ingest/app_nfc write through
  * here. app_config() and g_app_config share one struct (a test simplification
@@ -186,9 +187,9 @@ size_t app_history_count(void)
 	return 0;
 }
 
-uint32_t app_history_get_mask(void)
+void app_history_get_layout(struct app_history_layout *out)
 {
-	return 0;
+	memset(out, 0, sizeof(*out));
 }
 
 uint32_t app_history_get_interval(void)

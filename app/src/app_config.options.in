@@ -40,6 +40,9 @@ Response.Error.detail       max_size:32
 # APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B) so it never fills this. RAM-free: the Response oneof is dominated by
 # ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
 Response.HistoryFrame.samples max_size:440
+# #430 record layout: one entry per column (APP_HISTORY_MAX_CH) / per 1-Wire slot.
+Response.HistoryFrame.channels max_size:24
+Response.HistoryFrame.w1_types max_size:4 fixed_length:true
 Response.Info.claim_token   max_size:16 fixed_length:true
 Response.Info.dev_eui       max_size:8 fixed_length:true
 

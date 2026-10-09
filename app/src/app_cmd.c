@@ -1349,6 +1349,20 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 #endif
 }
 
+#if defined(APP_CMD_HAVE_HISTORY)
+/* HistoryFrame layout fields (#430): one column per record value, bit i of
+ * `present` = column i; the 1-Wire slot types only when a column needs them. */
+static void history_frame_layout(Response_HistoryFrame *hf, const struct app_history_layout *l)
+{
+	hf->present = l->count ? (uint32_t)BIT_MASK(l->count) : 0;
+	memcpy(hf->channels.bytes, l->channels, l->count);
+	hf->channels.size = l->count;
+	if (l->has_w1) {
+		memcpy(hf->w1_types, l->w1_types, sizeof(hf->w1_types));
+	}
+}
+#endif
+
 /* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
  * streaming), this is client-driven and stateless: each tap returns exactly one
  * HistoryFrame and the phone advances the cursor by passing the response's
@@ -1367,8 +1381,10 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
 	size_t start = rq->has_start_ord ? rq->start_ord : 0;
-	uint32_t present = app_history_get_mask();
+	struct app_history_layout layout;
 	uint32_t interval = app_history_get_interval();
+
+	app_history_get_layout(&layout);
 
 	Response_HistoryFrame *hf = &resp->body.history_frame;
 
@@ -1377,7 +1393,7 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	 * (max-varint) header values keep the bound stable regardless of the actual
 	 * ordinal/time values. */
 	size_t cap = app_cmd_history_sample_capacity(cmd->seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
-						     present, interval, DUMP_PAGE_BUDGET_NFC);
+						     &layout, interval, DUMP_PAGE_BUDGET_NFC);
 	cap = MIN(cap, sizeof(hf->samples.bytes));
 
 	uint32_t t0 = 0;
@@ -1392,7 +1408,7 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	 * it by record ordinal, so no page_index/page_count here (#425). */
 	hf->t0_unix = t0;
 	hf->samples.size = written;
-	hf->present = present;
+	history_frame_layout(hf, &layout);
 	hf->interval_s = interval;
 	hf->has_time_synced = true;
 	hf->time_synced = synced; /* per frame: a frame never spans two segments */
@@ -3113,8 +3129,8 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, b
 
 #if defined(APP_CMD_HAVE_HISTORY)
 size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				       size_t out_cap)
+				       uint32_t t0_unix, const struct app_history_layout *layout,
+				       uint32_t interval_s, size_t out_cap)
 {
 	Response resp = Response_init_zero;
 
@@ -3123,7 +3139,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	Response_HistoryFrame *hf = &resp.body.history_frame;
 	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
-	hf->present = present;
+	history_frame_layout(hf, layout);
 	hf->interval_s = interval_s;
 	/* app_cmd_build_history_frame() always sets time_synced, so account for its
 	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
@@ -3152,13 +3168,13 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				bool time_synced, const uint8_t *samples, size_t samples_len,
-				uint8_t *out, size_t out_cap, size_t *out_len)
+				uint32_t t0_unix, const struct app_history_layout *layout,
+				uint32_t interval_s, bool time_synced, const uint8_t *samples,
+				size_t samples_len, uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	Response resp = Response_init_zero;
 
-	if (!out || !out_len || (samples_len > 0 && !samples)) {
+	if (!out || !out_len || !layout || (samples_len > 0 && !samples)) {
 		return -EINVAL;
 	}
 	if (samples_len > sizeof(resp.body.history_frame.samples.bytes)) {
@@ -3170,7 +3186,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	Response_HistoryFrame *hf = &resp.body.history_frame;
 	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
-	hf->present = present;
+	history_frame_layout(hf, layout);
 	hf->interval_s = interval_s;
 	/* Flag whether t0_unix is absolute (L-1/L-3): host emits time=null otherwise. */
 	hf->has_time_synced = true;

@@ -236,20 +236,21 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, b
  * serializes to an oversized/empty uplink. Returns 0 when even one sample byte
  * will not fit. Pass worst-case (max-varint) field values to get a stable lower
  * bound across a whole replay. */
+struct app_history_layout;
 size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				       size_t out_cap);
+				       uint32_t t0_unix, const struct app_history_layout *layout,
+				       uint32_t interval_s, size_t out_cap);
 
 /* Build one history-replay frame (Response{ seq, history_frame={...} }) into
- * `out`. `samples` holds values-only records (the shared `present` mask +
- * `interval_s` describe their layout/timing). Used by the app_radio_lrw replay state
+ * `out`. `samples` holds values-only records (the shared `layout` + `interval_s`
+ * describe their columns/timing, #430). Used by the app_radio_lrw replay state
  * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
  * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode.
  * `time_synced` reports whether `t0_unix` is absolute UTC (L-1/L-3). */
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				bool time_synced, const uint8_t *samples, size_t samples_len,
-				uint8_t *out, size_t out_cap, size_t *out_len);
+				uint32_t t0_unix, const struct app_history_layout *layout,
+				uint32_t interval_s, bool time_synced, const uint8_t *samples,
+				size_t samples_len, uint8_t *out, size_t out_cap, size_t *out_len);
 
 /* One alarm edge for app_cmd_build_alarm_report(). source/edge/type carry the
  * AlarmEvent_Source/Edge/Type enum values (app_alarm fills these without

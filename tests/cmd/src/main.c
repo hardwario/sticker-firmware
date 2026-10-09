@@ -10,6 +10,7 @@
 #include "app_version.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
+#include "app_history.h"
 #include "app_nfc.h"
 #include "app_sensor.h"
 
@@ -1918,6 +1919,15 @@ ZTEST(cmd, test_clock_sync_over_nfc)
 		      r.which_body);
 }
 
+/* Three columns: two motherboard channels and one W1 slot 0 channel (#430),
+ * so the frame carries both `channels` and `w1_types`. */
+static const struct app_history_layout layout3 = {
+	.count = 3,
+	.channels = {0x00, 0x01, 0x00 | (1 << 5)},
+	.w1_types = {2, 0, 0, 0},
+	.has_w1 = true,
+};
+
 /* #89: a fully-populated history frame (48 samples, synced 5-byte t0) must fit
  * the staging buffer. The pre-fix 64-byte buffer overflowed (~68 B encoded),
  * killing replay silently on DR3+. */
@@ -1929,7 +1939,7 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 
 	memset(samples, 0xAB, sizeof(samples));
 	int ret = app_cmd_build_history_frame(/*seq*/ 200, /*idx*/ 200, /*count*/ 200,
-					      /*t0*/ 1770000000u, /*present*/ 0x7, /*interval*/ 900,
+					      /*t0*/ 1770000000u, &layout3, /*interval*/ 900,
 					      /*time_synced*/ true, samples, sizeof(samples), out,
 					      sizeof(out), &out_len);
 	zassert_equal(ret, 0, "full frame did not fit (ret %d)", ret);
@@ -1942,6 +1952,10 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 	zassert_equal(r.body.history_frame.samples.size, 48, "sample count");
 	zassert_true(r.body.history_frame.has_time_synced, "time_synced must be present");
 	zassert_true(r.body.history_frame.time_synced, "time_synced should be true");
+	zassert_equal(r.body.history_frame.present, 0x7, "present = one bit per column");
+	zassert_equal(r.body.history_frame.channels.size, 3, "channels count");
+	zassert_mem_equal(r.body.history_frame.channels.bytes, layout3.channels, 3, "channels");
+	zassert_mem_equal(r.body.history_frame.w1_types, layout3.w1_types, 4, "w1_types");
 }
 
 /* The capacity helper must be exact: a frame built with `cap` samples fits the
@@ -1957,30 +1971,30 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
-	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						     900, sizeof(out));
 	zassert_true(cap > 0 && cap < sizeof(out), "cap %zu out of range", cap);
 
 	/* Exactly `cap` samples must encode within out_cap. */
-	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
 					      /*time_synced*/ true, samples, cap, out, sizeof(out),
 					      &out_len);
 	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
 
 	/* Exactness: one more sample byte must NOT fit the same out_cap. */
-	ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+	ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
 					  /*time_synced*/ true, samples, cap + 1, out, sizeof(out),
 					  &out_len);
 	zassert_equal(ret, -EMSGSIZE, "cap+1 samples should overflow (ret %d)", ret);
 
 	/* A tighter budget yields a strictly smaller (or zero) capacity. */
-	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						       900, 32);
 	zassert_true(tight < cap, "tight cap %zu not below %zu", tight, cap);
 
 	/* A budget below the fixed overhead yields zero. */
-	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						      900, 8),
 		      0, "tiny budget should give 0");
 }

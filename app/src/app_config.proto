@@ -539,7 +539,9 @@ message Response {
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
         bytes  samples     = 4;   // records, values only (no per-record time/mask)
-        uint32 present     = 5;   // sensor mask shared by every record in the frame
+        // Bit i = column i is stored in every record of the frame. Since #430 the
+        // columns are `channels`; older firmware used a fixed sensor enum here.
+        uint32 present     = 5;
         uint32 interval_s  = 6;   // seconds between records; time(j) = t0_unix + j*interval_s
         // True when t0_unix is absolute UTC; false when the RTC had not synced at
         // capture, so t0_unix is only uptime-relative (L-1/L-3). Absent = old FW =
@@ -553,6 +555,14 @@ message Response {
         // has_more=false means the window is exhausted — stop tapping (no wedge).
         optional uint32 next_ord = 8;
         optional bool   has_more = 9;
+        // #430: record layout. One byte per column in record order, `slot << 5 |
+        // ch` (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = channel of the
+        // slot's type in app_sensor_types.yaml, whose `history` [enc, scale]
+        // gives the column's width and scale). w1_types = sensor type id of
+        // slots 1..4 the 1-Wire columns were recorded with; omitted when no
+        // column is a 1-Wire slot. Absent `channels` = pre-#430 firmware.
+        bytes channels = 10;
+        bytes w1_types = 11;
     }
 
     message Error {

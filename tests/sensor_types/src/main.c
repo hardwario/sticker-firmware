@@ -96,7 +96,10 @@ ZTEST(sensor_types, test_descriptor_fields)
 				   APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION);
 	zassert_equal(c->kind, APP_SENSOR_KIND_STATE);
 	zassert_true(c->flags & APP_SENSOR_F_MOMENTARY);
-	zassert_equal(c->hist_enc, APP_SENSOR_HIST_NONE);
+	/* Momentary channels record a 0/1 "fired" column derived from their pulse
+	 * counter (#430). */
+	zassert_equal(c->hist_enc, APP_SENSOR_HIST_U8);
+	zassert_equal(c->pulses_ch, APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT);
 
 	c = app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
 				   APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT);

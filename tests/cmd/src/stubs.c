@@ -192,9 +192,9 @@ size_t app_history_count(void)
 	return 0;
 }
 
-uint32_t app_history_get_mask(void)
+void app_history_get_layout(struct app_history_layout *out)
 {
-	return 0;
+	memset(out, 0, sizeof(*out));
 }
 
 uint32_t app_history_get_interval(void)

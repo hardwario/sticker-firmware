@@ -657,6 +657,48 @@ test("decodeUplink decodes + reassembles multi-frame history (fPort 85)", () => 
   assert.deepEqual(all.map((r) => r.time), [t0a, t0a + interval, t0b]);
 });
 
+// #430: a layout-described frame — `channels` (field 10) lists the columns as
+// slot << 5 | channel, `w1_types` (field 11) the 1-Wire slot types.
+function buildLayoutFrame(t0, interval, channels, w1Types, samples) {
+  let hf = pbTV(2, 1).concat(pbTV(3, t0)).concat(pbLD(4, samples))
+    .concat(pbTV(5, (1 << channels.length) - 1)).concat(pbTV(6, interval))
+    .concat(pbTV(7, 1)).concat(pbLD(10, channels));
+  if (w1Types) hf = hf.concat(pbLD(11, w1Types));
+  return [0x01].concat(pbTV(1, 7)).concat(pbLD(5, hf));
+}
+const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
+const le32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+
+test("history frame with channels/w1_types decodes any registry channel (#430)", () => {
+  // temperature, humidity, s1 temperature (dallas), pir-motion, hall-left-count,
+  // altitude (motherboard ch 21)
+  const channels = [0x00, 0x01, 0x20, 0x0f, 0x06, 0x15];
+  const rec0 = [].concat(le16(2150), [90], le16(-525), [1], le32(1234), le16(-123));
+  const rec1 = [].concat(le16(0x7fff), [0xff], le16(0x7fff), [0], le32(0xffffffff),
+    le16(0x7fff));
+  const f = buildLayoutFrame(1780000000, 60, channels, [2, 0, 0, 0], rec0.concat(rec1));
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+
+  assert.deepEqual(hf.channels, ["temperature", "humidity", "s1_temperature", "pir_motion",
+    "hall_left_count", "altitude"]);
+  assert.deepEqual(hf.w1_types, [2, 0, 0, 0]);
+  assert.equal(hf.records.length, 2);
+  assert.deepEqual(hf.records[0], { time: 1780000000, temperature: 21.5, humidity: 45,
+    s1_temperature: -5.25, pir_motion: 1, hall_left_count: 1234, altitude: -123 });
+  assert.deepEqual(hf.records[1], { time: 1780000060, temperature: null, humidity: null,
+    s1_temperature: null, pir_motion: 0, hall_left_count: null, altitude: null });
+});
+
+test("history frame with an unknown column leaves records undecoded (#430)", () => {
+  // slot 2 has no type (w1_types[1] = 0): the record size is unknown.
+  const f = buildLayoutFrame(1780000000, 60, [0x00, 0x40], [2, 0, 0, 0], [1, 2, 3, 4]);
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+
+  assert.equal(hf.channels, null);
+  assert.deepEqual(hf.records, []);
+});
+
+
 // #260: an NFC paged-read frame carries next_ord + has_more (fields 8/9). The
 // shared decoder must surface them for the phone's cursor while still decoding
 // records unchanged; a device-driven LoRaWAN frame omits them (has_more absent).

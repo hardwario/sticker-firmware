@@ -306,8 +306,11 @@ static uint8_t *cfg_rom_staging(int slot)
 	}
 }
 
-/* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
- * at runtime from the discovered device's family code, not stored in config.
+/* The ROM binds a slot; the device's driver (and SHT variant) is resolved at
+ * runtime from the discovered device's family code. The slot's registry type is
+ * persisted next to the ROM as sensorN_type (#430) — the stored serial carries
+ * no family code, and history must know a slot's channels while the sensor is
+ * absent.
  * The serial is stored big-endian so `config sensorN-rom` reads the same digits
  * as `w1 list` / the serial number (e.g. 0000000553f7), matching the radio-deveui
  * convention. 0 = empty slot. */
@@ -316,12 +319,43 @@ static uint64_t cfg_rom_get(int slot)
 	return sys_get_be64(cfg_rom(slot));
 }
 
+static uint8_t *cfg_type(struct app_config *c, int slot)
+{
+	switch (slot) {
+	case 0:
+		return &c->sensor1_type;
+	case 1:
+		return &c->sensor2_type;
+	case 2:
+		return &c->sensor3_type;
+	case 3:
+		return &c->sensor4_type;
+	default:
+		return NULL;
+	}
+}
+
+/* Runtime + staging, like cfg_rom_set(). */
+static void cfg_type_set(int slot, uint8_t type)
+{
+	uint8_t *rt = cfg_type(&g_app_config, slot);
+	uint8_t *st = cfg_type(app_config(), slot);
+
+	if (rt != NULL && st != NULL) {
+		*rt = type;
+		*st = type;
+	}
+}
+
 static void cfg_rom_set(int slot, uint64_t serial)
 {
 	/* Write both: runtime (for the live rebind below) + staging (so
 	 * `settings save` persists it and `config get` shows it). */
 	sys_put_be64(serial, cfg_rom(slot));
 	sys_put_be64(serial, cfg_rom_staging(slot));
+	if (serial == 0) {
+		cfg_type_set(slot, APP_SENSOR_TYPE_NONE); /* type is set on the bind */
+	}
 }
 
 bool app_w1_slots_any_taught(void)
@@ -411,6 +445,11 @@ int app_w1_slots_rebind(void)
 				m_slots[s].type = dev[d].desc->type;
 				m_slots[s].driver_index = dev[d].driver_index;
 				m_slots[s].present = true;
+				/* No-op once set; fills sensorN_type on a unit taught
+				 * before it existed (#430). */
+				if (*cfg_type(&g_app_config, s) != dev[d].desc->sensor_type) {
+					cfg_type_set(s, dev[d].desc->sensor_type);
+				}
 				LOG_INF("Slot %d bound to %s ROM %012llx (idx %d)", s + 1,
 					dev[d].desc->name, m_slots[s].rom, dev[d].driver_index);
 				break;
@@ -446,6 +485,7 @@ int app_w1_slots_rebind(void)
 				m_slots[s].driver_index = dev[d].driver_index;
 				m_slots[s].present = true;
 				cfg_rom_set(s, dev[d].serial);
+				cfg_type_set(s, dev[d].desc->sensor_type);
 				LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1,
 					dev[d].desc->name, dev[d].serial);
 				dev[d].claimed = true;

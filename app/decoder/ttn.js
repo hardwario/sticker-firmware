@@ -533,7 +533,7 @@ function _decodeW1Scan(bytes, start, end) {
   return { rom: roms };
 }
 
-// app_history_sensor enum order → name + encoding (mirrors app_history.c).
+// Pre-#430 firmware: app_history_sensor enum order → name + encoding.
 var _HIST_SENSORS = [
   { name: "temperature", enc: "temp" },
   { name: "humidity", enc: "hum" },
@@ -619,6 +619,60 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
   return out;
 }
 
+// #430: a HistoryFrame with `channels` (field 10) describes its columns as
+// registry entries (slot << 5 | channel); `w1_types` (field 11) gives the sensor
+// type of 1-Wire slots 1..4 the layout was built with (slot 0 = motherboard).
+// Each column is encoded per the channel's history [enc, scale]; the top value
+// of the encoding is the "absent" sentinel (null). Counters are whole numbers,
+// other values are raw / scale. Column key = snake_case channel name, prefixed
+// "sN_" for 1-Wire slot N. Returns null when a column is unknown (the record
+// size cannot be derived, so the samples are not decoded).
+var _HIST_ENC_SIZE = { u8: 1, i16: 2, u16: 2, i32: 4, u32: 4 };
+var _HIST_ENC_SENTINEL = { u8: 0xff, i16: 0x7fff, u16: 0xffff, i32: 0x7fffffff,
+                           u32: 0xffffffff };
+
+function _historyColumns(channels, w1Types) {
+  var cols = [];
+  for (var i = 0; i < channels.length; i++) {
+    var slot = channels[i] >> 5, ch = channels[i] & 0x1f;
+    var type = slot === 0 ? _SENSOR_MB_TYPE : (w1Types ? w1Types[slot - 1] : 0);
+    var t = _SENSOR_TYPES[type];
+    var c = t ? t.ch[ch] : undefined;
+    if (!c || !c.h || !_HIST_ENC_SIZE[c.h[0]]) return null;
+    var key = c.n.replace(/-/g, "_");
+    cols.push({ key: slot === 0 ? key : "s" + slot + "_" + key, enc: c.h[0],
+                scale: c.h[1], count: c.k === "rate" });
+  }
+  return cols;
+}
+
+function _decodeHistoryColumns(bytes, t0, cols, interval, synced) {
+  var out = [];
+  var recSize = 0;
+  for (var i = 0; i < cols.length; i++) recSize += _HIST_ENC_SIZE[cols[i].enc];
+  if (recSize === 0) return out;
+
+  var p = 0, j = 0;
+  while (p + recSize <= bytes.length) {
+    var rec = { time: synced ? ((t0 + j * interval) >>> 0) : null };
+    for (var k = 0; k < cols.length; k++) {
+      var c = cols[k], n = _HIST_ENC_SIZE[c.enc], raw;
+      if (n === 1) raw = bytes[p];
+      else if (n === 2) raw = bytes[p] | (bytes[p + 1] << 8);
+      else raw = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) |
+                  (bytes[p + 3] << 24)) >>> 0;
+      p += n;
+      if (raw === _HIST_ENC_SENTINEL[c.enc]) { rec[c.key] = null; continue; }
+      if (c.enc === "i16" && raw > 0x7fff) raw -= 0x10000;
+      else if (c.enc === "i32") raw = raw | 0;
+      rec[c.key] = c.count ? raw : raw / c.scale;
+    }
+    out.push(rec);
+    j++;
+  }
+  return out;
+}
+
 function _decodeHistoryFrame(bytes, start, end) {
   // frame_index/frame_count: only older firmware numbers frames here (#425 moved
   // it to the Response envelope, pages "i/N"). Emitted only when frame_count is
@@ -630,7 +684,7 @@ function _decodeHistoryFrame(bytes, start, end) {
   // next_ord (field 8) / has_more (field 9): NFC paged read (#260, req_history_page)
   // only. Absent over the LoRaWAN device-driven replay; surfaced here so the same
   // decoder is a complete reference for the NFC (Manager-App) paging cursor.
-  var samples = null;
+  var samples = null, channels = null, w1Types = null;
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -648,6 +702,8 @@ function _decodeHistoryFrame(bytes, start, end) {
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (f === 4) samples = bytes.slice(pos, pos + len.value);
+      else if (f === 10) channels = bytes.slice(pos, pos + len.value);
+      else if (f === 11) w1Types = bytes.slice(pos, pos + len.value);
       pos += len.value;
     } else { break; }
   }
@@ -657,7 +713,16 @@ function _decodeHistoryFrame(bytes, start, end) {
   hf.present = present;
   hf.interval_s = interval;
   hf.time_synced = synced;
-  if (samples) hf.records = _decodeHistorySamples(samples, t0, present, interval, synced);
+  if (channels) {
+    // #430 layout: present = one bit per column, always all set.
+    var cols = _historyColumns(channels, w1Types);
+    hf.channels = cols ? cols.map(function (c) { return c.key; }) : null;
+    if (w1Types) hf.w1_types = Array.prototype.slice.call(w1Types);
+    if (samples && cols) hf.records = _decodeHistoryColumns(samples, t0, cols, interval, synced);
+  } else if (samples) {
+    // Pre-#430 firmware: `present` is a mask over the fixed sensor enum.
+    hf.records = _decodeHistorySamples(samples, t0, present, interval, synced);
+  }
   return hf;
 }
 
