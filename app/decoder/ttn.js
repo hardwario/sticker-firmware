@@ -962,10 +962,24 @@ function decodeTelemetry(bytes) {
         d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
+      // #425 paging, as Response / AlarmReport
+      case 28: d.page_index = v.value; break;
+      case 29: d.page_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }
+  _applyTelemetryPages(d);
   return d;
+}
+
+// #425: a telemetry report that does not fit one frame comes as pages, each
+// decoded on its own ("i/N", 1-based). A 1-Wire reading is never split, so a
+// reading on a page is complete; the host merges the pages by page_index.
+function _applyTelemetryPages(d) {
+  if (d.page_count > 1) {
+    if (d.page_index === undefined) d.page_index = 0;
+    d.pages = (d.page_index + 1) + "/" + d.page_count;
+  }
 }
 
 // ---------------------------------------------------------------------------
