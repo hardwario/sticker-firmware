@@ -55,6 +55,7 @@
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
@@ -151,7 +152,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	 * holds a real reading by the time DeviceInfo is sent. 0/NaN before the first
 	 * sample -> proto omits it and the host treats battery as "unknown". */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	float v = g_app_sensor_data.voltage;
+	float v = APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	info->battery_mv = (isfinite(v) && v > 0.f) ? (uint32_t)(v * 1000.0f) : 0;
 
@@ -209,7 +210,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
  * here keeps the list variable-length (only the active alarms are sent, empty
  * when all is well) and avoids a large static array in the Info struct — the
  * debug build's RAM is tight. Shared by the LoRaWAN and NFC info paths. */
-#define ACTIVE_ALARM_SNAPSHOT_MAX (APP_ALARM_SLOT_COUNT + 9) /* +8 no-data +1 battery */
+#define ACTIVE_ALARM_SNAPSHOT_MAX (APP_ALARM_RULE_COUNT + APP_ALARM_WATCHDOG_MAX)
 
 static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
@@ -226,9 +227,11 @@ static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, 
 
 	for (size_t i = 0; i < n; i++) {
 		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
-		e.source = list[i].source;
-		e.quantity = list[i].quantity;
+		e.slot = list[i].slot;
+		e.channel = list[i].channel;
 		e.type = list[i].type;
+		e.has_sensor_type = list[i].slot != 0 && list[i].sensor_type != 0;
+		e.sensor_type = list[i].sensor_type;
 		if (!pb_encode_tag_for_field(stream, field)) {
 			return false;
 		}
@@ -334,6 +337,18 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 		info->unix_time = i.unix_time;
 	}
 
+#if defined(APP_CMD_HAVE_W1)
+	/* 1-Wire slot state (#430), omitted while every slot is unused. */
+	BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(info->w1_slot_state),
+		     "w1_slot_state array too small for APP_W1_SLOT_COUNT");
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		info->w1_slot_state[s] = (uint32_t)app_w1_slot_get_state(s);
+		if (info->w1_slot_state[s] != APP_W1_SLOT_STATE_NONE) {
+			info->w1_slot_state_count = APP_W1_SLOT_COUNT;
+		}
+	}
+#endif
+
 	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
 	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
 	 * (and the LNS already knows it). dev_eui is further omitted when unset
@@ -430,6 +445,9 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	 * was removed with the fixed alarm keys — alarm rules validate on their own
 	 * SET path in app_alarm_rules.) */
 	struct app_config snapshot = *app_config();
+	/* Rules already stale before this batch (#430) do not fail it; only a
+	 * batch that makes more rules stale or invalid does. */
+	const int stale_before = app_alarm_rules_stale_count();
 
 	/* alarms_replace: the host is the source of truth for the whole alarm table
 	 * (ProXimos Portal). Empty every rule slot in staging first, so the alarms
@@ -491,8 +509,10 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		 * reboot (whether or not this batch is persisted). reload sanitizes and
 		 * reports any rule that fails validation — surface that as a fault instead
 		 * of a misleading ACK for a rule that was silently dropped (H-10). */
-		if ((sp->has_alarms || alarms_replace) &&
-		    app_alarm_rules_reload_from_config() > 0) {
+		/* A sensors-group change of sensorN_type can turn rules stale
+		 * (#430), so it reloads (and is checked) like an alarms change. */
+		if ((sp->has_alarms || sp->has_sensors || alarms_replace) &&
+		    app_alarm_rules_reload_from_config() > stale_before) {
 			*app_config() = snapshot;                   /* roll back the batch */
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
@@ -576,9 +596,10 @@ static const struct {
 	{DUMP_SECTION_APPLICATION, 2, 3, false, false},
 	{DUMP_SECTION_APPLICATION, 3, 4, false, false},
 	{DUMP_SECTION_APPLICATION, 4, 2, false, false},
-	{DUMP_SECTION_APPLICATION, 5, 6, false, false},
+	{DUMP_SECTION_APPLICATION, 9, 26, false, false},
 	{DUMP_SECTION_APPLICATION, 6, 3, false, false},
 	{DUMP_SECTION_APPLICATION, 7, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 8, 3, false, false},
 	{DUMP_SECTION_SENSORS, 1, 2, false, false},
 	{DUMP_SECTION_SENSORS, 2, 2, false, false},
 	{DUMP_SECTION_SENSORS, 3, 2, false, false},
@@ -587,34 +608,39 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 6, 2, false, false},
 	{DUMP_SECTION_SENSORS, 7, 2, false, false},
 	{DUMP_SECTION_SENSORS, 19, 3, false, false},
+	{DUMP_SECTION_SENSORS, 22, 3, false, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false, false},
 	{DUMP_SECTION_SENSORS, 9, 2, false, false},
 	{DUMP_SECTION_SENSORS, 10, 2, false, false},
 	{DUMP_SECTION_SENSORS, 11, 10, false, true},
+	{DUMP_SECTION_SENSORS, 23, 7, false, false},
 	{DUMP_SECTION_SENSORS, 12, 10, false, true},
+	{DUMP_SECTION_SENSORS, 24, 7, false, false},
 	{DUMP_SECTION_SENSORS, 13, 10, false, true},
+	{DUMP_SECTION_SENSORS, 25, 7, false, false},
 	{DUMP_SECTION_SENSORS, 14, 10, false, true},
+	{DUMP_SECTION_SENSORS, 26, 7, false, false},
 	{DUMP_SECTION_SENSORS, 15, 2, false, false},
 	{DUMP_SECTION_SENSORS, 16, 3, false, false},
 	{DUMP_SECTION_SENSORS, 17, 3, false, false},
 	{DUMP_SECTION_SENSORS, 18, 3, false, false},
 	{DUMP_SECTION_ALARMS, 1, 3, false, false},
-	{DUMP_SECTION_ALARMS, 3, 19, false, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false, false},
-	{DUMP_SECTION_ALARMS, 5, 19, false, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false, false},
-	{DUMP_SECTION_ALARMS, 7, 19, false, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false, false},
-	{DUMP_SECTION_ALARMS, 9, 19, false, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false, false},
-	{DUMP_SECTION_ALARMS, 11, 19, false, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false, false},
-	{DUMP_SECTION_ALARMS, 13, 19, false, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false, false},
-	{DUMP_SECTION_ALARMS, 15, 19, false, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false, false},
-	{DUMP_SECTION_ALARMS, 17, 20, false, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false, false},
+	{DUMP_SECTION_ALARMS, 3, 20, false, false},
+	{DUMP_SECTION_ALARMS, 4, 20, false, false},
+	{DUMP_SECTION_ALARMS, 5, 20, false, false},
+	{DUMP_SECTION_ALARMS, 6, 20, false, false},
+	{DUMP_SECTION_ALARMS, 7, 20, false, false},
+	{DUMP_SECTION_ALARMS, 8, 20, false, false},
+	{DUMP_SECTION_ALARMS, 9, 20, false, false},
+	{DUMP_SECTION_ALARMS, 10, 20, false, false},
+	{DUMP_SECTION_ALARMS, 11, 20, false, false},
+	{DUMP_SECTION_ALARMS, 12, 20, false, false},
+	{DUMP_SECTION_ALARMS, 13, 20, false, false},
+	{DUMP_SECTION_ALARMS, 14, 20, false, false},
+	{DUMP_SECTION_ALARMS, 15, 20, false, false},
+	{DUMP_SECTION_ALARMS, 16, 21, false, false},
+	{DUMP_SECTION_ALARMS, 17, 21, false, false},
+	{DUMP_SECTION_ALARMS, 18, 21, false, false},
 	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	{DUMP_SECTION_ALARMS, 21, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
@@ -629,8 +655,8 @@ static const struct {
  * config_dump wrapper + page_index + page_count + the two submessage wrappers),
  * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
  * worst-case frame near 44 B with margin. Conservative — a page can never
- * overflow (the largest single field is 20 B: a 17-byte alarm rule with a
- * two-byte tag). */
+ * overflow (the largest single field is 21 B: an 18-byte alarm rule with a
+ * two-byte tag and its length byte). */
 #define DUMP_PAGE_BUDGET 30
 
 /* Over NFC the response travels in the ST25DV Fast-Transfer-Mode mailbox, a
@@ -959,40 +985,50 @@ static void app_cmd_handle_claim_done(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
-	app_nfc_claim_done();
+	app_nfc_claim_done("claim_done command");
 	resp->which_body = Response_ack_tag;
 }
 
 /* #351/#415: re-open the claim window (symmetric counterpart to claim_done's
  * close). Always deferred via APP_CMD_ACTION_CLAIM_ACTIVE_SAVE — same
- * restart-style pattern as reboot/device_reset/set_secret_key: the Ack is
+ * restart-style pattern as reboot/device_reset/set_secret_key: the answer is
  * written and delivered to the phone first (app_nfc_take_cmd_action() only
  * releases the action once that round-trip completes, #242), and only then does
- * main.c flip the latch + reboot. This used to short-circuit to a synchronous
- * app_nfc_claim_active() (no reboot) when no new_claim_token was given, on the
- * reasoning that nothing in g_app_config was changing so there was nothing to
- * wait on — but that made the two branches behave differently for no
- * functional reason. Deferring both the same way costs one reboot in the
- * no-new-token case and buys consistent, predictable timing instead: the
- * phone can always assume "ack read -> reboot happens" regardless of which
- * branch it took, mirroring the non-new-token branch's rebuild of
- * app_config()->claim_token being a same-value no-op (h_commit just re-syncs
- * the value that's already live), so a plain re-open still leaves
- * claim_token unchanged. */
+ * main.c persist the config, flip the latch and reboot.
+ *
+ * The token (#471): a non-zero new_claim_token replaces it; without one the
+ * stored token is kept, and when none is stored (wiped by vendor_reset) a new
+ * 128-bit token comes from the CSPRNG. The answer is always Response.claim_info
+ * with the token that holds after the reboot, so the phone can forward it to
+ * ATELOS; it travels on the secret_key channel (nfc) or the shell only. */
 static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command *cmd,
 					Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
 	const Command_ClaimActive *rearm = &cmd->body.claim_active;
+	uint8_t *token = app_config()->claim_token;
+	const size_t token_size = sizeof(app_config()->claim_token);
 
 	if (rearm->has_new_claim_token &&
 	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
-		memcpy(app_config()->claim_token, rearm->new_claim_token,
-		       sizeof(app_config()->claim_token));
+		memcpy(token, rearm->new_claim_token, token_size);
+	} else if (buffer_is_zero(token, token_size)) {
+		uint8_t fresh[sizeof(app_config()->claim_token)];
+
+		if (sys_csrand_get(fresh, sizeof(fresh)) || buffer_is_zero(fresh, sizeof(fresh))) {
+			make_error(resp, Response_Error_Code_NOT_READY, "no entropy");
+			return;
+		}
+		memcpy(token, fresh, token_size);
+		LOG_INF("claim_active: new claim_token generated");
 	}
 	*action = APP_CMD_ACTION_CLAIM_ACTIVE_SAVE;
 
-	resp->which_body = Response_ack_tag;
+	resp->which_body = Response_claim_info_tag;
+	resp->body.claim_info.serial_number = app_config()->serial_number;
+	BUILD_ASSERT(sizeof(resp->body.claim_info.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(resp->body.claim_info.claim_token, token, token_size);
 }
 
 /* #415: read the claim identity {serial_number, claim_token} over the
@@ -1213,17 +1249,23 @@ void app_cmd_run_action(enum app_cmd_action action)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
-		/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
-		 * together, so a staged claim_token goes live in the same breath as the
-		 * latch. #340 M15: app_nfc_claim_active() has already persisted the
-		 * latch; if the save then fails, reboot anyway so live state follows
-		 * whatever DID get persisted. */
+		/* #351/#415/#471: persist the staged claim_token (new, generated or the
+		 * same one), then flip the claim window to ACTIVE, then reboot, always
+		 * (every claim_active case runs this action, see
+		 * app_cmd_handle_claim_active), so the phone can always assume
+		 * "claim_info read -> reboot". The latch flips only after the token is
+		 * on flash: a failed save reboots with the old token and the old latch,
+		 * never with an open window and a token the phone was told about but
+		 * the unit lost (e.g. an all-zero one after vendor_reset). claim_token
+		 * becomes live via h_commit on the next boot. */
 		LOG_INF("Command: claim window active + reboot");
-		app_nfc_claim_active();
-		if (app_settings_save(true)) {
+		if (app_settings_save(false)) {
 			LOG_WRN_REBOOTING("claim-token save failed");
 			sys_reboot(SYS_REBOOT_COLD);
 		}
+		app_nfc_claim_active("claim_active command");
+		/* Nothing left to write (NVS skips unchanged values); reboots. */
+		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
 		/* Persist calibration=true + reboot; main() enters calibration mode on
@@ -1332,6 +1374,20 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 #endif
 }
 
+#if defined(APP_CMD_HAVE_HISTORY)
+/* HistoryFrame layout fields (#430): one column per record value, bit i of
+ * `present` = column i; the 1-Wire slot types only when a column needs them. */
+static void history_frame_layout(Response_HistoryFrame *hf, const struct app_history_layout *l)
+{
+	hf->present = l->count ? (uint32_t)BIT_MASK(l->count) : 0;
+	memcpy(hf->channels.bytes, l->channels, l->count);
+	hf->channels.size = l->count;
+	if (l->has_w1) {
+		memcpy(hf->w1_types, l->w1_types, sizeof(hf->w1_types));
+	}
+}
+#endif
+
 /* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
  * streaming), this is client-driven and stateless: each tap returns exactly one
  * HistoryFrame and the phone advances the cursor by passing the response's
@@ -1350,8 +1406,10 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
 	size_t start = rq->has_start_ord ? rq->start_ord : 0;
-	uint32_t present = app_history_get_mask();
+	struct app_history_layout layout;
 	uint32_t interval = app_history_get_interval();
+
+	app_history_get_layout(&layout);
 
 	Response_HistoryFrame *hf = &resp->body.history_frame;
 
@@ -1360,7 +1418,7 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	 * (max-varint) header values keep the bound stable regardless of the actual
 	 * ordinal/time values. */
 	size_t cap = app_cmd_history_sample_capacity(cmd->seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
-						     present, interval, DUMP_PAGE_BUDGET_NFC);
+						     &layout, interval, DUMP_PAGE_BUDGET_NFC);
 	cap = MIN(cap, sizeof(hf->samples.bytes));
 
 	uint32_t t0 = 0;
@@ -1375,7 +1433,7 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	 * it by record ordinal, so no page_index/page_count here (#425). */
 	hf->t0_unix = t0;
 	hf->samples.size = written;
-	hf->present = present;
+	history_frame_layout(hf, &layout);
 	hf->interval_s = interval;
 	hf->has_time_synced = true;
 	hf->time_synced = synced; /* per frame: a frame never spans two segments */
@@ -1901,10 +1959,10 @@ enum page_stream_kind {
 };
 
 /* Info snapshot for paging: the LoRaWAN view of the scalars plus the active
- * alarms as (source, quantity, type) triples. */
+ * alarms as app_alarm_active entries (slot, channel, sensor type, type). */
 struct info_snap {
 	Response_Info info;
-	uint8_t alarm[ACTIVE_ALARM_SNAPSHOT_MAX][3];
+	struct app_alarm_active alarm[ACTIVE_ALARM_SNAPSHOT_MAX];
 	uint8_t n_alarms;
 	uint32_t seq; /* echoed on every page; part of the page size */
 };
@@ -1966,8 +2024,10 @@ static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *re
 
 /* application: interval_sample, interval_report, history_enable */
 static const uint32_t cs_app_ids[] = {2, 3, 4};
-/* sensors: cap_hall_left..cap_accelerometer (all nine cap_* flags) */
-static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+/* sensors: every cap_* flag — cap_hall_left..cap_accelerometer (1..9),
+ * cap_buzzer (19, effective value: app_sensor_init() clears it when
+ * cap_pir_detector is also set) and cap_sht (22, #465) */
+static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 22};
 #if defined(APP_CMD_HAVE_W1)
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids) + 1)
 #else
@@ -2012,13 +2072,12 @@ static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint
 
 #if defined(APP_CMD_HAVE_W1)
 	if (mask & BIT(CS_ITEMS - 1)) {
-		/* Detected 1-Wire slot type per slot (runtime state; see app_w1_slot_type
-		 * in app_w1_slots.h — the single source of truth). Wire values are pinned
-		 * here so reordering the enum can never silently change the on-air
-		 * meaning. */
-		BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 1 &&
-				     APP_W1_SLOT_MACHINE_PROBE == 2,
-			     "w1_slot_type wire values must stay 0/empty 1/dallas 2/machine-probe");
+		/* Detected 1-Wire slot type per slot (runtime state): the registry type
+		 * id (#430). Wire values are pinned here so reordering the enum can
+		 * never silently change the on-air meaning. */
+		BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 2 &&
+				     APP_W1_SLOT_MACHINE_PROBE == 3,
+			     "w1_slot_type wire values must stay 0/empty 2/dallas 3/machine-probe");
 		BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(cd->w1_slot_type),
 			     "w1_slot_type array too small for APP_W1_SLOT_COUNT");
 		cd->w1_slot_type_count = APP_W1_SLOT_COUNT;
@@ -2213,6 +2272,7 @@ enum {
 	INFO_U_BATTERY,
 	INFO_U_RESET_CAUSE,
 	INFO_U_DEVICE_STATUS,
+	INFO_U_W1_SLOT_STATE,
 	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
 	INFO_U_CLAIM_TOKEN,
 	INFO_U_DEV_EUI,
@@ -2232,9 +2292,11 @@ static bool encode_alarm_range(pb_ostream_t *stream, const pb_field_t *field, vo
 	for (uint8_t i = r->start; i < r->end; i++) {
 		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
 
-		e.source = r->snap->alarm[i][0];
-		e.quantity = r->snap->alarm[i][1];
-		e.type = r->snap->alarm[i][2];
+		e.slot = r->snap->alarm[i].slot;
+		e.channel = r->snap->alarm[i].channel;
+		e.type = r->snap->alarm[i].type;
+		e.has_sensor_type = e.slot != 0 && r->snap->alarm[i].sensor_type != 0;
+		e.sensor_type = r->snap->alarm[i].sensor_type;
 		if (!pb_encode_tag_for_field(stream, field) ||
 		    !pb_encode_submessage(stream, Response_AlarmStatus_fields, &e)) {
 			return false;
@@ -2266,6 +2328,10 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
+	if (mask & BIT(INFO_U_W1_SLOT_STATE)) {
+		pi->w1_slot_state_count = all->w1_slot_state_count;
+		memcpy(pi->w1_slot_state, all->w1_slot_state, sizeof(pi->w1_slot_state));
+	}
 	if (mask & BIT(INFO_U_CLAIM_TOKEN)) {
 		pi->has_claim_token = all->has_claim_token;
 		memcpy(pi->claim_token, all->claim_token, sizeof(pi->claim_token));
@@ -2307,6 +2373,8 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->reset_cause == 0;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
+	case INFO_U_W1_SLOT_STATE:
+		return in->w1_slot_state_count == 0;
 	case INFO_U_CLAIM_TOKEN:
 		return !in->has_claim_token;
 	case INFO_U_DEV_EUI:
@@ -2427,9 +2495,7 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 	fill_info(APP_CMD_TRANSPORT_LRW, &snap->info, SIZE_MAX);
 	snap->info.active_alarms.funcs.encode = NULL;
 	for (size_t i = 0; i < n; i++) {
-		snap->alarm[i][0] = (uint8_t)list[i].source;
-		snap->alarm[i][1] = (uint8_t)list[i].quantity;
-		snap->alarm[i][2] = (uint8_t)list[i].type;
+		snap->alarm[i] = list[i];
 	}
 	snap->n_alarms = (uint8_t)n;
 	snap->seq = seq;
@@ -2714,9 +2780,7 @@ static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, ui
 	fill_info(tp, &snap.info, SIZE_MAX);
 	snap.info.active_alarms.funcs.encode = NULL;
 	for (size_t i = 0; i < n; i++) {
-		snap.alarm[i][0] = (uint8_t)list[i].source;
-		snap.alarm[i][1] = (uint8_t)list[i].quantity;
-		snap.alarm[i][2] = (uint8_t)list[i].type;
+		snap.alarm[i] = list[i];
 	}
 	snap.n_alarms = (uint8_t)n;
 	snap.seq = seq;
@@ -3094,8 +3158,8 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, b
 
 #if defined(APP_CMD_HAVE_HISTORY)
 size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				       size_t out_cap)
+				       uint32_t t0_unix, const struct app_history_layout *layout,
+				       uint32_t interval_s, size_t out_cap)
 {
 	Response resp = Response_init_zero;
 
@@ -3104,7 +3168,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	Response_HistoryFrame *hf = &resp.body.history_frame;
 	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
-	hf->present = present;
+	history_frame_layout(hf, layout);
 	hf->interval_s = interval_s;
 	/* app_cmd_build_history_frame() always sets time_synced, so account for its
 	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
@@ -3133,13 +3197,13 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				bool time_synced, const uint8_t *samples, size_t samples_len,
-				uint8_t *out, size_t out_cap, size_t *out_len)
+				uint32_t t0_unix, const struct app_history_layout *layout,
+				uint32_t interval_s, bool time_synced, const uint8_t *samples,
+				size_t samples_len, uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	Response resp = Response_init_zero;
 
-	if (!out || !out_len || (samples_len > 0 && !samples)) {
+	if (!out || !out_len || !layout || (samples_len > 0 && !samples)) {
 		return -EINVAL;
 	}
 	if (samples_len > sizeof(resp.body.history_frame.samples.bytes)) {
@@ -3151,7 +3215,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	Response_HistoryFrame *hf = &resp.body.history_frame;
 	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
-	hf->present = present;
+	history_frame_layout(hf, layout);
 	hf->interval_s = interval_s;
 	/* Flag whether t0_unix is absolute (L-1/L-3): host emits time=null otherwise. */
 	hf->has_time_synced = true;
@@ -3186,14 +3250,17 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
+		ev->rule = events[i].rule;
 		ev->slot = events[i].slot;
-		ev->source = events[i].source;
-		ev->quantity = events[i].quantity;
+		ev->channel = events[i].channel;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;
 		ev->type = (AlarmEvent_Type)events[i].type;
 		ev->rel_s = events[i].rel_s;
 		ev->has_value = events[i].has_value;
 		ev->value = events[i].value;
+		/* Slot 0 is always the motherboard: no type on the wire (#430). */
+		ev->has_sensor_type = events[i].slot != 0 && events[i].sensor_type != 0;
+		ev->sensor_type = events[i].sensor_type;
 	}
 	report.events_count = (pb_size_t)n;
 

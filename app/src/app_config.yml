@@ -155,6 +155,7 @@ proto:
       message: Application
       field: application
       proto_id: 6
+      reserved: [5]  # was history_sensors (uint32 bitmask), replaced by history_channels (#430)
     - key: sensors
       message: Sensors
       field: sensors
@@ -247,8 +248,10 @@ commands:
     # No reboot, no deferred action: app_nfc_claim_done() is a narrow
     # settings_save_one() persist.
     - {name: claim_done, proto_id: 25, body: ClaimDone, kind: handler, response: ack, transports: [nfc, shell]}
-    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number
-    # + vendor_token and installs the replacement secret_key carried in the body
+    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number,
+    # nonce_counter + vendor_token, clears counters + history, closes the claim
+    # window with no claim_token (#471: the owner re-opens it with claim_active,
+    # which generates one), and installs the replacement secret_key carried in the body
     # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
     # Reachable ONLY over the vendor transport (NFC hio.stck:vnd, vendor-token
     # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
@@ -259,12 +262,15 @@ commands:
     # #351/#415: symmetric counterpart to claim_done above (renamed from
     # clm_rearm; SAME wire id 27) — re-opens the claim window instead of closing
     # it, over the same secret_key-authenticated hio.stck:cmd / mailbox channel.
-    # Optional new_claim_token: empty/omitted re-opens with the EXISTING token, a
-    # non-zero value replaces it — either way the latch flip + reboot are
-    # deferred together until after the Ack is delivered (same restart-style
-    # pattern as reboot/set_secret_key, see app_cmd_handle_claim_active), so the
-    # phone always sees "ack read -> reboot" regardless of which case it took.
-    - {name: claim_active, proto_id: 27, body: ClaimActive, kind: handler, response: ack, transports: [nfc, shell]}
+    # Optional new_claim_token: a non-zero value replaces the token; empty/omitted
+    # re-opens with the EXISTING token, or, when none is stored (vendor_reset
+    # wipes it, #471), with a new CSPRNG token. Answers Response.claim_info with
+    # the token that holds after the reboot, so the phone can forward it to
+    # ATELOS. The save, latch flip and reboot are deferred until after the answer
+    # is delivered (same restart-style pattern as reboot/set_secret_key, see
+    # app_cmd_handle_claim_active), so the phone always sees "claim_info read ->
+    # reboot" regardless of which case it took.
+    - {name: claim_active, proto_id: 27, body: ClaimActive, kind: handler, response: claim_info, transports: [nfc, shell]}
     # #338: remote-triggered buzzer melody. kind is a raw melody id (0 = stop —
     # silences immediately + cancels a pending repeat; 1-3 = fixed severity
     # melodies; 4-15 reserved; >=16 collapses to 0), owned entirely by
@@ -289,10 +295,11 @@ commands:
     # owner-only, via the encrypted get_info).
     - {name: get_basic_info, proto_id: 30, body: GetBasicInfo, kind: handler, response: basic_info, transports: [plain_text, nfc, shell]}
     # get_settings (#428): the small boot settings-info ConfigDump (#412 content:
-    # application interval_sample/interval_report/history_enable, the nine
-    # sensors cap_* flags, runtime w1_slot_type) on request, so a host can refresh
-    # the key operating settings without a full multi-page GetConfig. Answer
-    # carries the command's seq (the autonomous boot dump keeps seq 0); over
+    # application interval_sample/interval_report/history_enable, every
+    # sensors cap_* flag incl. cap_buzzer + cap_sht (#465), runtime
+    # w1_slot_type) on request, so a host can refresh the key operating
+    # settings without a full multi-page GetConfig. Answer carries the
+    # command's seq (the autonomous boot dump keeps seq 0); over
     # LoRaWAN it is paged like the boot dump (#425 envelope) when the budget is
     # too small. Read-only, non-secret — all transports except the opt-in
     # plain_text (#415: omitted `transports:` excludes it).
@@ -360,6 +367,8 @@ parameters:
     type: bytes
     size: 16
     write_once: true   # written once at commissioning via `config claim-token`, then immutable
+    # Not kept by vendor_reset (#471): the window closes, and claim_active then
+    # generates a new token (or takes new_claim_token).
     persistent: [device_reset, factory_reset]
     help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
 
@@ -412,12 +421,18 @@ parameters:
     default: false
     help: "Get/Set sensor history store-and-forward (true/false)."
 
-  - name: history_sensors
+  # Recorded channels (#430): up to 24 entries `slot << 5 | ch` in record order
+  # (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = app_sensor_types.yaml
+  # channel of that slot's type), 0xff = unused. Replaces the v1.4 uint32
+  # `history_sensors` bitmask (proto_id 5, reserved).
+  - name: history_channels
     proto_group: application
-    proto_id: 5
-    type: uint32
-    default: 3
-    help: "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity."
+    proto_id: 9
+    type: bytes
+    size: 24
+    default: [0x00, 0x01]
+    fill: 0xff
+    help: "Get/Set recorded history channels (24 bytes, slot<<5|ch each, ff = unused). Default 0001ff.. = temperature + humidity."
 
   - name: battery_level
     proto_group: application
@@ -449,6 +464,20 @@ parameters:
     # the default (it only runs when allow was true anyway).
     persistent: [device_reset, factory_reset]
     help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
+
+  # #445: the periodic re-announce of the boot/join Info + settings-info, so the
+  # network's retained identity/config heals without a reboot. Hours, not seconds:
+  # the 168 h cap keeps the period plus its jitter inside one 32-bit ms delay.
+  - name: interval_announce
+    proto_group: application
+    proto_id: 8
+    type: int
+    default: 24
+    min: 1
+    max: 168
+    help: "Get/Set periodic Info + settings-info announce interval (range 1 to 168 hours; 0 = off)."
+    extras:
+      zero_allowed: true
 
   - name: alarm_limit
     proto_group: alarms
@@ -684,6 +713,16 @@ parameters:
     type: bool
     help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
 
+  # Onboard SHT4x (#465). proto_id 22, not 20: draft PR #407 claims sensors
+  # 20/21 for cap_analog_a/_b. Default true keeps an upgraded unit (no NVS key)
+  # sampling the onboard sensor exactly as before.
+  - name: cap_sht
+    proto_group: sensors
+    proto_id: 22
+    type: bool
+    default: true
+    help: "Get/Set onboard SHT4x temperature/humidity capability (true/false)."
+
   - name: cap_w1_sensors
     proto_group: sensors
     proto_id: 8
@@ -696,174 +735,175 @@ parameters:
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
-  # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
-  # rule's stable identity). 17 bytes little-endian:
-  #   [0] flags  bit0=present (slot occupied), bit1=enabled
-  #   [1] source (enum app_alarm_source)
-  #   [2] quantity (enum app_alarm_quantity)
-  #   [3] from_state, [4] to_state (STATE only)
-  #   [5..8] lo, [9..12] hi, [13..16] dwell (IEEE-754 float LE)
-  # An empty slot is 34 zero hex chars (present=0). The rule cache in
+  # Dynamic alarm rules (#430). One packed-hex rule per entry (the index is the
+  # rule's stable identity). 18 bytes little-endian:
+  #   [0] flags  bit0=present (rule occupied), bit1=enabled
+  #   [1] slot (0 = motherboard, 1..4 = s1..s4)
+  #   [2] channel (type-local, app_sensor_types.yaml)
+  #   [3] sensor_type (registry type id the rule was written for)
+  #   [4] from_state, [5] to_state (STATE only)
+  #   [6..9] lo, [10..13] hi, [14..17] dwell (IEEE-754 float LE)
+  # An empty rule is 36 zero hex chars (present=0). The rule cache in
   # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
   - name: alarm_0
     proto_group: alarms
     proto_id: 3
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 0 (packed hex, see app_config.yml)."
 
   - name: alarm_1
     proto_group: alarms
     proto_id: 4
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 1 (packed hex, see app_config.yml)."
 
   - name: alarm_2
     proto_group: alarms
     proto_id: 5
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 2 (packed hex, see app_config.yml)."
 
   - name: alarm_3
     proto_group: alarms
     proto_id: 6
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 3 (packed hex, see app_config.yml)."
 
   - name: alarm_4
     proto_group: alarms
     proto_id: 7
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 4 (packed hex, see app_config.yml)."
 
   - name: alarm_5
     proto_group: alarms
     proto_id: 8
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 5 (packed hex, see app_config.yml)."
 
   - name: alarm_6
     proto_group: alarms
     proto_id: 9
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 6 (packed hex, see app_config.yml)."
 
   - name: alarm_7
     proto_group: alarms
     proto_id: 10
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 7 (packed hex, see app_config.yml)."
 
   - name: alarm_8
     proto_group: alarms
     proto_id: 11
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 8 (packed hex, see app_config.yml)."
 
   - name: alarm_9
     proto_group: alarms
     proto_id: 12
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 9 (packed hex, see app_config.yml)."
 
   - name: alarm_10
     proto_group: alarms
     proto_id: 13
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 10 (packed hex, see app_config.yml)."
 
   - name: alarm_11
     proto_group: alarms
     proto_id: 14
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 11 (packed hex, see app_config.yml)."
 
   - name: alarm_12
     proto_group: alarms
     proto_id: 15
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 12 (packed hex, see app_config.yml)."
 
   - name: alarm_13
     proto_group: alarms
     proto_id: 16
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 13 (packed hex, see app_config.yml)."
 
   - name: alarm_14
     proto_group: alarms
     proto_id: 17
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 14 (packed hex, see app_config.yml)."
 
   - name: alarm_15
     proto_group: alarms
     proto_id: 18
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 15 (packed hex, see app_config.yml)."
 
   - name: alarm_buzzer_mode
     proto_group: alarms
@@ -905,6 +945,11 @@ parameters:
     # use for the ROM). get_param / NFC / shell still read it.
     dump_radio: false
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor1_type
+    proto_group: sensors
+    proto_id: 23
+    type: uint8
+    help: "Get/Set 1-Wire slot 1 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor2_rom
     proto_group: sensors
     proto_id: 12
@@ -912,6 +957,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_type
+    proto_group: sensors
+    proto_id: 24
+    type: uint8
+    help: "Get/Set 1-Wire slot 2 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor3_rom
     proto_group: sensors
     proto_id: 13
@@ -919,6 +969,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_type
+    proto_group: sensors
+    proto_id: 25
+    type: uint8
+    help: "Get/Set 1-Wire slot 3 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor4_rom
     proto_group: sensors
     proto_id: 14
@@ -926,6 +981,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_type
+    proto_group: sensors
+    proto_id: 26
+    type: uint8
+    help: "Get/Set 1-Wire slot 4 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
 
   # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
   # the sensors they belong to (moved out of `alarms`).

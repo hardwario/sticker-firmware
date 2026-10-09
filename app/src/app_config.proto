@@ -64,13 +64,15 @@ message AppConfigMessage {
     }
 
     message Application {
+        reserved 5;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 3;
         optional bool history_enable = 4;
-        optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
         optional bool vendor_reset_allow = 7;
+        optional uint32 interval_announce = 8;
+        optional bytes history_channels = 9;
     }
 
     message Sensors {
@@ -100,6 +102,11 @@ message AppConfigMessage {
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
         optional bool cap_buzzer = 19;
+        optional bool cap_sht = 22;
+        optional uint32 sensor1_type = 23;
+        optional uint32 sensor2_type = 24;
+        optional uint32 sensor3_type = 25;
+        optional uint32 sensor4_type = 26;
     }
 
     message Alarms {
@@ -343,10 +350,11 @@ message Command {
     message GetBasicInfo { }
 
     // The boot settings-info ConfigDump (#412) on request: application
-    // interval_sample / interval_report / history_enable, the nine sensors
-    // cap_* flags and the runtime w1_slot_type. The answer carries this
-    // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
-    // paged with the Response envelope (#425) when it does not fit one frame.
+    // interval_sample / interval_report / history_enable, every sensors
+    // cap_* flag incl. cap_buzzer + cap_sht (#465), and the runtime
+    // w1_slot_type. The answer carries this command's seq (the autonomous
+    // boot dump has seq 0); over LoRaWAN it is paged with the Response
+    // envelope (#425) when it does not fit one frame.
     message GetSettings { }
 
     // Link state and diagnostics of the active radio (#446): answered with
@@ -438,14 +446,18 @@ message Response {
         // Currently-active alarms, one entry per latched alarm at the moment the
         // Info was built (rule slots + no-data / low-battery watchdogs). Only the
         // active ones are emitted, so the list is empty when all is well and its
-        // length varies. Each entry names its source/quantity/type using the same
-        // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
-        // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
+        // length varies. Each entry names its slot/channel/type like the alarm
+        // rules and the fPort 3 AlarmReport (#430) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
 
         // 16..18 were last_dl_rssi / last_dl_snr / last_dl_age_s (#423), moved
         // to get_radio_state before v1.5.0 shipped (#446).
         reserved 16, 17, 18;
+
+        // 1-Wire slot state, slots 1..4 in order (#430): enum app_w1_slot_state
+        // (app_w1_slots.h) 0=none 1=ok 2=absent 3=replaced 4=mismatch. Omitted
+        // when every slot is unused.
+        repeated uint32 w1_slot_state = 19 [packed = true];
     }
 
     // Link state and diagnostics of the active radio, the same message and the
@@ -501,12 +513,14 @@ message Response {
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a
     // configured alarm rule / fPort 3 AlarmEvent, trimmed to just what a status
-    // read needs: no slot/value/edge/time (this is a live snapshot, not an edge
+    // read needs: no rule/value/edge/time (this is a live snapshot, not an edge
     // report). Encoded as a nanopb callback so only the active alarms are sent.
     message AlarmStatus {
-        uint32 source   = 1;  // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel/battery
-        uint32 quantity = 2;  // enum app_alarm_quantity: temperature/humidity/.../state/count/voltage
-        uint32 type     = 3;  // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)
+        reserved 2;                         // was: quantity — replaced by channel (#430)
+        uint32 slot     = 1;                // 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
+        uint32 type     = 3;                // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)/sensor_mismatch(5)
+        uint32 channel  = 4;                // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
+        optional uint32 sensor_type = 5;    // sensor type id of a 1-Wire slot; absent for slot 0
     }
 
     message ConfigDump {
@@ -518,10 +532,9 @@ message Response {
         optional AppConfigMessage.Application application = 4;
         optional AppConfigMessage.Sensors     sensors     = 5;
         optional AppConfigMessage.Alarms      alarms      = 6;
-        // Detected 1-Wire slot occupancy, slots 1..4 in order. Raw uint32 whose
-        // values follow enum app_w1_slot_type (app_w1_slots.h — the single source
-        // of truth, extended in one place when a new sensor family is added):
-        // 0=empty, 1=dallas (DS18B20), 2=machine-probe (DS28E17). This is live
+        // Detected 1-Wire slot occupancy, slots 1..4 in order. Raw uint32 sensor
+        // type ids of app_sensor_types.yaml (#430; = enum app_w1_slot_type):
+        // 0=empty, 2=dallas (DS18B20), 3=machine-probe (DS28E17). This is live
         // runtime state, not a stored config field — it is filled ONLY by the
         // autonomous boot settings-info uplink (#412), never by GetConfig/GetParam
         // (those stay a pure config snapshot). The persisted slot ROM serials are
@@ -537,7 +550,9 @@ message Response {
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
         bytes  samples     = 4;   // records, values only (no per-record time/mask)
-        uint32 present     = 5;   // sensor mask shared by every record in the frame
+        // Bit i = column i is stored in every record of the frame. Since #430 the
+        // columns are `channels`; older firmware used a fixed sensor enum here.
+        uint32 present     = 5;
         uint32 interval_s  = 6;   // seconds between records; time(j) = t0_unix + j*interval_s
         // True when t0_unix is absolute UTC; false when the RTC had not synced at
         // capture, so t0_unix is only uptime-relative (L-1/L-3). Absent = old FW =
@@ -551,6 +566,14 @@ message Response {
         // has_more=false means the window is exhausted — stop tapping (no wedge).
         optional uint32 next_ord = 8;
         optional bool   has_more = 9;
+        // #430: record layout. One byte per column in record order, `slot << 5 |
+        // ch` (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = channel of the
+        // slot's type in app_sensor_types.yaml, whose `history` [enc, scale]
+        // gives the column's width and scale). w1_types = sensor type id of
+        // slots 1..4 the 1-Wire columns were recorded with; omitted when no
+        // column is a 1-Wire slot. Absent `channels` = pre-#430 firmware.
+        bytes channels = 10;
+        bytes w1_types = 11;
     }
 
     message Error {
@@ -609,12 +632,13 @@ message AlarmReport {
 }
 
 message AlarmEvent {
-    // One alarm edge from a dynamic alarm rule. The rule's target is (source,
-    // quantity); the event reports what fired (type) and the transition (edge),
-    // plus the current value. The rule config (from/to, lo/hi, rate N) is NOT on
-    // the wire — only the resulting edge. type and edge are orthogonal: type says
-    // WHAT fired, edge says rising/falling, so a recovery still names the
-    // condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
+    // One alarm edge from a dynamic alarm rule or a built-in watchdog. The target
+    // is (slot, channel) of the sensor channel model (#430,
+    // app_sensor_types.yaml); the event reports what fired (type) and the
+    // transition (edge), plus the current value. The rule config (from/to, lo/hi,
+    // rate N) is NOT on the wire — only the resulting edge. type and edge are
+    // orthogonal: type says WHAT fired, edge says rising/falling, so a recovery
+    // still names the condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
     enum Edge {
@@ -624,24 +648,32 @@ message AlarmEvent {
 
     // What kind of condition fired (#212). Threshold rules report LOW/HIGH (which
     // bound); state/count/PIR/accel rules report TRIGGER; the no-data watchdog
-    // reports NO_DATA. NONE is unused on the wire (default guard).
+    // reports NO_DATA (on a 1-Wire slot: channel 255 = the whole device stopped
+    // answering, else the first channel of the one chip that stopped); a 1-Wire
+    // slot with a device of another type than its
+    // sensorN_type reports SENSOR_MISMATCH (#430: rule = 0xFF, no channel,
+    // sensor_type = expected type, value = detected type). NONE is unused on the
+    // wire (default guard).
     enum Type {
-        TYPE_NONE    = 0;
-        TYPE_LOW     = 1;
-        TYPE_HIGH    = 2;
-        TYPE_TRIGGER = 3;
-        TYPE_NO_DATA = 4;
+        TYPE_NONE            = 0;
+        TYPE_LOW             = 1;
+        TYPE_HIGH            = 2;
+        TYPE_TRIGGER         = 3;
+        TYPE_NO_DATA         = 4;
+        TYPE_SENSOR_MISMATCH = 5;
     }
 
     reserved 3, 8;               // was: side (3), no_data (8) — folded into type (#212)
+    reserved 6;                  // was: quantity — replaced by channel (#430)
 
-    uint32 source   = 1;         // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel
+    uint32 slot     = 1;         // sensor slot: 0 = motherboard, 1..4 = s1..s4 (#430; was `source`)
     Edge   edge     = 2;         // activate / deactivate
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
-    optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
-    uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
-    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
-    Type   type     = 9;         // low / high / trigger / no_data
+    optional sint32 value = 5;   // current value × the channel's wire scale, digital 0/1, or counter
+    uint32 rule     = 7;         // alarm rule index that fired (stable identity), 0xFF = watchdog, 0xFE = low battery (#430; was `slot`)
+    Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
+    uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
+    optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
@@ -697,21 +729,19 @@ message Telemetry {
     // New sensors append at field >= 28 as new groups; never renumber.
 }
 
-// One ROM-bound 1-Wire slot's reading. type = enum app_w1_slot_type
-// (1=dallas temperature-only, 2=machine-probe full sensor cluster); quantities a
-// slot's type does not provide — or a sub-sensor that did not respond — are
-// absent. Fields 6-10 (lux/field/accel) are machine-probe only.
+// One ROM-bound 1-Wire slot's reading. type = the slot's expected sensor type
+// id (sensorN_type, app_sensor_types.yaml: 2=dallas temperature-only,
+// 3=machine-probe full sensor cluster); quantities a slot's type does not
+// provide — or a sub-sensor that did not respond — are absent. A slot whose
+// probe is absent or mismatched (#430) carries only slot + type. Fields 6-10
+// (lux/field/accel) are machine-probe only.
 message SensorReading {
-    uint32 slot              = 1;   // 1-based slot (matches sensorN config / `w1 list`)
-    uint32 type              = 2;   // enum app_w1_slot_type
-    optional sint32 temperature = 3;  // degC x100
-    optional uint32 humidity    = 4;  // %RH  x2
-    optional uint32 flags       = 5;  // bit0 tilt (machine-probe only)
-    optional uint32 illuminance    = 6;  // lux           (OPT3001)
-    optional sint32 magnetic_field = 7;  // uT (mT x1000) (Si7210)
-    optional sint32 accel_x        = 8;  // m/s^2 x100    (LIS2DH12)
-    optional sint32 accel_y        = 9;  // m/s^2 x100
-    optional sint32 accel_z        = 10; // m/s^2 x100
+    reserved 3 to 10;                        // typed per-quantity fields, replaced by the channel model (#430)
+    uint32 slot             = 1;             // 1-based slot (matches sensorN config / `w1 list`)
+    uint32 type             = 2;             // sensor type id (app_sensor_types.yaml)
+    uint32 valid            = 11;            // bit ch = channel ch of `type` has a value
+    repeated sint32 value   = 12 [packed = true]; // values of the set bits, ascending ch,
+                                             // each round(phys * channel wire scale)
 }
 
 // Provisioning claim identity (#247/#415): {serial_number, claim_token}. Served

@@ -50,9 +50,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define NFC_EVENT_FALLBACK_MS      (-1)
 /* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
  * over NFC packs DUMP_FIELDS tags into a flat ids[] (#176), builds a Response
- * (union sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb —
- * far more than a short GetInfo. 3072 B overflowed on the longer commands. */
-#define NFC_POLL_THREAD_STACK_SIZE 6144
+ * (union sized to ConfigDump) and runs AES-CCM (HW AES, app_ccm) + nanopb.
+ * HW high-water mark over real-RF mailbox GetConfig/SetParam/GetInfo/history
+ * (CONFIG_INIT_STACKS, 2026-10-09): 2704 B release, 2656 B debug. 4096 B keeps
+ * ~1.4 KB for paths not measured (SettingsSave → NVS write before reboot). */
+#define NFC_POLL_THREAD_STACK_SIZE 4096
 #define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
@@ -194,9 +196,9 @@ static enum app_mode detect_mode(void)
 	return APP_MODE_NORMAL;
 }
 
-static void event_led_handler(enum app_alarm_source source, bool active, void *user_data)
+static void event_led_handler(uint8_t channel, bool active, void *user_data)
 {
-	ARG_UNUSED(source);
+	ARG_UNUSED(channel);
 	ARG_UNUSED(user_data);
 
 	static int64_t last_blink_ms;

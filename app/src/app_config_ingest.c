@@ -25,32 +25,33 @@
 
 LOG_MODULE_REGISTER(app_config_ingest, LOG_LEVEL_DBG);
 
-/* Record the first offending proto field tag and mark the result invalid. The
- * apply still processes the remaining fields (best effort) so a caller inspecting
- * fault_field learns the FIRST offender; the rc reflects that first fault too
- * (value → -EINVAL). */
-#define FAULT(tag)                                                                                 \
-	do {                                                                                       \
-		if (fault_field && *fault_field == 0) {                                            \
-			*fault_field = (tag);                                                      \
-		}                                                                                  \
-		if (ret == 0) {                                                                    \
-			ret = -EINVAL;                                                             \
-		}                                                                                  \
-	} while (0)
+/* Record the first offending proto field tag in fault_field and the first fault's
+ * rc in *ret. The apply still processes the remaining fields (best effort) so a
+ * caller inspecting fault_field learns the FIRST offender; the rc reflects that
+ * first fault too.
+ *
+ * Deliberately out of line: with the check inlined at every field, GCC's jump
+ * threading cloned the rest of each apply_<group>() once per fault state
+ * (ret == 0 or not, fault_field set or not), ~500 B per field — the lorawan
+ * group alone grew to 8 KB. Passing the state by pointer through a call the
+ * compiler cannot see into stops that and saves ~5 KB flash. Do not turn this
+ * back into an inline macro. */
+static __noinline void fault_at(int *ret, uint32_t *fault_field, uint32_t tag, int rc)
+{
+	if (fault_field && *fault_field == 0) {
+		*fault_field = tag;
+	}
+	if (*ret == 0) {
+		*ret = rc;
+	}
+}
 
-/* Reject a write of this field over a transport not in its `writable` list (M-3).
- * Distinct rc (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than
- * OUT_OF_RANGE; records the first offending tag like FAULT. */
-#define FAULT_TRANSPORT(tag)                                                                       \
-	do {                                                                                       \
-		if (fault_field && *fault_field == 0) {                                            \
-			*fault_field = (tag);                                                      \
-		}                                                                                  \
-		if (ret == 0) {                                                                    \
-			ret = -EACCES;                                                             \
-		}                                                                                  \
-	} while (0)
+/* Value out of range / not a valid enum value → OUT_OF_RANGE. */
+#define FAULT(tag) fault_at(&ret, fault_field, (tag), -EINVAL)
+
+/* Write over a transport not in the field's `writable` list (M-3). Distinct rc
+ * (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than OUT_OF_RANGE. */
+#define FAULT_TRANSPORT(tag) fault_at(&ret, fault_field, (tag), -EACCES)
 
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 {
@@ -358,9 +359,6 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 	if (src->has_history_enable) {
 		config->history_enable = src->history_enable;
 	}
-	if (src->has_history_sensors) {
-		config->history_sensors = src->history_sensors;
-	}
 	if (src->has_battery_level) {
 		int val = src->battery_level;
 
@@ -377,6 +375,20 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 		FAULT_TRANSPORT(7);
 	} else if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
+	}
+	if (src->has_interval_announce) {
+		int val = src->interval_announce;
+
+		if (val == 0 || (val >= 1 && val <= 168)) {
+			config->interval_announce = val;
+		} else {
+			FAULT(8);
+		}
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_history_channels) {
+		memcpy(config->history_channels, src->history_channels,
+		       sizeof(config->history_channels));
 	}
 	return ret;
 }
@@ -401,10 +413,6 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 		dst->has_history_enable = true;
 		dst->history_enable = c->history_enable;
 	}
-	if (requested(ids, n, 5)) {
-		dst->has_history_sensors = true;
-		dst->history_sensors = c->history_sensors;
-	}
 	if (requested(ids, n, 6)) {
 		dst->has_battery_level = true;
 		dst->battery_level = c->battery_level;
@@ -412,6 +420,14 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 7)) {
 		dst->has_vendor_reset_allow = true;
 		dst->vendor_reset_allow = c->vendor_reset_allow;
+	}
+	if (requested(ids, n, 8)) {
+		dst->has_interval_announce = true;
+		dst->interval_announce = c->interval_announce;
+	}
+	if (requested(ids, n, 9)) {
+		dst->has_history_channels = true;
+		memcpy(dst->history_channels, c->history_channels, sizeof(c->history_channels));
 	}
 }
 
@@ -492,6 +508,21 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	}
 	if (src->has_cap_buzzer) {
 		config->cap_buzzer = src->cap_buzzer;
+	}
+	if (src->has_cap_sht) {
+		config->cap_sht = src->cap_sht;
+	}
+	if (src->has_sensor1_type) {
+		config->sensor1_type = src->sensor1_type;
+	}
+	if (src->has_sensor2_type) {
+		config->sensor2_type = src->sensor2_type;
+	}
+	if (src->has_sensor3_type) {
+		config->sensor3_type = src->sensor3_type;
+	}
+	if (src->has_sensor4_type) {
+		config->sensor4_type = src->sensor4_type;
 	}
 	return ret;
 }
@@ -576,6 +607,26 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 19)) {
 		dst->has_cap_buzzer = true;
 		dst->cap_buzzer = c->cap_buzzer;
+	}
+	if (requested(ids, n, 22)) {
+		dst->has_cap_sht = true;
+		dst->cap_sht = c->cap_sht;
+	}
+	if (requested(ids, n, 23)) {
+		dst->has_sensor1_type = true;
+		dst->sensor1_type = c->sensor1_type;
+	}
+	if (requested(ids, n, 24)) {
+		dst->has_sensor2_type = true;
+		dst->sensor2_type = c->sensor2_type;
+	}
+	if (requested(ids, n, 25)) {
+		dst->has_sensor3_type = true;
+		dst->sensor3_type = c->sensor3_type;
+	}
+	if (requested(ids, n, 26)) {
+		dst->has_sensor4_type = true;
+		dst->sensor4_type = c->sensor4_type;
 	}
 }
 

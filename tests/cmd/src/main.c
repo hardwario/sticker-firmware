@@ -10,6 +10,7 @@
 #include "app_version.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
+#include "app_history.h"
 #include "app_nfc.h"
 #include "app_sensor.h"
 
@@ -34,6 +35,7 @@ extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
 extern int g_claim_done_calls;
 extern int g_claim_active_calls;
+extern int g_claim_active_saves_before;
 extern uint8_t g_claim_state;
 extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
@@ -229,13 +231,13 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 	zassert_equal(r.which_body, Response_ack_tag, "seed apply failed, which=%d", r.which_body);
 	zassert_equal(g_app_config.interval_report, 120, "seed not applied");
 
-	/* seq5 set_param{ application{interval_report=200}, alarms{alarm_0=<17
+	/* seq5 set_param{ application{interval_report=200}, alarms{alarm_0=<18
 	 * packed rule bytes>} }. app_config_apply_alarms() just memcpy's the raw
 	 * bytes (no shape validation at apply time), so rc==0 for the whole batch
 	 * and interval_report=200 lands in the staging struct; the forced dropped
 	 * count then rolls the whole batch back. */
 	test_alarm_reload_dropped = 1;
-	const char *hex = "0805121a120318c8012a131a110100060000000000000000000000000000";
+	const char *hex = "0805121b120318c8012a141a12010006" "000000000000000000000000000000";
 	enum app_cmd_action a = handle(hex, &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
@@ -280,26 +282,27 @@ static bool slot_is(const uint8_t *slot, size_t n, uint8_t v)
 ZTEST(cmd, test_set_param_alarms_replace_keeps_only_sent_slots)
 {
 	Response r;
-	static const uint8_t rule_a[17] = {0x01, 0x00, 0x06};
-	static const uint8_t rule_b[17] = {0x01, 0x02, 0x03};
+	static const uint8_t rule_a[18] = {0x01, 0x00, 0x06, 0x01};
+	static const uint8_t rule_b[18] = {0x01, 0x02, 0x03};
 
 	reset_cfg();
 	seed_alarm_slots();
 	test_alarm_clear_all_calls = 0;
 
 	/* seq7 set_param{ alarms{ alarm_2=rule_a, alarm_5=rule_b }, alarms_replace } */
-	enum app_cmd_action a = handle("0807122a2a262a110100060000000000000000000000000000421101020"
-				       "300000000000000000000000000003001",
+	enum app_cmd_action a = handle("0807122c2a282a12010006010000000000000000000000000000"
+				       "4212010203000000000000000000000000000000"
+				       "3001",
 				       &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no save requested");
 	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
 	zassert_equal(test_alarm_clear_all_calls, 1, "slots must be cleared once");
-	zassert_mem_equal(g_app_config.alarm_2, rule_a, 17, "alarm_2");
-	zassert_mem_equal(g_app_config.alarm_5, rule_b, 17, "alarm_5");
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "old alarm_1 must be gone");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "old alarm_3 must be gone");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "old alarm_7 must be gone");
+	zassert_mem_equal(g_app_config.alarm_2, rule_a, 18, "alarm_2");
+	zassert_mem_equal(g_app_config.alarm_5, rule_b, 18, "alarm_5");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0), "old alarm_1 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0), "old alarm_3 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0), "old alarm_7 must be gone");
 }
 
 ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
@@ -312,9 +315,9 @@ ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
 
 	handle("080812023001", &r); /* seq8 set_param{ alarms_replace } */
 	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "alarm_1");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "alarm_3");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "alarm_7");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0), "alarm_1");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0), "alarm_3");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0), "alarm_7");
 	zassert_equal(g_app_config.alarm_limit, 30, "alarm_limit is not a rule slot");
 }
 
@@ -329,17 +332,17 @@ ZTEST(cmd, test_set_param_alarms_replace_rolls_back)
 	 * (stubbed) reload reports as invalid: the whole batch rolls back, so the
 	 * cleared slots come back and the new rule does not stick. */
 	test_alarm_reload_dropped = 1;
-	handle("080912172a132a1101000600000000000000000000000000003001", &r);
+	handle("080912182a142a120100060100000000000000000000000000003001", &r);
 	test_alarm_reload_dropped = 0;
 
 	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
 		      r.body.error.code);
 	zassert_equal(r.body.error.fault_field, 400, "fault_field %u", r.body.error.fault_field);
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 restored");
-	zassert_true(slot_is(g_app_config.alarm_3, 17, 0x33), "alarm_3 restored");
-	zassert_true(slot_is(g_app_config.alarm_7, 17, 0x77), "alarm_7 restored");
-	zassert_true(slot_is(g_app_config.alarm_2, 17, 0), "rejected alarm_2 must not stick");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0x11), "alarm_1 restored");
+	zassert_true(slot_is(g_app_config.alarm_3, 18, 0x33), "alarm_3 restored");
+	zassert_true(slot_is(g_app_config.alarm_7, 18, 0x77), "alarm_7 restored");
+	zassert_true(slot_is(g_app_config.alarm_2, 18, 0), "rejected alarm_2 must not stick");
 }
 
 ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
@@ -355,7 +358,7 @@ ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
 		      r.body.error.code);
 	zassert_equal(test_alarm_clear_all_calls, 0, "vendor must not clear the table");
-	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 intact");
+	zassert_true(slot_is(g_app_config.alarm_1, 18, 0x11), "alarm_1 intact");
 }
 
 /* Two back-to-back SetParam calls: the first fails and rolls back, the second
@@ -624,7 +627,7 @@ ZTEST(cmd, test_build_info)
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
 	/* get_info reads the cached sample voltage, not a fresh ADC read. */
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 
 	bool more;
 	int ret = app_cmd_build_info(out, sizeof(out), &out_len, &more);
@@ -659,6 +662,7 @@ ZTEST(cmd, test_build_config_status)
 	g_app_config.history_enable = true;
 	g_app_config.cap_hall_left = true;
 	g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
 
 	bool more;
 	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len, &more);
@@ -698,12 +702,43 @@ ZTEST(cmd, test_build_config_status)
 	zassert_true(r.body.config_dump.sensors.has_cap_barometer,
 		     "cap_barometer must be explicit");
 	zassert_false(r.body.config_dump.sensors.cap_barometer, "cap_barometer default false");
+	/* #465: cap_buzzer (19) and cap_sht (22) complete the capability picture. */
+	zassert_true(r.body.config_dump.sensors.has_cap_buzzer, "cap_buzzer must be explicit");
+	zassert_true(r.body.config_dump.sensors.has_cap_sht, "cap_sht missing");
+	zassert_true(r.body.config_dump.sensors.cap_sht, "cap_sht value");
 
 	/* This native build has no CONFIG_W1 (APP_CMD_HAVE_W1 undefined), so the
 	 * runtime-only slot-type list is compiled out; the wire encoding of
 	 * w1_slot_type is covered by the decoder regression test (ttn.test.js). */
 	zassert_equal(r.body.config_dump.w1_slot_type_count, 0,
 		      "w1_slot_type must be empty without CONFIG_W1");
+}
+
+/* #465: worst case of the boot settings-info — every cap_* true (a false bool
+ * costs the same 2-3 B, so this is about values, not flags) and the widest
+ * in-range interval varints — still fits one EU868 DR0 frame (51 B), so adding
+ * cap_buzzer/cap_sht does not make the boot dump page there. */
+ZTEST(cmd, test_build_config_status_worst_case_dr0)
+{
+	uint8_t out[51];
+	size_t out_len = 0;
+	bool more = true;
+
+	reset_cfg();
+	g_app_config.interval_sample = 3600;  /* yml max */
+	g_app_config.interval_report = 86400; /* yml max */
+	g_app_config.history_enable = true;
+	g_app_config.cap_hall_left = g_app_config.cap_hall_right = true;
+	g_app_config.cap_input_a = g_app_config.cap_input_b = true;
+	g_app_config.cap_light_sensor = g_app_config.cap_barometer = true;
+	g_app_config.cap_pir_detector = g_app_config.cap_buzzer = true;
+	g_app_config.cap_w1_sensors = g_app_config.cap_accelerometer = true;
+	g_app_config.cap_sht = true;
+
+	zassert_equal(app_cmd_build_config_status(out, sizeof(out), &out_len, &more), 0, "build");
+	TC_PRINT("settings-info worst case: %zu B\n", out_len);
+	zassert_false(more, "worst-case settings-info pages at DR0 (%zu B)", out_len);
+	zassert_true(out_len <= 51, "%zu B > DR0", out_len);
 }
 
 /* sample over NFC: the device answers synchronously with the fresh telemetry
@@ -1156,7 +1191,7 @@ ZTEST(cmd, test_build_info_pages_instead_of_trimming)
 	g_app_config.serial_number = 1234567890;
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(5);
 
 	/* Plenty of room: one frame, all 5 alarms, no stream. */
@@ -1206,7 +1241,7 @@ ZTEST(cmd, test_build_info_seq)
 
 	reset_cfg();
 	g_app_config.serial_number = 1234567890;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(5);
 
 	zassert_equal(app_cmd_build_info_seq(25, out, sizeof(out), &out_len, &more), 0, "full");
@@ -1419,21 +1454,37 @@ ZTEST(cmd, test_claim_done)
 	zassert_equal(g_claim_done_calls, 1, "app_nfc_claim_done called exactly once");
 }
 
-/* #351/#415 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected over
- * lrw, same pattern as claim_done/set_secret_key above). Both the
- * no/zero-new_claim_token and the non-zero-new_claim_token cases defer
- * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way — restart-style, Ack delivered
- * to the phone first, then main.c flips the latch (app_nfc_claim_active()) and
- * reboots — so the phone can always assume "ack read -> reboot" regardless of
- * which case it took. A non-zero new_claim_token additionally stages it into
- * g_app_config synchronously in the handler, before the deferred reboot lands it
- * via h_commit. Wire id 27 is unchanged by the rename. */
+/* #351/#415/#471 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected
+ * over lrw, same pattern as claim_done/set_secret_key above). Every case defers
+ * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way (restart-style: the answer is
+ * delivered first, then main.c saves, flips the latch and reboots) and answers
+ * Response.claim_info with the token that holds after the reboot: a non-zero
+ * new_claim_token replaces it, otherwise the stored token is kept, and when none
+ * is stored (vendor_reset wiped it) a new one comes from the CSPRNG. */
+static bool buffer_is_zero_test(const uint8_t *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void expect_claim_info(const Response *r, const uint8_t *token)
+{
+	zassert_equal(r->which_body, Response_claim_info_tag,
+		      "claim_active answers claim_info (%d)", r->which_body);
+	zassert_equal(r->body.claim_info.serial_number, g_app_config.serial_number, "serial");
+	zassert_mem_equal(r->body.claim_info.claim_token, token, 16, "claim_info token");
+	zassert_mem_equal(g_app_config.claim_token, token, 16, "staged token");
+}
+
 ZTEST(cmd, test_claim_active)
 {
 	Response r;
-	uint8_t expect_token[16];
-
-	memset(expect_token, 0x33, sizeof(expect_token));
+	uint8_t token[16];
+	uint8_t zero[16] = {0};
 
 	reset_cfg();
 	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE,
@@ -1442,25 +1493,44 @@ ZTEST(cmd, test_claim_active)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(g_claim_active_calls, 0, "must not call app_nfc_claim_active over lrw");
+	zassert_mem_equal(g_app_config.claim_token, zero, sizeof(zero),
+			  "a rejected claim_active must not generate a token");
 
+	/* Stored token kept. */
 	reset_cfg();
+	g_app_config.serial_number = 2162190413U;
+	memset(g_app_config.claim_token, 0x22, sizeof(g_app_config.claim_token));
+	memset(token, 0x22, sizeof(token));
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active without token also defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously in the handler");
 
-	reset_cfg();
+	/* new_claim_token replaces the stored one. */
 	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active with token defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
-	zassert_mem_equal(g_app_config.claim_token, expect_token, sizeof(expect_token),
-			  "new_claim_token not staged");
+	memset(token, 0x33, sizeof(token));
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously when staging a new token");
+
+	/* No stored token (after vendor_reset): a fresh one is generated. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, "generated token defers save+reboot");
+	zassert_false(buffer_is_zero_test(g_app_config.claim_token, 16),
+		      "a token must be generated when none is stored");
+	memcpy(token, g_app_config.claim_token, sizeof(token));
+	expect_claim_info(&r, token);
+
+	/* A second generation differs from the first. */
+	reset_cfg();
+	(void)handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_true(memcmp(g_app_config.claim_token, token, sizeof(token)) != 0,
+		     "two generated tokens must differ");
 }
 
 /* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
@@ -1850,6 +1920,15 @@ ZTEST(cmd, test_clock_sync_over_nfc)
 		      r.which_body);
 }
 
+/* Three columns: two motherboard channels and one W1 slot 0 channel (#430),
+ * so the frame carries both `channels` and `w1_types`. */
+static const struct app_history_layout layout3 = {
+	.count = 3,
+	.channels = {0x00, 0x01, 0x00 | (1 << 5)},
+	.w1_types = {2, 0, 0, 0},
+	.has_w1 = true,
+};
+
 /* #89: a fully-populated history frame (48 samples, synced 5-byte t0) must fit
  * the staging buffer. The pre-fix 64-byte buffer overflowed (~68 B encoded),
  * killing replay silently on DR3+. */
@@ -1861,7 +1940,7 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 
 	memset(samples, 0xAB, sizeof(samples));
 	int ret = app_cmd_build_history_frame(/*seq*/ 200, /*idx*/ 200, /*count*/ 200,
-					      /*t0*/ 1770000000u, /*present*/ 0x7, /*interval*/ 900,
+					      /*t0*/ 1770000000u, &layout3, /*interval*/ 900,
 					      /*time_synced*/ true, samples, sizeof(samples), out,
 					      sizeof(out), &out_len);
 	zassert_equal(ret, 0, "full frame did not fit (ret %d)", ret);
@@ -1874,6 +1953,10 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 	zassert_equal(r.body.history_frame.samples.size, 48, "sample count");
 	zassert_true(r.body.history_frame.has_time_synced, "time_synced must be present");
 	zassert_true(r.body.history_frame.time_synced, "time_synced should be true");
+	zassert_equal(r.body.history_frame.present, 0x7, "present = one bit per column");
+	zassert_equal(r.body.history_frame.channels.size, 3, "channels count");
+	zassert_mem_equal(r.body.history_frame.channels.bytes, layout3.channels, 3, "channels");
+	zassert_mem_equal(r.body.history_frame.w1_types, layout3.w1_types, 4, "w1_types");
 }
 
 /* The capacity helper must be exact: a frame built with `cap` samples fits the
@@ -1889,30 +1972,30 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
-	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						     900, sizeof(out));
 	zassert_true(cap > 0 && cap < sizeof(out), "cap %zu out of range", cap);
 
 	/* Exactly `cap` samples must encode within out_cap. */
-	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
 					      /*time_synced*/ true, samples, cap, out, sizeof(out),
 					      &out_len);
 	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
 
 	/* Exactness: one more sample byte must NOT fit the same out_cap. */
-	ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+	ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
 					  /*time_synced*/ true, samples, cap + 1, out, sizeof(out),
 					  &out_len);
 	zassert_equal(ret, -EMSGSIZE, "cap+1 samples should overflow (ret %d)", ret);
 
 	/* A tighter budget yields a strictly smaller (or zero) capacity. */
-	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						       900, 32);
 	zassert_true(tight < cap, "tight cap %zu not below %zu", tight, cap);
 
 	/* A budget below the fixed overhead yields zero. */
-	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
 						      900, 8),
 		      0, "tiny budget should give 0");
 }
@@ -1926,24 +2009,24 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
  * no_write_nfc used to get set, so the template's write-gate block never
  * fired for this field at all: app_config_apply_alarms() had a bare
  * ARG_UNUSED(tp) and an unconditional memcpy for alarm_0..alarm_15. This test
- * constructs `set_param{ alarms{ alarm_0 = <17 bytes> } }` over lrw/nfc
+ * constructs `set_param{ alarms{ alarm_0 = <18 bytes> } }` over lrw/nfc
  * (control, must still be accepted) and vendor (must now be rejected). */
 ZTEST(cmd, test_alarm_slot_writable_excludes_vendor)
 {
 	Response r;
-	uint8_t payload[17];
-	uint8_t zero17[17];
+	uint8_t payload[18];
+	uint8_t zero18[18];
 
 	memset(payload, 0x01, sizeof(payload));
-	memset(zero17, 0, sizeof(zero17));
+	memset(zero18, 0, sizeof(zero18));
 
-	/* seq1 set_param{ alarms{ alarm_0 = 17x0x01 } }
+	/* seq1 set_param{ alarms{ alarm_0 = 18x0x01 } }
 	 * Command:  08 01                      seq=1
-	 *           12 15                      set_param, len 21
-	 *             2a 13                    .alarms (SetParam field5), len 19
-	 *               1a 11 <17x01>           .alarm_0 (Alarms field3), len 17
+	 *           12 16                      set_param, len 22
+	 *             2a 14                    .alarms (SetParam field5), len 20
+	 *               1a 12 <18x01>           .alarm_0 (Alarms field3), len 18
 	 */
-	const char *hex = "080112152a131a110101010101010101010101010101010101";
+	const char *hex = "080112162a141a12010101010101010101010101010101010101";
 
 	/* Control: lrw is IN writable -> correctly accepted. */
 	reset_cfg();
@@ -1967,7 +2050,7 @@ ZTEST(cmd, test_alarm_slot_writable_excludes_vendor)
 	reset_cfg();
 	a = handle_via(APP_CMD_TRANSPORT_VENDOR, hex, &r);
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
-	zassert_mem_equal(g_app_config.alarm_0, zero17, sizeof(zero17),
+	zassert_mem_equal(g_app_config.alarm_0, zero18, sizeof(zero18),
 			  "C2 REGRESSION: alarm_0 was written to 0x%02x... over VENDOR "
 			  "transport despite writable:[nfc,lrw] excluding vendor",
 			  g_app_config.alarm_0[0]);
@@ -2390,7 +2473,7 @@ ZTEST(cmd, test_get_info_over_lrw_is_paged)
 	g_app_config.serial_number = 1234567890;
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(2);
 	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
 				     &action),
@@ -2418,10 +2501,11 @@ static void visit_settings_page(const uint8_t *buf, size_t len, const Response *
 			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_input_a +
 			     cd->sensors.has_cap_input_b + cd->sensors.has_cap_light_sensor +
 			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_pir_detector +
-			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer;
+			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer +
+			     cd->sensors.has_cap_buzzer + cd->sensors.has_cap_sht;
 }
 
-/* #425: settings-info that does not fit is paged; all 12 settings arrive. */
+/* #425: settings-info that does not fit is paged; all 14 settings arrive. */
 ZTEST(cmd, test_settings_info_paged_at_small_budget)
 {
 	uint8_t out[64];
@@ -2435,12 +2519,12 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	zassert_true(more, "expected more pages at 16 B");
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 0, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings: the boot settings-info content on request. At the EU868 DR0
  * budget it is one frame, carries the command's seq (not the boot dump's 0) and
- * the same 12 settings; no page fields, no stream. */
+ * the same 14 settings; no page fields, no stream. */
 ZTEST(cmd, test_get_settings_one_frame)
 {
 	uint8_t in[8], out[64], boot[64];
@@ -2467,7 +2551,7 @@ ZTEST(cmd, test_get_settings_one_frame)
 	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left");
 	g_seen_cfg_fields = 0;
 	visit_settings_page(out, out_len, &r);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 
 	/* Same bytes as the autonomous boot dump apart from the seq field
 	 * (08 07 right after the version byte). */
@@ -2497,7 +2581,7 @@ ZTEST(cmd, test_get_settings_paged)
 	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 42, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings over NFC: one frame with the seq, never a radio page stream. */
@@ -2829,7 +2913,7 @@ static void nfc_info_setup(size_t alarms)
 	g_app_config.serial_number = 2162165682u;
 	memcpy(g_app_config.claim_token, token, sizeof(token));
 	memcpy(g_app_config.radio_deveui, deveui, sizeof(deveui));
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(alarms);
 }
 
@@ -3032,11 +3116,14 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 	zassert_equal(test_run_settings_save_calls, 1, "and is saved (+ reboot)");
 	g_app_config.calibration = false;
 
-	/* The claim latch flips first, then the save persists the token with it. */
+	/* #471: the token is saved first, only then the claim latch flips, then the
+	 * reboot (a second, no-op save). */
 	run_action_reset();
+	g_claim_active_saves_before = -1;
 	app_cmd_run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE);
 	zassert_equal(g_claim_active_calls, 1, "claim window re-opened");
-	zassert_equal(test_run_settings_save_calls, 1, "claim token saved (+ reboot)");
+	zassert_equal(g_claim_active_saves_before, 1, "latch flips after the token save");
+	zassert_equal(test_run_settings_save_calls, 2, "then save + reboot");
 }
 
 ZTEST(cmd, test_run_action_none_and_page_stream_do_nothing)
@@ -3075,3 +3162,41 @@ ZTEST(cmd, test_action_reboots_classification)
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
+
+/* #430: AlarmEvent carries rule / slot / channel; sensor_type (field 11) is
+ * sent only for a 1-Wire slot event, e.g. TYPE_SENSOR_MISMATCH (rule 0xFF)
+ * with value = the detected type; a motherboard event stays without it. */
+ZTEST(cmd, test_alarm_report_sensor_type_only_for_slot_events)
+{
+	const struct app_cmd_alarm_event ev[] = {
+		{.rule = 0xFF, .slot = 2, .channel = 0, .type = 5, .sensor_type = 3,
+		 .has_value = true, .value = 2},
+		{.rule = 3, .slot = 0, .channel = 1, .type = 2, .sensor_type = 1,
+		 .has_value = true, .value = 133},
+		{.rule = 4, .slot = 1, .channel = 2, .type = 1, .sensor_type = 3,
+		 .has_value = true, .value = -500},
+	};
+	uint8_t out[64];
+	size_t len = 0;
+
+	zassert_ok(app_cmd_build_alarm_report(0, 3, false, ev, 3, 0, 1, out, sizeof(out), &len));
+
+	AlarmReport r = AlarmReport_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, len - 1); /* skip version byte */
+
+	zassert_true(pb_decode(&is, AlarmReport_fields, &r), "decode");
+	zassert_equal(r.events_count, 3);
+	zassert_equal(r.events[0].type, AlarmEvent_Type_TYPE_SENSOR_MISMATCH);
+	zassert_equal(r.events[0].rule, 0xFF);
+	zassert_equal(r.events[0].slot, 2);
+	zassert_true(r.events[0].has_sensor_type && r.events[0].sensor_type == 3,
+		     "expected type on the mismatch event");
+	zassert_true(r.events[0].has_value && r.events[0].value == 2, "detected type");
+	zassert_false(r.events[1].has_sensor_type, "motherboard event without sensor_type");
+	zassert_equal(r.events[1].rule, 3);
+	zassert_equal(r.events[1].channel, 1);
+	zassert_true(r.events[2].has_sensor_type && r.events[2].sensor_type == 3);
+	zassert_equal(r.events[2].slot, 1);
+	zassert_equal(r.events[2].channel, 2);
+	zassert_equal(r.events[2].value, -500);
+}

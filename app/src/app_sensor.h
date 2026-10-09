@@ -8,47 +8,99 @@
 #define APP_SENSOR_H_
 
 /* Zephyr includes */
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 
 /* Standard includes */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Application includes */
+#include "app_sensor_types.h"
 #include "app_w1_slots.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-struct app_sensor_data {
-	int orientation;
-	float voltage;
-	float temperature;
-	float humidity;
-	float illuminance;
-	float altitude;
-	float pressure;
-	/* 1-Wire sensor slots, ROM-bound (see app_w1_slots). Each slot's reading
-	 * carries temperature/humidity/tilt + present; unbound/absent → NaN/false. */
-	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
-	uint32_t hall_left_count;
-	uint32_t hall_right_count;
-	bool hall_left_is_active;
-	bool hall_right_is_active;
-	uint32_t input_a_count;
-	uint32_t input_b_count;
-	bool input_a_is_active;
-	bool input_b_is_active;
-	uint32_t motion_count;       /* PIR (PYQ1648) motion events */
-	uint32_t accel_motion_count; /* accelerometer (LIS2DH) any-motion events */
+/* One channel value (#430). Counter channels (APP_SENSOR_F_COUNTER) use `u` —
+ * an exact uint32 that a float would round above 2^24 — every other channel
+ * uses `f` in the channel's physical unit (app_sensor_types.yaml), NaN when absent,
+ * state channels as 0.0f / 1.0f. */
+union app_sensor_value {
+	float f;
+	uint32_t u;
 };
+
+/* Slot 0: the motherboard channel vector, indexed by APP_SENSOR_CH_MOTHERBOARD_*.
+ * Bit ch of `valid` is set when channel ch holds a value (always consistent with
+ * the NaN of a float channel). */
+struct app_sensor_mb {
+	uint32_t valid;
+	union app_sensor_value v[APP_SENSOR_CH_MOTHERBOARD_COUNT];
+};
+
+/* Slots 1..4: one 1-Wire slot. `type` is the registry type id of the bound
+ * device (APP_SENSOR_TYPE_NONE when unbound); `v` is indexed by that type's
+ * channel numbers. Channels the type does not provide are NaN. present=false
+ * when the bound ROM was not seen on the last scan. */
+struct app_sensor_w1 {
+	uint8_t type;
+	bool present;
+	uint32_t valid;
+	union app_sensor_value v[APP_SENSOR_W1_CH_MAX];
+};
+
+struct app_sensor_data {
+	struct app_sensor_mb mb;
+	struct app_sensor_w1 w1[APP_W1_SLOT_COUNT];
+};
+
+/* Motherboard channel by name: APP_SENSOR_MB_F(d, TEMPERATURE) (float view),
+ * APP_SENSOR_MB_U(d, HALL_LEFT_COUNT) (counter view). */
+#define APP_SENSOR_MB_F(d, NAME) ((d)->mb.v[APP_SENSOR_CH_MOTHERBOARD_##NAME].f)
+#define APP_SENSOR_MB_U(d, NAME) ((d)->mb.v[APP_SENSOR_CH_MOTHERBOARD_##NAME].u)
+
+/* Reset a 1-Wire slot vector to "no values" for a slot bound to `type`. */
+void app_sensor_w1_clear(struct app_sensor_w1 *s, uint8_t type);
+
+/* Store a float reading into channel `ch` of type `type`. A NaN, a non-finite
+ * value or one outside the channel's registry range stores NaN and clears the
+ * valid bit. */
+void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, uint8_t ch,
+		      float value);
+
+/* Value of channel `c` as sent on the wire (telemetry SensorReading.value):
+ * round(phys * wire scale), or the raw integer of a counter channel. */
+int32_t app_sensor_wire_value(const struct app_sensor_channel *c, union app_sensor_value v);
+
+/* Transitional (#430 step 2): a 1-Wire slot value addressed by its
+ * machine-probe channel number, for the quantity-based readers (alarm rules,
+ * history, ATS) until they address channels by the slot's own type (steps
+ * 4-6). A dallas slot provides only the temperature (ch 0 in both types); every
+ * other channel reads NaN. */
+float app_sensor_w1_f(const struct app_sensor_w1 *s, uint8_t mp_ch);
+
+/* Fetch one sample from a Zephyr sensor device and read `n` channels into `out`
+ * as floats. Shared fetch/channel-get/convert boilerplate for the onboard I2C
+ * sensors (SHT4x, OPT3001, MPL3115A2) so each driver only keeps its own
+ * channel list, logging and range checks (#220.C). Returns 0, -ENODEV if the
+ * device is not ready, or the first failing sensor API error. */
+int app_sensor_read_channels(const struct device *dev, const enum sensor_channel *chans, float *out,
+			     size_t n);
 
 extern struct app_sensor_data g_app_sensor_data;
 extern struct k_mutex g_app_sensor_data_lock;
 
 int app_sensor_init(void);
 void app_sensor_sample(void);
+
+/* Queue one full sample on the sensor work queue now, e.g. after a live 1-Wire
+ * slot change, so the no-data watchdog sees the new binding's reading instead
+ * of the empty value left until the next sample tick. */
+void app_sensor_sample_async(void);
 
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
 void app_sensor_suspend(void);

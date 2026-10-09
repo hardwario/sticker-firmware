@@ -1887,6 +1887,123 @@ static void announce_retries_when_the_queue_is_full(void)
 }
 BOTH_PROFILES(announce_retries_when_the_queue_is_full)
 
+/* ---- Periodic announce (#445) ----------------------------------------------- */
+
+#define HOUR_MS (3600LL * 1000LL)
+
+/* The period ends in its last 10 %, never past it; 0 = off; capped at 168 h. */
+ZTEST(radio_common, test_periodic_announce_delay_bounds)
+{
+	zassert_equal(app_radio_periodic_announce_delay_ms(0, 12345), 0);
+	zassert_equal(app_radio_periodic_announce_delay_ms(24, 0), 24U * 3600U * 900U);
+	zassert_equal(app_radio_periodic_announce_delay_ms(24, UINT32_MAX),
+		      24U * 3600U * 900U + (UINT32_MAX % (24U * 3600U * 100U)));
+	zassert_equal(app_radio_periodic_announce_delay_ms(200, 0),
+		      app_radio_periodic_announce_delay_ms(168, 0));
+	for (uint32_t i = 0; i < 1000; i++) {
+		uint32_t rnd = i * 2654435761U;
+		uint32_t d = app_radio_periodic_announce_delay_ms(1, rnd);
+
+		zassert_true(d >= 3240000U && d < 3600000U, "1 h -> %u ms", d);
+		d = app_radio_periodic_announce_delay_ms(168, rnd);
+		zassert_true(d >= 168U * 3600U * 900U && d < 168U * 3600U * 1000U, "168 h -> %u ms",
+			     d);
+	}
+}
+
+/* Boot/join announce at t0 (2 frames); then Info + settings-info again within
+ * [0.9, 1.0] of each period, the next period anchored on the previous one. */
+static void periodic_announce_repeats(void)
+{
+	g_app_config.interval_report = 2;
+	g_app_config.interval_announce = 1;
+	int64_t t0 = k_uptime_get();
+
+	app_radio_announce();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 2, "boot/join announce");
+
+	k_sleep(K_MSEC(HOUR_MS));
+	zassert_equal(fk.n, 4, "first periodic announce (%u frames)", (unsigned)fk.n);
+	zassert_equal(fk.log[2].tag, APP_RADIO_TAG_INFO);
+	zassert_equal(fk.log[3].tag, APP_RADIO_TAG_SETTINGS);
+	int64_t d1 = fk.log[2].at_ms - t0;
+
+	zassert_true(d1 >= HOUR_MS * 9 / 10 && d1 <= HOUR_MS + 1000, "%lld ms", (long long)d1);
+
+	k_sleep(K_MSEC(HOUR_MS));
+	zassert_equal(fk.n, 6, "second periodic announce (%u frames)", (unsigned)fk.n);
+	int64_t d2 = fk.log[4].at_ms - fk.log[2].at_ms;
+
+	zassert_true(d2 >= HOUR_MS * 9 / 10 && d2 <= HOUR_MS + 1000, "%lld ms", (long long)d2);
+	zassert_false(app_radio_announce_pending());
+}
+BOTH_PROFILES(periodic_announce_repeats)
+
+/* interval_announce 0: the boot/join announce only. */
+static void periodic_announce_off(void)
+{
+	g_app_config.interval_report = 2;
+	g_app_config.interval_announce = 0;
+	app_radio_announce();
+	k_sleep(K_MSEC(3 * HOUR_MS));
+	zassert_equal(fk.n, 2, "boot/join announce only (%u frames)", (unsigned)fk.n);
+}
+BOTH_PROFILES(periodic_announce_off)
+
+/* Link down when the period ends: nothing is sent, and nothing retries; the
+ * next link-up's announce goes and restarts the period. */
+static void periodic_announce_defers_to_link_up(void)
+{
+	g_app_config.interval_report = 2;
+	g_app_config.interval_announce = 1;
+	app_radio_announce();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 2);
+
+	fk.state = APP_RADIO_STATE_RECONNECT;
+	fk.ready = false;
+	k_sleep(K_MSEC(HOUR_MS));
+	zassert_equal(fk.n, 2, "nothing while the link is down");
+	zassert_false(app_radio_announce_pending(), "not left armed for the dead link");
+
+	fk.state = APP_RADIO_STATE_HEALTHY;
+	fk.ready = true;
+	k_sleep(K_MSEC(HOUR_MS));
+	zassert_equal(fk.n, 2, "no retry of its own: the link-up announces");
+
+	int64_t t1 = k_uptime_get();
+
+	app_radio_announce(); /* the re-join */
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 4, "the link-up announce");
+	k_sleep(K_MSEC(HOUR_MS));
+	zassert_equal(fk.n, 6, "the period restarted at the link-up");
+	zassert_true(fk.log[4].at_ms - t1 >= HOUR_MS * 9 / 10);
+}
+BOTH_PROFILES(periodic_announce_defers_to_link_up)
+
+/* A re-join half-way through the period restarts it from the re-join. */
+static void periodic_announce_restarts_on_join(void)
+{
+	g_app_config.interval_report = 2;
+	g_app_config.interval_announce = 1;
+	app_radio_announce();
+	k_sleep(K_MSEC(HOUR_MS / 2));
+	zassert_equal(fk.n, 2);
+
+	int64_t t1 = k_uptime_get();
+
+	app_radio_announce();
+	k_sleep(K_MSEC(HOUR_MS * 85 / 100));
+	zassert_equal(fk.n, 4, "only the re-join announce: the old period is gone (%u)",
+		      (unsigned)fk.n);
+	k_sleep(K_MSEC(HOUR_MS / 5));
+	zassert_equal(fk.n, 6, "the periodic one, from the re-join");
+	zassert_true(fk.log[4].at_ms - t1 >= HOUR_MS * 9 / 10);
+}
+BOTH_PROFILES(periodic_announce_restarts_on_join)
+
 /* ---- History replay (F3c) --------------------------------------------------- */
 
 #define HIST_GAP_MS 3000 /* app_radio.c HIST_FRAME_GAP_MS */

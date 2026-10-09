@@ -206,7 +206,7 @@ stays joined / rejoins with the same credentials.
 **Goal:** `factory_reset` (new, narrower than device_reset above) keeps the identity (serial,
 `secret-key`, `nonce-counter`, claim token, `vendor-token`) plus DevEUI / JoinEUI, and resets the
 LoRaWAN keys, session and radio settings to defaults — the unit must be re-keyed before it can join
-again. `vendor_reset` keeps only
+again. Since #471 it also clears the pulse counters and the history. `vendor_reset` keeps only
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
@@ -214,16 +214,18 @@ already-encrypted nfc/shell channel, then reboots so the new key is live (#322);
 replacement is refused.
 **Observable:** `factory_reset` — identity and DevEUI / JoinEUI survive. AppKey / NwkKey, the ABP
 keys, region / sub-band / network / ADR / datarate and the radio mode go back to defaults, and the
-LoRaWAN NVM is wiped (X8). Once re-keyed, the device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+LoRaWAN NVM is wiped (X8), the counters read 0 and the history is empty (#471). Once re-keyed, the
+device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
-live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
+live after reboot, the claim token is blank and the claim window is `done` (#471). `set_secret_key` — the device saves and cold-reboots, and the new key is in
 effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
 `BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
 > `settings factory-reset` over the RTT shell. Confirm:
 > - `config serial-number` / `secret-key` / `radio-deveui` / `lrw-joineui` survive;
-> - `config radio-appkey` and the other LoRaWAN keys and settings are back to defaults.
+> - `config radio-appkey` and the other LoRaWAN keys and settings are back to defaults;
+> - `ats sensors sample` shows the hall / input counters at 0 and `history info` an empty ring (#471).
 >
 > Re-provision the keys (`config radio-appkey …` + `settings save`, or NFC `set_param`, N1) and
 > confirm the device joins afresh. Then `config vendor-reset-allow false` + `settings save`, and confirm
@@ -231,9 +233,18 @@ effect once it comes back (old key no longer decrypts); an all-zero key is rejec
 > `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
 > argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
 > `config serial-number`/`config vendor-token` are unchanged but everything else (incl.
-> `config secret-key`, which should now read the supplied key) is back to defaults/blank.
+> `config secret-key`, which should now read the supplied key) is back to defaults/blank, and
+> `ats claim status` → `done` (#471).
 
-- [ ] Pass
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):**
+> - `settings factory-reset`: serial / `secret-key` / DevEUI / JoinEUI kept, LoRaWAN keys zero,
+>   hall-left count 5 → 0, `history info` 1 → 0 segments, claim window unchanged. After re-keying
+>   (`radio-mode lorawan` + AppKey + ChirpStack `FlushDevNonces`) the unit joined afresh.
+> - `settings vendor-reset <key>` with `vendor-reset-allow false` → refused (-13), nothing erased;
+>   no argument → refused; with a key → serial / `vendor-token` kept, `secret-key` = supplied key,
+>   claim token blank, `ats claim status` → `done`.
+
+- [x] Pass — 2026-10-09
 
 ### G6a-NFC — vendor_reset over the vendor mailbox channel `0x02` (#299, #316, v1.5.0 #414)
 
@@ -249,9 +260,9 @@ channel instead of the shell. `vendor_reset` (id 26, `SetSecretKey{key}` body) i
 - A valid request → `ack`. Then the session ends (deferred action), green + yellow 2 s, and the
   reset + reboot run. Afterwards only `serial_number`, `vendor_token` and `nonce_counter` survive,
   and the supplied `secret_key` is live (the owner channel works with the new key). The claim
-  window is set back to `active`, but the claim token is wiped with everything else, so
-  `get_claim_info` → `NOT_READY "no claim token"` until it is provisioned again. The LoRaWAN
-  identity is wiped too (X8).
+  token is wiped with everything else and the claim window is closed (`done`, #471), so
+  `get_claim_info` → `NOT_READY "claimed"` until the owner sends `claim_active`, which
+  generates a new token (N10). The LoRaWAN identity is wiped too (X8).
 - `vendor-reset-allow = false` → `Error{NOT_READY "vendor_reset disabled"}`, no reboot. Recovery:
   `set_param{application{vendor_reset_allow = true}}` over `0x02`. It is always accepted there: the
   field is `writable: [vendor]` and its write is not gated on the current value. Then re-send
@@ -271,14 +282,26 @@ the Manager-App guide §4.4 and `tests/nfc_crypto` `test_vendor_channel_vector`)
 >    kept on the tag), confirm:
 >    - `get_basic_info` reports the same serial and a `nonce_counter` that is not reset;
 >    - the owner channel answers under the new `secret_key` (the old one gets no reply);
->    - `ats claim status` → `active`, while `get_claim_info` → `NOT_READY "no claim token"`;
+>    - `ats claim status` → `done` and `get_claim_info` → `NOT_READY "claimed"` (#471);
 >    - `config serial-number` / `vendor-token` are unchanged and everything else is back to
 >      defaults.
 > 5. Send `vendor_reset` over `0x01` → `NOT_READY "transport not allowed"`.
 >
 > Restore the bench identity (secret key, claim token, LoRaWAN keys via N1) afterwards. Report results.
 
-- [ ] Pass — v1.5.0 mailbox run pending
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, Pixel + nfc-proxy-app):** in one tap —
+> `vendor_reset` on `0x01` → `NOT_READY "transport not allowed"`; on `0x02` with
+> `vendor-reset-allow false` → `NOT_READY "vendor_reset disabled"`; 
+> `set_param{application{vendor_reset_allow = true}}` on `0x02` → `ack`; no key → `BAD_REQUEST "missing key"`; zero key →
+> `BAD_REQUEST "zero key"`; valid key → `ack`, RTT `session end (deferred action), 7 reply(ies)`,
+> reboot. Afterwards serial / `vendor-token` kept, `secret-key` = supplied key, `nonce_counter` not
+> reset (`get_basic_info` 301), claim token wiped, window `done`, DevEUI zero.
+> `vendor_reset` injected as a LoRaWAN Command (`ats cmd lrw …`) → `Error{NOT_READY}`, nothing
+> erased. Not checked: the LED pattern, and old-key rejection (the supplied key equalled the bench
+> key). Caveat: `ats claim status` read within ~1.5 s after boot shows the compile-time default
+> `active` until `app_nfc` loads `clm/state` — re-read after init.
+
+- [x] Pass — v1.5.0 mailbox, 2026-10-09
 
 > **Earlier runs (for reference):** 2026-07-13, HIL with a hand-crafted frame on the removed
 > `hio.stck:rst` magic-byte channel. After #316 the `hio.stck:vnd` protobuf channel was verified
@@ -401,7 +424,8 @@ on TTN.
 settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
 **Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
 fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
-(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+(`interval_sample`, `interval_report`, `history_enable`), every `sensors.cap_*` flag (since #465
+incl. `cap_buzzer` and `cap_sht`) and,
 on a 1-Wire build, `w1_slot_type` (4 entries).
 
 **Prompt for Claude:**
@@ -425,7 +449,12 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 > they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
 > covered: both boot frames are dropped whole there, see #418.
 
+> **Re-verified with #465 (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** join → Info (fCnt 1, DR0) → `ConfigDump`
+> (fCnt 2, 37 B, DR5) → telemetry (fCnt 3); a changed `history_enable` is reflected, and the new
+> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `ttn.js`.
+
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+- [x] Pass — `cap_sht` / `cap_buzzer` fields, 2026-10-09
 
 ### L4c — GetSettings: settings-info on request (v1.5.0, #428)
 
@@ -454,6 +483,31 @@ interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_sl
 > step.
 
 - [x] Pass (EU868 one-frame answer)
+
+### L4d — Periodic Info + settings-info announce (v1.5.0, #445)
+
+**Goal:** A node that runs without a reboot re-announces its Info + settings-info every
+`interval_announce` hours, so the network's retained identity/config heals by itself. LoRaWAN and
+P2P behave the same.
+**Observable:** RTT `Periodic announce`, then `Info announced` and `Settings-info announced`, and
+on the network side a fPort-85 (P2P: `0x55`) `Info` seq 0 followed by the settings-info
+`ConfigDump` seq 0, between 0.9 and 1.0 × `interval_announce` after the previous announce. No
+reboot, no re-join, no counter / history reset; telemetry keeps its cadence.
+
+**Prompt for Claude:**
+> On a joined (LoRaWAN) or paired (P2P) bench node set `config interval-announce 1` and
+> `settings save`; note the time of the boot/join announce. Leave RTT attached (debug: keep the
+> 20 min keepalive). Within 54–60 min confirm `Periodic announce` and the two frames on the network
+> side, decoded with `app/decoder/ttn.js`, and that the next one follows 54–60 min after it. Change
+> a setting over the shell **without** a reboot (`config interval-sample 30`, no save) and confirm
+> the next periodic settings-info carries the staged value. Then (a) set `interval-announce 0` +
+> save: after the boot announce no periodic one for > 1 h; (b) with `interval-announce 1`, take the
+> link down at the 50 min mark (LoRaWAN: gateway off; P2P: Hub off) so the period ends while the
+> link is down: RTT `Periodic announce deferred to the next link-up`, nothing sent; after the
+> re-join the join announce goes and the next periodic one comes ~1 h after it. Run on both radios.
+> Restore `interval-announce 24`.
+
+- [ ] Pass
 
 
 **Goal:** Telemetry is sent on the configured interval.
@@ -801,11 +855,11 @@ sub-band's 8 channels have all been used by failed joins and after each rejoin's
 ### S4 — Free-fall → alarm
 
 **Goal:** Free-fall raises an `accel-motion` alarm.
-**Observable:** AlarmReport on fPort 3 with source `accel-motion`, edge ACTIVATE; orange LED blink.
+**Observable:** AlarmReport on fPort 3 with slot `mb`, channel `accel-motion`, edge ACTIVATE; orange LED blink.
 
 **Prompt for Claude:**
 > Ask me to perform a short, safe free-fall (drop onto a cushion). Confirm an AlarmReport arrives
-> on fPort 3 with an event whose source decodes to `accel-motion` and edge ACTIVATE, and that the
+> on fPort 3 with an event whose channel decodes to `accel-motion` and edge ACTIVATE, and that the
 > RTT log / orange LED reflect the alarm. Decode and report the event fields.
 
 - [ ] Pass
@@ -906,6 +960,29 @@ requires `cap_barometer` / `cap_light_sensor`.
 
 - [ ] Pass
 
+### S10b — Onboard SHT4x switched off: `cap_sht` (v1.5.0, #465)
+
+**Goal:** With `cap_sht` off the onboard SHT4x is not read and leaves no trace on the wire,
+in the alarms or in the history; the settings-info reports the flag.
+**Observable:** fPort 2 telemetry without `temperature` / `humidity`; no `no_data` alarm for
+the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors.cap_buzzer`.
+
+**Prompt for Claude:**
+> On a joined unit with `history-enable true` and `history-channels` incl. temperature/humidity,
+> confirm the boot `ConfigDump` shows `cap_sht: 1` and `cap_buzzer`. Run `config cap-sht false`
+> and `settings save` (reboots). Confirm the new boot `ConfigDump` shows `cap_sht: 0`, and that
+> the next fPort 2 telemetry frames decode without `temperature` / `humidity` (other groups
+> unchanged). Wait > 5 s past a sample and confirm no fPort 3 `no_data` alarm for
+> `onboard` temperature/humidity. Run `history info` and confirm the `sensors:` line no longer
+> lists temperature/humidity. Restore `config cap-sht true` + `settings save` and confirm the fields return.
+
+> **HW-verified (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** boot `ConfigDump` `cap_sht: 1`, `cap_buzzer: 0`.
+> `cap-sht false` + save → `ConfigDump` `cap_sht: 0`; the next two fPort 2 frames are 9 B with no
+> `temperature` / `humidity` (voltage / accel unchanged); no fPort 3 within two cycles;
+> `history info` lists no sensors. `cap-sht true` + save → 14 B telemetry with T 23.27 °C / H 50.5 %.
+
+- [x] Pass — 2026-10-09
+
 ### S11 — Battery voltage
 
 **Goal:** Voltage field is reported.
@@ -987,15 +1064,19 @@ calibration uplinks. The flag is one-shot, so the next reboot returns to normal.
 
 - [ ] Pass
 
-### H2 — Sensor selection
+### H2 — Channel selection (#430)
 
-**Goal:** Per-sensor recording can be toggled.
-**Observable:** `history sensors` lists sensors + selection; `history sensors <name> on|off` toggles.
+**Goal:** any registry channel can be recorded; the selection persists as `history_channels`.
+**Observable:** `history sensors` lists every motherboard channel (and every channel of a typed
+1-Wire slot as `sN-<channel>`) with its selection and capability state; `history sensors <name>
+on|off` toggles it and stages `config history-channels` (`slot << 5 | ch` per byte, `ff` unused).
 
 **Prompt for Claude:**
-> Run `history sensors` and report the list with current selection. Toggle one sensor off then on
-> (e.g. `history sensors temperature off` / `... on`) and confirm the listing updates accordingly.
-> Note which sensors are gated by capability flags.
+> Run `history sensors` and report the list with current selection. Toggle one channel off then on
+> (e.g. `history sensors temperature off` / `... on`) and confirm the listing and
+> `config history-channels` update accordingly. Enable a channel that was not recordable before
+> #430 (e.g. `battery-voltage`), `settings save` (reboots), and confirm `history info` still lists
+> it after the reboot. Note which channels are gated by capability flags or by an untyped slot.
 
 - [ ] Pass
 
@@ -1101,26 +1182,29 @@ it resets to 0.
 
 - [ ] Pass
 
-### H9 — Pressure / illuminance / orientation / accel-motion channels (#311)
+### H9 — Pressure / illuminance / orientation / accel channels (#311, #430)
 
-**Goal:** the 4 new history channels (barometer pressure, light-sensor illuminance, accelerometer
-orientation, accelerometer any-motion event count) record and read back correctly, gated on their
-own capability flags (`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates
-both `orientation` and `accel-motion`), and are absent (not recorded) when the capability is off.
-**Observable:** `history sensors` lists all 4 new names; enabling them + capturing records values
-consistent with a live sensor read; disabling the capability drops the channel from both the
-selection list and stored records.
+**Goal:** the barometer pressure, light-sensor illuminance, accelerometer orientation and
+accelerometer motion channels record and read back correctly, gated on their own capability flags
+(`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates `accel-orientation`,
+`accel-motion` and `accel-count`), and are skipped (not recorded) when the capability is off.
+`accel-motion` is momentary: `1` when the accel event counter moved since the previous record.
+**Observable:** `history sensors` lists the channels; enabling them + capturing records values
+consistent with a live sensor read; disabling the capability drops the channel from the recorded
+columns (it stays in `history-channels`).
 
 **Prompt for Claude:**
-> Confirm the board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell
-> or `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `orientation`,
-> `accel-motion` are all listed and available. Enable all 4 (`history sensors pressure on`, etc.),
-> `history capture`, then `history read 1` and confirm the printed values are in a plausible range
-> (pressure ~950–1050 hPa, illuminance a small non-negative number, orientation 0–5, accel-motion a
-> non-negative count) and roughly match a fresh sensor reading (`sample` command or `get_info`).
-> Then flip `cap_accelerometer` off via `config` + `settings save`, reboot, and confirm
-> `orientation`/`accel-motion` no longer appear in `history sensors` and are silently dropped from
-> the selection mask (no crash, no stale values). Report all observations.
+> Use a build with `CONFIG_LIS2DH=y` (the debug variant drops the accelerometer, #395). Confirm the
+> board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell or
+> `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `accel-orientation`,
+> `accel-motion`, `accel-count` are listed and available. Enable them (`history sensors pressure
+> on`, etc.), `history capture` twice (move the board in between), then `history read` and confirm
+> the printed values are plausible (pressure ~950–1050 hPa, illuminance a small non-negative
+> number, orientation 1–6, `accel-motion` absent in the first record then 0/1, `accel-count` a
+> non-negative count) and roughly match `ats sensors sample`. Then flip `cap_accelerometer` off via
+> `config` + `settings save`, and confirm the accel columns are gone from `history info` (buffer
+> restarted, no crash, no stale values) while `config history-channels` still lists them.
+> Report all observations.
 
 - [ ] Pass
 
@@ -1128,14 +1212,18 @@ selection list and stored records.
 
 ## Alarms
 
-> **Alarms are dynamic rules** in 16 fixed slots (`0…15`). Arm/change/clear them locally with the
-> `alarm` shell command (`alarm set <i> <source> <quantity> <args>`, `alarm new …`,
-> `alarm clear <i>|all`, `alarm list`), or over the air with **SetParam** writing the slot config
-> parameter `alarm_<i>` (a packed 17-byte rule as hex) — the same message works on **fPort 85
-> (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*` config keys
-> any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See `doc/version 1.4.md` §7 for
-> the source/quantity enums, the kinds (threshold / state / count) and the packed-slot layout.
-> `alarm-limit` (rate-limit) still applies globally.
+> **Alarms are dynamic rules** in 16 fixed rule entries (`0…15`). Each rule targets a **channel**
+> of a sensor **slot** (#430): `mb` = motherboard, `s1`…`s4` = 1-Wire slots; `sensor types [<type>]`
+> lists every type's channels with their kind (threshold / state / rate). Arm/change/clear rules
+> locally with the `alarm` shell command (`alarm set <rule> <slot> <channel> <key> <value>...`,
+> `alarm new <slot> <channel> ...`, `alarm clear <rule>|all`, `alarm list`), or over the air with
+> **SetParam** writing the config parameter `alarm_<rule>` (a packed 18-byte rule as hex: flags,
+> slot, channel, sensor_type, from, to, then float32 LE lo, hi, dwell) — the same message works on
+> **fPort 85 (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*`
+> config keys any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See
+> `doc/version 1.5.md` (sensor channel model) for the channel registry, the kinds and the rule
+> layout. A rule written for another sensor type than the slot now holds is **stale**: kept,
+> listed as `STALE`, never evaluated. `alarm-limit` (rate-limit) still applies globally.
 >
 > **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band** —
 > `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` config keys are gone.
@@ -1144,12 +1232,12 @@ selection list and stored records.
 > and give a concrete recipe to observe it, including the "canceled by an early revert" case that a
 > naive check-once-at-expiry implementation would get wrong.
 >
-> **Shell syntax gotcha:** `alarm new <source> <quantity> <kind-args>` / `alarm set <i> <source>
-> <quantity> <kind-args>` — `<source>`/`<quantity>` are **names** (e.g. `onboard`,
-> `temperature`), not numeric indices, and there is **no** literal `threshold`/`state`/`count`
-> keyword in the actual command line — the kind is inferred from the quantity. Threshold args are
-> `<lo> <hi> [dwell]` (e.g. `alarm new onboard temperature 0 20 1`); adding a `threshold` token as
-> if it were a positional argument shifts everything and fails with "wrong parameter count".
+> **Shell syntax:** `alarm new <slot> <channel> <key> <value>...` / `alarm set <rule> <slot>
+> <channel> <key> <value>...` — `<slot>` is `mb` or `s1`…`s4`, `<channel>` a channel name of the
+> slot's type (e.g. `temperature`, `hall-left-state`) or its number. The kind comes from the
+> channel; the keys are `lo`/`hi`/`dwell` (threshold), `from`/`to`/`dwell` (state) and `hi`/`dwell`
+> (rate), e.g. `alarm new mb temperature lo 0 hi 20 dwell 1`. A 1-Wire slot needs its
+> `sensorN-type` set first (the rule records that type).
 >
 > **Bench tip — testing alarms without a network join:** the alarm-poll loop in the main
 > application only runs while the LoRaWAN state is HEALTHY, so on a device that hasn't joined (or
@@ -1166,16 +1254,16 @@ selection list and stored records.
 band continuously for `dwell` seconds; a value that dips back inside the band before `dwell` elapses
 must NOT fire, and must NOT get credit toward a later attempt (the dwell window resets).
 Deactivation is always immediate.
-**Observable:** AlarmReport on fPort 3, source `onboard`, quantity `temperature`, edge + side
+**Observable:** AlarmReport on fPort 3, slot `mb`, channel `temperature`, edge + side
 (LO/HI); RTT alarm log; red LED while active.
 
 **Prompt for Claude:**
-> Arm `alarm set 0 onboard temperature <lo> <hi> <dwell>` with bounds near the current room
+> Arm `alarm set 0 mb temperature lo <lo> hi <hi> dwell <dwell>` with bounds near the current room
 > temperature and `dwell` a few seconds (note the values); confirm with `alarm list`. Then, in order:
 > (1) push the sensor just past the bound and back inside within less than `dwell` seconds — confirm
 > **no** AlarmReport fires (the dwell was interrupted); (2) push it past the bound and hold it there
 > for longer than `dwell` — confirm an AlarmReport fires only after roughly `dwell` seconds have
-> elapsed, with source `onboard`/quantity `temperature` and the correct side (LO/HI); (3) bring the
+> elapsed, with slot `mb`/channel `temperature` and the correct side (LO/HI); (3) bring the
 > value back inside the band and confirm the alarm clears **immediately** (no matching dwell on the
 > way down). Decode and report all three events/non-events with their timing.
 
@@ -1183,14 +1271,16 @@ Deactivation is always immediate.
 
 ### A2 — Threshold alarms: humidity / pressure / 1-Wire slots
 
-**Goal:** The other analog quantities behave like temperature (band + dwell + immediate clear).
-**Observable:** AlarmReport fPort 3 with the matching source and side.
+**Goal:** The other analog channels behave like temperature (band + dwell + immediate clear).
+**Observable:** AlarmReport fPort 3 with the matching slot/channel and side.
 
 **Prompt for Claude:**
-> For each present analog quantity (onboard humidity/pressure, and 1-Wire slot s1…s4 temperature/
-> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [dwell]`, stimulate a crossing held past
-> `dwell`, and confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side after
-> the dwell. Summarize per source; mark any sensor not fitted as N/A.
+> For each present analog channel (`mb` humidity/pressure, and the 1-Wire slots s1…s4 per their
+> type — dallas `temperature`, machine-probe `temperature`/`temperature-aux`/`humidity`), arm
+> `alarm set <i> <slot> <channel> lo <lo> hi <hi> [dwell <s>]`, stimulate a crossing held past
+> `dwell`, and confirm an AlarmReport on fPort 3 with the correct slot/channel (and `sensor_type`
+> for a 1-Wire slot) and LO/HI side after the dwell. Summarize per channel; mark any sensor not
+> fitted as N/A.
 
 - [ ] Pass
 
@@ -1200,7 +1290,7 @@ Deactivation is always immediate.
 to persist for `dwell` seconds before it fires; an edge that fires then also **holds** the alarm
 active (and blocks re-arming) for that same `dwell`. `dwell = 0` reproduces the old immediate
 behavior. Level deactivation is always immediate.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-state`/`hall-right-state`.
 
 **Polarity (#352):** `state 1` = magnet **present**, `state 0` = magnet **absent** —
 `ats sensors sample`/`alarm poll` reading `hall_left=1` while no magnet is applied (or `=0` while
@@ -1209,17 +1299,17 @@ one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue 
 **Prompt for Claude:**
 > First confirm the raw polarity: `ats sensors sample` with no magnet must show `hall_left=0`, and
 > `=1` only while a magnet is held against it. Then arm an **edge** rule with a confirm+hold
-> window, `alarm set 0 hall-left state 0 1 5` (fires on 0→1, 5 s confirm+hold) and confirm with
+> window, `alarm set 0 mb hall-left-state from 0 to 1 dwell 5` (fires on 0→1, 5 s confirm+hold) and confirm with
 > `alarm list` it reads `0->1 (edge) dwell=5.00`. Ask me to briefly tap the magnet on and off within
 > less than 5 s — confirm **no** AlarmReport fires (the confirm was interrupted). Then ask me to
 > apply the magnet and hold it past 5 s — confirm one AlarmReport fires roughly 5 s after the raw
 > transition, i.e. when the magnet is **applied**, not removed, and that reapplying the magnet
 > within the next 5 s produces **no** second report (holding/re-arm-blocked). Then arm a **level**
-> rule `alarm set 0 hall-left state 1 1 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
+> rule `alarm set 0 mb hall-left-state from 1 to 1 dwell 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
 > after the magnet has been present continuously for ~5 s, and clears immediately on removal.
 > Report all four checks with timing.
 
-**Reverse direction (edge on removal, `alarm set 0 hall-left state 1 0 5`):** symmetric to the
+**Reverse direction (edge on removal, `alarm set 0 mb hall-left-state from 1 to 0 dwell 5`):** symmetric to the
 `0→1` case above — confirmed to fire ~5 s after the magnet is removed (not reapplied), with the
 same early-revert-cancel on a quick remove+reapply within 5 s. Worth testing explicitly at least
 once, not just assuming symmetry: a bounce-prone reed switch has different release vs. close
@@ -1232,16 +1322,16 @@ way to confirm the physical transition actually settled before timing the dwell.
 ### A4 — Binary alarm: Input A/B (state)
 
 **Goal:** Input edges/levels raise `state` alarms (same confirm/hold model as A3).
-**Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `input-a-state`/`input-b-state`.
 
 **Polarity (#352):** `state 1` = input **asserted** (shorted to GND), `state 0` = input **idle** —
 same fix/regression check as A3's hall polarity note.
 
 **Prompt for Claude:**
 > With PIR disabled (shared pins), confirm `ats sensors sample` shows `input_a=0`/`input_b=0` idle,
-> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1 [dwell]` (and
-> `input-b`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3 with source
-> `input-a`/`input-b` fire on **assertion**, not release. Report results.
+> and `=1` only while shorted to GND. Then arm `alarm set <i> mb input-a-state from 0 to 1 [dwell <s>]`
+> (and `input-b-state`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3
+> with channel `input-a-state`/`input-b-state` fire on **assertion**, not release. Report results.
 
 - [ ] Pass
 
@@ -1251,7 +1341,7 @@ same fix/regression check as A3's hall polarity note.
 the sensor already reports a discrete event, not a raw level) and then use `dwell` purely as the
 hold/re-arm window: a further pulse within `dwell` seconds of the last is suppressed. `dwell = 0` re-
 arms on the very next poll.
-**Observable:** AlarmReport fPort 3, source `pir`/`accel`, quantity `state`, edge ACTIVATE; one
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `pir-motion`/`accel-motion`, edge ACTIVATE; one
 report per pulse, suppressed for `dwell` seconds, then re-armed; a motion burst is flood-suppressed
 (no permanent latch).
 
@@ -1265,8 +1355,8 @@ its own fire.
 **Prompt for Claude:**
 > Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
-> `alarm set 0 pir state 0 1 <dwell>` (or `accel state 0 1 <dwell>`, note the value) — edge and level
-> behave alike for these momentary sources. Ask me to trigger motion repeatedly; confirm the FIRST
+> `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — only
+> edge rules are accepted on these momentary channels. Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
 > `dwell` seconds of it are suppressed, that it re-arms and fires again once `dwell` has elapsed, and
 > that a sustained burst produces only periodic reports (not a flood, not a stuck `active`). Report
@@ -1276,26 +1366,26 @@ its own fire.
 
 ### A6 — Count / rate alarm (hall / input) — dwell as hold/re-arm
 
-**Goal:** A `count` rule fires when a counter exceeds the per-interval rate, then holds/re-arm-
+**Goal:** A rate rule on a counter channel fires when it exceeds the per-interval rate, then holds/re-arm-
 blocks for `dwell` seconds (same role as A5). `dwell = 0` re-arms on the next report interval.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
-`count`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-count`/`hall-right-count`/
+`input-a-count`/`input-b-count`.
 
 **Gotcha:** `interval_report` has a hard shell-enforced minimum of 60 s (`config interval-report`,
 `cmd_int` min=60) — it cannot be shrunk for a faster manual test cycle, so each rate-window
 iteration costs a real 60+ s wait. Also: re-arming a rule via `alarm clear all` immediately
-followed by `alarm new <same source+quantity>` does **not** reset the runtime dwell/window
-state — `rt_sync()` only resets on a `(source, quantity)` mismatch, and nothing re-syncs while the
+followed by `alarm new <same slot+channel>` does **not** reset the runtime dwell/window
+state — `rt_sync()` only resets on a rule change, and nothing re-syncs while the
 rule is briefly absent — so a "fresh" rule can silently inherit a stale window baseline from the
 previous test run. Insert an `alarm poll` **between** `alarm clear all` and `alarm new` to force a
 true reset before timing a fresh window.
 
 **Prompt for Claude:**
-> Arm `alarm new hall-left count <N> <dwell>` (small N, note both values; `alarm list` shows
+> Arm `alarm new mb hall-left-count hi <N> dwell <dwell>` (small N, note both values; `alarm list` shows
 > `rate>=N/interval dwell=…`) — if re-arming an existing rate rule, `alarm clear all` then
 > `alarm poll` then `alarm new` (not `clear` immediately followed by `new`, see gotcha above).
 > Ask me to pulse the hall sensor more than N times within a report interval and confirm an
-> AlarmReport on fPort 3 for that source/quantity, then confirm a second over-rate interval
+> AlarmReport on fPort 3 for that slot/channel, then confirm a second over-rate interval
 > within `dwell` seconds of the first does **not** produce a second report while one after `dwell`
 > has elapsed does. Report the result.
 
@@ -1303,15 +1393,15 @@ true reset before timing a fresh window.
 
 ### A7 — Set & read alarms over LoRaWAN & NFC (SetParam / GetParam)
 
-**Goal:** Alarm slots are written/read as `alarm_<i>` config parameters over both transports
+**Goal:** Alarm rules are written/read as `alarm_<i>` config parameters over both transports
 (native protobuf bytes, not hex strings on the wire).
-**Observable:** `set_param.alarms.alarm_<i>` arms a slot (Ack); `get_param.alarms_field=[54+i]`
+**Observable:** `set_param.alarms.alarm_<i>` arms a rule (Ack); `get_param.alarms_field=[54+i]`
 returns the packed rule in `config_dump`; `alarm list` matches; identical behaviour on fPort 85
 and NFC.
 
 **Prompt for Claude:**
-> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed onboard-
-> temperature rule (hex), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
+> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed 18-byte `mb`
+> temperature rule (hex, e.g. `0300000100000000a0400000f0410000803f` = lo 5, hi 30, dwell 1), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
 > shows the rule. Then GetParam `alarms_field:[54]` and confirm the returned hex matches what was
 > set. Repeat the SetParam over NFC and confirm the same result. Report both transports.
 
@@ -1319,32 +1409,32 @@ and NFC.
 
 ### A8 — Change / delete / deactivate a rule
 
-**Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
-**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
+**Goal:** A rule can be overwritten, cleared, and disabled-without-losing-its-definition.
+**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 36
 zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
-`01…`) keeps the slot listed with `en=0` and is **not** evaluated. Since the 2026-08-18
+`01…`) keeps the rule listed with `en=0` and is **not** evaluated. Since the 2026-08-18
 final-review fix, clearing/disabling/editing a rule whose latch is currently ACTIVE also emits
 the matching fPort-3 deactivate edge on the next poll (previously the activate was left
 dangling for edge-pairing backends).
 
 **Prompt for Claude:**
-> Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 5` then re-set to
-> `5 30 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
+> Using rule 0: (1) **change** it — `alarm set 0 mb temperature lo 0 hi 10 dwell 5` then re-set to
+> `lo 5 hi 30 dwell 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
 > `alarm_0` with the same rule but flags `01` (present, not enabled); confirm `alarm list` shows
 > `en=0` and that crossing the bound raises **no** alarm. (3) **delete** it (`alarm clear 0`, or
-> SetParam `alarm_0` = all zeros); confirm the slot disappears from `alarm list`. Report all three.
+> SetParam `alarm_0` = all zeros); confirm the rule disappears from `alarm list`. Report all three.
 
 - [ ] Pass
 
-### A9 — Multi-level (two slots, same source + quantity)
+### A9 — Multi-level (two rules, same slot + channel)
 
-**Goal:** Several slots may carry the same `(source, quantity)` as independent rules (e.g. a warning
+**Goal:** Several rules may target the same `(slot, channel)` independently (e.g. a warning
 band and a critical band), each latching/reporting on its own.
 
 **Prompt for Claude:**
-> Arm two onboard-temperature rules — slot 0 a wide "warning" band and slot 1 a tighter "critical"
-> band (note both). Stimulate crossings into each band and confirm each slot raises its own
-> AlarmReport independently (the `slot`/event fields distinguish them) and clears independently.
+> Arm two `mb temperature` rules — rule 0 a wide "warning" band and rule 1 a tighter "critical"
+> band (note both). Stimulate crossings into each band and confirm each rule raises its own
+> AlarmReport independently (the `rule` field distinguishes them) and clears independently.
 > Report.
 
 - [ ] Pass
@@ -1352,13 +1442,14 @@ band and a critical band), each latching/reporting on its own.
 ### A10 — AlarmReport structure
 
 **Goal:** AlarmReport fields are well-formed.
-**Observable:** `base_time`, `total`, `events[]` with `source`, `edge`, `side`, `rel_s`, and
-optional scaled `value` (×100 temp/hum, ×10 pressure; absent for discrete).
+**Observable:** `base_time`, `total`, `events[]` with `rule`, `slot`, `channel` (+ `sensor_type`
+for a 1-Wire slot), `edge`, `type`, `rel_s`, and optional `value` scaled by the channel's wire
+scale (×100 temperature, ×2 humidity, ×10 pressure, ×1000 voltage; see `sensor types`).
 
 **Prompt for Claude:**
 > Capture any AlarmReport on fPort 3 and fully decode it. Confirm `base_time` and `total` are
-> sensible, each event has a valid `source`/`edge`/`side`/`rel_s`, threshold events carry a scaled
-> `value` (×100 for temp/hum, ×10 for pressure) while discrete events omit it, and that no more
+> sensible, each event has a valid `rule`/`slot`/`channel`/`edge`/`type`/`rel_s`, threshold events
+> carry `value` scaled by the channel's wire scale, and that no more
 > than 8 events appear per frame. Report the decoded structure.
 
 - [ ] Pass
@@ -2021,8 +2112,8 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 - `device_reset`: config and alarm defaults are restored. Kept: identity (serial, `secret_key`,
   nonce, claim token + window state, `vendor_token`) and the full LoRaWAN provisioning and session
   (G6).
-- `factory_reset`: kept are identity + DevEUI / JoinEUI. The LoRaWAN keys and session reset, and the
-  device re-joins (G6a).
+- `factory_reset`: kept are identity + DevEUI / JoinEUI. The LoRaWAN keys and session reset, the
+  counters and the history are cleared (#471), and the device re-joins (G6a).
 - `set_secret_key`: the `ack` decrypts under the **old** key. After the reboot, a frame sealed with
   the old key gets no reply (RTT `cmd: decrypt failed`, red LED) while the new key works. The nonce
   is preserved.
@@ -2064,7 +2155,13 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 > `test_set_secret_key`, `test_set_secret_key_over_vendor`) and by `tests/nfc_hw`
 > (`test_mb_deferred_action_ends_poll_while_field_held`).
 
-- [ ] Pass — v1.5.0 mailbox run pending
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868) — step 2 only:** `factory_reset` over `0x01` → `ack`, RTT
+> `session end (deferred action)`, reboot. Afterwards serial / `secret-key` / claim token kept,
+> claim window unchanged, LoRaWAN keys zero, `radio-mode off`, history empty. `factory_reset`
+> injected as a LoRaWAN Command (`ats cmd lrw 0801ba0100`) → `Error{NOT_READY}`, nothing erased.
+> Steps 1, 3, 4 (`device_reset`, `set_secret_key`) not re-run on the mailbox.
+
+- [ ] Pass — v1.5.0 mailbox: step 2 PASS 2026-10-09, steps 1/3/4 pending
 
 ### N10 — Claim window: explicit two-state latch (`active`/`done`) + `get_claim_info` (#247, #415)
 
@@ -2078,10 +2175,13 @@ mailbox channel `0x03`.
 `get_claim_info` with `ClaimInfo{serial_number, claim_token}` (`device_status` bit 17
 `CLAIM_ACTIVE` set). The window closes **only** on an explicit `claim_done` (owner command, id 25)
 or `ats claim done`, which gives `done`: `get_claim_info` → `NOT_READY "claimed"` and bit 17 = 0.
-`claim_active` (id 27, reboots) / `ats claim active` / `vendor_reset` reopen it; `device_reset` /
-`factory_reset` leave it alone. The state persists across reboot and reflash (NVS `clm/state`).
-Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and `consumed` → `done`.
-No token provisioned → `NOT_READY "no claim token"`.
+`claim_active` (id 27, reboots) / `ats claim active` reopen it; `vendor_reset` closes it and wipes
+the token (#471); `device_reset` / `factory_reset` leave it alone. The state persists across reboot
+and reflash (NVS `clm/state`). Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and
+`consumed` → `done`; any other stored value closes the window (fail-closed, #471). No token
+provisioned → `NOT_READY "no claim token"`. `claim_active` answers `ClaimInfo` with the token that
+holds after the reboot: `new_claim_token` if given, else the stored one, else (none stored) a new
+CSPRNG token (#471).
 **Observable:** `ats claim status` reports the state throughout. `get_claim_info` (over `[0x03]`
 or `ats cmd plain 0801ea0100`) returns the token or the `NOT_READY` reason. `device_status` bit 17
 in the encrypted `get_info` mirrors the window.
@@ -2098,8 +2198,11 @@ in the encrypted `get_info` mirrors the window.
 > 3. Reflash (plain `west flash`, no `--erase`) and confirm the state is still `active`.
 > 4. `ats claim done` → `done`, and `get_claim_info` → `NOT_READY "claimed"`. Reboot and confirm
 >    `done` survives.
-> 5. `vendor_reset` (G6a-NFC) → back to `active`. The token is wiped with it, so
->    `get_claim_info` → `NOT_READY "no claim token"` until `config claim-token` is set again.
+> 5. `vendor_reset` (G6a-NFC) → `done`, token wiped: `get_claim_info` → `NOT_READY "claimed"`
+>    (#471).
+> 6. Send `claim_active` with no token over the owner channel (phone
+>    part step 5) → `ClaimInfo` with a **new, non-zero** token; after the reboot `ats claim status`
+>    → `active`, `config claim-token` shows that token and `get_claim_info` returns it.
 >
 > **Phone part (bench as in N6, `sticker_mailbox_seq_led_claim.py` steps 3–7):**
 > 1. `get_claim_info` → token.
@@ -2107,7 +2210,11 @@ in the encrypted `get_info` mirrors the window.
 >    command must not close it.
 > 3. `claim_done` → `ack`, then `get_claim_info` → `NOT_READY "claimed"`, and `get_info` shows
 >    bit 17 = 0.
-> 4. `claim_active` → `ack`, reboot. With the phone kept on the tag, `get_claim_info` → token again.
+> 4. `claim_active` → `ClaimInfo` with the same token (#471), reboot. With the phone kept on the
+>    tag, `get_claim_info` → token again.
+> 5. After a `vendor_reset` (G6a-NFC): `claim_active` with no token → `ClaimInfo` with a new token;
+>    `claim_active` with `new_claim_token` → `ClaimInfo` with that token. Each time the token
+>    returned is the one `get_claim_info` gives after the reboot.
 >
 > Report each outcome.
 
@@ -2121,7 +2228,19 @@ in the encrypted `get_info` mirrors the window.
 The shell part (reflash survival, `vendor_reset` reopen) is still to be re-run on v1.5.0.
 
 - [x] Pass — phone part, 2026-09-23
-- [ ] Pass — shell part (v1.5.0)
+> **HW-verified (2026-10-09, debug `418e24ad`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868, #471 claim flow):**
+> - Shell 4: `ats claim done` → `done`, survived a `settings save` reboot.
+> - Shell 5 / G6a-NFC: `vendor_reset` → `done`, token wiped.
+> - Phone: `get_claim_info` → `NOT_READY "claimed"`; `claim_active` (no token) → `ClaimInfo` with a
+>   new random token, reboot, `active`, `config claim-token` = that token; `get_claim_info` → same
+>   token; `claim_done` → `ack`, then `NOT_READY "claimed"`; `claim_active` → `ClaimInfo` with the
+>   **same** token; `claim_active{new_claim_token}` → `ClaimInfo` with that token, persisted.
+> - Shell 6 via `ats cmd` inject: `ClaimInfo` with a new token. The inject does not run the deferred
+>   save/reboot, but the token is staged into config and a later `settings save` persists it.
+> - Not re-run: shell 1–3 (erase / reflash survival), phone 2 (many `get_info`).
+
+- [x] Pass — #471 claim flow (shell 4–6, phone 1, 3–5), 2026-10-09
+- [ ] Pass — shell part 1–3 (v1.5.0)
 
 > **Superseded v1.4.0 run (2026-07-14, for reference only):** with the old auto-arm + implicit
 > close, `config claim-token` + `settings save` armed `pending`; `nfc dump` showed the two-record
@@ -2456,7 +2575,7 @@ cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 
 ### X9 — H: alarm `rt_sync()` resets stale latch on any rule edit; RATE/COUNT holds after firing
 
-**Goal:** Editing an alarm rule (not just source/quantity changes) resets its runtime latch; a
+**Goal:** Editing an alarm rule (not just slot/channel changes) resets its runtime latch; a
 RATE/COUNT alarm holds after firing instead of re-firing every window.
 **Observable:** Editing any field of an armed rule clears its latched state cleanly; a RATE/COUNT
 alarm fires once per window then stays quiet (no report spam) until the condition genuinely

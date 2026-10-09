@@ -16,52 +16,37 @@
 extern "C" {
 #endif
 
-/* Analog + counter channels that can be stored in the history buffer. The order
- * is the wire order within a record and the bit order of the selection mask
- * (uint32 → up to 32 channels). The 1-Wire slots mirror the telemetry slot model
- * (s1..s4 = ROM-bound w1[0..3]); each slot stores temperature + humidity (a
- * Dallas slot leaves humidity at the sentinel). The selection mask lets a
- * deployment enable only the channels it cares about. */
-enum app_history_sensor {
-	APP_HISTORY_TEMPERATURE = 0,
-	APP_HISTORY_HUMIDITY,
-	APP_HISTORY_S1_TEMP,
-	APP_HISTORY_S1_HUM,
-	APP_HISTORY_S2_TEMP,
-	APP_HISTORY_S2_HUM,
-	APP_HISTORY_S3_TEMP,
-	APP_HISTORY_S3_HUM,
-	APP_HISTORY_S4_TEMP,
-	APP_HISTORY_S4_HUM,
-	APP_HISTORY_HALL_LEFT,
-	APP_HISTORY_HALL_RIGHT,
-	APP_HISTORY_INPUT_A,
-	APP_HISTORY_INPUT_B,
-	APP_HISTORY_MOTION,
-	/* #311: barometer/light/accelerometer — already sampled + in telemetry,
-	 * newly recordable in history. accel_motion is the LIS2DH any-motion event
-	 * counter, distinct from MOTION above (PIR person-detection). */
-	APP_HISTORY_PRESSURE,
-	APP_HISTORY_ILLUMINANCE,
-	APP_HISTORY_ORIENTATION,
-	APP_HISTORY_ACCEL_MOTION,
-	APP_HISTORY_SENSOR_COUNT
-};
+/* Recordable channels (#430): any channel of app_sensor_types.yaml. The
+ * selection is config.history_channels, up to APP_HISTORY_MAX_CH entries
+ * `slot << 5 | ch` in record order (slot 0 = motherboard, 1..4 = 1-Wire
+ * sensorN of its configured sensorN_type), APP_HISTORY_ENTRY_UNUSED = none. */
+#define APP_HISTORY_MAX_CH       24
+#define APP_HISTORY_ENTRY_UNUSED 0xFF
 
-/* A decoded record handed to the shell. `value[i]` is valid only when
- * `present` has bit i set; counters are whole numbers, analog values are in
- * physical units (deg C, %RH). `time_unix` is absolute UTC when `time_synced`,
- * otherwise it is uptime seconds of the boot that recorded the record (no
- * wall-clock yet). */
+/* A decoded record handed to the shell. `value[i]` is column i of the layout
+ * (app_history_get_layout()) and valid only when `present` has bit i set;
+ * counters are whole numbers, other values are in physical units. `time_unix`
+ * is absolute UTC when `time_synced`, otherwise it is uptime seconds of the
+ * boot that recorded the record (no wall-clock yet). */
 struct app_history_record {
 	uint32_t time_unix;
 	bool time_synced;
 	uint32_t present;
-	double value[APP_HISTORY_SENSOR_COUNT];
+	double value[APP_HISTORY_MAX_CH];
+};
+
+/* The columns stored records hold, for a HistoryFrame: `channels` = the
+ * recorded entries in record order, `w1_types` = the sensorN_type of slots 1..4
+ * the 1-Wire columns were recorded with (meaningful when `has_w1`). */
+struct app_history_layout {
+	uint8_t count;
+	uint8_t channels[APP_HISTORY_MAX_CH];
+	uint8_t w1_types[4];
+	bool has_w1;
 };
 
 /* Initialize the history subsystem: mount the flash backend (or the RAM ring),
- * seed enable + sensor mask from g_app_config, and rebuild buffer state.
+ * seed enable + channel selection from g_app_config, and rebuild buffer state.
  * Returns 0 on success or a negative errno. */
 int app_history_init(void);
 
@@ -106,7 +91,7 @@ void app_history_set_work_queue(struct k_work_q *queue);
 /* Number of records currently stored (0..capacity). */
 size_t app_history_count(void);
 
-/* Capacity in records for the current sensor selection. */
+/* Capacity in records for the current channel selection. */
 size_t app_history_capacity(void);
 
 /* Erase all stored records and reset the base time. */
@@ -121,11 +106,15 @@ int app_history_get(size_t idx, struct app_history_record *out);
 bool app_history_is_ready(void);
 void app_history_set_enabled(bool enable);
 
-/* Sensor selection mask (bit i = enum app_history_sensor i). Setting a new mask
- * clears the buffer (record layout changes). Sensors whose capability is off
- * are silently dropped from the mask. */
-uint32_t app_history_get_mask(void);
-void app_history_set_mask(uint32_t mask);
+/* Current record layout (see struct app_history_layout). */
+void app_history_get_layout(struct app_history_layout *out);
+
+/* Channel selection (config.history_channels format, `n` <= APP_HISTORY_MAX_CH
+ * bytes, the rest unused). A selection that changes the layout clears the
+ * buffer. Entries that cannot be recorded now (unknown channel, untyped slot,
+ * capability off) are skipped until they can. Does not touch the config. */
+void app_history_set_channels(const uint8_t *list, size_t n);
+void app_history_get_channels(uint8_t list[APP_HISTORY_MAX_CH]);
 
 /* interval_report (s) the buffer is currently recorded at; records are periodic
  * so a wire frame carries this once and per-record time = t0 + ord*interval. */
@@ -135,7 +124,7 @@ uint32_t app_history_get_interval(void);
  * ReqHistoryPage), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
  * many whole records as fit in `cap`. Each record is the raw stored bytes (values
  * only, fixed size = the sample size, sentinels mark absent values); the shared
- * present mask + interval travel in the frame header, not per record.
+ * column layout + interval travel in the frame header, not per record.
  *
  * Record times are periodic within a segment (a flash page, stamped from the
  * clock when it was opened), and a frame never crosses a segment boundary, so
@@ -174,10 +163,15 @@ size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t sta
  * export_page's packing so the replay can announce frame_count up front. */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap);
 
-/* Descriptor helpers for the shell. */
-enum app_history_sensor app_history_sensor_by_name(const char *name);
-bool app_history_sensor_available(enum app_history_sensor s);
-uint32_t app_history_available_mask(void);
+/* Entry names for the shell: "temperature" (motherboard), "s1-temperature"
+ * (channel of 1-Wire slot 1's configured type). entry_name returns -ENOENT (and
+ * writes "?<hex>") for an unknown channel; entry_by_name -EINVAL. */
+int app_history_entry_name(uint8_t entry, char *buf, size_t cap);
+int app_history_entry_by_name(const char *name, uint8_t *entry);
+
+/* True if the entry can be recorded now (known channel, typed slot,
+ * capability on). */
+bool app_history_entry_available(uint8_t entry);
 
 #ifdef __cplusplus
 }

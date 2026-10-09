@@ -41,11 +41,45 @@ extern uint32_t test_clock_unix;
 
 #define BIT16(n) ((uint16_t)(1u << (n)))
 
+/* Columns of the default layout (history_channels = temperature, humidity). */
+#define COL_TEMP 0
+#define COL_HUM  1
+
+static void set_channels(const uint8_t *list, size_t n)
+{
+	memset(g_app_config.history_channels, APP_HISTORY_ENTRY_UNUSED,
+	       sizeof(g_app_config.history_channels));
+	memcpy(g_app_config.history_channels, list, n);
+}
+
+static void mb_f(uint8_t ch, float v)
+{
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, g_app_sensor_data.mb.v,
+			 &g_app_sensor_data.mb.valid, ch, v);
+}
+
 static void set_temp(float t)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = t;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, t);
 	k_mutex_unlock(&g_app_sensor_data_lock);
+}
+
+/* The page-header layout guard (#430) of motherboard columns `chs`: crc32 over
+ * (entry, type, enc, scale) per column, as app_history.c computes it. */
+static uint32_t layout_crc(const uint8_t *chs, size_t n)
+{
+	uint32_t crc = 0;
+
+	for (size_t i = 0; i < n; i++) {
+		const struct app_sensor_channel *c =
+			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD, chs[i]);
+		uint8_t key[3] = {chs[i], APP_SENSOR_TYPE_MOTHERBOARD, c->hist_enc};
+
+		crc = crc32_ieee_update(crc, key, sizeof(key));
+		crc = crc32_ieee_update(crc, (const uint8_t *)&c->hist_scale, sizeof(c->hist_scale));
+	}
+	return crc;
 }
 
 /* Simulate a reboot: the simulator flash persists in-process, so a fresh init
@@ -66,12 +100,15 @@ static void before(void *unused)
 {
 	ARG_UNUSED(unused);
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default, onboard T/H available */
 	g_app_config.history_enable = true;
-	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
+	set_channels((const uint8_t[]){APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+				       APP_SENSOR_CH_MOTHERBOARD_HUMIDITY},
+		     2);
 	g_app_config.interval_report = 60;
 	g_app_sensor_data = (struct app_sensor_data){0};
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 50.0f;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, 20.0f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 50.0f);
 	test_clock_has = false;
 	app_history_set_work_queue(NULL);
 
@@ -109,9 +146,9 @@ ZTEST(history_flash, test_records_persist_and_readable)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after reboot");
-	zassert_true(r.present & BIT16(APP_HISTORY_TEMPERATURE), "temp not present");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 22.5, 0.01, "temp %g",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+	zassert_true(r.present & BIT16(COL_TEMP), "temp not present");
+	zassert_within(r.value[COL_TEMP], 22.5, 0.01, "temp %g",
+		       r.value[COL_TEMP]);
 }
 
 /* A non-aligned capture count loses only the < 7 B staged tail on reboot: the
@@ -140,8 +177,8 @@ ZTEST(history_flash, test_ordering_preserved)
 	for (int i = 0; i < 21; i++) {
 		struct app_history_record r;
 		zassert_equal(app_history_get(i, &r), 0, "get(%d)", i);
-		zassert_within(r.value[APP_HISTORY_TEMPERATURE], (double)i * 0.10, 0.01,
-			       "record %d value %g", i, r.value[APP_HISTORY_TEMPERATURE]);
+		zassert_within(r.value[COL_TEMP], (double)i * 0.10, 0.01,
+			       "record %d value %g", i, r.value[COL_TEMP]);
 	}
 }
 
@@ -168,7 +205,7 @@ ZTEST(history_flash, test_wrap_evicts_oldest)
 	/* get(0) must still decode a valid record after wrap. */
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after wrap");
-	zassert_true(r.present & BIT16(APP_HISTORY_TEMPERATURE), "oldest temp present");
+	zassert_true(r.present & BIT16(COL_TEMP), "oldest temp present");
 }
 
 /* Eviction advances the oldest record's timestamp base by whole pages. */
@@ -255,8 +292,10 @@ ZTEST(history_flash, test_mask_change_resets)
 	/* Drop humidity → layout changes, buffer resets. Persist the new selection
 	 * to config too (the shell does this on `settings save`) so a reboot re-seeds
 	 * the same mask. */
-	app_history_set_mask(BIT(APP_HISTORY_TEMPERATURE));
-	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE);
+	const uint8_t temp_only[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE};
+
+	app_history_set_channels(temp_only, sizeof(temp_only));
+	set_channels(temp_only, sizeof(temp_only));
 	zassert_equal(app_history_count(), 0, "mask change must reset the buffer");
 
 	/* 7 records × 2 B (temp only) = 14 B = 2 double words → fully durable. */
@@ -268,7 +307,7 @@ ZTEST(history_flash, test_mask_change_resets)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0)");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 11.0, 0.01, "temp after reset");
+	zassert_within(r.value[COL_TEMP], 11.0, 0.01, "temp after reset");
 }
 
 /* #340 L7 regression: a logical reset that does NOT change the mask/layout (e.g.
@@ -290,8 +329,12 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 	set_temp(5.0f);
 	capture_n(cap + cap / 2); /* force real wraps -> large first_ord baseline */
 
-	uint32_t mask = app_history_get_mask();
-	app_history_set_mask(mask); /* logical reset, mask unchanged */
+	/* Logical reset, layout unchanged: one selection change and back. */
+	const uint8_t temp_only[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE};
+
+	app_history_set_channels(temp_only, sizeof(temp_only));
+	app_history_set_channels(g_app_config.history_channels,
+				 sizeof(g_app_config.history_channels));
 	zassert_equal(app_history_count(), 0, "same-mask reset must still empty the buffer");
 
 	set_temp(99.0f);
@@ -305,10 +348,10 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0) after reboot");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 99.0, 0.01,
+	zassert_within(r.value[COL_TEMP], 99.0, 0.01,
 		       "oldest surviving record must be from the post-reset batch, got %g "
 		       "(stale pre-reset page leaked in)",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+		       r.value[COL_TEMP]);
 }
 
 /* ---- F28: post-reboot record timestamps --------------------------------- */
@@ -592,7 +635,9 @@ static void write_v1_page(uint16_t phys, uint32_t seq, uint32_t first_ord, uint3
 	struct v1_hdr h = {
 		.magic = 0x48524e47,
 		.seq = seq,
-		.mask = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY),
+		.mask = layout_crc((const uint8_t[]){APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+						     APP_SENSOR_CH_MOTHERBOARD_HUMIDITY},
+				   2),
 		.interval = 60,
 		.base_time = base,
 		.first_ord = first_ord,
@@ -628,11 +673,11 @@ ZTEST(history_flash, test_v1_pages_still_readable)
 	zassert_equal(app_history_get(0, &r), 0);
 	zassert_true(r.time_synced);
 	zassert_equal(r.time_unix, F28_T0);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 10.0, 0.01);
+	zassert_within(r.value[COL_TEMP], 10.0, 0.01);
 	zassert_equal(app_history_get(8, &r), 0);
 	zassert_false(r.time_synced);
 	zassert_equal(r.time_unix, 560);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 21.0, 0.01);
+	zassert_within(r.value[COL_TEMP], 21.0, 0.01);
 
 	/* A v1 page has no fix-up double word: an old-boot unsynced page stays so. */
 	test_clock_has = true;
@@ -649,7 +694,7 @@ ZTEST(history_flash, test_v1_pages_still_readable)
 	zassert_true(r.time_synced);
 	zassert_equal(r.time_unix, F28_T0 + 3600);
 	zassert_equal(app_history_get(13, &r), 0);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 26.0, 0.01, "v1 tail record");
+	zassert_within(r.value[COL_TEMP], 26.0, 0.01, "v1 tail record");
 	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 3, "one frame per page");
 }
 
@@ -683,10 +728,10 @@ ZTEST(history_flash, test_mount_skips_garbage_keeps_wrapped_chain)
 
 	zassert_equal(app_history_get(0, &r), 0);
 	zassert_equal(r.time_unix, F28_T0);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 10.0, 0.01);
+	zassert_within(r.value[COL_TEMP], 10.0, 0.01);
 	zassert_equal(app_history_get(20, &r), 0);
 	zassert_equal(r.time_unix, F28_T0 + 20 * 60);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 36.0, 0.01);
+	zassert_within(r.value[COL_TEMP], 36.0, 0.01);
 
 	/* Mount left the foreign page alone. */
 	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);

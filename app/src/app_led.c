@@ -28,7 +28,8 @@ LOG_MODULE_REGISTER(app_led, LOG_LEVEL_DBG);
 #define REQUEST_MAX_AGE_MS   2000
 #define REQUEST_MIN_DELAY_MS 500
 
-#define LED_THREAD_STACK_SIZE 2048
+/* HW high-water mark 456 B (CONFIG_INIT_STACKS, 2026-10-09); >= 2x margin. */
+#define LED_THREAD_STACK_SIZE 1024
 #define LED_THREAD_PRIORITY   K_PRIO_PREEMPT(5)
 
 static const struct gpio_dt_spec m_led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);

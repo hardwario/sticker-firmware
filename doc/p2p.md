@@ -280,6 +280,10 @@ JoinAccept (38 B)   Data, src = net_id, dest = low32(DevEUI), counter = the Join
 6. **Announce.** The node announces through `app_radio` (Info → settings → first
    telemetry). It queues Capabilities + Hello (+ TimeReq when app_radio wants the
    time) for a jittered `0x91` uplink.
+   **Periodic announce (#445):** every `interval-announce` hours (default 24, 0 = off)
+   the same Info + settings-info go again, at a random point of the period's last 10 %,
+   anchored on the previous announce; every link-up announce restarts the period.
+   Nothing is held or retried while the link is down. Same path as LoRaWAN.
 
 `tests/ccm/tower_join_kat.json` pins all of it: both keys, the three frames, and the
 first uplink of the session.

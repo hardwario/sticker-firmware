@@ -18,6 +18,7 @@ A plan is renamed if its PR is renamed, so the two stay in step.
 | `v1.5.0_mailbox.md` — NFC command channel over the ST25DV FTM mailbox (mailbox-only) | [#414](https://github.com/hardwario/sticker-firmware/pull/414) |
 | `v1.5.0_claiming.md` — plaintext command transport and explicit claiming | [#415](https://github.com/hardwario/sticker-firmware/pull/415) |
 | `425 - Universal response paging.md` | [#425](https://github.com/hardwario/sticker-firmware/pull/425) |
+| `431 - Sensor channel model for alarms.md` | [#431](https://github.com/hardwario/sticker-firmware/pull/431) |
 | `439 - Radio transport layer.md` | [#439](https://github.com/hardwario/sticker-firmware/pull/439) |
 | `447 - RadioState.md` — radio link state and diagnostics (GetRadioState) | [#447](https://github.com/hardwario/sticker-firmware/pull/447) |
 | `460 - One implementation per function in app_radio.md` — decision #23: queues, link supervision, post-command, confirmed alarms, duty ledger common | [#460](https://github.com/hardwario/sticker-firmware/pull/460) |

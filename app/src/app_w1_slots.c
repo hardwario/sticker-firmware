@@ -9,12 +9,8 @@
 #include "app_ds18b20.h"
 #include "app_log.h"
 #include "app_machine_probe.h"
-
-/* Nanopb includes — this framework layer owns the slot→telemetry encode so the
- * HW transport drivers (app_ds18b20, app_machine_probe) never see the wire
- * schema. Mirrors the chester serial app, where the per-device CBOR encode lives
- * in app_cbor.c, not in the device drivers. */
-#include "src/app_config.pb.h"
+#include "app_sensor.h"
+#include "app_sensor_types.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -27,6 +23,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 
@@ -34,34 +31,26 @@ LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 /* Sensor-type registry — the extensibility point.                        */
 /*                                                                        */
 /* Adding a new 1-Wire sensor type is one entry in m_types[] plus its     */
-/* thin read + encode wrappers below (and a transport driver + devicetree */
-/* nodes, which any new hardware needs regardless). No changes to the slot */
-/* table, rebind, scan, read dispatch, or the telemetry composer — the     */
-/* per-type behaviour (read, encode) lives behind this vtable.             */
+/* thin read wrapper below, its channels in app_sensor_types.yaml (and a  */
+/* transport driver + devicetree nodes, which any new hardware needs      */
+/* regardless). No changes to the slot table, rebind, scan, read dispatch */
+/* or the telemetry composer, which encodes channels from the registry.   */
 /* ====================================================================== */
 
-/* Fill *out (temperature/humidity/cluster/tilt) for device `index` of this type
- * and return its ROM serial in *serial. Quantities the type doesn't provide stay
- * at the caller-initialised NaN/false. Returns 0 or negative errno. */
-typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_w1_slot_reading *out);
-
-/* Encode a reading's value fields into its telemetry SensorReading. The caller
- * owns slot/type/array; this fills only the quantities the type provides, each
- * omitted when NaN. */
-typedef void (*w1_encode_fn)(const struct app_w1_slot_reading *r, SensorReading *sr);
+/* Fill the channels of *out (already cleared to NaN for this type) for device
+ * `index` of this type and return its ROM serial in *serial. Channels the read
+ * does not produce stay NaN. Returns 0 or negative errno. */
+typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_sensor_w1 *out);
 
 struct app_w1_sensor_type {
 	enum app_w1_slot_type type;
-	uint8_t family;    /* 1-Wire family code (informational) */
-	const char *name;  /* shell / log label */
-	int (*scan)(void); /* re-enumerate this transport's devices */
+	uint8_t sensor_type; /* registry type id (app_sensor_types.yaml) */
+	uint8_t family;      /* 1-Wire family code (informational) */
+	const char *name;    /* shell / log label */
+	int (*scan)(void);   /* re-enumerate this transport's devices */
 	int (*get_count)(void);
 	w1_read_fn read;
-	w1_encode_fn encode;
 };
-
-/* Telemetry SensorReading.flags bit positions (mirrored in ttn.js). */
-#define MP_FLAG_TILT BIT(0)
 
 /* DS18B20 plausibility (#180). The Zephyr driver CRC-checks the scratchpad, so a
  * *missing* sensor errors out — but the part's power-on-reset / brownout /
@@ -80,14 +69,15 @@ struct app_w1_sensor_type {
 #define DS18B20_TEMP_MAX     125.0f
 #define DS18B20_POR_SENTINEL 85.0f
 
-static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+static int dallas_read(int index, uint64_t *serial, struct app_sensor_w1 *out)
 {
 	float temperature;
 	int ret = app_ds18b20_read(index, serial, &temperature);
 
 	if (ret == 0) {
 		if (temperature >= DS18B20_TEMP_MIN && temperature <= DS18B20_TEMP_MAX) {
-			out->temperature = temperature;
+			app_sensor_put_f(APP_SENSOR_TYPE_DALLAS, out->v, &out->valid,
+					 APP_SENSOR_CH_DALLAS_TEMPERATURE, temperature);
 		} else {
 			/* Leave temperature NaN so eval_threshold / encode treat it
 			 * as absent rather than firing a false alarm. */
@@ -98,95 +88,86 @@ static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *
 	return ret;
 }
 
-static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+/* TMP112 (machine-probe ch temperature-aux) is not populated on older probe
+ * revisions: the read then fails on every sample, costing ~60 ms of bus time and
+ * an error log each time. After TMP112_FAIL_LIMIT consecutive failures the
+ * sub-sensor is skipped for that driver index until the next rebind (boot,
+ * teach, scan), which also reshuffles the driver indices. */
+#define TMP112_FAIL_LIMIT 3
+static uint8_t m_tmp112_fails[APP_W1_SLOT_COUNT * 2];
+
+static void mp_put(struct app_sensor_w1 *out, uint8_t ch, float value)
 {
-	/* Temperature + humidity (SHT) is the primary reading — its result decides
-	 * the slot read's success. The remaining probe sub-sensors are best-effort:
-	 * a failure (e.g. an absent TMP112 on older revisions) leaves that quantity
-	 * NaN/false without failing the whole read. */
+	app_sensor_put_f(APP_SENSOR_TYPE_MACHINE_PROBE, out->v, &out->valid, ch, value);
+}
+
+static int machine_probe_read(int index, uint64_t *serial, struct app_sensor_w1 *out)
+{
+	/* Every probe sub-sensor (chip) is read best-effort: a failed chip leaves
+	 * its channels NaN without failing the others, so the no-data watchdog can
+	 * name the chip (one alarm per part). The read fails only when no chip
+	 * answered at all — the probe itself is gone (one device alarm). */
 	float temperature, humidity;
 	int ret = app_machine_probe_read_hygrometer(index, serial, &temperature, &humidity);
 
 	if (ret == 0) {
-		out->temperature = temperature;
-		out->humidity = humidity;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, temperature);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, humidity);
 	}
 
 	float illuminance;
 	if (app_machine_probe_read_lux_meter(index, serial, &illuminance) == 0) {
-		out->illuminance = illuminance;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, illuminance);
 	}
 
 	float magnetic_field;
 	if (app_machine_probe_read_magnetometer(index, serial, &magnetic_field) == 0) {
-		out->magnetic_field = magnetic_field;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, magnetic_field);
 	}
 
 	float ax, ay, az;
 	int orientation;
 	if (app_machine_probe_read_accelerometer(index, serial, &ax, &ay, &az, &orientation) == 0) {
-		out->accel_x = ax;
-		out->accel_y = ay;
-		out->accel_z = az;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, ax);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, ay);
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, az);
 	}
 
 	bool tilt = false;
 	if (app_machine_probe_get_tilt_alert(index, serial, &tilt) == 0) {
-		out->is_tilt_alert = tilt;
+		mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TILT, tilt ? 1.0f : 0.0f);
 	}
-	return ret;
-}
 
-/* sint32 telemetry "no data" sentinel — keep in sync with app_compose.c
- * (TM_S32_NA) and the codec (ttn.js _TM_S32_NA). */
-#define TM_S32_NA INT32_MIN
+	/* TMP112 is not fitted on every probe revision. Count its failures only
+	 * while the rest of the probe answers: a probe that is merely unplugged
+	 * must not get its TMP112 skipped for good. */
+	if (index >= 0 && index < (int)ARRAY_SIZE(m_tmp112_fails) &&
+	    m_tmp112_fails[index] < TMP112_FAIL_LIMIT) {
+		float aux;
 
-/* Dallas (DS18B20): temperature only. A NaN reading (sensor disconnected or
- * faulted) is sent as TM_S32_NA so the decoder surfaces temperature=null,
- * rather than dropping the field. */
-static void dallas_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
-{
-	sr->has_temperature = true;
-	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
-}
-
-/* Machine probe: the full sensor cluster. flags (tilt) is a real digital state
- * sent every report per #80; the analog quantities are omitted individually when
- * their sub-sensor did not respond (NaN). */
-static void machine_probe_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
-{
-	sr->has_temperature = true;
-	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
-	if (!isnan(r->humidity)) {
-		sr->has_humidity = true;
-		sr->humidity = (uint32_t)(r->humidity * 2.0f);
+		if (app_machine_probe_read_thermometer(index, serial, &aux) == 0) {
+			m_tmp112_fails[index] = 0;
+			mp_put(out, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, aux);
+		} else if (out->valid != 0 && ++m_tmp112_fails[index] == TMP112_FAIL_LIMIT) {
+			LOG_WRN("Machine probe idx %d: TMP112 not responding, skipped until rebind",
+				index);
+		}
 	}
-	sr->has_flags = true;
-	sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
-	if (!isnan(r->illuminance)) {
-		sr->has_illuminance = true;
-		sr->illuminance = (uint32_t)r->illuminance;
-	}
-	if (!isnan(r->magnetic_field)) {
-		sr->has_magnetic_field = true;
-		sr->magnetic_field = (int32_t)(r->magnetic_field * 1000.0f);
-	}
-	if (!isnan(r->accel_x) && !isnan(r->accel_y) && !isnan(r->accel_z)) {
-		sr->has_accel_x = true;
-		sr->accel_x = (int32_t)(r->accel_x * 100.0f);
-		sr->has_accel_y = true;
-		sr->accel_y = (int32_t)(r->accel_y * 100.0f);
-		sr->has_accel_z = true;
-		sr->accel_z = (int32_t)(r->accel_z * 100.0f);
-	}
+	return out->valid != 0 ? 0 : (ret != 0 ? ret : -EIO);
 }
 
 static const struct app_w1_sensor_type m_types[] = {
-	{APP_W1_SLOT_DALLAS, 0x28, "dallas", app_ds18b20_scan, app_ds18b20_get_count, dallas_read,
-	 dallas_encode},
-	{APP_W1_SLOT_MACHINE_PROBE, 0x19, "machine-probe", app_machine_probe_scan,
-	 app_machine_probe_get_count, machine_probe_read, machine_probe_encode},
+	{APP_W1_SLOT_DALLAS, APP_SENSOR_TYPE_DALLAS, 0x28, "dallas", app_ds18b20_scan,
+	 app_ds18b20_get_count, dallas_read},
+	{APP_W1_SLOT_MACHINE_PROBE, APP_SENSOR_TYPE_MACHINE_PROBE, 0x19, "machine-probe",
+	 app_machine_probe_scan, app_machine_probe_get_count, machine_probe_read},
 };
+
+/* The slot type enum is the registry type id (#430 step 3). */
+BUILD_ASSERT((int)APP_W1_SLOT_EMPTY == (int)APP_SENSOR_TYPE_NONE &&
+		     (int)APP_W1_SLOT_DALLAS == (int)APP_SENSOR_TYPE_DALLAS &&
+		     (int)APP_W1_SLOT_MACHINE_PROBE == (int)APP_SENSOR_TYPE_MACHINE_PROBE,
+	     "enum app_w1_slot_type must equal the registry type ids");
 
 static const struct app_w1_sensor_type *type_desc(enum app_w1_slot_type type)
 {
@@ -217,7 +198,8 @@ struct slot_rt {
 	const struct app_w1_sensor_type *desc; /* bound type descriptor, NULL if empty */
 	int driver_index;                      /* index into the type's driver; -1 = absent */
 	bool present;
-	bool replaced;           /* configured ROM absent but a same-type device showed up */
+	enum app_w1_slot_state state;
+	uint8_t detected;        /* MISMATCH: registry type of the foreign device */
 	bool ds18b20_pending_85; /* DS18B20: a +85.0 C sample awaiting confirmation (#180) */
 };
 
@@ -268,8 +250,11 @@ static uint8_t *cfg_rom_staging(int slot)
 	}
 }
 
-/* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
- * at runtime from the discovered device's family code, not stored in config.
+/* The ROM binds a slot; the device's driver (and SHT variant) is resolved at
+ * runtime from the discovered device's family code. The slot's registry type is
+ * persisted next to the ROM as sensorN_type (#430) — the stored serial carries
+ * no family code, and history must know a slot's channels while the sensor is
+ * absent.
  * The serial is stored big-endian so `config sensorN-rom` reads the same digits
  * as `w1 list` / the serial number (e.g. 0000000553f7), matching the radio-deveui
  * convention. 0 = empty slot. */
@@ -278,18 +263,52 @@ static uint64_t cfg_rom_get(int slot)
 	return sys_get_be64(cfg_rom(slot));
 }
 
+static uint8_t *cfg_type(struct app_config *c, int slot)
+{
+	switch (slot) {
+	case 0:
+		return &c->sensor1_type;
+	case 1:
+		return &c->sensor2_type;
+	case 2:
+		return &c->sensor3_type;
+	case 3:
+		return &c->sensor4_type;
+	default:
+		return NULL;
+	}
+}
+
+/* Runtime + staging, like cfg_rom_set(). */
+static void cfg_type_set(int slot, uint8_t type)
+{
+	uint8_t *rt = cfg_type(&g_app_config, slot);
+	uint8_t *st = cfg_type(app_config(), slot);
+
+	if (rt != NULL && st != NULL) {
+		*rt = type;
+		*st = type;
+	}
+}
+
 static void cfg_rom_set(int slot, uint64_t serial)
 {
 	/* Write both: runtime (for the live rebind below) + staging (so
 	 * `settings save` persists it and `config get` shows it). */
 	sys_put_be64(serial, cfg_rom(slot));
 	sys_put_be64(serial, cfg_rom_staging(slot));
+	if (serial == 0) {
+		cfg_type_set(slot, APP_SENSOR_TYPE_NONE); /* type is set on the bind */
+	}
 }
 
 bool app_w1_slots_any_taught(void)
 {
 	for (int slot = 0; slot < APP_W1_SLOT_COUNT; slot++) {
-		if (cfg_rom_get(slot) != 0) {
+		/* A slot provisioned with only sensorN_type also needs the boot
+		 * rebind: auto-enroll of a matching probe, or mismatch / absent. */
+		if (cfg_rom_get(slot) != 0 ||
+		    app_w1_slot_get_expected_type(slot) != APP_W1_SLOT_EMPTY) {
 			return true;
 		}
 	}
@@ -317,7 +336,9 @@ static int collect_all(struct discovered *out, int max)
 
 		for (int i = 0; i < count && n < max; i++) {
 			uint64_t serial = 0;
-			struct app_w1_slot_reading r = {.temperature = NAN, .humidity = NAN};
+			struct app_sensor_w1 r;
+
+			app_sensor_w1_clear(&r, t->sensor_type);
 
 			if (t->read(i, &serial, &r) == 0 && serial != 0) {
 				out[n].serial = serial;
@@ -340,8 +361,14 @@ int app_w1_slots_rebind(void)
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
+	/* The scans before a rebind reshuffle the driver indices: give every probe
+	 * a fresh TMP112 chance. */
+	memset(m_tmp112_fails, 0, sizeof(m_tmp112_fails));
+
 	/* Load persisted slot identity (ROM only) and reset runtime state. The
 	 * type/driver are resolved from the discovered device's family below. */
+	bool same_type_seen[APP_W1_SLOT_COUNT] = {0};
+
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		m_slots[s].rom = cfg_rom_get(s);
 		m_slots[s].type = APP_W1_SLOT_EMPTY;
@@ -349,7 +376,8 @@ int app_w1_slots_rebind(void)
 		m_slots[s].desc = NULL;
 		m_slots[s].driver_index = -1;
 		m_slots[s].present = false;
-		m_slots[s].replaced = false;
+		m_slots[s].state = APP_W1_SLOT_STATE_NONE;
+		m_slots[s].detected = APP_SENSOR_TYPE_NONE;
 		m_slots[s].ds18b20_pending_85 = false;
 	}
 
@@ -367,46 +395,117 @@ int app_w1_slots_rebind(void)
 				m_slots[s].type = dev[d].desc->type;
 				m_slots[s].driver_index = dev[d].driver_index;
 				m_slots[s].present = true;
+				m_slots[s].state = APP_W1_SLOT_STATE_OK;
+				/* No-op once set; fills sensorN_type on a unit taught
+				 * before it existed (#430). */
+				if (*cfg_type(&g_app_config, s) != dev[d].desc->sensor_type) {
+					cfg_type_set(s, dev[d].desc->sensor_type);
+				}
 				LOG_INF("Slot %d bound to %s ROM %012llx (idx %d)", s + 1,
 					dev[d].desc->name, m_slots[s].rom, dev[d].driver_index);
 				break;
 			}
 		}
+	}
 
-		if (!m_slots[s].present) {
-			/* Configured ROM not seen. If any unclaimed device is present the
-			 * sensor was likely swapped — flag it, do NOT silently rebind
-			 * (alarm correctness). */
-			for (int d = 0; d < ndev; d++) {
-				if (!dev[d].claimed) {
-					m_slots[s].replaced = true;
-					break;
-				}
+	/* A configured ROM not seen while an unbound device of the slot's type is
+	 * on the bus: the probe was likely swapped. Checked before pass 2, which may
+	 * enroll that device into a free slot. */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].rom == 0 || m_slots[s].present) {
+			continue;
+		}
+		for (int d = 0; d < ndev; d++) {
+			if (!dev[d].claimed && (expected == APP_SENSOR_TYPE_NONE ||
+						dev[d].desc->sensor_type == expected)) {
+				same_type_seen[s] = true;
+				break;
 			}
-			LOG_WRN("Slot %d ROM %012llx absent%s", s + 1, m_slots[s].rom,
-				m_slots[s].replaced ? " (REPLACED? different device present)" : "");
 		}
 	}
 
-	/* Pass 2: auto-enroll unclaimed devices into the lowest empty slot (ROM
-	 * persisted; type stays runtime). Idempotent until `config save`. */
+	/* Pass 2: auto-enroll unclaimed devices into the lowest slot without a ROM
+	 * whose expected type is the device's type, or none. Idempotent until
+	 * `settings save`. */
 	for (int d = 0; d < ndev; d++) {
 		if (dev[d].claimed) {
 			continue;
 		}
 		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-			if (m_slots[s].rom == 0) {
-				m_slots[s].rom = dev[d].serial;
-				m_slots[s].type = dev[d].desc->type;
-				m_slots[s].desc = dev[d].desc;
-				m_slots[s].driver_index = dev[d].driver_index;
-				m_slots[s].present = true;
-				cfg_rom_set(s, dev[d].serial);
-				LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1,
-					dev[d].desc->name, dev[d].serial);
+			uint8_t expected = *cfg_type(&g_app_config, s);
+
+			if (m_slots[s].rom != 0 || (expected != APP_SENSOR_TYPE_NONE &&
+						    expected != dev[d].desc->sensor_type)) {
+				continue;
+			}
+			m_slots[s].rom = dev[d].serial;
+			m_slots[s].type = dev[d].desc->type;
+			m_slots[s].desc = dev[d].desc;
+			m_slots[s].driver_index = dev[d].driver_index;
+			m_slots[s].present = true;
+			m_slots[s].state = APP_W1_SLOT_STATE_OK;
+			cfg_rom_set(s, dev[d].serial);
+			cfg_type_set(s, dev[d].desc->sensor_type);
+			LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1, dev[d].desc->name,
+				dev[d].serial);
+			dev[d].claimed = true;
+			break;
+		}
+	}
+
+	/* Pass 3: state of every slot left without a device. A device still
+	 * unclaimed found no free slot expecting its type. First a taught slot
+	 * claims a same-type one as its likely replacement (REPLACED); every other
+	 * unclaimed device puts the lowest slot that expects another type in
+	 * MISMATCH (one slot per foreign device). */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].present || m_slots[s].rom == 0) {
+			continue;
+		}
+		for (int d = 0; d < ndev; d++) {
+			if (!dev[d].claimed && (expected == APP_SENSOR_TYPE_NONE ||
+						dev[d].desc->sensor_type == expected)) {
 				dev[d].claimed = true;
+				same_type_seen[s] = true;
 				break;
 			}
+		}
+	}
+
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		uint8_t expected = *cfg_type(&g_app_config, s);
+
+		if (m_slots[s].present ||
+		    (m_slots[s].rom == 0 && expected == APP_SENSOR_TYPE_NONE)) {
+			continue;
+		}
+
+		m_slots[s].state =
+			same_type_seen[s] ? APP_W1_SLOT_STATE_REPLACED : APP_W1_SLOT_STATE_ABSENT;
+		if (!same_type_seen[s] && expected != APP_SENSOR_TYPE_NONE) {
+			for (int d = 0; d < ndev; d++) {
+				if (!dev[d].claimed && dev[d].desc->sensor_type != expected) {
+					dev[d].claimed = true;
+					m_slots[s].state = APP_W1_SLOT_STATE_MISMATCH;
+					m_slots[s].detected = dev[d].desc->sensor_type;
+					break;
+				}
+			}
+		}
+
+		if (m_slots[s].state == APP_W1_SLOT_STATE_MISMATCH) {
+			LOG_WRN("Slot %d MISMATCH: expects %s, found %s", s + 1,
+				app_w1_slot_type_name(expected),
+				app_w1_slot_type_name(m_slots[s].detected));
+		} else {
+			LOG_WRN("Slot %d ROM %012llx absent%s", s + 1, m_slots[s].rom,
+				m_slots[s].state == APP_W1_SLOT_STATE_REPLACED
+					? " (REPLACED? different device present)"
+					: "");
 		}
 	}
 
@@ -423,20 +522,13 @@ int app_w1_slots_rebind(void)
 
 /* ---- read --------------------------------------------------------------- */
 
-int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
+int app_w1_slots_read(int slot, struct app_sensor_w1 *out)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || out == NULL) {
 		return -EINVAL;
 	}
 
-	out->temperature = NAN;
-	out->humidity = NAN;
-	out->illuminance = NAN;
-	out->magnetic_field = NAN;
-	out->accel_x = NAN;
-	out->accel_y = NAN;
-	out->accel_z = NAN;
-	out->is_tilt_alert = false;
+	app_sensor_w1_clear(out, APP_SENSOR_TYPE_NONE);
 
 	/* Snapshot the binding under the lock; the (slow) driver read runs outside
 	 * it so a teach/list in the shell never blocks sampling and vice versa. */
@@ -447,6 +539,9 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	bool present = m_slots[slot].present;
 	k_mutex_unlock(&m_lock);
 
+	if (desc != NULL) {
+		app_sensor_w1_clear(out, desc->sensor_type);
+	}
 	out->present = present;
 
 	if (!present || driver_index < 0 || desc == NULL) {
@@ -455,24 +550,34 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 
 	uint64_t serial;
 	int ret = desc->read(driver_index, &serial, out);
-	if (ret) {
-		return ret;
-	}
 
 	/* A concurrent rescan may have reshuffled the driver indices under us —
 	 * reject a reading whose serial no longer matches the slot's ROM rather
 	 * than report another sensor's values under this slot's identity. */
-	if (serial != rom) {
-		*out = (struct app_w1_slot_reading){.temperature = NAN,
-						    .humidity = NAN,
-						    .illuminance = NAN,
-						    .magnetic_field = NAN,
-						    .accel_x = NAN,
-						    .accel_y = NAN,
-						    .accel_z = NAN,
-						    .is_tilt_alert = false,
-						    .present = present};
-		return -ENODEV;
+	if (ret == 0 && serial != rom) {
+		ret = -ENODEV;
+	}
+	if (ret) {
+		app_sensor_w1_clear(out, desc->sensor_type);
+		out->present = present;
+	}
+
+	/* Live presence for Info.w1_slot_state: a bound device that stops
+	 * answering reads "absent" until it answers again. Only OK <-> ABSENT;
+	 * REPLACED / MISMATCH are decided by the rebind. */
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (m_slots[slot].rom == rom) {
+		if (ret && m_slots[slot].state == APP_W1_SLOT_STATE_OK) {
+			m_slots[slot].state = APP_W1_SLOT_STATE_ABSENT;
+			LOG_WRN("Slot %d: device not answering", slot + 1);
+		} else if (!ret && m_slots[slot].state == APP_W1_SLOT_STATE_ABSENT) {
+			m_slots[slot].state = APP_W1_SLOT_STATE_OK;
+			LOG_INF("Slot %d: device answering again", slot + 1);
+		}
+	}
+	k_mutex_unlock(&m_lock);
+	if (ret) {
+		return ret;
 	}
 
 	/* DS18B20 +85.0 C POR-sentinel debounce (#180). The sentinel is in range so
@@ -482,38 +587,24 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	 * +85 C still gets through after one extra sample. Any other valid reading
 	 * clears the suspicion. Keyed on the (stable) slot, not the driver index. */
 	if (desc->type == APP_W1_SLOT_DALLAS) {
+		float *t = &out->v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f;
+
 		k_mutex_lock(&m_lock, K_FOREVER);
-		if (out->temperature == DS18B20_POR_SENTINEL) {
+		if (*t == DS18B20_POR_SENTINEL) {
 			if (!m_slots[slot].ds18b20_pending_85) {
 				m_slots[slot].ds18b20_pending_85 = true;
-				out->temperature = NAN;
+				app_sensor_put_f(APP_SENSOR_TYPE_DALLAS, out->v, &out->valid,
+						 APP_SENSOR_CH_DALLAS_TEMPERATURE, NAN);
 				LOG_WRN("Slot %d: DS18B20 +85.0 C suppressed (awaiting confirm)",
 					slot + 1);
 			}
 			/* else: confirmed by a second consecutive +85.0 C — accept. */
-		} else if (!isnan(out->temperature)) {
+		} else if (!isnan(*t)) {
 			m_slots[slot].ds18b20_pending_85 = false;
 		}
 		k_mutex_unlock(&m_lock);
 	}
 	return 0;
-}
-
-/* ---- telemetry encode dispatch ------------------------------------------ */
-
-void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, SensorReading *sr)
-{
-	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || r == NULL || sr == NULL) {
-		return;
-	}
-
-	k_mutex_lock(&m_lock, K_FOREVER);
-	const struct app_w1_sensor_type *desc = m_slots[slot].desc;
-	k_mutex_unlock(&m_lock);
-
-	if (desc != NULL && desc->encode != NULL) {
-		desc->encode(r, sr);
-	}
 }
 
 /* ---- accessors ---------------------------------------------------------- */
@@ -571,15 +662,33 @@ bool app_w1_slot_is_present(int slot)
 	return present;
 }
 
-bool app_w1_slot_is_replaced(int slot)
+enum app_w1_slot_state app_w1_slot_get_state(int slot)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
-		return false;
+		return APP_W1_SLOT_STATE_NONE;
 	}
 	k_mutex_lock(&m_lock, K_FOREVER);
-	bool replaced = m_slots[slot].replaced;
+	enum app_w1_slot_state state = m_slots[slot].state;
 	k_mutex_unlock(&m_lock);
-	return replaced;
+	return state;
+}
+
+uint8_t app_w1_slot_get_expected_type(int slot)
+{
+	const uint8_t *t = cfg_type(&g_app_config, slot);
+
+	return t != NULL ? *t : APP_SENSOR_TYPE_NONE;
+}
+
+uint8_t app_w1_slot_get_detected_type(int slot)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
+		return APP_SENSOR_TYPE_NONE;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint8_t detected = m_slots[slot].detected;
+	k_mutex_unlock(&m_lock);
+	return detected;
 }
 
 /* ---- enrollment (sensor shell) ----------------------------------------- */
@@ -645,6 +754,15 @@ int app_w1_slots_scan(struct app_w1_scan_entry *out, int max)
 	return n;
 }
 
+/* A slot with a set expected type only takes a device of that type (#430
+ * step 3); clearing the slot first resets the expectation. */
+static bool type_allowed(int slot, enum app_w1_slot_type type)
+{
+	uint8_t expected = app_w1_slot_get_expected_type(slot);
+
+	return expected == APP_SENSOR_TYPE_NONE || expected == (uint8_t)type;
+}
+
 int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
@@ -671,6 +789,9 @@ int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 	}
 	if (new_count > 1) {
 		return -E2BIG; /* ambiguous — caller should steer to assign */
+	}
+	if (!type_allowed(slot, e[new_idx].type)) {
+		return -EINVAL;
 	}
 
 	cfg_rom_set(slot, e[new_idx].serial);
@@ -701,6 +822,9 @@ int app_w1_slots_assign(int slot, uint64_t serial)
 
 	for (int i = 0; i < n; i++) {
 		if (e[i].serial == serial) {
+			if (!type_allowed(slot, e[i].type)) {
+				return -EINVAL;
+			}
 			cfg_rom_set(slot, serial);
 			dedupe_rom(serial, slot);
 			(void)app_w1_slots_rebind();
@@ -748,29 +872,43 @@ static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+	static const char *const state_name[] = {
+		[APP_W1_SLOT_STATE_NONE] = "-",
+		[APP_W1_SLOT_STATE_OK] = "present",
+		[APP_W1_SLOT_STATE_ABSENT] = "absent",
+		[APP_W1_SLOT_STATE_REPLACED] = "REPLACED?",
+		[APP_W1_SLOT_STATE_MISMATCH] = "MISMATCH",
+	};
+
 	shell_print(shell, "SLOT  TYPE           ROM           STATE      READING");
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		enum app_w1_slot_type t = app_w1_slot_get_type(s);
+		enum app_w1_slot_state st = app_w1_slot_get_state(s);
+		/* The expected type also names an absent / mismatched slot. */
+		enum app_w1_slot_type t = (enum app_w1_slot_type)app_w1_slot_get_expected_type(s);
 
-		if (t == APP_W1_SLOT_EMPTY) {
+		if (st == APP_W1_SLOT_STATE_NONE) {
 			shell_print(shell, "%-4d  (empty)", s + 1);
 			continue;
 		}
 
-		const char *state = app_w1_slot_is_present(s)    ? "present"
-				    : app_w1_slot_is_replaced(s) ? "REPLACED?"
-								 : "absent";
+		const char *state = state_name[st];
 
-		struct app_w1_slot_reading r;
+		struct app_sensor_w1 r;
 		char reading[40] = "--";
-		if (app_w1_slots_read(s, &r) == 0 && r.present) {
-			if (!isnan(r.humidity)) {
+		if (st == APP_W1_SLOT_STATE_MISMATCH) {
+			snprintf(reading, sizeof(reading), "found %s",
+				 app_w1_slot_type_name(
+					 (enum app_w1_slot_type)app_w1_slot_get_detected_type(s)));
+		} else if (app_w1_slots_read(s, &r) == 0 && r.present) {
+			float temp = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
+			float hum = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
+			bool tilt = app_sensor_w1_f(&r, APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
+
+			if (!isnan(hum)) {
 				snprintf(reading, sizeof(reading), "%s%d.%02d C / %s%d.%01d %%%s",
-					 APP_FP2(r.temperature), APP_FP1(r.humidity),
-					 r.is_tilt_alert ? " / TILT" : "");
-			} else if (!isnan(r.temperature)) {
-				snprintf(reading, sizeof(reading), "%s%d.%02d C",
-					 APP_FP2(r.temperature));
+					 APP_FP2(temp), APP_FP1(hum), tilt ? " / TILT" : "");
+			} else if (!isnan(temp)) {
+				snprintf(reading, sizeof(reading), "%s%d.%02d C", APP_FP2(temp));
 			}
 		}
 
@@ -796,6 +934,8 @@ static int cmd_sensor_scan(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "no 1-Wire devices found");
 		return 0;
 	}
+
+	app_sensor_sample_async(); /* scan rebinds live: refresh the slot readings */
 
 	shell_print(shell, "TYPE           ROM           BOUND");
 	for (int i = 0; i < n; i++) {
@@ -833,6 +973,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 	if (argc == 1) {
 		int n = app_w1_slots_enroll_all();
 
+		app_sensor_sample_async();
 		shell_print(shell, "enrolled; %d slot(s) bound", n);
 		return 0;
 	}
@@ -853,6 +994,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 		switch (ret) {
 		case 0:
+			app_sensor_sample_async();
 			shell_print(shell, "enrolled ROM %012llx to slot %d", serial, slot + 1);
 			return 0;
 		case -ENODEV:
@@ -860,6 +1002,11 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 			return ret;
 		case -EEXIST:
 			shell_error(shell, "ROM %012llx already bound to another slot", serial);
+			return ret;
+		case -EINVAL:
+			shell_error(shell,
+				    "sensor type differs from sensor%d-type — `w1 clear %d` first",
+				    slot + 1, slot + 1);
 			return ret;
 		default:
 			shell_error(shell, "enroll failed: %d", ret);
@@ -872,6 +1019,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 	switch (ret) {
 	case 0:
+		app_sensor_sample_async();
 		shell_print(shell, "enrolled slot %d -> %s ROM %012llx", slot + 1,
 			    app_w1_slot_type_name(bound.type), bound.serial);
 		return 0;
@@ -882,6 +1030,10 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 	case -E2BIG:
 		shell_error(shell, "more than one new sensor — pass the ROM: "
 				   "`w1 enroll <slot> <rom>`");
+		return ret;
+	case -EINVAL:
+		shell_error(shell, "sensor type differs from sensor%d-type — `w1 clear %d` first",
+			    slot + 1, slot + 1);
 		return ret;
 	default:
 		shell_error(shell, "enroll failed: %d", ret);
@@ -903,6 +1055,7 @@ static int cmd_sensor_clear(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "clear failed: %d", ret);
 		return ret;
 	}
+	app_sensor_sample_async();
 	shell_print(shell, "slot %d cleared", slot + 1);
 	return 0;
 }

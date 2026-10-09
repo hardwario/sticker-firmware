@@ -15,6 +15,7 @@
 #include "app_w1_slots.h"
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 #include "src/app_config.pb.h"
 
 #include <zephyr/ztest.h>
@@ -35,31 +36,49 @@ extern uint32_t test_alarm_flags;
 extern struct app_hall_data test_hall;
 extern struct app_input_data test_input;
 extern enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
+extern enum app_w1_slot_state test_w1_states[APP_W1_SLOT_COUNT];
 
 #define SYSTEM_FLAG_BOOT 0x1
 
 static void set_clean(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
+	g_app_config.cap_sht = true; /* #465: the yml default */
 	memset(&test_hall, 0, sizeof(test_hall));
 	memset(&test_input, 0, sizeof(test_input));
 	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
+	memset(test_w1_states, 0, sizeof(test_w1_states)); /* = OK */
 	test_budget = 200;
 	test_alarm_flags = 0;
 
 	g_app_sensor_data = (struct app_sensor_data){0};
-	g_app_sensor_data.orientation = INT_MAX; /* absent */
+	APP_SENSOR_MB_F(&g_app_sensor_data, ACCEL_ORIENTATION) = NAN; /* absent */
 	/* Analog scalars: NaN = absent. */
-	g_app_sensor_data.voltage = NAN;
-	g_app_sensor_data.temperature = NAN;
-	g_app_sensor_data.humidity = NAN;
-	g_app_sensor_data.illuminance = NAN;
-	g_app_sensor_data.altitude = NAN;
-	g_app_sensor_data.pressure = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = NAN;
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		g_app_sensor_data.w1[s].temperature = NAN;
-		g_app_sensor_data.w1[s].humidity = NAN;
+		app_sensor_w1_clear(&g_app_sensor_data.w1[s], APP_SENSOR_TYPE_NONE);
 	}
+}
+
+/* Bind 1-Wire slot `slot` (0-based) to `type` (expected and read) with no values. */
+static void w1_bind(int slot, uint8_t type)
+{
+	test_w1_types[slot] = (enum app_w1_slot_type)type;
+	app_sensor_w1_clear(&g_app_sensor_data.w1[slot], type);
+	g_app_sensor_data.w1[slot].present = true;
+}
+
+/* Store a reading on channel `ch` of slot `slot` through the registry. */
+static void w1_put(int slot, uint8_t ch, float v)
+{
+	struct app_sensor_w1 *w = &g_app_sensor_data.w1[slot];
+
+	app_sensor_put_f(w->type, w->v, &w->valid, ch, v);
 }
 
 static Telemetry decode(const uint8_t *buf, size_t len)
@@ -108,7 +127,7 @@ ZTEST(compose, test_debug_probe_before_first_uplink_preserves_boot_flag)
 	bool more = true;
 
 	set_clean();
-	g_app_sensor_data.temperature = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
 
 	/* Mirrors `ats radio compose` (app_ats.c): drains a full report via
 	 * app_compose_ex(), the same entry point the debug shell command uses. */
@@ -128,8 +147,8 @@ ZTEST(compose, test_boot_internal)
 	size_t n;
 
 	set_clean();
-	g_app_sensor_data.temperature = 23.5f;
-	g_app_sensor_data.humidity = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 
 	run_report(fr, 8, &n);
 
@@ -153,7 +172,7 @@ ZTEST(compose, test_capability_gating)
 
 	/* barometer capability OFF -> pressure dropped even with valid data */
 	set_clean();
-	g_app_sensor_data.pressure = 1000.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 10000.0f; /* hPa */
 	g_app_config.cap_barometer = false;
 	run_report(fr, 8, &n);
 	for (size_t i = 0; i < n; i++) {
@@ -161,9 +180,9 @@ ZTEST(compose, test_capability_gating)
 	}
 
 	/* barometer capability ON -> pressure present, scaled to hPa x10 (#92).
-	 * d.pressure is kPa; wire is hPa x10 = kPa x100, so 1000 kPa -> 100000. */
+	 * The pressure channel is hPa (#430), so 10000 hPa -> 100000. */
 	set_clean();
-	g_app_sensor_data.pressure = 1000.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 10000.0f; /* hPa */
 	g_app_config.cap_barometer = true;
 	run_report(fr, 8, &n);
 	bool seen = false;
@@ -174,6 +193,25 @@ ZTEST(compose, test_capability_gating)
 		}
 	}
 	zassert_true(seen, "pressure missing with cap on");
+}
+
+/* #465: cap_sht off drops the onboard temperature/humidity from the wire, even
+ * with a valid reading; the system group still goes out. */
+ZTEST(compose, test_cap_sht_gating)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
+	g_app_config.cap_sht = false;
+	run_report(fr, 8, &n);
+
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_true(fr[0].has_voltage, "system group must stay");
+	zassert_false(fr[0].has_temperature, "temperature leaked with cap_sht off");
+	zassert_false(fr[0].has_humidity, "humidity leaked with cap_sht off");
 }
 
 ZTEST(compose, test_counter_flags)
@@ -208,15 +246,15 @@ ZTEST(compose, test_multiframe_split)
 
 	set_clean();
 	/* Enable several independent groups with data. */
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	g_app_config.cap_barometer = true;
-	g_app_sensor_data.pressure = 990.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 9900.0f; /* hPa */
 	g_app_config.cap_light_sensor = true;
-	g_app_sensor_data.illuminance = 300.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
 	g_app_config.cap_w1_sensors = true;
-	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 11.0f;
+	w1_bind(0, APP_SENSOR_TYPE_DALLAS);
+	w1_put(0, APP_SENSOR_CH_DALLAS_TEMPERATURE, 11.0f);
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42;
 
@@ -253,35 +291,59 @@ ZTEST(compose, test_machine_probe_cluster)
 
 	set_clean();
 	g_app_config.cap_w1_sensors = true;
-	test_w1_types[0] = APP_W1_SLOT_MACHINE_PROBE;
-	g_app_sensor_data.w1[0].temperature = 23.65f;
-	g_app_sensor_data.w1[0].humidity = 54.0f;
-	g_app_sensor_data.w1[0].illuminance = 27.0f;
-	g_app_sensor_data.w1[0].magnetic_field = 0.062f; /* mT */
-	g_app_sensor_data.w1[0].accel_x = 0.38f;
-	g_app_sensor_data.w1[0].accel_y = -9.35f;
-	g_app_sensor_data.w1[0].accel_z = -0.54f;
-	g_app_sensor_data.w1[0].is_tilt_alert = true;
-	g_app_sensor_data.w1[0].present = true;
+	w1_bind(0, APP_SENSOR_TYPE_MACHINE_PROBE);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 23.65f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, 54.0f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, 22.5f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, 27.0f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, 0.062f); /* mT */
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1.0f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, 0.38f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, -9.35f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, -0.54f);
 
 	run_report(fr, 4, &n);
 
-	/* One SensorReading carrying the whole cluster, in one frame (ample budget). */
+	/* One SensorReading carrying every channel, in one frame (ample budget):
+	 * valid mask of all nine channels, values in ascending ch at wire scale. */
 	zassert_equal(n, 1, "expected one frame, got %zu", n);
 	zassert_equal(fr[0].w1_sensors_count, 1, "expected one w1 reading");
 	const SensorReading *sr = &fr[0].w1_sensors[0];
+	static const int32_t want[] = {2365, 108, 2250, 27, 62, 1, 38, -935, -54};
+
 	zassert_equal(sr->slot, 1, "slot (1-based: internal slot 0 -> wire 1)");
-	zassert_equal(sr->type, APP_W1_SLOT_MACHINE_PROBE, "type");
-	zassert_true(sr->has_temperature && sr->temperature == 2365, "temperature %d",
-		     sr->temperature);
-	zassert_true(sr->has_humidity && sr->humidity == 108, "humidity %u", sr->humidity);
-	zassert_true(sr->has_illuminance && sr->illuminance == 27, "lux %u", sr->illuminance);
-	zassert_true(sr->has_magnetic_field && sr->magnetic_field == 62, "field %d",
-		     sr->magnetic_field);
-	zassert_true(sr->has_accel_x && sr->accel_x == 38, "ax %d", sr->accel_x);
-	zassert_true(sr->has_accel_y && sr->accel_y == -935, "ay %d", sr->accel_y);
-	zassert_true(sr->has_accel_z && sr->accel_z == -54, "az %d", sr->accel_z);
-	zassert_true(sr->has_flags && sr->flags == 1, "tilt flag %u", sr->flags);
+	zassert_equal(sr->type, APP_SENSOR_TYPE_MACHINE_PROBE, "type");
+	zassert_equal(sr->valid, 0x1FF, "valid 0x%x", sr->valid);
+	zassert_equal(sr->value_count, ARRAY_SIZE(want), "value_count %u", sr->value_count);
+	for (size_t i = 0; i < ARRAY_SIZE(want); i++) {
+		zassert_equal(sr->value[i], want[i], "value[%zu] %d", i, sr->value[i]);
+	}
+}
+
+/* A partial mask: channels without a value (sub-sensor not responding, out of
+ * range) have their bit clear and no entry, the rest stay in ch order. */
+ZTEST(compose, test_machine_probe_partial_mask)
+{
+	Telemetry fr[4];
+	size_t n;
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	w1_bind(0, APP_SENSOR_TYPE_MACHINE_PROBE);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, -5.25f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, 150.0f); /* out of range */
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0.0f);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, 9.81f);
+
+	run_report(fr, 4, &n);
+
+	const SensorReading *sr = &fr[0].w1_sensors[0];
+
+	zassert_equal(sr->valid, BIT(0) | BIT(5) | BIT(8), "valid 0x%x", sr->valid);
+	zassert_equal(sr->value_count, 3);
+	zassert_equal(sr->value[0], -525);
+	zassert_equal(sr->value[1], 0);
+	zassert_equal(sr->value[2], 981);
 }
 
 ZTEST(compose, test_dallas_temperature_only)
@@ -291,22 +353,81 @@ ZTEST(compose, test_dallas_temperature_only)
 
 	set_clean();
 	g_app_config.cap_w1_sensors = true;
-	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 21.5f;
-	g_app_sensor_data.w1[0].present = true;
+	w1_bind(0, APP_SENSOR_TYPE_DALLAS);
+	w1_put(0, APP_SENSOR_CH_DALLAS_TEMPERATURE, 21.5f);
 
 	run_report(fr, 4, &n);
 
 	zassert_equal(fr[0].w1_sensors_count, 1, "expected one w1 reading");
 	const SensorReading *sr = &fr[0].w1_sensors[0];
-	zassert_true(sr->has_temperature && sr->temperature == 2150, "temperature %d",
-		     sr->temperature);
-	/* Dallas is temperature-only: cluster + flags must be absent. */
-	zassert_false(sr->has_humidity, "dallas humidity leaked");
-	zassert_false(sr->has_flags, "dallas flags leaked");
-	zassert_false(sr->has_illuminance, "dallas lux leaked");
-	zassert_false(sr->has_magnetic_field, "dallas field leaked");
-	zassert_false(sr->has_accel_x, "dallas accel leaked");
+
+	zassert_equal(sr->type, APP_SENSOR_TYPE_DALLAS);
+	zassert_equal(sr->valid, BIT(0));
+	zassert_equal(sr->value_count, 1);
+	zassert_equal(sr->value[0], 2150);
+}
+
+/* A slot in mismatch (or with its probe absent) is still sent, with type = the
+ * expected type and valid = 0, so the decoder emits null. The stale readings in
+ * g_app_sensor_data must not leak into it. */
+ZTEST(compose, test_mismatch_and_absent_slots_send_type_only)
+{
+	Telemetry fr[4];
+	size_t n;
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	w1_bind(0, APP_SENSOR_TYPE_MACHINE_PROBE);
+	w1_put(0, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, 21.5f);
+	test_w1_states[0] = APP_W1_SLOT_STATE_MISMATCH;
+	w1_bind(2, APP_SENSOR_TYPE_DALLAS);
+	w1_put(2, APP_SENSOR_CH_DALLAS_TEMPERATURE, 19.0f);
+	test_w1_states[2] = APP_W1_SLOT_STATE_ABSENT;
+
+	run_report(fr, 4, &n);
+
+	zassert_equal(fr[0].w1_sensors_count, 2, "expected two w1 readings");
+	const SensorReading *a = &fr[0].w1_sensors[0];
+	const SensorReading *b = &fr[0].w1_sensors[1];
+
+	zassert_equal(a->slot, 1);
+	zassert_equal(a->type, 3, "expected type = machine-probe registry id");
+	zassert_true(a->valid == 0 && a->value_count == 0, "mismatched slot carries values");
+	zassert_equal(b->slot, 3);
+	zassert_equal(b->type, 2, "expected type = dallas registry id");
+	zassert_true(b->valid == 0 && b->value_count == 0, "absent slot carries values");
+}
+
+/* Byte cost of the encoded readings incl. the 3 B field-27 tag + length (plan
+ * D2 table): a mismatched slot 7 B, dallas 13 B, a full machine-probe <= 30 B.
+ * A reading does not fit the 11 B tier (US915 DR0 / AU915 DR2) with the
+ * version byte; the composer then sends it alone (oversized-unit path). */
+ZTEST(compose, test_sensor_reading_size)
+{
+	SensorReading sr = SensorReading_init_zero;
+	size_t sz;
+
+	sr.slot = 1;
+	sr.type = APP_SENSOR_TYPE_MACHINE_PROBE;
+	zassert_true(pb_get_encoded_size(&sz, SensorReading_fields, &sr));
+	zassert_equal(sz + 3, 7, "mismatch %zu B", sz + 3);
+
+	sr.type = APP_SENSOR_TYPE_DALLAS;
+	sr.valid = 1;
+	sr.value[sr.value_count++] = 2345;
+	zassert_true(pb_get_encoded_size(&sz, SensorReading_fields, &sr));
+	zassert_equal(sz + 3, 13, "dallas %zu B", sz + 3);
+
+	static const int32_t mp[] = {2345, 90, 2210, 300, 62, 0, 38, -981, -54};
+
+	sr.type = APP_SENSOR_TYPE_MACHINE_PROBE;
+	sr.valid = 0x1FF;
+	sr.value_count = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(mp); i++) {
+		sr.value[sr.value_count++] = mp[i];
+	}
+	zassert_true(pb_get_encoded_size(&sz, SensorReading_fields, &sr));
+	zassert_true(sz + 3 <= 30, "machine-probe %zu B", sz + 3);
 }
 
 ZTEST(compose, test_system_always_present)
@@ -351,8 +472,8 @@ ZTEST(compose, test_system_flags_carry_alarm_bits)
 	set_clean();
 	/* Real readings: NaN sentinels (INT32_MIN / UINT32_MAX) would make the
 	 * internal group alone exceed 11 B (pre-existing M-10 oversize path). */
-	g_app_sensor_data.temperature = 23.5f;
-	g_app_sensor_data.humidity = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 	test_alarm_flags = 0x03; /* ALARM_ANY | ALARM_THRESHOLD */
 	test_budget = 11;        /* US915 DR0 / AU915 DR2 */
 	run_report(fr, 8, &n);
@@ -371,7 +492,7 @@ ZTEST(compose, test_budget_unknown_pre_join)
 	bool more = false;
 
 	set_clean();
-	g_app_sensor_data.temperature = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
 	test_budget = 0; /* app_radio_lrw_get_max_payload() == 0 -> pre-join */
 	int ret = app_compose(buf, sizeof(buf), &len, &more);
 
@@ -400,15 +521,15 @@ ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
 	/* Same multi-group setup as test_multiframe_split: proven to leave a
 	 * pending snapshot (more=true) after a single app_compose() call at this
 	 * budget. */
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
 	g_app_config.cap_barometer = true;
-	g_app_sensor_data.pressure = 990.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 9900.0f; /* hPa */
 	g_app_config.cap_light_sensor = true;
-	g_app_sensor_data.illuminance = 300.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
 	g_app_config.cap_w1_sensors = true;
-	test_w1_types[0] = APP_W1_SLOT_DALLAS;
-	g_app_sensor_data.w1[0].temperature = 11.0f;
+	w1_bind(0, APP_SENSOR_TYPE_DALLAS);
+	w1_put(0, APP_SENSOR_CH_DALLAS_TEMPERATURE, 11.0f);
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42; /* "abandoned cycle" value */
 

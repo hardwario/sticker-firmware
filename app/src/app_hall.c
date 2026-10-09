@@ -150,14 +150,14 @@ restore:
 	 * the alarm lock and may enqueue an uplink. Keeping it outside avoids the
 	 * data->alarm nested lock order and holding the data lock over alarm work. */
 	if (left_rise) {
-		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE, true);
 	} else if (left_fall) {
-		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE, false);
 	}
 	if (right_rise) {
-		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_STATE, true);
 	} else if (right_fall) {
-		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_STATE, false);
 	}
 
 	return 0;

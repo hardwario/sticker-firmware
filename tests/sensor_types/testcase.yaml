@@ -1,0 +1,5 @@
+common:
+  tags: sticker sensor
+  platform_allow: native_sim
+tests:
+  sticker.sensor_types: {}
