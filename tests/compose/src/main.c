@@ -134,8 +134,8 @@ static void assert_pages(const Telemetry *fr, size_t n)
 	}
 }
 
-/* Merge the SensorReading parts of slot `slot` (1-based) over all frames:
- * every channel must come exactly once, in ascending order across parts. */
+/* Collect the channels of slot `slot` (1-based) over all frames: the reading
+ * must come exactly once, every channel once, in ascending order. */
 static uint32_t merge_slot(const Telemetry *fr, size_t n, uint32_t slot, int32_t *values)
 {
 	uint32_t seen = 0;
@@ -350,10 +350,10 @@ static void fill_machine_probe(int slot)
 	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, -0.54f);
 }
 
-/* A machine-probe reading bigger than a page is split by channel across pages
- * (#425 / #430): same slot and type in every part, each channel exactly once,
- * frames within the budget, pages numbered. */
-ZTEST(compose, test_w1_reading_split_by_channel)
+/* A machine-probe reading bigger than a page is never split: it goes out whole,
+ * alone on its own page (the stall guard), the other content on the other
+ * pages within the budget, pages numbered. */
+ZTEST(compose, test_w1_reading_bigger_than_page_sent_alone)
 {
 	Telemetry fr[16];
 	size_t n;
@@ -367,9 +367,9 @@ ZTEST(compose, test_w1_reading_split_by_channel)
 	w1_put(3, APP_SENSOR_CH_DALLAS_TEMPERATURE, 21.5f);
 	test_budget = 24;
 
-	run_report(fr, 16, &n);
+	run_report_ex(fr, 16, &n, true);
 
-	zassert_true(n > 2, "expected the probe split over pages, got %zu", n);
+	zassert_true(n > 1, "expected a paged report, got %zu", n);
 	assert_pages(fr, n);
 	for (size_t i = 0; i < n; i++) {
 		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
@@ -377,6 +377,10 @@ ZTEST(compose, test_w1_reading_split_by_channel)
 
 			zassert_equal(r->type, r->slot == 2 ? APP_SENSOR_TYPE_MACHINE_PROBE
 							    : APP_SENSOR_TYPE_DALLAS);
+			if (r->slot == 2) {
+				zassert_equal(fr[i].w1_sensors_count, 1, "probe not alone");
+				zassert_equal(r->valid, 0x1FF, "probe split");
+			}
 		}
 	}
 	zassert_equal(merge_slot(fr, n, 2, v), 0x1FF, "machine-probe channels");
@@ -410,15 +414,15 @@ ZTEST(compose, test_w1_reading_moves_whole_when_it_fits_a_page)
 
 	zassert_equal(n, 2, "expected two pages, got %zu", n);
 	assert_pages(fr, n);
-	zassert_equal(fr[0].w1_sensors_count, 0, "probe split beside the groups");
+	zassert_equal(fr[0].w1_sensors_count, 0, "probe packed beside the groups");
 	zassert_equal(fr[1].w1_sensors_count, 1);
 	zassert_equal(fr[1].w1_sensors[0].valid, 0x1FF);
 }
 
-/* 11 B tier (US915 DR0 / AU915 DR2): not even one channel fits a page, so
- * each part carries one channel and is sent alone; the report still ends with
- * every channel sent once. */
-ZTEST(compose, test_w1_split_at_11_byte_tier)
+/* 11 B tier (US915 DR0 / AU915 DR2): the reading does not fit a page, so it is
+ * sent whole and alone (the MAC rejects it, as before paging); the report
+ * still ends. */
+ZTEST(compose, test_w1_at_11_byte_tier)
 {
 	Telemetry fr[24];
 	size_t n;
@@ -436,8 +440,8 @@ ZTEST(compose, test_w1_split_at_11_byte_tier)
 	zassert_equal(merge_slot(fr, n, 1, v), 0x1FF, "machine-probe channels");
 	for (size_t i = 0; i < n; i++) {
 		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
-			zassert_true(__builtin_popcount(fr[i].w1_sensors[j].valid) <= 1,
-				     "page %zu carries more than one channel", i);
+			zassert_equal(fr[i].w1_sensors[j].valid, 0x1FF, "page %zu: probe split",
+				      i);
 		}
 	}
 }

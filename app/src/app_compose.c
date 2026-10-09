@@ -153,7 +153,6 @@ static Telemetry m_snapshot;
 struct tlm_cursor {
 	uint16_t pending; /* bitmask of enum tlm_group still to send */
 	pb_size_t w1;     /* next w1_sensors reading of the snapshot */
-	uint8_t ch;       /* next channel of reading `w1` when it is split, else 0 */
 };
 
 static struct tlm_cursor m_cur;
@@ -420,67 +419,12 @@ static bool frame_fits(const Telemetry *f, size_t cap)
 	return sz <= cap;
 }
 
-/* Append to `f` a part of reading `r` (#430): its present channels from c->ch
- * on, as many as fit `cap`, in a SensorReading with the same slot / type and
- * the part's own `valid` bits. `force` sends the first channel even when it
- * does not fit (a page that would otherwise stay empty). Advances the cursor;
- * false when nothing was added. */
-static bool add_w1_part(Telemetry *f, const SensorReading *r, struct tlm_cursor *c, size_t cap,
-			bool force)
-{
-	pb_size_t at = f->w1_sensors_count;
-	SensorReading *p = &f->w1_sensors[at];
-	pb_size_t k = 0; /* index of the channel's value in r->value */
-	uint8_t next = 0;
-
-	*p = (SensorReading)SensorReading_init_zero;
-	p->slot = r->slot;
-	p->type = r->type;
-	f->w1_sensors_count = at + 1;
-
-	for (uint8_t ch = 0; ch < 32 && k < r->value_count; ch++) {
-		if (!(r->valid & BIT(ch))) {
-			continue;
-		}
-		if (ch < c->ch) {
-			k++;
-			continue;
-		}
-		p->valid |= BIT(ch);
-		p->value[p->value_count++] = r->value[k++];
-		if (!frame_fits(f, cap) && !(force && p->value_count == 1)) {
-			p->valid &= ~BIT(ch);
-			p->value_count--;
-			next = ch;
-			break;
-		}
-	}
-
-	if (p->value_count == 0) {
-		f->w1_sensors_count = at;
-		return false;
-	}
-	if (!frame_fits(f, cap)) {
-		LOG_WRN("w1 slot=%u channel exceeds budget %zuB, sending alone", (unsigned)r->slot,
-			cap);
-	}
-	if (next == 0) {
-		c->w1++;
-		c->ch = 0;
-	} else {
-		c->ch = next;
-	}
-	return true;
-}
-
 /* Fill `f` with the next page from cursor `c` and advance it: whole pending
- * groups first (highest priority first), then 1-Wire readings in order. A
- * reading that does not fit an otherwise empty page is split by channel
- * across pages (add_w1_part); one that does not fit beside other content
- * waits for the next page. A single unit bigger than the budget is sent alone
- * so the report never stalls. `paged` reserves the page_index / page_count
- * fields (index exact, count at its one-byte bound) so the layout matches the
- * frames sent later. */
+ * groups first (highest priority first), then whole 1-Wire readings in order.
+ * A reading that does not fit beside other content waits for the next page; a
+ * single unit bigger than the budget is sent alone so the report never stalls.
+ * `paged` reserves the page_index / page_count fields (index exact, count at
+ * its one-byte bound) so the layout matches the frames sent later. */
 static void pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged, uint8_t index)
 {
 	uint16_t frame_groups = 0;
@@ -505,35 +449,17 @@ static void pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged
 	}
 
 	while (c->w1 < m_snapshot.w1_sensors_count) {
-		const SensorReading *r = &m_snapshot.w1_sensors[c->w1];
-		bool empty = frame_groups == 0 && w1_added == 0;
+		pb_size_t at = f->w1_sensors_count;
 
-		if (c->ch == 0) {
-			pb_size_t at = f->w1_sensors_count;
-
-			f->w1_sensors[at] = *r;
-			f->w1_sensors_count = at + 1;
-			if (frame_fits(f, cap)) {
-				c->w1++;
-				w1_added++;
-				continue;
-			}
-			f->w1_sensors_count = at; /* revert */
-			if (r->valid == 0 && empty) {
-				/* No channel to split by (mismatch / absent slot). */
-				f->w1_sensors[at] = *r;
-				f->w1_sensors_count = at + 1;
-				c->w1++;
-				w1_added++;
-				LOG_WRN("w1 slot=%u exceeds budget %zuB, sending alone",
-					(unsigned)r->slot, cap);
-				break;
-			}
-		}
-		if ((empty || c->ch != 0) && add_w1_part(f, r, c, cap, empty)) {
+		f->w1_sensors[at] = m_snapshot.w1_sensors[c->w1];
+		f->w1_sensors_count = at + 1;
+		if (frame_fits(f, cap)) {
+			c->w1++;
 			w1_added++;
+			continue;
 		}
-		break; /* a split reading ends the page */
+		f->w1_sensors_count = at; /* revert; keep order */
+		break;
 	}
 
 	if (frame_groups == 0 && w1_added == 0) {
@@ -545,6 +471,13 @@ static void pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged
 				break;
 			}
 		}
+	}
+
+	if (frame_groups == 0 && w1_added == 0 && c->w1 < m_snapshot.w1_sensors_count) {
+		f->w1_sensors[0] = m_snapshot.w1_sensors[c->w1++];
+		f->w1_sensors_count = 1;
+		LOG_WRN("w1 slot=%u exceeds budget %zuB, sending alone",
+			(unsigned)f->w1_sensors[0].slot, cap);
 	}
 
 	c->pending &= ~frame_groups;
