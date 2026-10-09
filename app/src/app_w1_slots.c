@@ -998,6 +998,8 @@ static int cmd_sensor_scan(const struct shell *shell, size_t argc, char **argv)
 		return 0;
 	}
 
+	app_sensor_sample_async(); /* scan rebinds live: refresh the slot readings */
+
 	shell_print(shell, "TYPE           ROM           BOUND");
 	for (int i = 0; i < n; i++) {
 		if (e[i].bound_slot >= 0) {
@@ -1034,6 +1036,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 	if (argc == 1) {
 		int n = app_w1_slots_enroll_all();
 
+		app_sensor_sample_async();
 		shell_print(shell, "enrolled; %d slot(s) bound", n);
 		return 0;
 	}
@@ -1054,6 +1057,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 		switch (ret) {
 		case 0:
+			app_sensor_sample_async();
 			shell_print(shell, "enrolled ROM %012llx to slot %d", serial, slot + 1);
 			return 0;
 		case -ENODEV:
@@ -1078,6 +1082,7 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 	switch (ret) {
 	case 0:
+		app_sensor_sample_async();
 		shell_print(shell, "enrolled slot %d -> %s ROM %012llx", slot + 1,
 			    app_w1_slot_type_name(bound.type), bound.serial);
 		return 0;
@@ -1113,6 +1118,7 @@ static int cmd_sensor_clear(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "clear failed: %d", ret);
 		return ret;
 	}
+	app_sensor_sample_async();
 	shell_print(shell, "slot %d cleared", slot + 1);
 	return 0;
 }

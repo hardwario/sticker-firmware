@@ -93,6 +93,11 @@ extern struct k_mutex g_app_sensor_data_lock;
 int app_sensor_init(void);
 void app_sensor_sample(void);
 
+/* Queue one full sample on the sensor work queue now, e.g. after a live 1-Wire
+ * slot change, so the no-data watchdog sees the new binding's reading instead
+ * of the empty value left until the next sample tick. */
+void app_sensor_sample_async(void);
+
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
 void app_sensor_suspend(void);
 

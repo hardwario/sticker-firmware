@@ -515,6 +515,11 @@ int app_sensor_init(void)
 	return res;
 }
 
+void app_sensor_sample_async(void)
+{
+	(void)k_work_submit_to_queue(&m_sensor_work_q, &m_sensor_work);
+}
+
 void app_sensor_sample(void)
 {
 	int ret;
