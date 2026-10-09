@@ -80,11 +80,11 @@ static const uint8_t m_enc_size[] = {
 
 static struct k_mutex m_lock;
 static bool m_enabled;
-static uint8_t m_list[APP_HISTORY_MAX_CH]; /* selection (config.history_channels) */
+static uint8_t m_list[APP_HISTORY_MAX_CH];         /* selection (config.history_channels) */
 static struct hist_col m_cols[APP_HISTORY_MAX_CH]; /* recorded columns, record order */
 static uint8_t m_ncols;
 static uint8_t m_w1_types[APP_W1_SLOT_COUNT]; /* slot types the layout was built with */
-static uint32_t m_layout; /* layout CRC, stamped into page headers */
+static uint32_t m_layout;                     /* layout CRC, stamped into page headers */
 /* Momentary columns record "asserted during the interval": the pulse counter
  * at the previous capture (bit i of m_pulses_known = m_pulses_prev[i] set). */
 static uint32_t m_pulses_prev[APP_HISTORY_MAX_CH];
@@ -1111,7 +1111,8 @@ static bool layout_build(void)
 		uint8_t key[3] = {e, type, c->hist_enc};
 
 		crc = crc32_ieee_update(crc, key, sizeof(key));
-		crc = crc32_ieee_update(crc, (const uint8_t *)&c->hist_scale, sizeof(c->hist_scale));
+		crc = crc32_ieee_update(crc, (const uint8_t *)&c->hist_scale,
+					sizeof(c->hist_scale));
 		n++;
 	}
 
@@ -2199,8 +2200,8 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 		if (n == 0) {
 			shell_print(sh, "%-20s %8s %8s %8s %5u", name, "--", "--", "--", 0);
 		} else {
-			shell_print(sh, "%-20s %s%d.%02d %s%d.%02d %s%d.%02d %5u", name, APP_FP2(mn),
-				    APP_FP2(mx), APP_FP2(sum / n), n);
+			shell_print(sh, "%-20s %s%d.%02d %s%d.%02d %s%d.%02d %5u", name,
+				    APP_FP2(mn), APP_FP2(mx), APP_FP2(sum / n), n);
 		}
 	}
 	return 0;
