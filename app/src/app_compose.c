@@ -10,7 +10,7 @@
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 /* Nanopb includes */
@@ -130,7 +130,7 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 /* True if a group carries any data in the snapshot (any of its fields present). */
 static bool group_present(const Telemetry *s, enum tlm_group g)
 {
-	/* Compose runs solely on m_work_q; static keeps this large struct off the
+	/* Compose runs solely on the radio work queue; static keeps this large struct off the
 	 * tight work-queue stack (it grew with the w1_sensors array). */
 	static Telemetry probe;
 
@@ -185,15 +185,18 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal — onboard SHT4x is always present, so temperature/humidity are
-	 * always on the wire; a NaN reading (sensor fault) goes out as the sentinel
-	 * (decoder → null) instead of dropping the field. */
-	t->has_temperature = true;
-	t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
-	t->has_humidity = true;
-	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
-	 * negative %RH, and a negative float->uint cast is UB. */
-	t->humidity = isnan(humidity) ? TM_U32_NA : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
+	/* internal — onboard SHT4x, sent whenever enabled (#465 cap_sht); a NaN
+	 * reading (sensor fault) goes out as the sentinel (decoder → null) instead
+	 * of dropping the field. */
+	if (g_app_config.cap_sht) {
+		t->has_temperature = true;
+		t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
+		t->has_humidity = true;
+		/* Clamp before the unsigned cast: the SHT4x formula can yield a
+		 * slightly negative %RH, and a negative float->uint cast is UB. */
+		t->humidity = isnan(humidity) ? TM_U32_NA
+					      : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
+	}
 
 	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
@@ -307,22 +310,22 @@ static void fill_telemetry(Telemetry *t, bool boot)
 
 /* #340 M16: the one-shot "first uplink after boot" marker. Module-level (not a
  * fill_snapshot()-local static) so app_compose_ex()'s debug/test callers (e.g.
- * `ats lrw compose`) can read it without being the ones who clear it — only a
+ * `ats radio compose`) can read it without being the ones who clear it — only a
  * real report (app_compose(), consume_boot=true below) may consume it. Without
- * this split, a bench tech running `ats lrw compose` before the real first
+ * this split, a bench tech running `ats radio compose` before the real first
  * post-boot cycle silently stole the marker: the debug dump got
  * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
 static bool m_boot_pending = true;
 
 /* True while the in-progress snapshot belongs to the shell's debug probe
  * (app_compose_ex()) rather than the real TX path. Both paths run their
- * multi-frame sessions as separate per-frame work items on m_work_q, so they
+ * multi-frame sessions as separate per-frame work items on the radio work queue, so they
  * can interleave — without this tag the real report would silently drain the
  * remainder of a debug session's snapshot over the air (and vice versa). */
 static bool m_active_debug;
 
 /* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
- * solely on m_work_q. `consume_boot` is true only for the real report path
+ * solely on the radio work queue. `consume_boot` is true only for the real report path
  * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
  * one-shot marker for the real uplink that hasn't happened yet. */
 static void fill_snapshot(bool consume_boot)
@@ -345,7 +348,7 @@ static void fill_snapshot(bool consume_boot)
 void app_compose_reset(void)
 {
 	/* Drop the in-progress snapshot; the next app_compose() takes a fresh one.
-	 * These run solely on m_work_q (as does the join path that calls this), so
+	 * These run solely on the radio work queue (as does the join path that calls this), so
 	 * no lock is needed. */
 	m_active = false;
 	m_pending = 0;
@@ -401,7 +404,7 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 	/* Greedily pack whole pending groups, highest priority first, that fit.
 	 * Static for the same reason as the snapshot: app_compose runs solely on
-	 * m_work_q and the struct is too big for that stack. */
+	 * the radio work queue and the struct is too big for that stack. */
 	static Telemetry frame;
 	memset(&frame, 0, sizeof(frame));
 	uint16_t frame_groups = 0;
@@ -489,10 +492,15 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
-	return compose_ex_impl(buf, size, len, more, app_lrw_get_max_payload(), true);
+	return compose_ex_impl(buf, size, len, more, app_radio_get_max_payload(), true);
 }
 
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
 {
 	return compose_ex_impl(buf, size, len, more, budget, false);
+}
+
+int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
+	return compose_ex_impl(buf, size, len, more, budget, true);
 }

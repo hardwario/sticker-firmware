@@ -86,6 +86,7 @@ struct app_config {
 	uint32_t history_sensors;
 	int battery_level;
 	bool vendor_reset_allow;
+	int interval_announce;
 	int alarm_limit;
 	enum app_config_lrw_region lrw_region;
 	enum app_config_radio_mode radio_mode;
@@ -93,16 +94,16 @@ struct app_config {
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
 	enum app_config_lrw_activation lrw_activation;
-	uint8_t lrw_deveui[8];
+	uint8_t radio_deveui[8];
 	uint8_t lrw_joineui[8];
 	uint8_t lrw_nwkkey[16];
-	uint8_t lrw_appkey[16];
+	uint8_t radio_appkey[16];
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
 	enum app_config_lrw_datarate lrw_datarate;
-	int lrw_link_check_interval;
-	int lrw_link_check_fail_rejoin;
+	int radio_link_check_interval;
+	int radio_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
 	bool cap_input_a;
@@ -111,6 +112,7 @@ struct app_config {
 	bool cap_barometer;
 	bool cap_pir_detector;
 	bool cap_buzzer;
+	bool cap_sht;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
 	uint8_t alarm_0[17];
@@ -130,6 +132,7 @@ struct app_config {
 	uint8_t alarm_14[17];
 	uint8_t alarm_15[17];
 	enum app_config_alarm_buzzer_mode alarm_buzzer_mode;
+	bool radio_alarm_ack;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor2_rom[8];
@@ -139,6 +142,9 @@ struct app_config {
 	bool hall_right_counter;
 	bool input_a_counter;
 	bool input_b_counter;
+	int p2p_frequency;
+	int p2p_spreading_factor;
+	int p2p_tx_power;
 };
 
 extern struct app_config g_app_config;

@@ -11,8 +11,12 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
+#include "app_radio.h"
+#if defined(CONFIG_RADIO_P2P)
+#include "app_radio_p2p.h"
+#endif
 #include "app_report.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
@@ -169,129 +173,6 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "invalid command");
 		shell_help(shell);
 	}
-}
-
-static int parse_pwm_channel(const struct shell *shell, const char *name, enum app_led_channel *out)
-{
-	if (strcmp(name, "red") == 0) {
-		*out = APP_LED_CHANNEL_R;
-		return 0;
-	}
-	if (strcmp(name, "green") == 0) {
-		*out = APP_LED_CHANNEL_G;
-		return 0;
-	}
-	shell_error(shell, "invalid channel (red|green only; yellow has no PWM)");
-	return -EINVAL;
-}
-
-/* ats led fade <red|green> <from%> <to%> <ms> — ramp one PWM LED for testing. */
-static void cmd_fade_led(const struct shell *shell, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	enum app_led_channel channel;
-	if (parse_pwm_channel(shell, argv[1], &channel)) {
-		return;
-	}
-
-	int from = atoi(argv[2]);
-	int to = atoi(argv[3]);
-	int ms = atoi(argv[4]);
-
-	shell_print(shell, SHELL_PFX " fade %s %d%%->%d%% over %d ms", argv[1], from, to, ms);
-	app_led_fade(channel, from, to, ms);
-}
-
-/* ats led heartbeat <red|green> [reps] — heartbeat pulse(s) for testing. */
-static void cmd_heartbeat_led(const struct shell *shell, size_t argc, char **argv)
-{
-	enum app_led_channel channel;
-	if (parse_pwm_channel(shell, argv[1], &channel)) {
-		return;
-	}
-
-	int reps = (argc >= 3) ? atoi(argv[2]) : 1;
-	if (reps < 1) {
-		reps = 1;
-	} else if (reps > 20) {
-		reps = 20;
-	}
-
-	shell_print(shell, SHELL_PFX " heartbeat %s x%d", argv[1], reps);
-	for (int i = 0; i < reps; i++) {
-		app_led_heartbeat(channel);
-		if (i < reps - 1) {
-			k_sleep(K_MSEC(300)); /* gap between beats */
-		}
-	}
-}
-
-static int parse_any_channel(const struct shell *shell, const char *name, enum app_led_channel *out)
-{
-	if (strcmp(name, "red") == 0) {
-		*out = APP_LED_CHANNEL_R;
-		return 0;
-	}
-	if (strcmp(name, "green") == 0) {
-		*out = APP_LED_CHANNEL_G;
-		return 0;
-	}
-	if (strcmp(name, "yellow") == 0) {
-		*out = APP_LED_CHANNEL_Y;
-		return 0;
-	}
-	shell_error(shell, "invalid channel (red|green|yellow)");
-	return -EINVAL;
-}
-
-/* ats led idle [off|gpio|pwm] [red|green|yellow] [on_ms] — configure the
- * periodic lrw-mode-off indicator (bench power knob). No args = show current. */
-static void cmd_idle_led(const struct shell *shell, size_t argc, char **argv)
-{
-	static const char *const mode_name[] = {"off", "gpio", "pwm"};
-	static const char *const chan_name[] = {"red", "green", "yellow"};
-
-	if (argc < 2) {
-		enum app_led_idle_mode mode;
-		enum app_led_channel ch;
-		int on_ms;
-		app_led_idle_get(&mode, &ch, &on_ms);
-		shell_print(shell, SHELL_PFX " idle mode=%s color=%s on_ms=%d (period=3s)",
-			    mode_name[mode], chan_name[ch], on_ms);
-		return;
-	}
-
-	enum app_led_idle_mode mode;
-	if (strcmp(argv[1], "off") == 0) {
-		mode = APP_LED_IDLE_OFF;
-	} else if (strcmp(argv[1], "gpio") == 0) {
-		mode = APP_LED_IDLE_GPIO;
-	} else if (strcmp(argv[1], "pwm") == 0) {
-		mode = APP_LED_IDLE_PWM;
-	} else {
-		shell_error(shell, "invalid mode (off|gpio|pwm)");
-		return;
-	}
-
-	/* Keep current colour/on_ms unless overridden. */
-	enum app_led_channel channel;
-	int on_ms;
-	app_led_idle_get(NULL, &channel, &on_ms);
-
-	if (argc >= 3 && parse_any_channel(shell, argv[2], &channel)) {
-		return;
-	}
-	if (argc >= 4) {
-		on_ms = atoi(argv[3]);
-	}
-
-	app_led_idle_config(mode, channel, on_ms);
-
-	/* Read back the effective config (PWM+yellow falls back to green). */
-	app_led_idle_get(&mode, &channel, &on_ms);
-	shell_print(shell, SHELL_PFX " idle mode=%s color=%s on_ms=%d (period=3s)", mode_name[mode],
-		    chan_name[channel], on_ms);
 }
 
 static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char **argv)
@@ -698,37 +579,96 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
+
 #if defined(CONFIG_LORAWAN)
-static const char *lrw_state_to_str(enum app_lrw_state state)
+static const char *lrw_state_to_str(enum app_radio_state state)
 {
 	switch (state) {
-	case APP_LRW_STATE_IDLE:
+	case APP_RADIO_STATE_IDLE:
 		return "IDLE";
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		return "JOINING";
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		return "WARNING";
-	case APP_LRW_STATE_RECONNECT:
+	case APP_RADIO_STATE_RECONNECT:
 		return "RECONNECT";
-	case APP_LRW_STATE_DISABLED:
+	case APP_RADIO_STATE_DISABLED:
 		return "DISABLED";
 	default:
 		return "UNKNOWN";
 	}
 }
+#endif /* defined(CONFIG_LORAWAN) */
 
-static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
+#if defined(CONFIG_RADIO_P2P)
+static const char *p2p_state_to_str(enum p2p_link_state state)
 {
-	struct app_lrw_info info;
-	int ret = app_lrw_get_info(&info);
+	switch (state) {
+	case P2P_LINK_UNPAIRED:
+		return "UNPAIRED";
+	case P2P_LINK_JOINING:
+		return "JOINING";
+	case P2P_LINK_PAIRED:
+		return "PAIRED";
+	default:
+		return "UNKNOWN";
+	}
+}
+#endif /* defined(CONFIG_RADIO_P2P) */
+
+/* Universal across whichever stack radio_mode selected at boot (app_radio
+ * facade, #118) -- the one status command a tester runs regardless of
+ * build/config. LoRaWAN exposes rich link diagnostics (devaddr/fcnt/rssi/
+ * margin/...); P2P only pairing/session state, since the raw-LoRa protocol
+ * has no per-frame link-quality feedback (doc/p2p.md). */
+static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+#if defined(CONFIG_RADIO_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		struct app_radio_p2p_info info;
+
+		app_radio_p2p_get_info(&info);
+
+		shell_print(shell, "kind: P2P");
+		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
+		shell_print(shell, "app_key: %s",
+			    info.app_key_set ? "set" : "MISSING (radio refused to start)");
+		shell_print(shell, "net_id: %08x", info.net_id);
+		shell_print(shell, "dev_addr: %04x", info.dev_addr);
+		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
+		shell_print(shell, "sf: %u (config %d)", info.sf,
+			    g_app_config.p2p_spreading_factor);
+		shell_print(shell, "tx power: %d dBm (%s)", info.tx_power_dbm,
+			    info.tx_power_assigned ? "assigned" : "config");
+		shell_print(shell, "fcnt: %u", info.fcnt);
+		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
+		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
+		if (info.last_ack_valid) {
+			shell_print(shell, "last ack rssi: %d dBm", info.last_ack_rssi);
+			shell_print(shell, "last ack snr: %d dB", info.last_ack_snr);
+		} else {
+			shell_print(shell, "last ack rssi/snr: n/a");
+		}
+		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
+		return 0;
+	}
+#endif /* defined(CONFIG_RADIO_P2P) */
+#if defined(CONFIG_LORAWAN)
+	struct app_radio_lrw_info info;
+	int ret = app_radio_lrw_get_info(&info);
 
 	if (ret) {
 		shell_error(shell, "Failed to get LRW info: %d", ret);
 		return ret;
 	}
 
+	shell_print(shell, "kind: LoRaWAN");
 	shell_print(shell, "state: %s", lrw_state_to_str(info.state));
 	shell_print(shell, "devaddr: %08x", info.dev_addr);
 	shell_print(shell, "fcnt up: %u", info.fcnt_up);
@@ -741,16 +681,19 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "messages: %d", info.message_count);
 	shell_print(shell, "healthy->warning: %d/%d", info.consecutive_lc_fail,
 		    info.thresh_warning);
-	shell_print(shell, "warning->healthy: %d/%d", info.consecutive_lc_ok, info.thresh_healthy);
 	shell_print(shell, "warning->reconnect: %d/%d", info.warning_lc_fail_total,
 		    info.thresh_reconnect);
 
 	return 0;
+#else
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
 }
 
+#if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_force_link_check();
+	app_radio_force_link_check();
 	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;
@@ -761,7 +704,7 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	int ret = app_lrw_reset_nvm();
+	int ret = app_radio_lrw_reset_nvm();
 	if (ret) {
 		shell_warn(shell, "NVM clear reported errors: %d", ret);
 	}
@@ -772,12 +715,12 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* app_compose.c documents app_compose_ex()/app_compose_reset() as running
- * "solely on m_work_q" (owned by app_lrw.c) and mutating static state
+ * "solely on m_work_q" (owned by app_radio_lrw.c) and mutating static state
  * (m_active/m_pending/m_snapshot/a static frame buffer) with no lock on that
  * assumption. Calling app_compose_ex() directly from the shell thread below
  * would race the real telemetry TX path, which composes on m_work_q too. So
  * each frame is composed as a work item on m_work_q (via
- * app_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
+ * app_radio_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
  * prints that one frame, and loops for the next — mirroring the original
  * per-frame streaming print, one m_work_q round-trip per frame instead of
  * buffering the whole multi-frame report (which a full report can run to
@@ -833,7 +776,7 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 	while (more) {
 		res->budget = budget;
 
-		int sret = app_lrw_run_on_work_q(&m_compose_work);
+		int sret = app_radio_lrw_run_on_work_q(&m_compose_work);
 		if (sret < 0) {
 			shell_error(shell, "compose submit failed: %d", sret);
 			return sret;
@@ -874,28 +817,209 @@ static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
 	} else if (strcmp(argv[1], "fail") == 0) {
 		ok = false;
 	} else {
-		shell_error(shell, "usage: lrw lc ok|fail");
+		shell_error(shell, "usage: radio lc ok|fail");
 		return -EINVAL;
 	}
 
-	app_lrw_debug_inject_lc(ok);
-	shell_print(shell, "Injected link-check %s (see 'ats lrw status')", argv[1]);
+	app_radio_lrw_debug_inject_lc(ok);
+	shell_print(shell, "Injected link-check %s (see 'ats radio status')", argv[1]);
+	return 0;
+}
+#endif /* defined(CONFIG_LORAWAN) */
+
+#if defined(CONFIG_RADIO_P2P)
+/* Bench two-STICKER rig (doc/p2p.md §14): drives the reference receiver on a
+ * second STICKER without a real gateway/central. Not registered when P2P
+ * transport is compiled out (flash-tight debug builds, doc/p2p.md §11). */
+static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool enable;
+
+	if (strcmp(argv[1], "on") == 0) {
+		enable = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		enable = false;
+	} else {
+		shell_error(shell, "usage: radio listen on|off");
+		return -EINVAL;
+	}
+
+	int ret = app_radio_p2p_listen(enable);
+	if (ret) {
+		shell_error(shell, "listen %s failed: %d", enable ? "on" : "off", ret);
+		return ret;
+	}
+	shell_print(shell, "P2P listen %s", enable ? "ON" : "OFF");
 	return 0;
 }
 
+/* Clears the persisted pairing and reboots -- the P2P analogue of
+ * cmd_lrw_reset(), named to match P2P's own join/JoinRequest/JoinAccept
+ * vocabulary rather than "pairing". The reset tiers that drop the network
+ * session clear it too (factory_reset, vendor_reset, lrw_reset: all go through
+ * app_radio_reset_link()); device_reset keeps it, as it keeps the LoRaWAN
+ * session. For a LIVE re-join that doesn't need a reboot, see the top-level
+ * `join` command (app_radio_rejoin()) instead. */
+static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = app_radio_p2p_unjoin();
+
+	if (ret) {
+		shell_warn(shell, "Unjoin reported errors: %d", ret);
+	}
+	shell_print(shell, "P2P pairing cleared; rebooting...");
+	k_sleep(K_MSEC(200)); /* let the shell flush */
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
+/* Debug: sweep rx1_delay on the bench without a full re-join (doc/p2p.md
+ * §13's own proposal for this, "same idiom as the existing ats radio lc
+ * debug helpers"). */
+static int cmd_radio_rx1_delay(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	int s = atoi(argv[1]);
+
+	if (s < 0 || s > 255) {
+		shell_error(shell, "rx1_delay must be 0..255 s");
+		return -EINVAL;
+	}
+
+	app_radio_p2p_debug_set_rx1_delay((uint8_t)s);
+	shell_print(shell,
+		    "rx1_delay override -> %d s (not persisted; a real JoinAccept "
+		    "restores it)",
+		    s);
+	return 0;
+}
+
+/* Debug: exercise the confirmed-uplink retry path (doc/p2p.md §6) without a
+ * real RF outage, same idea as `ats radio lc` for the LoRaWAN link-check FSM. */
+static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	int n = atoi(argv[1]);
+
+	if (n < 0) {
+		shell_error(shell, "count must be >= 0");
+		return -EINVAL;
+	}
+
+	app_radio_p2p_debug_drop_acks((uint32_t)n);
+	shell_print(shell, "Next %d confirmed-uplink Ack(s) will appear dropped", n);
+	return 0;
+}
+
+/* Build (frame + encrypt) telemetry frames WITHOUT transmitting or advancing
+ * the frame counter -- lets a bench tech inspect the exact bytes that would
+ * go on air. The P2P counterpart of cmd_lrw_compose(); dispatched from the
+ * same universal `compose` entry as cmd_radio_compose() below. */
+static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_sensor_sample();
+
+	bool more = true;
+	int frame = 0;
+
+	shell_print(shell, "P2P TELEMETRY frame preview:");
+	while (more) {
+		uint8_t buf[APP_RADIO_P2P_FRAME_MAX_LEN];
+		size_t len = 0;
+
+		int ret = app_radio_p2p_debug_compose(buf, sizeof(buf), &len, &more);
+
+		if (ret == -ENOTCONN) {
+			shell_error(shell, "not paired yet");
+			return ret;
+		}
+		if (ret) {
+			shell_error(shell, "compose failed: %d", ret);
+			return ret;
+		}
+		if (len == 0) {
+			shell_print(shell, "  (nothing to report)");
+			break;
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
+		for (size_t i = 0; i < len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "\n");
+	}
+	return 0;
+}
+#endif /* defined(CONFIG_RADIO_P2P) */
+
+/* Universal `compose`, same dispatch idiom as cmd_radio_status(): a name
+ * collision would otherwise be unavoidable on a dual-stack build, since both
+ * cmd_lrw_compose() and cmd_p2p_compose() would need to register under the
+ * same `ats radio compose` slot. */
+static int cmd_radio_compose(const struct shell *shell, size_t argc, char **argv)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		return cmd_p2p_compose(shell, argc, argv);
+	}
+#endif /* defined(CONFIG_RADIO_P2P) */
+#if defined(CONFIG_LORAWAN)
+	return cmd_lrw_compose(shell, argc, argv);
+#else
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	shell_error(shell, "no radio stack compiled in");
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
+}
+
+/* Single ATS entry point for both radio stacks (#118): `ats radio status`
+ * and `ats radio compose` work no matter which one radio_mode picked at
+ * boot; the rest are necessarily stack-specific (LoRaWAN link-check/NVM
+ * reset vs. P2P's pairing/retry/timing bench helpers) and only compiled in
+ * for the stack that provides them. */
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
+	sub_radio,
+	SHELL_CMD_ARG(status, NULL, "Print radio status (LoRaWAN or P2P).", cmd_radio_status, 1, 0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build a telemetry frame without sending; dump hex. "
+		      "Usage: compose [budget] (budget: LoRaWAN only)",
+		      cmd_radio_compose, 1, 1),
+#if defined(CONFIG_LORAWAN)
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
 		      0),
-	SHELL_CMD_ARG(compose, NULL,
-		      "Build telemetry uplink without sending; dump fPort-2 hex. "
-		      "Usage: compose [budget]",
-		      cmd_lrw_compose, 1, 1),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
-	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_RADIO_P2P)
+	SHELL_CMD_ARG(listen, NULL,
+		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
+		      "doc/p2p.md §14). Usage: listen on|off",
+		      cmd_p2p_listen, 2, 0),
+	SHELL_CMD_ARG(unjoin, NULL,
+		      "Clear P2P pairing state (reboots); factory_reset clears it too.",
+		      cmd_radio_unjoin, 1, 0),
+	SHELL_CMD_ARG(rx1_delay, NULL,
+		      "Debug: override rx1_delay, not persisted. Usage: rx1_delay <seconds>",
+		      cmd_radio_rx1_delay, 2, 0),
+	SHELL_CMD_ARG(ack_drop, NULL,
+		      "Debug: force the next N confirmed-uplink Acks to appear dropped. "
+		      "Usage: ack_drop <count>",
+		      cmd_radio_ack_drop, 2, 0),
+#endif /* defined(CONFIG_RADIO_P2P) */
+	SHELL_SUBCMD_SET_END);
+
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sensors,
@@ -914,16 +1038,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		cmd_cycle_led, 1, 1),
 	SHELL_CMD_ARG(switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
 		      cmd_switch_led, 3, 0),
-	SHELL_CMD_ARG(fade, NULL, "Fade a PWM LED. Usage: fade <red|green> <from%> <to%> <ms>",
-		      cmd_fade_led, 5, 0),
-	SHELL_CMD_ARG(heartbeat, NULL,
-		      "Heartbeat pulse (0->100->0, ~200ms). Usage: heartbeat <red|green> [reps]",
-		      cmd_heartbeat_led, 2, 1),
-	SHELL_CMD_ARG(
-		idle, NULL,
-		"Idle (radio-off) indicator @3s. Usage: idle [off|gpio|pwm] [red|green|yellow] "
-		"[on_ms]",
-		cmd_idle_led, 1, 3),
 	SHELL_SUBCMD_SET_END);
 
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
@@ -974,7 +1088,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
-		ret = app_lrw_queue_response(85, out, out_len);
+		ret = app_radio_queue_response(85, out, out_len);
 		if (ret) {
 			shell_warn(sh, "queue_response failed: %d", ret);
 		}
@@ -992,6 +1106,15 @@ static int cmd_cmd_lrw(const struct shell *sh, size_t argc, char **argv)
 static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 {
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
+}
+
+/* #415: inject a raw (unencrypted) Command over the plain_text transport — the
+ * bench equivalent of the NFC mailbox channel 0x03. Only allow-listed commands
+ * answer (get_claim_info); anything else returns NOT_READY "transport not
+ * allowed". */
+static int cmd_cmd_plain(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_PLAIN_TEXT, argv[1]);
 }
 
 /* Bench driver for the NFC paged history read (#260): drives the same
@@ -1109,6 +1232,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(plain, NULL,
+		      "Inject a raw Command over the unauthenticated plain_text transport "
+		      "(#415). Usage: plain <hex>",
+		      cmd_cmd_plain, 2, 0),
 	SHELL_CMD_ARG(history, NULL,
 		      "Drive the NFC paged history read (#260). Usage: history [<from> [<to>]]",
 		      cmd_cmd_history, 1, 2),
@@ -1324,20 +1451,28 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		uint32_t flag;
 		const char *name;
 	} names[] = {
+		/* Alarms */
 		{APP_DEVICE_STATUS_ALARM_ANY, "alarm-any"},
 		{APP_DEVICE_STATUS_ALARM_THRESHOLD, "alarm-threshold"},
 		{APP_DEVICE_STATUS_ALARM_STATE, "alarm-state"},
 		{APP_DEVICE_STATUS_ALARM_RATE, "alarm-rate"},
 		{APP_DEVICE_STATUS_ALARM_NO_DATA, "alarm-no-data"},
 		{APP_DEVICE_STATUS_ALARM_LOW_BATT, "alarm-low-battery"},
-		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
-		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
-		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
-		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		/* Radio */
+		{APP_DEVICE_STATUS_RADIO_OFF, "radio-off"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_RADIO_LINK_DOWN, "radio-link-down"},
+		/* Hardware / health */
+		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
+		{APP_DEVICE_STATUS_MAILBOX_DOWN, "mailbox-down"},
+		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
+		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
+		/* System */
+		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		{APP_DEVICE_STATUS_CLAIM_ACTIVE, "claim-active"},
 	};
 
-	char buf[128];
+	char buf[256];
 	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
@@ -1362,8 +1497,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	static const char *const build_type_name[] = {"main", "dev", "custom"};
-	static const char *const lrw_state_name[] = {"idle",    "joining",   "healthy",
-						     "warning", "reconnect", "disabled"};
+	static const char *const radio_state_name[] = {"idle",    "joining",   "healthy",
+						       "warning", "reconnect", "disabled"};
 
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
@@ -1371,15 +1506,38 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
 				 ? build_type_name[info.build_type]
 				 : "unknown";
-	const char *ls = info.lrw_state < ARRAY_SIZE(lrw_state_name)
-				 ? lrw_state_name[info.lrw_state]
+	const char *ls = info.radio_state < ARRAY_SIZE(radio_state_name)
+				 ? radio_state_name[info.radio_state]
 				 : "unknown";
 
 	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
 	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
-	shell_print(sh, "LRW state:     %s", ls);
+	shell_print(sh, "Radio state:   %s", ls);
+
+	struct app_radio_status rs;
+
+	app_radio_get_status(&rs);
+	if (rs.has_dl) {
+		shell_print(sh, "Radio signal:  last downlink %d dBm / SNR %d dB, %u s ago",
+			    rs.dl_rssi, rs.dl_snr, rs.dl_age_s);
+	} else {
+		shell_print(sh, "Radio signal:  no downlink since boot");
+	}
+	if (rs.has_datarate) {
+		shell_print(sh, "Radio params:  SF%u DR%u, TX %d dBm", rs.sf, rs.datarate,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	} else {
+		shell_print(sh, "Radio params:  SF%u, TX %d dBm", rs.sf,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	}
+	shell_print(sh, "Radio link:    fail streak %u, join attempts %u, duty hold %u s",
+		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s);
+	shell_print(sh, "Radio counts:  tx %u rx %u retry %u fail %u tx_err %u join %u",
+		    rs.cnt[APP_RADIO_CNT_TX], rs.cnt[APP_RADIO_CNT_RX], rs.cnt[APP_RADIO_CNT_RETRY],
+		    rs.cnt[APP_RADIO_CNT_FAIL], rs.cnt[APP_RADIO_CNT_TX_ERR],
+		    rs.cnt[APP_RADIO_CNT_JOIN]);
 	if (info.battery_mv) {
 		shell_print(sh, "Battery:       %u mV", info.battery_mv);
 	} else {
@@ -1388,6 +1546,11 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 
 	print_reset_cause(sh, info.reset_cause);
 	print_device_status(sh, info.device_status);
+	/* #313 D7: FTM mailbox authorisation is a per-unit hardware property — a
+	 * unit that cannot enable it has no interactive NFC channel and must not
+	 * leave the production tester. */
+	shell_print(sh, "NFC mailbox:   %s",
+		    app_nfc_mailbox_available() ? "available" : "UNAVAILABLE (MB_MODE cfg failed)");
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;
@@ -1400,7 +1563,10 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Wall clock:    RTC not synced");
 	}
 
-	/* Device identity keys (local shell only). secret-key is confidential; the
+	/* Device identity keys (local shell only). secret-key is confidential, so
+	 * only its first and last two bytes are shown here -- `config secret-key`
+	 * prints the full value on request. Bench logs of this command get pasted
+	 * into run records and tickets; the summary must not carry the key. The
 	 * claim-token (#170) is shown as "(unset)" until commissioned. */
 	char hexbuf[2 * 16 + 1];
 
@@ -1408,7 +1574,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "DevEUI:        %s", hexbuf);
 
 	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
-	shell_print(sh, "Secret key:    %s", hexbuf);
+	shell_print(sh, "Secret key:    %.4s...%s (masked; `config secret-key` shows all)", hexbuf,
+		    &hexbuf[strlen(hexbuf) - 4]);
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1449,16 +1616,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-/* Re-arm the claim record (#247/#351): drops the clm latch back to UNSET, which
- * auto-advances to PENDING (clm reappears on NFC) on the next nfc_check_locked()
- * poll, as long as claim_token is still set. Non-destructive alternative to
- * app_settings_vendor_reset() for bench re-testing the claim flow. */
+/* #415: (re)open the claim window -> ACTIVE, so the clm record is laid again on
+ * the next NFC poll (while claim_token is set) and get_claim_info discloses the
+ * token. Non-destructive alternative to app_settings_vendor_reset() for bench
+ * re-testing the claim flow. */
 static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_reset();
+	app_nfc_claim_active("ats claim active");
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1467,34 +1634,36 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state -> unset (re-arms to pending on next NFC poll)");
+	shell_print(sh, "claim window -> active");
 	if (!claim_set) {
-		shell_print(sh, "warning: claim_token is unset - clm record will NOT reappear "
+		shell_print(sh, "warning: claim_token is unset - clm record will NOT appear "
 				"until one is provisioned (`config claim-token <hex>`)");
 	}
 	return 0;
 }
 
-/* Force the claim window closed (#308) without a phone deleting the clm record. */
+/* #415: close the claim window -> DONE without a phone (claim_done command). */
 static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_ack();
-	shell_print(sh, "clm state -> consumed");
+	app_nfc_claim_done("ats claim done");
+	shell_print(sh, "claim window -> done");
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). Moved
- * here from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
+/* #247/#415: show the claim window state (debug/HW-test visibility). Moved here
+ * from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
 static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	static const char *const names[] = {"unset", "pending", "consumed"};
-	uint8_t state = app_nfc_clm_state_get();
+	uint8_t state = app_nfc_claim_state_get();
+	const char *name = (state == APP_NFC_CLAIM_ACTIVE) ? "active"
+			   : (state == APP_NFC_CLAIM_DONE) ? "done"
+							   : "?";
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1503,9 +1672,8 @@ static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state:   %s (%u)", state < ARRAY_SIZE(names) ? names[state] : "?",
-		    state);
-	shell_print(sh, "claim token: %s", claim_set ? "set" : "unset");
+	shell_print(sh, "claim window: %s (%u)", name, state);
+	shell_print(sh, "claim token:  %s", claim_set ? "set" : "unset");
 	return 0;
 }
 
@@ -1525,9 +1693,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(claim, &sub_claim, "Claim-lifecycle test commands (#247/#351).", NULL),
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
-#if defined(CONFIG_LORAWAN)
-	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
-#endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
+	SHELL_CMD(radio, &sub_radio, "Radio (LoRaWAN/P2P) commands.", NULL),
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),

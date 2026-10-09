@@ -535,23 +535,28 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_LIS2DH) */
 
 #if defined(CONFIG_SHT4X)
-	ret = app_sht4x_read(&temperature, &humidity);
-	if (ret == -ERANGE) {
-		/* #340 M18: comm succeeded and the CRC was valid - this is a
-		 * plausibility rejection, not a bus failure. Don't count it toward
-		 * the wedged-bus streak below (a real, working bus that just
-		 * returned one implausible-but-valid sample isn't "wedged"), and
-		 * don't let the NaN temperature/humidity locals overwrite the last
-		 * known-good reading further down - that would otherwise trip the
-		 * no-data alarm (APP_ALARM_NO_DATA_MS) off one implausible sample,
-		 * exactly like a genuinely disconnected sensor. */
-		sht4x_valid = false;
-		LOG_WRN("SHT4x reading rejected as implausible; keeping last value");
-	} else {
-		i2c_tried++;
-		if (ret) {
-			i2c_failed++;
-			LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
+	/* #465: cap_sht off skips the read and keeps it out of the wedged-bus
+	 * accounting; temperature/humidity stay NaN (written through below). */
+	if (g_app_config.cap_sht) {
+		ret = app_sht4x_read(&temperature, &humidity);
+		if (ret == -ERANGE) {
+			/* #340 M18: comm succeeded and the CRC was valid - this is a
+			 * plausibility rejection, not a bus failure. Don't count it
+			 * toward the wedged-bus streak below (a real, working bus that
+			 * just returned one implausible-but-valid sample isn't
+			 * "wedged"), and don't let the NaN temperature/humidity locals
+			 * overwrite the last known-good reading further down - that
+			 * would otherwise trip the no-data alarm (APP_ALARM_NO_DATA_MS)
+			 * off one implausible sample, exactly like a genuinely
+			 * disconnected sensor. */
+			sht4x_valid = false;
+			LOG_WRN("SHT4x reading rejected as implausible; keeping last value");
+		} else {
+			i2c_tried++;
+			if (ret) {
+				i2c_failed++;
+				LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
+			}
 		}
 	}
 #endif /* defined(CONFIG_SHT4X) */

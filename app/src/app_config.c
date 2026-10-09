@@ -39,14 +39,20 @@ static const struct app_config m_app_config_defaults = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
-	.lrw_link_check_interval = 5,
-	.lrw_link_check_fail_rejoin = 5,
+	.radio_link_check_interval = 5,
+	.radio_link_check_fail_rejoin = 5,
+	.cap_sht = true,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 7,
+	.p2p_tx_power = 14,
 };
 
 /* Set by h_commit when a schema version migration ran; init persists the
@@ -71,14 +77,20 @@ static struct app_config m_app_config = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.interval_announce = 24,
 	.alarm_limit = 10,
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
-	.lrw_link_check_interval = 5,
-	.lrw_link_check_fail_rejoin = 5,
+	.radio_link_check_interval = 5,
+	.radio_link_check_fail_rejoin = 5,
+	.cap_sht = true,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 7,
+	.p2p_tx_power = 14,
 };
 
 /* Guards m_app_config/g_app_config against concurrent mutation:
@@ -142,6 +154,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		     sizeof(m_app_config.vendor_reset_allow));
+	SETTINGS_SET("interval-announce", &m_app_config.interval_announce,
+		     sizeof(m_app_config.interval_announce));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -150,18 +164,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
 		     sizeof(m_app_config.lrw_activation));
-	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	SETTINGS_SET("lrw-deveui", m_app_config.radio_deveui, sizeof(m_app_config.radio_deveui));
 	SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	SETTINGS_SET("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	SETTINGS_SET("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	SETTINGS_SET("lrw-appkey", m_app_config.radio_appkey, sizeof(m_app_config.radio_appkey));
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
 	SETTINGS_SET("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
-	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		     sizeof(m_app_config.lrw_link_check_interval));
-	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		     sizeof(m_app_config.lrw_link_check_fail_rejoin));
+	SETTINGS_SET("radio-link-check-interval", &m_app_config.radio_link_check_interval,
+		     sizeof(m_app_config.radio_link_check_interval));
+	SETTINGS_SET("radio-link-check-fail-rejoin", &m_app_config.radio_link_check_fail_rejoin,
+		     sizeof(m_app_config.radio_link_check_fail_rejoin));
 	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
@@ -175,6 +189,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
 	SETTINGS_SET("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	SETTINGS_SET("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -197,6 +212,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	SETTINGS_SET("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		     sizeof(m_app_config.alarm_buzzer_mode));
+	SETTINGS_SET("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		     sizeof(m_app_config.radio_alarm_ack));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -211,6 +228,11 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_a_counter));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
+	SETTINGS_SET("p2p-frequency", &m_app_config.p2p_frequency,
+		     sizeof(m_app_config.p2p_frequency));
+	SETTINGS_SET("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		     sizeof(m_app_config.p2p_spreading_factor));
+	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 
 #undef SETTINGS_SET
 
@@ -250,11 +272,13 @@ static int h_commit(void)
 		m_app_config.lrw_network = stored.lrw_network;
 		m_app_config.lrw_adr = stored.lrw_adr;
 		m_app_config.lrw_activation = stored.lrw_activation;
-		memcpy(m_app_config.lrw_deveui, stored.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+		memcpy(m_app_config.radio_deveui, stored.radio_deveui,
+		       sizeof(m_app_config.radio_deveui));
 		memcpy(m_app_config.lrw_joineui, stored.lrw_joineui,
 		       sizeof(m_app_config.lrw_joineui));
 		memcpy(m_app_config.lrw_nwkkey, stored.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-		memcpy(m_app_config.lrw_appkey, stored.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+		memcpy(m_app_config.radio_appkey, stored.radio_appkey,
+		       sizeof(m_app_config.radio_appkey));
 		memcpy(m_app_config.lrw_devaddr, stored.lrw_devaddr,
 		       sizeof(m_app_config.lrw_devaddr));
 		memcpy(m_app_config.lrw_nwkskey, stored.lrw_nwkskey,
@@ -262,6 +286,9 @@ static int h_commit(void)
 		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
 		       sizeof(m_app_config.lrw_appskey));
 		m_app_config.lrw_datarate = stored.lrw_datarate;
+		m_app_config.p2p_frequency = stored.p2p_frequency;
+		m_app_config.p2p_spreading_factor = stored.p2p_spreading_factor;
+		m_app_config.p2p_tx_power = stored.p2p_tx_power;
 
 		m_app_config_migrated = true;
 	}
@@ -286,6 +313,12 @@ static int h_commit(void)
 	}
 	if (m_app_config.battery_level > 3600) {
 		m_app_config.battery_level = 3600;
+	}
+	if (m_app_config.interval_announce < 1 && m_app_config.interval_announce != 0) {
+		m_app_config.interval_announce = 1;
+	}
+	if (m_app_config.interval_announce > 168) {
+		m_app_config.interval_announce = 168;
 	}
 	if (m_app_config.alarm_limit < 0) {
 		m_app_config.alarm_limit = 0;
@@ -314,17 +347,17 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_datarate < 0 || (int)m_app_config.lrw_datarate > 8) {
 		m_app_config.lrw_datarate = 0;
 	}
-	if (m_app_config.lrw_link_check_interval < 0) {
-		m_app_config.lrw_link_check_interval = 0;
+	if (m_app_config.radio_link_check_interval < 0) {
+		m_app_config.radio_link_check_interval = 0;
 	}
-	if (m_app_config.lrw_link_check_interval > 255) {
-		m_app_config.lrw_link_check_interval = 255;
+	if (m_app_config.radio_link_check_interval > 255) {
+		m_app_config.radio_link_check_interval = 255;
 	}
-	if (m_app_config.lrw_link_check_fail_rejoin < 1) {
-		m_app_config.lrw_link_check_fail_rejoin = 1;
+	if (m_app_config.radio_link_check_fail_rejoin < 1) {
+		m_app_config.radio_link_check_fail_rejoin = 1;
 	}
-	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
-		m_app_config.lrw_link_check_fail_rejoin = 255;
+	if (m_app_config.radio_link_check_fail_rejoin > 255) {
+		m_app_config.radio_link_check_fail_rejoin = 255;
 	}
 	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
@@ -332,6 +365,24 @@ static int h_commit(void)
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
+	}
+	if (m_app_config.p2p_frequency < 863000000) {
+		m_app_config.p2p_frequency = 863000000;
+	}
+	if (m_app_config.p2p_frequency > 870000000) {
+		m_app_config.p2p_frequency = 870000000;
+	}
+	if (m_app_config.p2p_spreading_factor < 6) {
+		m_app_config.p2p_spreading_factor = 6;
+	}
+	if (m_app_config.p2p_spreading_factor > 12) {
+		m_app_config.p2p_spreading_factor = 12;
+	}
+	if (m_app_config.p2p_tx_power < 2) {
+		m_app_config.p2p_tx_power = 2;
+	}
+	if (m_app_config.p2p_tx_power > 22) {
+		m_app_config.p2p_tx_power = 22;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -365,6 +416,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		    sizeof(m_app_config.vendor_reset_allow));
+	EXPORT_FUNC("interval-announce", &m_app_config.interval_announce,
+		    sizeof(m_app_config.interval_announce));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
@@ -373,18 +426,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
 		    sizeof(m_app_config.lrw_activation));
-	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	EXPORT_FUNC("lrw-deveui", m_app_config.radio_deveui, sizeof(m_app_config.radio_deveui));
 	EXPORT_FUNC("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	EXPORT_FUNC("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	EXPORT_FUNC("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	EXPORT_FUNC("lrw-appkey", m_app_config.radio_appkey, sizeof(m_app_config.radio_appkey));
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
 	EXPORT_FUNC("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
-	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		    sizeof(m_app_config.lrw_link_check_interval));
-	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		    sizeof(m_app_config.lrw_link_check_fail_rejoin));
+	EXPORT_FUNC("radio-link-check-interval", &m_app_config.radio_link_check_interval,
+		    sizeof(m_app_config.radio_link_check_interval));
+	EXPORT_FUNC("radio-link-check-fail-rejoin", &m_app_config.radio_link_check_fail_rejoin,
+		    sizeof(m_app_config.radio_link_check_fail_rejoin));
 	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
@@ -398,6 +451,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
 	EXPORT_FUNC("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	EXPORT_FUNC("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -420,6 +474,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	EXPORT_FUNC("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		    sizeof(m_app_config.alarm_buzzer_mode));
+	EXPORT_FUNC("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		    sizeof(m_app_config.radio_alarm_ack));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -434,6 +490,11 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_a_counter));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
+	EXPORT_FUNC("p2p-frequency", &m_app_config.p2p_frequency,
+		    sizeof(m_app_config.p2p_frequency));
+	EXPORT_FUNC("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		    sizeof(m_app_config.p2p_spreading_factor));
+	EXPORT_FUNC("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 	/* Export config-version LAST: settings_save is per-key atomic, so writing
 	 * the schema marker after every value means a brownout mid-save leaves an
 	 * old version with a partial new payload rather than a new version flagging
@@ -653,6 +714,11 @@ static void print_vendor_reset_allow(const struct shell *shell)
 		    m_app_config.vendor_reset_allow ? "true" : "false");
 }
 
+static void print_interval_announce(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " interval-announce %d", m_app_config.interval_announce);
+}
+
 static void print_alarm_limit(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
@@ -745,9 +811,10 @@ static void print_lrw_activation(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-activation %s", str);
 }
 
-static void print_lrw_deveui(const struct shell *shell)
+static void print_radio_deveui(const struct shell *shell)
 {
-	print_bytes(shell, "lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	print_bytes(shell, "radio-deveui", m_app_config.radio_deveui,
+		    sizeof(m_app_config.radio_deveui));
 }
 
 static void print_lrw_joineui(const struct shell *shell)
@@ -761,9 +828,10 @@ static void print_lrw_nwkkey(const struct shell *shell)
 	print_bytes(shell, "lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
 }
 
-static void print_lrw_appkey(const struct shell *shell)
+static void print_radio_appkey(const struct shell *shell)
 {
-	print_bytes(shell, "lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	print_bytes(shell, "radio-appkey", m_app_config.radio_appkey,
+		    sizeof(m_app_config.radio_appkey));
 }
 
 static void print_lrw_devaddr(const struct shell *shell)
@@ -822,16 +890,16 @@ static void print_lrw_datarate(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-datarate %s", str);
 }
 
-static void print_lrw_link_check_interval(const struct shell *shell)
+static void print_radio_link_check_interval(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-interval %d",
-		    m_app_config.lrw_link_check_interval);
+	shell_print(shell, SETTINGS_PFX " radio-link-check-interval %d",
+		    m_app_config.radio_link_check_interval);
 }
 
-static void print_lrw_link_check_fail_rejoin(const struct shell *shell)
+static void print_radio_link_check_fail_rejoin(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-fail-rejoin %d",
-		    m_app_config.lrw_link_check_fail_rejoin);
+	shell_print(shell, SETTINGS_PFX " radio-link-check-fail-rejoin %d",
+		    m_app_config.radio_link_check_fail_rejoin);
 }
 
 static void print_cap_hall_left(const struct shell *shell)
@@ -882,6 +950,11 @@ static void print_cap_buzzer(const struct shell *shell)
 		    m_app_config.cap_buzzer ? "true" : "false");
 }
 
+static void print_cap_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-sht %s", m_app_config.cap_sht ? "true" : "false");
+}
+
 static void print_cap_w1_sensors(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
@@ -927,6 +1000,12 @@ static void print_alarm_buzzer_mode(const struct shell *shell)
 		break;
 	}
 	shell_print(shell, SETTINGS_PFX " alarm-buzzer-mode %s", str);
+}
+
+static void print_radio_alarm_ack(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " radio-alarm-ack %s",
+		    m_app_config.radio_alarm_ack ? "true" : "false");
 }
 
 static void print_accel_motion_sensitivity(const struct shell *shell)
@@ -1000,6 +1079,22 @@ static void print_input_b_counter(const struct shell *shell)
 		    m_app_config.input_b_counter ? "true" : "false");
 }
 
+static void print_p2p_frequency(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-frequency %d", m_app_config.p2p_frequency);
+}
+
+static void print_p2p_spreading_factor(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-spreading-factor %d",
+		    m_app_config.p2p_spreading_factor);
+}
+
+static void print_p2p_tx_power(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-tx-power %d", m_app_config.p2p_tx_power);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1014,6 +1109,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_sensors(shell);
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
+	print_interval_announce(shell);
 	print_alarm_limit(shell);
 	print_lrw_region(shell);
 	print_radio_mode(shell);
@@ -1021,16 +1117,16 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
 	print_lrw_activation(shell);
-	print_lrw_deveui(shell);
+	print_radio_deveui(shell);
 	print_lrw_joineui(shell);
 	print_lrw_nwkkey(shell);
-	print_lrw_appkey(shell);
+	print_radio_appkey(shell);
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
 	print_lrw_datarate(shell);
-	print_lrw_link_check_interval(shell);
-	print_lrw_link_check_fail_rejoin(shell);
+	print_radio_link_check_interval(shell);
+	print_radio_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
 	print_cap_input_a(shell);
@@ -1039,9 +1135,11 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
 	print_cap_buzzer(shell);
+	print_cap_sht(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_alarm_buzzer_mode(shell);
+	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1051,6 +1149,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_counter(shell);
 	print_input_a_counter(shell);
 	print_input_b_counter(shell);
+	print_p2p_frequency(shell);
+	print_p2p_spreading_factor(shell);
+	print_p2p_tx_power(shell);
 
 	return 0;
 }
@@ -1250,6 +1351,36 @@ static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char *
 			print_vendor_reset_allow);
 }
 
+static int cmd_interval_announce(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_interval_announce(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	int a = strtol(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (a != 0 && (a < 1 || a > 168)) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.interval_announce = a;
+
+	return 0;
+}
+
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
@@ -1395,10 +1526,10 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 	return 0;
 }
 
-static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_deveui(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_deveui,
-			 sizeof(m_app_config.lrw_deveui), false, print_lrw_deveui);
+	return cmd_bytes(shell, argc, argv, m_app_config.radio_deveui,
+			 sizeof(m_app_config.radio_deveui), false, print_radio_deveui);
 }
 
 static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
@@ -1413,10 +1544,10 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 			 sizeof(m_app_config.lrw_nwkkey), false, print_lrw_nwkkey);
 }
 
-static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_appkey(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appkey,
-			 sizeof(m_app_config.lrw_appkey), false, print_lrw_appkey);
+	return cmd_bytes(shell, argc, argv, m_app_config.radio_appkey,
+			 sizeof(m_app_config.radio_appkey), false, print_radio_appkey);
 }
 
 static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
@@ -1482,16 +1613,16 @@ static int cmd_lrw_datarate(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_link_check_interval(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_interval, 0, 255,
-		       print_lrw_link_check_interval);
+	return cmd_int(shell, argc, argv, &m_app_config.radio_link_check_interval, 0, 255,
+		       print_radio_link_check_interval);
 }
 
-static int cmd_lrw_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_fail_rejoin, 1, 255,
-		       print_lrw_link_check_fail_rejoin);
+	return cmd_int(shell, argc, argv, &m_app_config.radio_link_check_fail_rejoin, 1, 255,
+		       print_radio_link_check_fail_rejoin);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
@@ -1532,6 +1663,11 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 static int cmd_cap_buzzer(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_buzzer, print_cap_buzzer);
+}
+
+static int cmd_cap_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_sht, print_cap_sht);
 }
 
 static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
@@ -1588,6 +1724,11 @@ static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **
 	}
 
 	return 0;
+}
+
+static int cmd_radio_alarm_ack(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.radio_alarm_ack, print_radio_alarm_ack);
 }
 
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
@@ -1671,6 +1812,23 @@ static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **ar
 	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
+static int cmd_p2p_frequency(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_frequency, 863000000, 870000000,
+		       print_p2p_frequency);
+}
+
+static int cmd_p2p_spreading_factor(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_spreading_factor, 6, 12,
+		       print_p2p_spreading_factor);
+}
+
+static int cmd_p2p_tx_power(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 2, 22, print_p2p_tx_power);
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -1741,6 +1899,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel.",
 	              cmd_vendor_reset_allow, 1, 1),
 
+	SHELL_CMD_ARG(interval-announce, NULL,
+	              "Get/Set periodic Info + settings-info announce interval (range 1 to 168 hours; 0 = off).",
+	              cmd_interval_announce, 1, 1),
+
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
 	              cmd_alarm_limit, 1, 1),
@@ -1769,9 +1931,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN activation (otaa/abp).",
 	              cmd_lrw_activation, 1, 1),
 
-	SHELL_CMD_ARG(lrw-deveui, NULL,
-	              "Get/Set LoRaWAN DevEUI (16 hex digits).",
-	              cmd_lrw_deveui, 1, 1),
+	SHELL_CMD_ARG(radio-deveui, NULL,
+	              "Get/Set DevEUI (16 hex digits), the node identity on LoRaWAN and P2P.",
+	              cmd_radio_deveui, 1, 1),
 
 	SHELL_CMD_ARG(lrw-joineui, NULL,
 	              "Get/Set LoRaWAN JoinEUI (16 hex digits).",
@@ -1781,9 +1943,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN NwkKey (32 hex digits).",
 	              cmd_lrw_nwkkey, 1, 1),
 
-	SHELL_CMD_ARG(lrw-appkey, NULL,
-	              "Get/Set LoRaWAN AppKey (32 hex digits).",
-	              cmd_lrw_appkey, 1, 1),
+	SHELL_CMD_ARG(radio-appkey, NULL,
+	              "Get/Set AppKey (32 hex digits): LoRaWAN OTAA root key, P2P join and session-key root.",
+	              cmd_radio_appkey, 1, 1),
 
 	SHELL_CMD_ARG(lrw-devaddr, NULL,
 	              "Get/Set LoRaWAN DevAddr (8 hex digits).",
@@ -1801,13 +1963,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default.",
 	              cmd_lrw_datarate, 1, 1),
 
-	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
-	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
-	              cmd_lrw_link_check_interval, 1, 1),
+	SHELL_CMD_ARG(radio-link-check-interval, NULL,
+	              "Get/Set link-check cadence, both radios: every N-th report is the link check -- a LoRaWAN LinkCheckReq, a confirmed P2P telemetry (0 = disabled).",
+	              cmd_radio_link_check_interval, 1, 1),
 
-	SHELL_CMD_ARG(lrw-link-check-fail-rejoin, NULL,
-	              "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted.",
-	              cmd_lrw_link_check_fail_rejoin, 1, 1),
+	SHELL_CMD_ARG(radio-link-check-fail-rejoin, NULL,
+	              "Get/Set link-check failures (while degraded) before the link is re-established: a LoRaWAN OTAA rejoin, a P2P re-join.",
+	              cmd_radio_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
 	              "Get/Set hall left capability (true/false).",
@@ -1841,6 +2003,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled).",
 	              cmd_cap_buzzer, 1, 1),
 
+	SHELL_CMD_ARG(cap-sht, NULL,
+	              "Get/Set onboard SHT4x temperature/humidity capability (true/false).",
+	              cmd_cap_sht, 1, 1),
+
 	SHELL_CMD_ARG(cap-w1-sensors, NULL,
 	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
 	              cmd_cap_w1_sensors, 1, 1),
@@ -1852,6 +2018,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
 	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
 	              cmd_alarm_buzzer_mode, 1, 1),
+
+	SHELL_CMD_ARG(radio-alarm-ack, NULL,
+	              "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times.",
+	              cmd_radio_alarm_ack, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
@@ -1888,6 +2058,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(input-b-counter, NULL,
 	              "Get/Set input B counter enabled (true/false).",
 	              cmd_input_b_counter, 1, 1),
+
+	SHELL_CMD_ARG(p2p-frequency, NULL,
+	              "Get/Set P2P carrier frequency in Hz (EU868 band).",
+	              cmd_p2p_frequency, 1, 1),
+
+	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept).",
+	              cmd_p2p_spreading_factor, 1, 1),
+
+	SHELL_CMD_ARG(p2p-tx-power, NULL,
+	              "Get/Set P2P TX power in dBm.",
+	              cmd_p2p_tx_power, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
@@ -1935,14 +2117,19 @@ int app_config_device_reset(void)
 	m_app_config.lrw_network = preserved.lrw_network;
 	m_app_config.lrw_adr = preserved.lrw_adr;
 	m_app_config.lrw_activation = preserved.lrw_activation;
-	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.radio_deveui, preserved.radio_deveui,
+	       sizeof(m_app_config.radio_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 	memcpy(m_app_config.lrw_nwkkey, preserved.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	memcpy(m_app_config.lrw_appkey, preserved.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	memcpy(m_app_config.radio_appkey, preserved.radio_appkey,
+	       sizeof(m_app_config.radio_appkey));
 	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
 	m_app_config.lrw_datarate = preserved.lrw_datarate;
+	m_app_config.p2p_frequency = preserved.p2p_frequency;
+	m_app_config.p2p_spreading_factor = preserved.p2p_spreading_factor;
+	m_app_config.p2p_tx_power = preserved.p2p_tx_power;
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 
@@ -1982,7 +2169,8 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
 	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
-	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.radio_deveui, preserved.radio_deveui,
+	       sizeof(m_app_config.radio_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));

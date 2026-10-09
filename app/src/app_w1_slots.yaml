@@ -61,8 +61,8 @@ types:
     slot: 0
     channels:
       # Climate / environment
-      - {ch: 0,  name: temperature,       label: "Temperature (SHT4x)",       quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-45.0, 130.0], liveness: true}
-      - {ch: 1,  name: humidity,          label: "Relative humidity (SHT4x)", quantity: humidity,    unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],     range: [0.0, 100.0], liveness: true}
+      - {ch: 0,  name: temperature,       label: "Temperature (SHT4x)",       quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-45.0, 130.0], cap: cap_sht, liveness: true}
+      - {ch: 1,  name: humidity,          label: "Relative humidity (SHT4x)", quantity: humidity,    unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],     range: [0.0, 100.0], cap: cap_sht, liveness: true}
       - {ch: 2,  name: pressure,          label: "Pressure (MPL3115A2)",      quantity: pressure,    unit: hPa,   kind: threshold, wire: [uint32, 10],   history: [u16, 10],   range: [0.0, 2000.0], cap: cap_barometer, liveness: true}
       - {ch: 3,  name: illuminance,       label: "Illuminance (OPT3001)",     quantity: illuminance, unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5],  range: [0.0, 83865.6], cap: cap_light_sensor}
       - {ch: 4,  name: temperature-baro,  label: "Temperature (MPL3115A2)",   quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-55.0, 125.0],  cap: cap_barometer}

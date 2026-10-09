@@ -309,7 +309,7 @@ static uint8_t *cfg_rom_staging(int slot)
 /* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
  * at runtime from the discovered device's family code, not stored in config.
  * The serial is stored big-endian so `config sensorN-rom` reads the same digits
- * as `w1 list` / the serial number (e.g. 0000000553f7), matching the lrw-deveui
+ * as `w1 list` / the serial number (e.g. 0000000553f7), matching the radio-deveui
  * convention. 0 = empty slot. */
 static uint64_t cfg_rom_get(int slot)
 {

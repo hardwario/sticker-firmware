@@ -6,6 +6,15 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+# Debug build (debug.conf in EXTRA_CONF_FILE): also apply debug.overlay, which
+# locks the MSI to the LSE (msi-pll-mode). debug.conf sets CONFIG_PM=n, so the
+# kernel tick is SysTick on the free-running MSI (~1.2 % off) instead of LPTIM
+# on the LSE. Kconfig cannot add a devicetree overlay, and Kconfig is not
+# parsed yet here, so key on the fragment name before find_package(Zephyr).
+if(EXTRA_CONF_FILE MATCHES "(^|;|/)debug\\.conf(;|$)")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/debug.overlay)
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
@@ -58,13 +67,17 @@ include(nanopb)
 zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
+target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_radio_p2p.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-# app_report.c owns the periodic sample/history cadence, not just the
-# LoRaWAN uplink (issue #395: CONFIG_LORAWAN=n toggle) -- compiled
-# unconditionally so history/sampling keep working with no radio; its own
-# app_lrw_* calls are internally CONFIG_LORAWAN-gated.
+target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_radio_lrw.c)
+# app_report.c owns the periodic sample/history cadence via app_radio, not
+# just the LoRaWAN uplink -- compiled unconditionally so sampling,
+# history capture and store-and-forward keep working with no radio linked in
+# at all. Two independent reasons converge here: #395's CONFIG_RADIO_LORAWAN=n
+# debug variant, and #118's P2P bench overlay (CONFIG_RADIO_LORAWAN=n +
+# CONFIG_RADIO_P2P=y). Its own app_radio_* calls route to whichever transport
+# is compiled in, and app_radio.c handles "neither" itself.
 target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
@@ -117,4 +130,6 @@ target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_sensor_types.c)
 target_sources(app PRIVATE src/app_sensor_channels.c)
 target_sources(app PRIVATE src/app_settings.c)
+target_sources(app PRIVATE src/app_radio.c)
+target_sources(app PRIVATE src/app_slot.c)
 target_sources(app PRIVATE src/main.c)

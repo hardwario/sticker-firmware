@@ -124,9 +124,14 @@ ZTEST(sensor_types, test_capability_gates)
 	c = app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD, APP_SENSOR_CH_MOTHERBOARD_PRESSURE);
 	zassert_equal(c->cap_off, offsetof(struct app_config, cap_barometer));
 
-	/* Always-on channel and 1-Wire channels carry no gate. */
+	/* The onboard SHT4x is gated by cap_sht (#465). */
 	c = app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
 				   APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE);
+	zassert_equal(c->cap_off, offsetof(struct app_config, cap_sht));
+
+	/* Always-on channel and 1-Wire channels carry no gate. */
+	c = app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
+				   APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE);
 	zassert_equal(c->cap_off, APP_SENSOR_NO_CAP);
 	c = app_sensor_channel_get(APP_SENSOR_TYPE_DALLAS, APP_SENSOR_CH_DALLAS_TEMPERATURE);
 	zassert_equal(c->cap_off, APP_SENSOR_NO_CAP);

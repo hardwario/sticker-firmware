@@ -246,11 +246,11 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
   run `app/decoder/ttn.js`) and a second-opinion join path.
 - **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
   the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
-  correctly and reliably — confirmed decisive on 2026-08-11: `ats lrw check` got an immediate
+  correctly and reliably — confirmed decisive on 2026-08-11: `ats radio check` got an immediate
   `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
   DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
   throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
-  freshly release-flashed device with stock `lrw-link-check-interval`/`lrw-link-check-fail-rejoin`
+  freshly release-flashed device with stock `radio-link-check-interval`/`radio-link-check-fail-rejoin`
   defaults (both `5`, per `app_config.yml`) rejoined OTAA (fresh DevAddr each time) roughly every
   5-16 minutes, with device uptime climbing continuously across rejoins (confirmed via
   `unix_time - uptime_s` staying self-consistent — this is LoRaWAN-layer RECONNECT churn, not
@@ -420,13 +420,18 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 
 ### AT-HOST-02 — native_sim ztest suites
 - **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
-  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw, p2p_logic on
+  `native_sim/native/64`).
   `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
   (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
   alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
   only covers the static rule-validation layer. `buzzer` (#397) drives the real
   `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
-  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds. `p2p_logic` (#118, PR
+  #408) compiles the real `app_radio_p2p.c` against a no-op fake LoRa device (`src/emul_lora.c`) and
+  thin stubs, reaching its internal pure helpers via CONFIG_ZTEST hooks (`app_radio_p2p.h`): LoRa
+  time-on-air, the CCM nonce layout, the data-plane frame codec (round-trip + tamper), and the
+  token-bucket duty-cycle governor (B2 — refill accrual, burst, cap, long-run ≤1%).
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -480,7 +485,8 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 ### AT-BOOT-02 — boot LED carousel (DR; SA on release; maps G2)
 - **Steps:** reboot; debug: confirm carousel timing vs log; release: §18 assist "watch the
   LEDs after I reset the device".
-- **Expect:** R→Y→G carousel ~5 s after boot, then idle. See `version 1.4.md` §16 for the
+- **Expect:** R→Y→G carousel (3 s) right after boot, no heartbeat before it ends, and no
+  `app_led` ERR/WRN in the boot log; then idle. See `version 1.4.md` §16 for the
   full LED reference.
 
 ### AT-BOOT-03 — identity preserved across factory reset & reflash (D; maps G6, G6c)
@@ -496,7 +502,7 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   a provisioned debug device via `JLinkExe loadfile` (sector-erase, no `--erase`). After a real
   power cycle (see AT-BOOT-04's PPK2 correction below), the autonomous post-join GetInfo uplink
   decoded to `debug: false`, `serial_number: 2162199999` (unchanged) and a successful OTAA join
-  on the preserved `lrw_deveui`/`lrw_appkey` — full identity survived a real firmware-variant
+  on the preserved `radio_deveui`/`radio_appkey` — full identity survived a real firmware-variant
   swap, not just a same-image reflash. Since release has no shell/RTT, post-release verification
   had to go through LRW (autonomous GetInfo) — there is currently no way to inspect NFC state on
   a release device without a phone or external reader.
@@ -553,7 +559,7 @@ source of truth — read it before testing so parameter names/ranges are current
 ### AT-CFG-01 — shell round-trip on a representative sample (D, A; maps C8)
 - **Steps:** for each of: `interval-report` (int, 60–86400), `interval-sample` (5–3600 or 0),
   `battery-level` (1000–3600), `history-enable` (bool), `accel-motion-sensitivity` (enum),
-  `lrw-adr` (bool), `lrw-link-check-interval` (0–255): set a non-default valid value →
+  `lrw-adr` (bool), `radio-link-check-interval` (0–255): set a non-default valid value →
   read back → `settings save` (reboots) → read back again.
 - **Expect:** staged value visible before save; persisted after reboot.
 - **Cleanup:** restore defaults, save.
@@ -568,7 +574,7 @@ source of truth — read it before testing so parameter names/ranges are current
 
 ### AT-CFG-03 — transport access model (D, A; maps C1, C10, H-3)
 - **Steps:** attempt over `ats cmd lrw`: (a) SetParam on a `lorawan`-group field (e.g.
-  radio_mode, lrw_appkey); (b) GetParam of `lrw_appkey`. Then the same over `ats cmd nfc`.
+  radio_mode, radio_appkey); (b) GetParam of `radio_appkey`. Then the same over `ats cmd nfc`.
 - **Expect:** LRW transport: both refused (lorawan group is shell+nfc writable only; keys
   NFC-readable only). NFC transport: allowed. Any key readable over LRW = **CRIT** finding.
 
@@ -606,7 +612,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 
 ### AT-LRW-01 — OTAA join on ChirpStack (DR, A; maps L2)
 - **Pre:** provision OTAA creds (§ annex; shell: `config lrw-activation otaa`,
-  `config lrw-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
+  `config radio-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
 - **Steps:** reboot; poll `GetActivation` until DevAddr appears (≤ 2 min).
 - **Expect:** join accept; first uplink = autonomous GetInfo on fPort 85 (AT-LRW-04).
 - **Evidence:** DevAddr, join timestamp, RSSI/SNR of first uplink.
@@ -626,12 +632,13 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-04 — GetInfo-on-join + device_status (DR, A; maps L4, G4)
 - **Steps:** force a rejoin (`lrw_join 08018a0100` via downlink or `ats cmd lrw`); capture
   the fPort-85 info frame; decode.
-- **Expect:** serial, fw version, config version, battery mV, lrw_state, device_status
+- **Expect:** serial, fw version, config version, battery mV, device_status (the link state is
+  `get_radio_state.state` since v1.5.0, no longer in Info)
   bitmask present and plausible (e.g. low-battery bit clear at {PPK2_MV}=3000).
 
 ### AT-LRW-05 — periodic + multi-frame telemetry (DR, A; maps L5, L6)
 - **Steps:** set `interval-report 60`, save; enable enough sensors that the fPort-2 payload
-  exceeds one frame at the current DR (or use `ats lrw compose <budget>` on debug to
+  exceeds one frame at the current DR (or use `ats radio compose <budget>` on debug to
   verify the split logic directly with a tiny budget).
 - **Expect:** uplinks every ~60 s (+TX jitter 0..min(interval/10,10 s) — jitter delays TX
   only, never the sampling timestamps); multi-frame sequences reassemble in the decoder.
@@ -664,20 +671,20 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   ~35s after the ack — i.e. LRW also does response-before-reboot ordering, just via ordinary
   uplink-then-deferred-action sequencing rather than NFC's ack/backstop gate. Config diff
   matched `app_config_device_reset()`'s preserve-list exactly (`cap-w1-sensors`/
-  `interval-report` reset, `lrw-appkey`/secret_key/serial/nonce_counter preserved).
+  `interval-report` reset, `radio-appkey`/secret_key/serial/nonce_counter preserved).
 - **Evidence:** command → response-hex → decoded table. This is the core release-FW
   functional suite.
 
 ### AT-LRW-07 — link-check state machine (D, A; maps L7, L8, L13)
-- **Pre:** ChirpStack (answers LinkCheckReq); `lrw-link-check-interval 5`,
-  `lrw-link-check-fail-rejoin 5` or run-plan values.
-- **Steps:** `ats lrw check` (real LC); then drive the FSM synthetically: `ats lrw lc fail`
-  × N → status via `ats lrw status` after each; then `ats lrw lc ok`.
+- **Pre:** ChirpStack (answers LinkCheckReq); `radio-link-check-interval 5`,
+  `radio-link-check-fail-rejoin 5` or run-plan values.
+- **Steps:** `ats radio check` (real LC); then drive the FSM synthetically: `ats radio lc fail`
+  × N → status via `ats radio status` after each; then `ats radio lc ok`.
 - **Expect:** HEALTHY → WARNING (with 🟡2× LED per §16) → RECONNECT (rejoin with backoff)
   transitions at the configured thresholds; `ok` recovers to HEALTHY.
 
 ### AT-LRW-08 — late LC in RECONNECT does not wedge (D, A; maps L14, HIGH-1 regression)
-- **Steps:** per manual L14: force RECONNECT, then inject a late `ats lrw lc ok`; continue
+- **Steps:** per manual L14: force RECONNECT, then inject a late `ats radio lc ok`; continue
   sending.
 - **Expect:** TX continues; no stuck semaphore (the historical overloaded-timer wedge).
 
@@ -688,6 +695,18 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   no LoRaWAN traffic + no crash). Back to `lorawan`.
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
+- **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
+  exists for it (the `p2p_logic` native_sim suite drives `app_radio_p2p.c` on a fake LoRa
+  device, but not this start-up guard), so this is the only place it gets exercised. In `radio-mode p2p`, set
+  `radio-appkey 00000000000000000000000000000000` + save: expect `P2P not started: radio_appkey
+  is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
+  status`, no JoinRequest on air, and `join` refused rather than transmitting.
+  Restore a real `radio-appkey` and confirm the join proceeds.
+- **Note:** `factory_reset` reverts `radio-mode` to its `OFF` default (#350; it is
+  `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
+  so it never leaves a live P2P node behind — but it does wipe `radio_appkey` while leaving
+  the `p2pjoin/*` pairing intact, which is the state the guard above exists for
+  (doc/p2p.md §7).
 - **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
 
 ### AT-LRW-10 — release sustained TX (R, A; maps L16 — decisive TX-stop regression)
@@ -697,7 +716,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Evidence:** uplink timestamp list + max-gap stat.
 
 ### AT-LRW-11 — DR/payload budget behaviour (D, A; maps L6)
-- **Steps:** `ats lrw compose 51` / `ats lrw compose 242` (DR0 vs DR5-class budgets) with
+- **Steps:** `ats radio compose 51` / `ats radio compose 242` (DR0 vs DR5-class budgets) with
   many sensors enabled.
 - **Expect:** frames never exceed the budget; split points are clean protobuf boundaries;
   the 2-byte-varint capacity case (>127 B frames) composes correctly.
@@ -742,7 +761,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   uplink DR and confirm a downlink is received in RX2.
 - **Expect:** uplinks flow and decode identically to EU868 (`ttn.js` is region-agnostic — any
   divergence = HIGH); telemetry fits the smallest US915 uplink DR max payload (DR0 ≈ 11 B → payload
-  splits across frames, never silently dropped — cross-check with `ats lrw compose 11` on debug);
+  splits across frames, never silently dropped — cross-check with `ats radio compose 11` on debug);
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
 - **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
 
@@ -778,7 +797,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
 ### AT-NFC-02 — encrypted GetInfo round-trip (DR, SA; maps N4)
 - **Steps:** `POST /comms` (encrypted, key from store or `{STICKER_KEY}`) → `POST /command
   {"op":"getinfo"}`.
-- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (lrw_state, dev_eui,
+- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (dev_eui,
   device_status); nonce advanced by the transaction.
 
 ### AT-NFC-03 — setparam → save → reboot → verify (DR, SA; maps N1, K6)
@@ -807,7 +826,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
   (anti-brick bound holds).
 
 ### AT-NFC-07 — NFC-only key readback (D, SA; maps C10, #162)
-- **Steps:** encrypted GetParam of `lorawan.lrw-appkey` over NFC.
+- **Steps:** encrypted GetParam of `lorawan.radio-appkey` over NFC.
 - **Expect:** key returned over NFC; the identical request over LRW (AT-CFG-03) refused.
 
 ### AT-NFC-08 — paged history readout (DR, SA; maps #260)
@@ -1153,6 +1172,10 @@ Regression tolerance: ±20 % on µA-class averages, flag anything beyond.
   carousel, join TX bursts, settle.
 - **Expect:** single boot signature (cross-check AT-BOOT-04); join burst count sane
   (1 join + GetInfo + first telemetry); settle to idle band.
+  **v1.5.0:** the carousel is the GPIO hard blink again (red 500 ms, yellow 500 ms, green
+  1500 ms, 250 ms gaps — #466); NFC init runs last, ~8 s after boot, just before the join
+  (#313); the post-join sequence is join + `Info` + settings-info `ConfigDump` on fPort 85
+  (#412) + first telemetry — one uplink burst more than v1.4.0.
 - **Evidence:** trace CSV + annotated segment averages.
 
 ### AT-PWR-04 — TX-period signature as release liveness (R, A)
@@ -1220,6 +1243,142 @@ delta is appended to the power annex / `doc/power-consumption.md` as the new bas
   above baseline → §20 improvement item.
 - **Evidence:** variant × idle-µA matrix appended to the annex (the headline "how much does each
   option cost" deliverable).
+
+### v1.5.0 power scenarios (AT-PWR-11..15)
+
+The v1.5.0 changes that can move the energy budget: the LED back on GPIO (#466), the
+mailbox-only NFC channel that powers the ST25DV during a tap (#313), the extra settings-info
+uplink after boot (#412), the link-loss recovery ladder (#424) with the M-2 duty-cycle hold
+(F29), and the buzzer melodies (#397). Same rules as AT-PWR-08..10: **release FW, J-Link
+physically detached, power-cycle after the last SWD session**, config changed over NFC
+(Manager-App mailbox session, §3.6) or set before the final flash.
+
+**Capture:** raw samples, not window averages — `ppk2_measure.py --csv` (PPK2 full rate, 100 kS/s), so
+short events (5 ms heartbeat, ~85 ms uplink) can be
+integrated. Report per scenario: idle avg excluding bursts, floor median, min, and the charge
+(mC) of each event class.
+
+### AT-PWR-11 — v1.4.0 → v1.5.0 A/B regression (R, A; release gate for #398)
+- **Pre:** one unit, fitted HW unchanged between runs. Two release images: the `v1.4.0` tag
+  (GitHub release artefact) and the v1.5.0 candidate (CI release artefact or a local release
+  build of the tested commit — record its SHA). Run v1.4.0 **first**, then flash v1.5.0 without
+  erase: the upgrade keeps NVS and history; the reverse (downgrade) needs `history clear`
+  (`version 1.5.md` §20).
+- **Config (both images):** `radio-mode lorawan` (joined, ADR on), `interval-report 900`,
+  `interval-sample` default, history off, accelerometer off, the bench's fitted-sensor caps.
+  Set it on v1.4.0 over the shell before detaching; v1.5.0 inherits it via NVS — verify with
+  an NFC `GetConfig` (mailbox) after the upgrade, no SWD.
+- **Steps (per image):** PPK2 `OFF` → 3 s → `ON`; discard the first 3 min (boot, join, `Info`,
+  settings-info, first telemetry); then measure **30 min** raw (≥ 1 full report interval plus
+  idle). From the same trace: idle avg excluding TX bursts, floor median, min, charge per
+  uplink, 30-min overall avg. Repeat the 30-min capture once per image (run-to-run spread).
+- **Expect:** v1.5.0 idle avg and floor median within **±10 %** of v1.4.0 (both images have the
+  same 5 ms / 3 s green heartbeat, so it cancels); uplink charge within ±10 % (same DR/TX power
+  — compare the DR on the LNS). v1.5.0 > v1.4.0 by more than +20 % on the idle avg = **HIGH,
+  blocks #398**; between +10 % and +20 % → analyse (wake-rate histogram, §20) before merge.
+- **Evidence:** image × {idle avg, floor median, min, mC/uplink, 30-min avg} table into
+  `doc/power-consumption.md` (new v1.5.0 section) and the bench annex; raw CSVs attached to
+  the #398 HIL comment.
+
+### AT-PWR-12 — LED on GPIO: the CPU stays in Stop while an LED is lit (R, A; #466)
+- **Steps:** (a) from the AT-PWR-11 v1.5.0 trace, find the green heartbeat pulses (5 ms every
+  3 s) and the average cost of the heartbeat (pulse charge × 1/3 s). (b) Produce a long LED
+  state without SWD: the NFC result indication (green + yellow 2 s after a successful mailbox
+  session) and, if an alarm rule is available, the red alarm blink; capture each at full rate.
+- **Expect:** (a) heartbeat ≈ +6 µA average (#390), pulses exactly every 3 s. (b) During a lit
+  LED the trace is the LED current as a flat plateau **with the normal Stop wake spikes on top**
+  — no extra ~4–5 mA plateau of a CPU held in Run/Sleep (that was the broken #406 PWM path,
+  where a working PWM would have needed the CPU out of Stop). After the LED goes off the trace
+  returns to the idle band within one wake period.
+- **Evidence:** zoomed trace of one heartbeat and one 2 s plateau; LED plateau current in mA.
+
+### AT-PWR-13 — NFC mailbox: idle, tap session, parked reader (R, SA — phone; #313)
+- **Pre:** v1.5.0 release, joined, phone with the Manager-App debug control server (§3.6).
+- **Steps:**
+  - (a) **No field:** 10 min idle (or reuse AT-PWR-11) — the ST25DV is released (LPD high)
+    between taps; only the GPO EXTI is armed.
+  - (b) **One tap session:** start capture, tap, run `GetInfo` + `GetConfig` (all pages) over
+    the mailbox, lift the phone; capture until 30 s after the lift. Repeat 3×.
+  - (c) **Parked reader:** hold a field on the tag without mailbox traffic (phone on the tag
+    with the Manager-App closed, or a plain NFC reader app that only reads) for **150 s**.
+  - (d) **Parked reader after a session:** tap with a session as in (b), then leave the phone on
+    the tag for 150 s.
+- **Expect:**
+  - (a) idle equal to AT-PWR-11 within run-to-run spread (no NFC draw at idle).
+  - (b) elevated current only while the field is present (PM lock + chip powered); back to the
+    idle band ≤ 5 s after the lift (`NFC_AWAKE_WINDOW_MS`) plus the 2 s green + yellow LED;
+    record mC per session.
+  - (c) a 50 ms poll band for the first 30 s, then a 500 ms tick, and at 120 s the release
+    (release FW has no log: the trace drops to the idle band while the field is still
+    present). No further wake until the field changes.
+  - (d) the 120 s window restarts at the last served reply, then the same release as (c).
+  - A field that keeps the device out of Stop2 past 120 s without traffic = **HIGH** (a phone
+    left on a sticker drains the battery).
+- **Evidence:** per-phase averages (field 0–30 s, 30–120 s, after release) and mC per session.
+
+### AT-PWR-14 — link loss: recovery ladder and rejoin energy (R, A, long-run; #424, F29)
+- **Pre:** v1.5.0 release, joined on ChirpStack, ADR on, `interval-report 120` (shortened so
+  the ladder runs in ~1–2 h instead of 4–5 h at 900 s), link-check settings default. Note the
+  starting DR and TX power from the LNS.
+- **Steps:** (1) 15 min healthy capture. (2) Simulate a network outage: disable the device in
+  ChirpStack (no rejoin is forced by the NS). (3) Capture continuously through the `WARNING`
+  ladder (link check on every report; one rung per report: TX power to max, then DR down to
+  DR0) and the rejoin attempts at the floor, ≥ 30 min past the first JoinRequest. (4) Re-enable
+  the device; capture until rejoined and two telemetry uplinks are seen.
+- **Setting the interval on a release image (no shell):** NFC `SetParam`
+  `app.interval-report = 120` (Manager-App debug server: `POST /command
+  {"op":"setparam","params":{"app.interval-report":120}}`); read it back with `getparam`. The
+  write reboots the unit → it rejoins; start step (1) after the first two 120 s reports.
+- **Observing the state during the outage:** ChirpStack logs no frames for a disabled device and a
+  release image has no RTT, so read the state over NFC: an encrypted `GetInfo` through the FTM
+  mailbox every 5 min returns `lrw_state` (`HEALTHY`/`WARNING`/`RECONNECT`), `last_dl_age_s`,
+  `uptime_s` (no reboot) and `battery`. The Manager-App debug server's `getinfo` drops these
+  fields, so drive the mailbox directly: nfc-proxy-app (`com.hardwario.nfcproxy`, `adb forward
+  tcp:8730`) with a host script that sends the ST25DV custom commands (`[0x02, cmd, 0x02, …]`:
+  `0xAE 0D 01` MB_EN, `0xAA` write message `[0x01 chan][CCM wire]`, poll `0xAD 0D` for
+  HOST_PUT, `0xAB`/`0xAC` read the reply, `0xAE 0D 00`). Phone gotchas: turn NFC on
+  (`cmd nfc enable-nfc`) *before* resuming the proxy activity (reader mode registered with NFC
+  off never sees the tag); disable any app that claims the tag's NDEF intent (Manager-App), or
+  the NDEF dispatch pulls it to the front and pauses the proxy; keep the screen on (`svc power
+  stayon true`); NFC off between probes. Log each probe's start/end next to the PPK2 capture
+  and drop those windows (≈ 47 mC each) from the outage average.
+- **Identifying the rungs on the trace:** the TX burst alone (bins > 25 mA) gives airtime and TX
+  current per report — SF7 61 ms → SF12 1483 ms for an 11 B telemetry frame; the TX-power rung
+  shows as a jump of the TX current (EU868 at 3.0 V: ≈ 28 mA ADR-reduced → ≈ 60 mA default).
+  An SF12 telemetry frame and a JoinRequest have the same airtime: tell them apart by timing
+  (reports keep the 120 s grid, joins follow the rejoin backoff) and by `lrw_state`.
+- **Expect:**
+  - Outage → `WARNING` after 3 unanswered checks at every `lrw-link-check-interval`-th report
+    (≈ 21 min at 120 s / 5), taking the first rung at once; then one rung per report (check on
+    every report): default TX power + DR4, DR3, DR2, DR1, DR0; `RECONNECT` only when the check
+    fails at the floor (DR0 = 5th failure in `WARNING` at defaults) — no rung skipped.
+  - Charge per report grows rung by rung with airtime (TX part DR5 at reduced power → DR0 at
+    default power: ≈ 1.7 → 85 mC, ×50); the idle band between reports is unchanged.
+  - At the floor: JoinRequests follow the rejoin back-off (60 s × 2ⁿ + jitter, cap 3600 s) and the
+    EU868 duty cycle — no back-to-back join storm, and no rejoin forced while the duty cycle refuses sends (F29).
+  - `RECONNECT` idle floor ≈ 2× the healthy one — the status LED blink every 3 s (≈ 0.23 mC each);
+    an idle band *above* that points at something else awake.
+  - Recovery: the device rejoins at its next scheduled join (up to ≈ 1 h after the LNS is back once the
+    back-off is capped), sends Info + ConfigDump, returns to DR5 via ADR; the idle band returns to the
+    healthy one and the LED stops.
+- **Evidence:** table DR × {mC per report, airtime}; state timeline from the NFC probes;
+  outage hour vs healthy hour (mC/h) as the battery-life cost of a lost network; LNS frame log
+  aligned to the trace.
+- **Cleanup:** `interval-report 900` (NFC `SetParam`); device enabled on ChirpStack; phone
+  restored (re-enable the disabled app, `svc power stayon false`, NFC on).
+
+### AT-PWR-15 — buzzer alarm melodies (R, SA; #397 — buzzer HW variant only)
+- **Pre:** a unit with the buzzer variant (operator confirms; unreworked R10/R11 caps the
+  buzzer at ~1–2 mA). An alarm rule the operator can trigger and clear without SWD (e.g. an
+  input/hall `state` rule, or `battery-level` above the PPK2 voltage and then the PPK2 raised).
+- **Steps:** for `alarm-buzzer-mode` `off`, the default mode and `continuous`: trigger the alarm,
+  capture 2 min (≥ 2 repeat cycles), clear it, capture 1 min.
+- **Expect:** while a tone plays, the buzzer current (~1–2 mA) on top of the idle band, the
+  CPU still sleeping between tone steps (the buzzer is GPIO-driven, `k_sleep` between steps) —
+  no mA plateau of a CPU held awake; between repeats the idle band; on clear the buzzer stops at
+  once and the trace returns to the idle band. `off`: no difference from the same alarm without
+  a buzzer.
+- **Evidence:** mode × {mC per melody, avg over 2 min alarm, avg after clear}.
 
 ## 16. Adversarial & "unrealistic" scenarios (AT-ADV)
 
@@ -1545,7 +1704,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | L7, L8, L13 | AT-LRW-07 | A | D | – | |
 | L9 | AT-ADV-08 | A | DR | – | |
 | L10 | AT-LRW-06 | A | DR | – | ✅ |
-| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats lrw` surface) | A | D | – | |
+| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats radio` surface) | A | D | – | |
 | L12 | asserted inside AT-LRW-05 | A | DR | – | |
 | L14 | AT-LRW-08 | A | D | – | |
 | L15 | AT-LRW-09 (radio-mode supersedes DevEUI-zero guard) | A | D | – | |
@@ -1599,12 +1758,13 @@ automated; *(excluded)* items are listed with reasons below the table.
 | N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone for the true ack path; §3.6 phone-free recipe covers decrypt/execute/config-diff decisively but always exercises the field-loss backstop, not `hio.stck:ack`, per its own limitation note | ✅ (2026-08-11, phone-free: all three commands decisive over `hio.stck:cmd`; factory_reset/set_secret_key rejection + device_reset success independently re-confirmed over a real LRW downlink, see AT-LRW-06; all-zero set_secret_key rejected with `BAD_REQUEST,"zero key"` per #322) |
 | F1 | AT-LRW-03 | A | DR | – | |
 | F2, F3 | AT-HOST-03, AT-HOST-06 | A | host | – | |
-| — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..07, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
+| — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..15, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
 
 **Release smoke set** (run on every release candidate, ~90 min + 60 min unattended):
 AT-HOST-01 → flash (consent) → AT-BOOT-04 → AT-LRW-01 → AT-LRW-06 (subset: get_info,
 set_param+readback, reboot) → AT-NFC-02 → AT-LRW-10 (60 min, unattended) → AT-PWR-04 (if
-PPK2 + J-Link detached).
+PPK2 + J-Link detached). A new minor release (v1.5.0, #398) also runs AT-PWR-11 against the
+previous release tag.
 
 ## 22. Known gotchas appendix (hard-won — read before debugging "failures")
 

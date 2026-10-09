@@ -73,7 +73,7 @@ void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, SensorReading *
 #undef MP
 }
 
-uint8_t app_lrw_get_max_payload(void)
+uint8_t app_radio_get_max_payload(void)
 {
 	return test_budget;
 }

@@ -8,6 +8,7 @@
 #define APP_CMD_H_
 
 /* Standard includes */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,32 +27,61 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_LRW,
 	APP_CMD_TRANSPORT_NFC,
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
+	/* Raw-LoRa P2P downlink command (0x56), dispatched by app_radio_p2p.c (#118 B4).
+	 * Same generic Command/Response dispatch and writability gating as the
+	 * LoRaWAN transport -- P2P is the network-server-less equivalent. */
+	APP_CMD_TRANSPORT_P2P,
 	/* NFC hio.stck:vnd record, authenticated with vendor_token instead of
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
 	APP_CMD_TRANSPORT_VENDOR,
+	/* Unencrypted, unauthenticated command channel (#415): a raw Command
+	 * protobuf in, 0x01||Response out, no CCM/nonce/cache. Reachable over the
+	 * NFC mailbox channel 0x03 and the `ats cmd plain` shell. A command answers
+	 * on it ONLY by listing `plain_text` in app_config.yml (opt-in) — the
+	 * implicit "omitted = all transports" default deliberately excludes it, so a
+	 * command reaches plain_text only after a reviewed one-line yml change. The
+	 * rule for such a command: read-only, disclosing identity-class data only
+	 * (first user: get_claim_info). */
+	APP_CMD_TRANSPORT_PLAIN_TEXT,
 };
 
 /* Aggregated device status reported in Device Info (device_status, fPort 85 +
- * NFC). uint32 bitmask; proto3 omits a 0 so an empty field means "all OK /
- * nothing active". Low bits are alarm categories (derived read-only from the
- * alarm latches, no side effects), high bits are health/degradation. The raw
- * LoRaWAN link state is NOT duplicated here (it has its own lrw_state field);
- * only the derived LRW_DISABLED bit is included. Bit positions are stable --
- * never renumber; new states take new bits. Plain (1u << n), not zephyr BIT(),
- * so this header stays free of zephyr includes. */
+ * NFC) and the plaintext get_basic_info. uint32 bitmask; proto3 omits a 0 so an
+ * empty field means "all OK / nothing active". A set bit is always the notable /
+ * active / degraded state (never "healthy"), so the empty field stays meaningful.
+ * Bits are grouped by category (alarms / radio / hardware / system) with a
+ * reserved tail in each group for future states.
+ *
+ * The layout was re-grouped for v1.5.0 (#415) — a clean break the mailbox move
+ * already forced. device_status carries no per-frame layout version, so the
+ * decoder is v1.5.0-specific; a still-deployed 1.4.x unit used a different layout
+ * (distinguishable only by the Info fw_* version). Stable from v1.5.0 on — never
+ * renumber again; new states take the reserved bits. Plain (1u << n), not zephyr
+ * BIT(), so this header stays free of zephyr includes. */
+/* Alarms (0-7) — derived read-only from the alarm latches, no side effects. */
 #define APP_DEVICE_STATUS_ALARM_ANY       (1u << 0) /* any alarm latched active */
 #define APP_DEVICE_STATUS_ALARM_THRESHOLD (1u << 1) /* analog threshold rule active */
 #define APP_DEVICE_STATUS_ALARM_STATE     (1u << 2) /* discrete state rule active */
 #define APP_DEVICE_STATUS_ALARM_RATE      (1u << 3) /* counter-rate rule active */
 #define APP_DEVICE_STATUS_ALARM_NO_DATA   (1u << 4) /* no-data watchdog latched */
 #define APP_DEVICE_STATUS_ALARM_LOW_BATT  (1u << 5) /* low-battery watchdog latched (#210) */
-/* bits 6..7 reserved for future alarm categories */
-#define APP_DEVICE_STATUS_NFC_DOWN        (1u << 8)  /* NFC (ST25DV) init failed, degraded */
-#define APP_DEVICE_STATUS_HISTORY_DOWN    (1u << 9)  /* history flash mount failed */
-#define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
-#define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
-#define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
+/* bits 6-7 reserved (alarms) */
+/* Radio (8-11). */
+#define APP_DEVICE_STATUS_RADIO_OFF    (1u << 8) /* radio_mode == off: deliberately silent (#350) */
+#define APP_DEVICE_STATUS_LRW_DISABLED (1u << 9) /* radio-silent: DevEUI all-zero (#98) */
+#define APP_DEVICE_STATUS_RADIO_LINK_DOWN                                                          \
+	(1u << 10) /* LoRaWAN link not healthy/warning (not alive) */
+/* bit 11 reserved (radio) */
+/* Hardware / health (12-15). */
+#define APP_DEVICE_STATUS_NFC_DOWN      (1u << 12) /* NFC (ST25DV) init failed, degraded */
+#define APP_DEVICE_STATUS_MAILBOX_DOWN  (1u << 13) /* ST25DV FTM mailbox not authorised (#414) */
+#define APP_DEVICE_STATUS_I2C_WEDGED    (1u << 14) /* I2C bus wedged (fail streak >= threshold) */
+#define APP_DEVICE_STATUS_HISTORY_DOWN  (1u << 15) /* history flash mount failed */
+/* System (16-17). */
+#define APP_DEVICE_STATUS_TIME_UNSYNCED (1u << 16) /* RTC not synced (no wall-clock) */
+#define APP_DEVICE_STATUS_CLAIM_ACTIVE                                                             \
+	(1u << 17) /* claim window open (claimable); clear = claimed (#415) */
 
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */
@@ -73,8 +103,8 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE,   /* persist pulse totalizers (no reboot) */
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
-	APP_CMD_ACTION_CLM_REARM_SAVE,  /* persist new claim_token + reboot, then re-arm clm (#351)
-					 */
+	APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, /* persist new claim_token + reboot, then re-open the
+					   * claim window (#351/#415, ex-CLM_REARM_SAVE) */
 	/* LoRaWAN GetConfig / GetParam answered with page 0 of N (#409 3d/3e): the
 	 * transport streams the remaining pages via app_cmd_stream_next(). */
 	APP_CMD_ACTION_PAGE_STREAM,
@@ -96,7 +126,7 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
+	uint8_t radio_state;    /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
 };
@@ -136,6 +166,15 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * vendor_reset zeroes secret_key, so this replacement is mandatory to keep the
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
+
+/* True for an action that ends in a reboot (save, reset, reboot), so a caller
+ * can finish what the operator must see first (NFC: the LED result). */
+bool app_cmd_action_reboots(enum app_cmd_action action);
+
+/* Run a deferred action returned by app_cmd_handle(). The one executor for
+ * every transport (#460 F3): the caller decides only when, after its reply was
+ * delivered. APP_CMD_ACTION_NONE and APP_CMD_ACTION_PAGE_STREAM do nothing. */
+void app_cmd_run_action(enum app_cmd_action action);
 
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
  * same payload a GetInfo command returns) into `out`. Used to send an autonomous
@@ -203,7 +242,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 
 /* Build one history-replay frame (Response{ seq, history_frame={...} }) into
  * `out`. `samples` holds values-only records (the shared `present` mask +
- * `interval_s` describe their layout/timing). Used by the app_lrw replay state
+ * `interval_s` describe their layout/timing). Used by the app_radio_lrw replay state
  * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
  * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode.
  * `time_synced` reports whether `t0_unix` is absolute UTC (L-1/L-3). */
