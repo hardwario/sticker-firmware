@@ -491,7 +491,7 @@ Approximate encoded size of one `SensorReading` (typical values: 23.45 °C, 45 %
 
 | Case | (a) typed | (b) sentinel | (c) mask |
 |---|---|---|---|
-| dallas, temperature | ~9 B | ~10 B | ~12 B |
+| dallas, temperature | ~9 B | ~10 B | ~12 B (measured 13 B) |
 | machine-probe, all 9 channels | ~30 B | ~24 B | ~27 B |
 | machine-probe, TMP112 missing | ~27 B | ~28 B | ~24 B |
 | slot in mismatch | ~6 B | ~51 B | ~8 B |
@@ -520,7 +520,7 @@ sensor that is atypical just declares a different `unit` / `scale`. For example:
   the second example). The Manager-App shows the unit from the YAML.
 - **Decoder:** divides by the channel's scale and **includes the unit** in its output:
   ```json
-  {"slot": 1, "type": "machine-probe",
+  {"slot": 1, "type": 3, "type_name": "machine-probe",
    "values": {"temperature": 23.45, "temperature-aux": null},
    "units":  {"temperature": "degC", "temperature-aux": "degC"}}
   ```
@@ -647,8 +647,33 @@ of every step.
      inert with a deactivate edge, event routed by channel, value wire scale, low
      battery on ch 20, registry liveness fits the latches), `cmd` (AlarmEvent rule /
      slot / channel / sensor_type, 18 B SetParam vectors), `ttn.test.js` (108).
-5. **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
+5. ✅ **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
    output with units, `i32` history encoding.
+   - Wire: `SensorReading` = `slot` (1), `type` (2), `valid` (11), `value` (12, packed
+     `sint32`, `max_count:10`); fields 3..10 reserved. A slot that is not `OK` (absent,
+     mismatch, replaced) is sent with `valid = 0`.
+   - Firmware: the composer encodes every 1-Wire type from the registry
+     (`encode_sensor_reading` in `app_compose.c`, `app_sensor_wire_value()` from the
+     generated `app_sensor_types.c`). The per-type `encode` vtable entries, the
+     `TM_S32_NA` temperature sentinel and `MP_FLAG_TILT` are removed from
+     `app_w1_slots.c`. The TMP112 `temperature-aux` is now on the wire.
+   - Decoder: `w1_sensors[]` entries are `{slot, type, type_name, values, units}`; every
+     non-retired channel of the type is listed, `null` when its bit is clear. A channel
+     newer than the decoder comes out raw as `chN`. State channels (`tilt`) are 0 / 1,
+     the same as in history.
+   - `i32` history encoding and the CI range check (`range × scale` fits `wire` and
+     `history`) were already done in steps 1 and 6.
+   - Measured size incl. the 3 B field-27 tag + length: mismatch 7 B, dallas 13 B, full
+     machine-probe ~25–30 B. With the version byte a dallas frame is 14 B, so a 1-Wire
+     reading no longer fits the 11 B tier (US915 DR0 / AU915 DR2; before: 11 B
+     exactly). The composer sends an oversized reading alone, which the MAC
+     rejects at that tier.
+   - Size: release 187 252 B flash / 55 524 B RAM (step 4 was 187 412 B / 55 716 B);
+     debug 98.81 % / 98.22 %; debug + `CONFIG_W1=y` + `CONFIG_LOG=n` 89.16 % / 91.78 %.
+   - Tests: `tests/compose` (full mask, partial mask with an out-of-range channel,
+     dallas, `valid = 0` for mismatch / absent, encoded size), `ttn.test.js` (mask +
+     packed decode, all machine-probe channels, nulls, unknown channel, round trip of
+     every 1-Wire `(type, channel)`).
 6. ✅ **History per channel.** `history_channels`, `sensorN_type`, derived layout with
    a layout CRC in the page header, momentary columns from their pulse counters,
    `HistoryFrame` `channels` / `w1_types`, decoder. Tests: `history` (17),
