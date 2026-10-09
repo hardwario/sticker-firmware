@@ -132,7 +132,8 @@ static void mb_put_u(struct app_sensor_mb *mb, uint8_t ch, uint32_t value)
 	mb->valid |= BIT(ch);
 }
 
-static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 2048);
+/* HW high-water mark 656 B (CONFIG_INIT_STACKS, 2026-10-09); >= 2x margin. */
+static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 1536);
 static struct k_work_q m_sensor_work_q;
 
 static void sensor_work_handler(struct k_work *work)

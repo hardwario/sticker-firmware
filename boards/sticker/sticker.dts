@@ -77,7 +77,10 @@ stm32_lp_tick_source: &lptim1 {
 
 &clk_lse {
 	clock-frequency = <32768>;
-	driving-capability = <1>;
+	/* Highest LSEDRV: ABS07 crystal (CL 12.5 pF, C20/C21 18 pF, ESR <= 70 kOhm)
+	 * needs gm_crit ~2.3 uA/V; only LSEDRV=high (Gmcritmax 2.7 uA/V) fits (#477).
+	 */
+	driving-capability = <3>;
 	status = "okay";
 };
 

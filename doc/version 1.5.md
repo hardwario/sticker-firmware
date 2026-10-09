@@ -125,6 +125,10 @@ technical detail.
   build without the patch fails on purpose (§5, §10).
 - `debug.conf` ships a lean default (1-Wire, accelerometer, buzzer and PIR off). Re-enable
   one with `-DCONFIG_<X>=y` (§2).
+- Release has no `printk` and prints no fault dump (`CONFIG_PRINTK=n`, `CONFIG_FAULT_DUMP=0`).
+  Debug log levels are compile-time only (`CONFIG_LOG_RUNTIME_FILTERING=n`). Thread stacks
+  were cut to measured high-water marks + margin. A new deep call path on a thread needs a
+  re-measure (§39).
 
 ---
 
@@ -169,6 +173,8 @@ technical detail.
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
 | Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 | LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
+| Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
+| Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
 
 ---
 
@@ -1983,6 +1989,130 @@ reboots.
   announce after `interval-announce 1` carrying a staged `interval-sample`.
 - **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
   `interval-announce 0`) and P2P.
+
+
+## 38. LSE crystal drive strength (#477)
+
+The board DTS (`boards/sticker/sticker.dts`, `&clk_lse`) now sets `driving-capability = <3>`
+(LSEDRV = high). Before this change it was `<1>` (medium-low). Zephyr's clock init applies the
+new value on every boot, even while the LSE is already running, so an upgraded unit picks it up
+with an ordinary firmware update.
+
+**Why.** The board's 32.768 kHz crystal is an Abracon ABS07 (Y2), loaded with C20/C21 =
+18 pF (CL ≈ 12.5 pF), ESR up to 70 kΩ. ST AN2867 gives
+`gm_crit = 4 · ESR · (2πF)² · (C0 + CL)²` ≈ 2.3 µA/V. Only LSEDRV = high (Gmcritmax 2.7 µA/V)
+covers that. Medium-low (0.75 µA/V) is below it in the worst case (maximum ESR, cold,
+part-to-part spread). The LSE clocks the RTC and the LPTIM1 tick, so a marginal oscillator
+would show up as RX-window and P2P-slot timing errors.
+
+The other half of the original "better range" tip, switching the PA to `rfo-hp`, is **not
+possible** on HW rev 2.1. The RFO_HP pin is unconnected, and the RF path is RFO_LP →
+BALFHB-WL-05D3 balun → BGS12P2L6 switch. TX power therefore stays capped at
+`rfo-lp-max-power` = 14 dBm, so `p2p-tx-power` values above 14 have no effect.
+
+**Hardware verification (2026-10-09).** Images were built from the same tree and differ only
+in LSEDRV.
+
+| Test | LSEDRV 1 | LSEDRV 3 |
+|---|---|---|
+| LSE start-up, cold backup domain (5 runs, 2162165625) | 126–131 ms | 126–136 ms |
+| RTC drift vs NTP, 1 h each (2162165625, `RTC_CALR` = 0) | +20.6 ppm | +21.7 ppm |
+| Idle current excl. TX, PPK2 3.0 V, A/B/A/B (2162165722) | 120.1 / 120.2 µA | 120.6 / 120.6 µA |
+
+- The ~125 ms is the fixed LSERDY qualification (4096 LSE cycles). The oscillator starts
+  promptly at every drive level on these units at room temperature.
+- The cost is +0.45 µA, ≈ 0.13 % of the battery capacity per year.
+- Radio traffic (P2P and the LoRaWAN join + uplinks) ran normally on LSEDRV 3.
+
+**Open.** A margin test is a HW task: series-R negative-resistance check or a cold chamber.
+The crystal on 2162165625 runs ~21 ppm fast, slightly outside the ABS07 ±20 ppm. This
+suggests a CL mismatch with C20/C21, which is worth a HW check. It is irrelevant to the
+LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time syncs.
+
+
+## 39. Flash and RAM trim (#479, #481)
+
+v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
+(debug, 1.7 KB free). #479 frees space without changing behaviour.
+
+| Variant | FLASH before → after | RAM before → after |
+|---|---|---|
+| release | 182 164 → **174 140 B** (81.8 %) | 55 076 → **46 884 B** (71.5 %) |
+| debug | 236 104 → **224 872 B** (91.5 %) | 63 860 → **55 412 B** (84.6 %) |
+
+**What changed**
+
+| Change | Variant | FLASH | RAM |
+|---|---|---:|---:|
+| `CONFIG_PRINTK=n` + `CONFIG_FAULT_DUMP=0` (`prj.conf`; `debug.conf` turns both back on) | release | −2 960 B | 0 |
+| `CONFIG_LOG_RUNTIME_FILTERING=n` (`debug.conf`) | debug | −6 168 B | −256 B |
+| Config ingest records faults out of line (`fault_at()` in `config_ingest.c.j2`) | both | −5 064 B | 0 |
+| Thread stacks sized from HW high-water marks | both | 0 | −8 192 B |
+
+- **printk / fault dump.** Release has no console backend, so `printk()` output and the fault
+  text went nowhere. A fault still resets the device, and the reset cause is still reported in
+  `GetInfo`.
+- **Runtime log filtering.** Nothing in the debug image changes log levels at runtime
+  (`CONFIG_LOG_CMDS` is off). Compile-time `CONFIG_LOG_MAX_LEVEL=2` is unchanged. Raising it
+  to 3 (INF) now fits into roughly the space this freed.
+- **Config ingest.** The `FAULT()` / `FAULT_TRANSPORT()` macros of the generated
+  `app_config_ingest.c` tested `ret` / `fault_field` inline at every field. GCC jump threading
+  then cloned the rest of every `app_config_apply_*()` per fault state, ~500 B per field. One
+  `static __noinline fault_at()` removes the cloning. The semantics are identical: the first
+  fault wins, and a bad value returns `-EINVAL` (`OUT_OF_RANGE`) while a forbidden transport
+  returns `-EACCES` (`NOT_WRITABLE`). Do not turn it back into an inline macro; the template
+  comment explains why.
+
+**Stacks.** Measured with `CONFIG_INIT_STACKS` (0xAA fill read over J-Link,
+`sticker_stack_watermark.py`) on 2162165625. The release measurement image was release +
+`INIT_STACKS` + `THREAD_STACK_INFO` + `PM=n`. Load: join, reports, LoRaWAN downlinks
+(GetConfig, SetParam), real-RF NFC mailbox commands from a phone, and shell `ats cmd` inject in
+debug.
+
+| Stack | Before | Used (release) | Used (debug) | After |
+|---|---:|---:|---:|---:|
+| `nfc_poll` | 6144 | 2704 | 2656 | **4096** |
+| main | 4096 | 992 | 968 | **2048** |
+| ISR | 2048 | 192 | 192 | **1024** |
+| LED | 2048 | 456 | 456 | **1024** |
+| sensor WQ | 2048 | 656 | 624 | **1536** |
+| report WQ | 3072 | 440 | 288 | **2048** |
+| radio WQ | 4096 | 2288 (2272 TOWER P2P) | 1448 | **3584** |
+| system WQ | 2048 | 1256 | 1248 | 2048 |
+| shell (debug) | 4096 | — | 3120 | 4096 |
+
+- Each cut keeps at least 1.5× (`nfc_poll`) or 2× (the rest) over the measured mark. The MPU
+  stack guard stays on in release, so an overflow faults instead of corrupting RAM.
+- `nfc_poll` keeps ~1.4 KB for `SettingsSave` (an NVS write right before the reboot), which
+  could not be measured.
+- The radio WQ was measured on LoRaWAN and on TOWER P2P (`recv_ack` → `app_cmd_handle`, #470
+  image on the current Hub). Both peak at ~2.3 KB. 3584 B keeps ~1.3 KB (1.58×), because the
+  static worst case is ~3.2 KB.
+- `debug_p2p_bench.conf` no longer sets its own `CONFIG_MAIN_STACK_SIZE`, because the base value
+  is now smaller.
+
+**Hardware verification (2026-10-09, 2162165625, EU868).** Every image was flashed without
+erase.
+
+| Image | Result |
+|---|---|
+| debug | PASS — boot, config unchanged, join, uplinks; SetParam no-op → `Ack`; out of range → `OUT_OF_RANGE` with `fault_field` 202 / 102 / 203 / 115; LoRaWAN write to a provisioning field → `NOT_WRITABLE` 102; first offender wins; a failed batch is rolled back; GetConfig, GetSettings, history, CCM self-test |
+| release (downlinks via the Hub) | PASS — join, Info / settings-info / alarm / telemetry; GetConfig 5 pages, SetParam `Ack` / `OUT_OF_RANGE` 202 / `NOT_WRITABLE` 102; FCnt contiguous; identical bytes before and after the stack cut |
+| release, TOWER P2P (#470 image, Hub NB 0.4.0), radio WQ 4096 and 3584 | PASS — Hello, TimeReq; GetConfig 6 pages (byte-identical in both runs), SetParam `Ack` / `OUT_OF_RANGE` 202 / transport not allowed 102 |
+| debug + release, phone NFC mailbox | PASS — GetConfig (2 pages), SetParam `Ack` / `OUT_OF_RANGE` 202 / 102, GetSettings, GetInfo, history page, GetBasicInfo |
+
+Native ztest suites and `pytest scripts/west_commands/tests` pass.
+
+**Not fixed here.** The `debug.conf;debug-history-flash.conf` variant already overflowed FLASH on
+`v1.5.0` (by 7 916 B). It now overflows by ~1.7 KB. CI does not build it.
+
+**Further levers (measured, not applied).**
+
+| Lever | Saving | Why not now |
+|---|---|---|
+| Debug RTT dictionary logging | −16 KB debug | Needs a host decoder |
+| Dropping AS923 / AU915 / US915 | −8.9 KB, −768 B RAM | Product decision |
+| Table-driven settings loader `h_set` | ≈ −1.5 KB release / −4 KB debug | Code change |
 
 ---
 
