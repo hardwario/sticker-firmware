@@ -169,6 +169,7 @@ technical detail.
 | LoRaWAN / P2P | **New / Changed** — network time through `app_radio` on both radios: P2P asks for the time with uplink `FCtrl` bit 1 `TIME_REQ` (after a link-up without one, the weekly re-sync, `clock_sync`, `clock sync`); the weekly re-sync (#96) now runs on P2P too; `app_clock` has no LoRaWAN code left. Wire-compatible. See §34. |
 | Sensors | **New** — `cap_sht` (`sensors` 22, default `true`, #465): the onboard SHT4x temperature/humidity can be switched off like every other sensor (no read, no telemetry fields, no `no_data` alarm, no history channel). The settings-info / `GetSettings` now also carry `cap_buzzer` and `cap_sht`. See §36. |
 | LoRaWAN / P2P | **New** — periodic announce (#445): every `interval-announce` hours (default 24, 0 = off) the node re-sends the boot/join `Info` + settings-info, so the network's retained identity and config heal without a reboot. See §37. |
+| Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
 
 ---
 
@@ -1981,6 +1982,45 @@ reboots.
   announce after `interval-announce 1` carrying a staged `interval-sample`.
 - **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
   `interval-announce 0`) and P2P.
+
+
+## 38. LSE crystal drive strength (#477)
+
+The board DTS (`boards/sticker/sticker.dts`, `&clk_lse`) now sets `driving-capability = <3>`
+(LSEDRV = high). Before this change it was `<1>` (medium-low). Zephyr's clock init applies the
+new value on every boot, even while the LSE is already running, so an upgraded unit picks it up
+with an ordinary firmware update.
+
+**Why.** The board's 32.768 kHz crystal is an Abracon ABS07 (Y2), loaded with C20/C21 =
+18 pF (CL ≈ 12.5 pF), ESR up to 70 kΩ. ST AN2867 gives
+`gm_crit = 4 · ESR · (2πF)² · (C0 + CL)²` ≈ 2.3 µA/V. Only LSEDRV = high (Gmcritmax 2.7 µA/V)
+covers that. Medium-low (0.75 µA/V) is below it in the worst case (maximum ESR, cold,
+part-to-part spread). The LSE clocks the RTC and the LPTIM1 tick, so a marginal oscillator
+would show up as RX-window and P2P-slot timing errors.
+
+The other half of the original "better range" tip, switching the PA to `rfo-hp`, is **not
+possible** on HW rev 2.1. The RFO_HP pin is unconnected, and the RF path is RFO_LP →
+BALFHB-WL-05D3 balun → BGS12P2L6 switch. TX power therefore stays capped at
+`rfo-lp-max-power` = 14 dBm, so `p2p-tx-power` values above 14 have no effect.
+
+**Hardware verification (2026-10-09).** Images were built from the same tree and differ only
+in LSEDRV.
+
+| Test | LSEDRV 1 | LSEDRV 3 |
+|---|---|---|
+| LSE start-up, cold backup domain (5 runs, 2162165625) | 126–131 ms | 126–136 ms |
+| RTC drift vs NTP, 1 h each (2162165625, `RTC_CALR` = 0) | +20.6 ppm | +21.7 ppm |
+| Idle current excl. TX, PPK2 3.0 V, A/B/A/B (2162165722) | 120.1 / 120.2 µA | 120.6 / 120.6 µA |
+
+- The ~125 ms is the fixed LSERDY qualification (4096 LSE cycles). The oscillator starts
+  promptly at every drive level on these units at room temperature.
+- The cost is +0.45 µA, ≈ 0.13 % of the battery capacity per year.
+- Radio traffic (P2P and the LoRaWAN join + uplinks) ran normally on LSEDRV 3.
+
+**Open.** A margin test is a HW task: series-R negative-resistance check or a cold chamber.
+The crystal on 2162165625 runs ~21 ppm fast, slightly outside the ABS07 ±20 ppm. This
+suggests a CL mismatch with C20/C21, which is worth a HW check. It is irrelevant to the
+LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time syncs.
 
 ---
 
