@@ -974,10 +974,11 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
  * 1-Wire slot: latch 0 watches the whole device — no channel at all means it
  * stopped answering (unplugged, cable cut) and raises ONE no_data alarm on
  * channel APP_SENSOR_CH_DEVICE instead of one per channel. Latch 1 + p watches
- * part (chip) p of the slot's type while the device still answers; its alarm
- * names the part's first channel. A part is only watched once it has reported
- * since the slot was armed, so a chip that is not fitted on this probe
- * (e.g. TMP112) never alarms. */
+ * part (chip) p of the slot's type while the device still answers: it alarms
+ * when any channel of the part stops reporting, naming the part's first
+ * channel. A part is only watched once it has reported since the slot was
+ * armed, so a chip that is not fitted on this probe (e.g. TMP112) never
+ * alarms. */
 #define NODATA_SLOTS (APP_ALARM_SLOT_MAX + 1)
 
 struct nodata_latch {
@@ -1191,11 +1192,14 @@ static void nodata_poll_w1(uint8_t slot, const struct app_sensor_type *t,
 			l->nan = false;
 			continue;
 		}
+		/* Fitted = any channel of the part reported once; healthy = all of
+		 * them report (a chip that answers for some channels only, e.g. a
+		 * LIS2DH12 with a readable tilt latch but no samples, is broken). */
 		if (reported & mask) {
 			l->seen = true;
 		}
 		if (l->seen) {
-			nodata_step(slot, t->id, l, (reported & mask) != 0, now, should_send);
+			nodata_step(slot, t->id, l, (reported & mask) == mask, now, should_send);
 		}
 	}
 }

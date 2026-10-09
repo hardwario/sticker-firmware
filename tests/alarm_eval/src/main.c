@@ -1389,6 +1389,8 @@ static void mp_reads(bool sht, bool accel)
 	w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, 0.1f);
 	if (accel) {
 		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0.0f);
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, 0.1f);
+		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, 0.2f);
 		w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, 9.8f);
 	}
 }
@@ -1501,4 +1503,24 @@ ZTEST(alarm_eval, test_w1_unseen_part_is_not_watched)
 	test_alarm_event_count = 0;
 	poll_past_nodata();
 	zassert_equal(test_alarm_event_count, 0, "%zu events", test_alarm_event_count);
+}
+
+/* A chip that answers for some of its channels only is broken: a LIS2DH12
+ * that lost power still reads its tilt latch but delivers no samples. */
+ZTEST(alarm_eval, test_w1_partly_reporting_part_alarms)
+{
+	const uint8_t mp = APP_SENSOR_TYPE_MACHINE_PROBE;
+
+	mp_slot_armed();
+
+	mp_reads(true, false);
+	w1_slot_reads(0, mp, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0.0f); /* tilt only */
+	poll_past_nodata();
+	zassert_equal(test_alarm_event_count, 1, "one event, got %zu", test_alarm_event_count);
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 0), 1, "lis2dh12");
+
+	mp_reads(true, true);
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1), 1, "recovered");
 }

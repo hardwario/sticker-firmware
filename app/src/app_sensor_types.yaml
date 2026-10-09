@@ -43,9 +43,9 @@
 #   range     [min, max] valid physical range; a reading outside is absent
 #   liveness  motherboard only: channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
 #   part      1-Wire only (required): chip the channel is read from. The no-data watchdog
-#             raises one alarm per part (on its first channel) while the device still
-#             answers, and one alarm on channel 255 ("device") when the whole device stops
-#             answering. A part that never reported since boot (not fitted) is not watched
+#             raises one alarm per part (on its first channel) when any of its channels
+#             stops reporting while the device still answers, and one alarm on channel
+#             255 ("device") when the whole device stops answering. A part that never reported since boot (not fitted) is not watched
 #   alarm_only_watchdog  true = evaluated by a built-in watchdog, not a rule target
 
 version: 1
