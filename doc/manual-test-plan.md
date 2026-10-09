@@ -420,7 +420,12 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 > they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
 > covered: both boot frames are dropped whole there, see #418.
 
+> **Re-verified with #465 (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** join → Info (fCnt 1, DR0) → `ConfigDump`
+> (fCnt 2, 37 B, DR5) → telemetry (fCnt 3); a changed `history_enable` is reflected, and the new
+> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `ttn.js`.
+
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+- [x] Pass — `cap_sht` / `cap_buzzer` fields, 2026-10-09
 
 ### L4c — GetSettings: settings-info on request (v1.5.0, #428)
 
@@ -917,7 +922,12 @@ the onboard sensor; the boot `ConfigDump` carries `sensors.cap_sht` and `sensors
 > `onboard` temperature/humidity. Run `history info` and confirm the `sensors:` line no longer
 > lists temperature/humidity. Restore `config cap-sht true` + `settings save` and confirm the fields return.
 
-- [ ] Pass
+> **HW-verified (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** boot `ConfigDump` `cap_sht: 1`, `cap_buzzer: 0`.
+> `cap-sht false` + save → `ConfigDump` `cap_sht: 0`; the next two fPort 2 frames are 9 B with no
+> `temperature` / `humidity` (voltage / accel unchanged); no fPort 3 within two cycles;
+> `history info` lists no sensors. `cap-sht true` + save → 14 B telemetry with T 23.27 °C / H 50.5 %.
+
+- [x] Pass — 2026-10-09
 
 ### S11 — Battery voltage
 
