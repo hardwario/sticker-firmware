@@ -15,7 +15,7 @@ technical detail.
 
 | | What you get | Details |
 |---|---|---|
-| **P2P radio** | A second radio mode for sites with no LoRaWAN network: `radio-mode p2p` talks directly to a HARDWARIO FIBER modem and a ProXimos Hub. Telemetry, alarms, commands, history backfill, network time and link supervision work as over LoRaWAN; the same firmware image does both, the choice is made at boot. | §6, §23–§34 |
+| **P2P radio** | A second radio mode for sites with no LoRaWAN network: `radio-mode p2p` talks directly to a HARDWARIO FIBER modem and a ProXimos Hub over the HARDWARIO TOWER radio protocol (AES-CCM frames, confirmed sends with a local gateway ACK). Telemetry, alarms, commands, history backfill, network time and link supervision work as over LoRaWAN; the same firmware image does both, the choice is made at boot. | §6, §23–§34, §41 |
 | **One-tap NFC, iOS included** | All phone commands go through the ST25DV Fast-Transfer-Mode mailbox: one tap, phone held still, a full configuration read or write in one hold (~0.1–0.3 s per exchange). iOS now works the same as Android. | §18 |
 | **Safer claiming** | The claim token is no longer readable from an unpowered box. The claim window is an explicit `active` / `done` switch that the app closes with `claim_done`; a corrupted NVS value closes it. After a `vendor_reset` the owner re-opens it with `claim_active`, which also creates a new token. | §19, §35 |
 | **The network knows the configuration** | After every boot/join the device sends its Info **and** its key settings (intervals, every sensor capability flag, detected 1-Wire sensors). The same pair is re-sent every `interval-announce` hours (default 24 h), and `GetSettings` asks for it at any time. | §4, §14, §37 |
@@ -37,7 +37,7 @@ technical detail.
 | `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
 | `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
 | `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
-| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power` | — | shell only | P2P radio parameters; must match the Hub | §6, §28 |
+| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora`; `fsk` not supported yet) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
 | `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
 | `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
@@ -123,8 +123,9 @@ technical detail.
    (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
    wire format changed with no migration. Rewrite the alarm rules and the history selection,
    and update the Hub/Portal decoder (§40).
-9. **P2P deployments only:** the P2P frame header changed (flag day). Nodes and the Hub must
-   be updated together (§28).
+9. **P2P deployments only:** P2P now speaks the TOWER protocol (flag day, no fallback). Nodes
+   and the Hub (Northbridge + central) must be updated together, and every node joins afresh
+   (§41).
 
 ### Known limitations
 
@@ -2316,7 +2317,8 @@ transport.md`; node behaviour: `doc/p2p.md`.
   verbatim. The
   `tests/p2p` gw-sim firmware (old wire only) is removed.
 - **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
-- **Cost:** release 185 556 B flash / 56 036 B RAM. About +2.3 KB of it is the new
+- **Cost:** release 183 060 B flash / 48 636 B RAM merged with v1.5.0 `60d982dc` (+3.2 KB /
+  +1.1 KB vs that head); 185 556 B / 56 036 B on `feat-p2p` before the #479 trim. About +2.3 KB of it is the new
   config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
 - **Tests:**
   - `tests/p2p_logic` is rewritten (77 cases). It runs against a gateway emulator on
