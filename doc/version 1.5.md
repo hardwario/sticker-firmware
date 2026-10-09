@@ -62,6 +62,10 @@ technical detail.
   jitter (§15).
 - **Uplink timing.** A periodic report is sent at a fixed per-device offset of up to 60 s
   after its time slot (was up to 10 s), so devices rebooted together do not collide (§27).
+- **Telemetry is paged (#480).** A periodic report that does not fit one frame goes out
+  as numbered pages (`page_index` / `page_count`, decoded as `pages: "i/N"`): sensor groups
+  first, then whole 1-Wire readings. A 1-Wire reading is never split; one bigger than a page
+  is sent alone (§13).
 - **Alarm state in every telemetry frame** (`system_flags`, decoded as `alarm_status`),
   and alarm batches are split across frames instead of being cut (§9).
 - **LoRaWAN `GetConfig`** leaves out the 1-Wire slot ROMs (4 pages instead of 6 at EU868
