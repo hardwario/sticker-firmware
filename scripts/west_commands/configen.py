@@ -49,22 +49,24 @@ Parameter options:
 
 Access control (readable / writable):
   Each parameter declares who may read and who may write it, as a subset of the
-  transports {shell, nfc, lrw, vendor}. Both lists default to all four (the
+  transports {shell, nfc, radio, vendor}; `radio` = both radio downlinks
+  (LoRaWAN and P2P, which share one gate). Both lists default to all four (the
   common case, so they are usually omitted) -- a field only loses a transport
   by explicitly narrowing its `writable`/`readable` list, e.g. to keep it off
-  vendor's narrow recovery surface (#299/#316) or off a LoRaWAN downlink:
-    readable: [shell, nfc, lrw]   # shell = `config <name>` / `config show`;
-                                  # nfc/lrw/vendor = ConfigDump (get_param/get_config)
-    writable: [shell, nfc, lrw]   # shell = `config <name>` set; nfc/lrw/vendor = SetParam
+  vendor's narrow recovery surface (#299/#316) or off a radio downlink:
+    readable: [shell, nfc, radio] # shell = `config <name>` / `config show`;
+                                  # nfc/radio/vendor = ConfigDump (get_param/get_config)
+    writable: [shell, nfc, radio] # shell = `config <name>` set; nfc/radio/vendor = SetParam
   configen derives the internal generator flags from these (see normalize_access):
     - no_shell      <- shell in neither list
     - readonly      <- shell readable but not writable
-    - dump          <- readable over nfc or lrw
-    - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
-  An explicit `dump_lrw: false` leaves a field readable everywhere but out of a
-  LoRaWAN get_config (it only costs downlink-answer pages there, e.g. the 1-Wire
+    - dump          <- readable over nfc or radio
+    - dump_nfc_only <- readable over nfc but not radio (e.g. LoRaWAN keys)
+  An explicit `dump_radio: false` leaves a field readable everywhere but out of a
+  radio get_config (it only costs downlink-answer pages there, e.g. the 1-Wire
   slot ROMs); an explicit get_param still returns it.
-    - no_write_lrw/no_write_nfc/no_write_vendor <- lrw/nfc/vendor not in writable
+    - no_write_lrw/no_write_nfc/no_write_vendor <- radio/nfc/vendor not in writable
+      (the internal flag keeps its historical name; it gates LRW and P2P)
       (per-field SetParam transport gate, M-3; shell has no such gate -- see
       normalize_access)
   Root `bytes` identity blobs (secret_key, claim_token) are emitted as a nanopb
@@ -191,6 +193,24 @@ def filter_c_name(name):
 def filter_settings_key(name):
     """Convert parameter name to settings key (replace _ with -)."""
     return name.replace("_", "-")
+
+
+def filter_nvs_key(param):
+    """Settings (NVS) key the value is stored under. Normally the shell key; a
+    renamed parameter keeps its old key via `stored_as`, so a stored value
+    survives the rename (and a downgrade) without a migration."""
+    return filter_settings_key(param.get("stored_as", param["name"]))
+
+
+def check_nvs_keys(parameters):
+    """Two parameters stored under one settings key would load each other's value."""
+    owner = {}
+    for param in parameters:
+        key = filter_nvs_key(param)
+        if key in owner:
+            log.die(f"Parameters '{owner[key]}' and '{param['name']}' share the "
+                    f"settings key '{key}' (check 'stored_as')")
+        owner[key] = param["name"]
 
 
 def filter_c_type(param, module_name):
@@ -432,7 +452,7 @@ def _proto_groups(config):
     return proto, {g["key"]: g for g in proto["groups"]}
 
 
-TRANSPORTS = ("shell", "nfc", "lrw", "vendor")
+TRANSPORTS = ("shell", "nfc", "radio", "vendor")
 
 
 def normalize_access(config):
@@ -445,9 +465,9 @@ def normalize_access(config):
 
       - no_shell      = shell in neither readable nor writable (no `config` entry)
       - readonly      = shell may read but not write
-      - dump          = field is readable over the air (nfc or lrw) -> ConfigDump
-      - dump_nfc_only = readable over nfc but NOT lrw (keys: LNS must not see them)
-      - no_write_lrw/no_write_nfc/no_write_vendor = that transport not in writable
+      - dump          = field is readable over the air (nfc or radio) -> ConfigDump
+      - dump_nfc_only = readable over nfc but NOT radio (keys: LNS must not see them)
+      - no_write_lrw/no_write_nfc/no_write_vendor = radio/nfc/vendor not in writable
       - proto_callback = root `bytes` (identity blobs stay off the wire, as
                          before) — structural, independent of the access lists
 
@@ -468,9 +488,9 @@ def normalize_access(config):
         if "shell" in r and "shell" not in w:
             p["readonly"] = True
 
-        air_read = ("nfc" in r) or ("lrw" in r)
+        air_read = ("nfc" in r) or ("radio" in r)
         p["dump"] = air_read
-        if ("nfc" in r) and ("lrw" not in r):
+        if ("nfc" in r) and ("radio" not in r):
             p["dump_nfc_only"] = True
 
         # Per-transport WRITE gating (M-3): the generated apply_<group>() rejects a
@@ -483,7 +503,12 @@ def normalize_access(config):
         # scoped to a narrow recovery surface (#299/#316), so a field that omits
         # vendor from `writable` must reject it like any other excluded transport.
         # Mirrors dump/dump_nfc_only.
-        if "lrw" not in w:
+        # `radio` covers both radio downlinks (#118 B4): a field kept off the
+        # LoRaWAN link (e.g. radio_mode/keys, the #271 "don't reconfigure the
+        # radio over the radio" rule) is kept off P2P too. The ingest template
+        # emits an APP_CMD_TRANSPORT_P2P check wherever it emits the LRW one; the
+        # flag keeps its historical no_write_lrw name.
+        if "radio" not in w:
             p["no_write_lrw"] = True
         if "nfc" not in w:
             p["no_write_nfc"] = True
@@ -837,12 +862,15 @@ def guard_no_renumber_commands(model, proto_path):
 # "all transports" set; a command whose list is a proper subset gets a guard.
 _TRANSPORT_ENUM = {
     "lrw": "APP_CMD_TRANSPORT_LRW",
+    "p2p": "APP_CMD_TRANSPORT_P2P",
     "nfc": "APP_CMD_TRANSPORT_NFC",
     "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
     "vendor": "APP_CMD_TRANSPORT_VENDOR",
     "plain_text": "APP_CMD_TRANSPORT_PLAIN_TEXT",
 }
 _ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
+# YAML `radio` token: both radio transports (LoRaWAN + P2P), the usual case.
+_RADIO_TRANSPORTS = ("lrw", "p2p")
 # Transports a command answers on when it omits `transports:`. plain_text (#415)
 # is the unencrypted, unauthenticated channel, so it is NOT in the implicit
 # default — a command reaches plain_text only by listing it explicitly (opt-in).
@@ -881,6 +909,14 @@ def build_commands_model(config):
             log.die(f"action command '{name}' must set 'action'")
 
         transports = c.get("transports")
+        if transports is not None:
+            # `radio` = both radios (LoRaWAN + P2P); expanded to the enum tokens.
+            expanded = []
+            for t in transports:
+                for e in (_RADIO_TRANSPORTS if t == "radio" else (t,)):
+                    if e not in expanded:
+                        expanded.append(e)
+            transports = expanded
         # Emit a transport guard for every command not reachable on ALL transports
         # (#183): the dispatch must reject the command on any disallowed transport,
         # not just the [lrw]-only case. `None` (omitted) means the implicit default
@@ -928,7 +964,7 @@ def build_commands_model(config):
 
 # get_config DUMP_FIELDS[] codegen ------------------------------------------
 # Section order MUST match the DUMP_SECTION_* enum in app_cmd.c.
-DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms"]
+DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms", "p2p"]
 
 
 def _varint_bytes(value):
@@ -972,7 +1008,7 @@ def build_dump_fields_model(config):
     selects it when the transport is NFC, so it never enters a LoRaWAN response
     (e.g. the LoRaWAN crypto keys — readable over the encrypted NFC channel only).
     A plain `dump: false` field stays excluded from every transport. A
-    `dump_lrw: false` field is included with lrw_skip=1: the get_config handler
+    `dump_radio: false` field is included with lrw_skip=1: the get_config handler
     leaves it out of a LoRaWAN dump (get_param still returns it on request)."""
     rows = []
     for section in DUMP_SECTIONS:
@@ -985,7 +1021,7 @@ def build_dump_fields_model(config):
                 continue
             rows.append({"section": macro, "tag": p["proto_id"],
                          "size": _dump_field_size(p), "nfc_only": nfc_only,
-                         "lrw_skip": p.get("dump_lrw") is False})
+                         "lrw_skip": p.get("dump_radio") is False})
     return {"dump_fields": rows}
 
 
@@ -1105,6 +1141,7 @@ class Configen(WestCommand):
         # Validate parameters
         for param in parameters:
             self._validate_param(param)
+        check_nvs_keys(parameters)
 
         # Derive the internal access flags (dump / no_shell / ...) from the
         # readable/writable transport lists before any model is built.
@@ -1125,6 +1162,7 @@ class Configen(WestCommand):
         # Register filters
         env.filters["c_name"] = filter_c_name
         env.filters["settings_key"] = filter_settings_key
+        env.filters["nvs_key"] = filter_nvs_key
         env.filters["c_type"] = filter_c_type
         env.filters["struct_field"] = filter_struct_field
         env.filters["printf_format"] = filter_printf_format
@@ -1383,6 +1421,13 @@ class Configen(WestCommand):
 
         if ptype == "enum" and not param.get("enum"):
             log.die(f"Parameter '{name}' of type 'enum' must have an 'enum' field")
+
+        stored_as = param.get("stored_as")
+        if stored_as is not None:
+            if not isinstance(stored_as, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", stored_as):
+                log.die(f"Parameter '{name}' 'stored_as' must be a snake_case name, got {stored_as!r}")
+            if stored_as == name:
+                log.die(f"Parameter '{name}' 'stored_as' repeats its own name")
 
         if "preserve_on_reset" in param:
             log.die(f"Parameter '{name}' uses removed 'preserve_on_reset' — "

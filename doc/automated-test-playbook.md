@@ -246,11 +246,11 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
   run `app/decoder/ttn.js`) and a second-opinion join path.
 - **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
   the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
-  correctly and reliably — confirmed decisive on 2026-08-11: `ats lrw check` got an immediate
+  correctly and reliably — confirmed decisive on 2026-08-11: `ats radio check` got an immediate
   `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
   DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
   throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
-  freshly release-flashed device with stock `lrw-link-check-interval`/`lrw-link-check-fail-rejoin`
+  freshly release-flashed device with stock `radio-link-check-interval`/`radio-link-check-fail-rejoin`
   defaults (both `5`, per `app_config.yml`) rejoined OTAA (fresh DevAddr each time) roughly every
   5-16 minutes, with device uptime climbing continuously across rejoins (confirmed via
   `unix_time - uptime_s` staying self-consistent — this is LoRaWAN-layer RECONNECT churn, not
@@ -420,13 +420,18 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 
 ### AT-HOST-02 — native_sim ztest suites
 - **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
-  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw, p2p_logic on
+  `native_sim/native/64`).
   `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
   (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
   alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
   only covers the static rule-validation layer. `buzzer` (#397) drives the real
   `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
-  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds. `p2p_logic` (#118, PR
+  #408) compiles the real `app_radio_p2p.c` against a no-op fake LoRa device (`src/emul_lora.c`) and
+  thin stubs, reaching its internal pure helpers via CONFIG_ZTEST hooks (`app_radio_p2p.h`): LoRa
+  time-on-air, the CCM nonce layout, the data-plane frame codec (round-trip + tamper), and the
+  token-bucket duty-cycle governor (B2 — refill accrual, burst, cap, long-run ≤1%).
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -480,7 +485,8 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 ### AT-BOOT-02 — boot LED carousel (DR; SA on release; maps G2)
 - **Steps:** reboot; debug: confirm carousel timing vs log; release: §18 assist "watch the
   LEDs after I reset the device".
-- **Expect:** R→Y→G carousel ~5 s after boot, then idle. See `version 1.4.md` §16 for the
+- **Expect:** R→Y→G carousel (3 s) right after boot, no heartbeat before it ends, and no
+  `app_led` ERR/WRN in the boot log; then idle. See `version 1.4.md` §16 for the
   full LED reference.
 
 ### AT-BOOT-03 — identity preserved across factory reset & reflash (D; maps G6, G6c)
@@ -496,7 +502,7 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   a provisioned debug device via `JLinkExe loadfile` (sector-erase, no `--erase`). After a real
   power cycle (see AT-BOOT-04's PPK2 correction below), the autonomous post-join GetInfo uplink
   decoded to `debug: false`, `serial_number: 2162199999` (unchanged) and a successful OTAA join
-  on the preserved `lrw_deveui`/`lrw_appkey` — full identity survived a real firmware-variant
+  on the preserved `radio_deveui`/`radio_appkey` — full identity survived a real firmware-variant
   swap, not just a same-image reflash. Since release has no shell/RTT, post-release verification
   had to go through LRW (autonomous GetInfo) — there is currently no way to inspect NFC state on
   a release device without a phone or external reader.
@@ -553,7 +559,7 @@ source of truth — read it before testing so parameter names/ranges are current
 ### AT-CFG-01 — shell round-trip on a representative sample (D, A; maps C8)
 - **Steps:** for each of: `interval-report` (int, 60–86400), `interval-sample` (5–3600 or 0),
   `battery-level` (1000–3600), `history-enable` (bool), `accel-motion-sensitivity` (enum),
-  `lrw-adr` (bool), `lrw-link-check-interval` (0–255): set a non-default valid value →
+  `lrw-adr` (bool), `radio-link-check-interval` (0–255): set a non-default valid value →
   read back → `settings save` (reboots) → read back again.
 - **Expect:** staged value visible before save; persisted after reboot.
 - **Cleanup:** restore defaults, save.
@@ -568,7 +574,7 @@ source of truth — read it before testing so parameter names/ranges are current
 
 ### AT-CFG-03 — transport access model (D, A; maps C1, C10, H-3)
 - **Steps:** attempt over `ats cmd lrw`: (a) SetParam on a `lorawan`-group field (e.g.
-  radio_mode, lrw_appkey); (b) GetParam of `lrw_appkey`. Then the same over `ats cmd nfc`.
+  radio_mode, radio_appkey); (b) GetParam of `radio_appkey`. Then the same over `ats cmd nfc`.
 - **Expect:** LRW transport: both refused (lorawan group is shell+nfc writable only; keys
   NFC-readable only). NFC transport: allowed. Any key readable over LRW = **CRIT** finding.
 
@@ -606,7 +612,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 
 ### AT-LRW-01 — OTAA join on ChirpStack (DR, A; maps L2)
 - **Pre:** provision OTAA creds (§ annex; shell: `config lrw-activation otaa`,
-  `config lrw-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
+  `config radio-deveui/joineui/appkey …`, `settings save`). MAC 1.0.3: appkey serves as NwkKey.
 - **Steps:** reboot; poll `GetActivation` until DevAddr appears (≤ 2 min).
 - **Expect:** join accept; first uplink = autonomous GetInfo on fPort 85 (AT-LRW-04).
 - **Evidence:** DevAddr, join timestamp, RSSI/SNR of first uplink.
@@ -626,12 +632,13 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-04 — GetInfo-on-join + device_status (DR, A; maps L4, G4)
 - **Steps:** force a rejoin (`lrw_join 08018a0100` via downlink or `ats cmd lrw`); capture
   the fPort-85 info frame; decode.
-- **Expect:** serial, fw version, config version, battery mV, lrw_state, device_status
+- **Expect:** serial, fw version, config version, battery mV, device_status (the link state is
+  `get_radio_state.state` since v1.5.0, no longer in Info)
   bitmask present and plausible (e.g. low-battery bit clear at {PPK2_MV}=3000).
 
 ### AT-LRW-05 — periodic + multi-frame telemetry (DR, A; maps L5, L6)
 - **Steps:** set `interval-report 60`, save; enable enough sensors that the fPort-2 payload
-  exceeds one frame at the current DR (or use `ats lrw compose <budget>` on debug to
+  exceeds one frame at the current DR (or use `ats radio compose <budget>` on debug to
   verify the split logic directly with a tiny budget).
 - **Expect:** uplinks every ~60 s (+TX jitter 0..min(interval/10,10 s) — jitter delays TX
   only, never the sampling timestamps); multi-frame sequences reassemble in the decoder.
@@ -664,20 +671,20 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   ~35s after the ack — i.e. LRW also does response-before-reboot ordering, just via ordinary
   uplink-then-deferred-action sequencing rather than NFC's ack/backstop gate. Config diff
   matched `app_config_device_reset()`'s preserve-list exactly (`cap-w1-sensors`/
-  `interval-report` reset, `lrw-appkey`/secret_key/serial/nonce_counter preserved).
+  `interval-report` reset, `radio-appkey`/secret_key/serial/nonce_counter preserved).
 - **Evidence:** command → response-hex → decoded table. This is the core release-FW
   functional suite.
 
 ### AT-LRW-07 — link-check state machine (D, A; maps L7, L8, L13)
-- **Pre:** ChirpStack (answers LinkCheckReq); `lrw-link-check-interval 5`,
-  `lrw-link-check-fail-rejoin 5` or run-plan values.
-- **Steps:** `ats lrw check` (real LC); then drive the FSM synthetically: `ats lrw lc fail`
-  × N → status via `ats lrw status` after each; then `ats lrw lc ok`.
+- **Pre:** ChirpStack (answers LinkCheckReq); `radio-link-check-interval 5`,
+  `radio-link-check-fail-rejoin 5` or run-plan values.
+- **Steps:** `ats radio check` (real LC); then drive the FSM synthetically: `ats radio lc fail`
+  × N → status via `ats radio status` after each; then `ats radio lc ok`.
 - **Expect:** HEALTHY → WARNING (with 🟡2× LED per §16) → RECONNECT (rejoin with backoff)
   transitions at the configured thresholds; `ok` recovers to HEALTHY.
 
 ### AT-LRW-08 — late LC in RECONNECT does not wedge (D, A; maps L14, HIGH-1 regression)
-- **Steps:** per manual L14: force RECONNECT, then inject a late `ats lrw lc ok`; continue
+- **Steps:** per manual L14: force RECONNECT, then inject a late `ats radio lc ok`; continue
   sending.
 - **Expect:** TX continues; no stuck semaphore (the historical overloaded-timer wedge).
 
@@ -688,6 +695,18 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   no LoRaWAN traffic + no crash). Back to `lorawan`.
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
+- **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
+  exists for it (the `p2p_logic` native_sim suite drives `app_radio_p2p.c` on a fake LoRa
+  device, but not this start-up guard), so this is the only place it gets exercised. In `radio-mode p2p`, set
+  `radio-appkey 00000000000000000000000000000000` + save: expect `P2P not started: radio_appkey
+  is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
+  status`, no JoinRequest on air, and `join` refused rather than transmitting.
+  Restore a real `radio-appkey` and confirm the join proceeds.
+- **Note:** `factory_reset` reverts `radio-mode` to its `OFF` default (#350; it is
+  `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
+  so it never leaves a live P2P node behind — but it does wipe `radio_appkey` while leaving
+  the `p2pjoin/*` pairing intact, which is the state the guard above exists for
+  (doc/p2p.md §7).
 - **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
 
 ### AT-LRW-10 — release sustained TX (R, A; maps L16 — decisive TX-stop regression)
@@ -697,7 +716,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Evidence:** uplink timestamp list + max-gap stat.
 
 ### AT-LRW-11 — DR/payload budget behaviour (D, A; maps L6)
-- **Steps:** `ats lrw compose 51` / `ats lrw compose 242` (DR0 vs DR5-class budgets) with
+- **Steps:** `ats radio compose 51` / `ats radio compose 242` (DR0 vs DR5-class budgets) with
   many sensors enabled.
 - **Expect:** frames never exceed the budget; split points are clean protobuf boundaries;
   the 2-byte-varint capacity case (>127 B frames) composes correctly.
@@ -742,7 +761,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   uplink DR and confirm a downlink is received in RX2.
 - **Expect:** uplinks flow and decode identically to EU868 (`ttn.js` is region-agnostic — any
   divergence = HIGH); telemetry fits the smallest US915 uplink DR max payload (DR0 ≈ 11 B → payload
-  splits across frames, never silently dropped — cross-check with `ats lrw compose 11` on debug);
+  splits across frames, never silently dropped — cross-check with `ats radio compose 11` on debug);
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
 - **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
 
@@ -778,7 +797,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
 ### AT-NFC-02 — encrypted GetInfo round-trip (DR, SA; maps N4)
 - **Steps:** `POST /comms` (encrypted, key from store or `{STICKER_KEY}`) → `POST /command
   {"op":"getinfo"}`.
-- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (lrw_state, dev_eui,
+- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (dev_eui,
   device_status); nonce advanced by the transaction.
 
 ### AT-NFC-03 — setparam → save → reboot → verify (DR, SA; maps N1, K6)
@@ -807,7 +826,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
   (anti-brick bound holds).
 
 ### AT-NFC-07 — NFC-only key readback (D, SA; maps C10, #162)
-- **Steps:** encrypted GetParam of `lorawan.lrw-appkey` over NFC.
+- **Steps:** encrypted GetParam of `lorawan.radio-appkey` over NFC.
 - **Expect:** key returned over NFC; the identical request over LRW (AT-CFG-03) refused.
 
 ### AT-NFC-08 — paged history readout (DR, SA; maps #260)
@@ -1685,7 +1704,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | L7, L8, L13 | AT-LRW-07 | A | D | – | |
 | L9 | AT-ADV-08 | A | DR | – | |
 | L10 | AT-LRW-06 | A | DR | – | ✅ |
-| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats lrw` surface) | A | D | – | |
+| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats radio` surface) | A | D | – | |
 | L12 | asserted inside AT-LRW-05 | A | DR | – | |
 | L14 | AT-LRW-08 | A | D | – | |
 | L15 | AT-LRW-09 (radio-mode supersedes DevEUI-zero guard) | A | D | – | |

@@ -8,6 +8,7 @@
 #define APP_CMD_H_
 
 /* Standard includes */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,10 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_LRW,
 	APP_CMD_TRANSPORT_NFC,
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
+	/* Raw-LoRa P2P downlink command (0x56), dispatched by app_radio_p2p.c (#118 B4).
+	 * Same generic Command/Response dispatch and writability gating as the
+	 * LoRaWAN transport -- P2P is the network-server-less equivalent. */
+	APP_CMD_TRANSPORT_P2P,
 	/* NFC hio.stck:vnd record, authenticated with vendor_token instead of
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
@@ -121,13 +126,9 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
+	uint8_t radio_state;    /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
-	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */
-	int16_t last_dl_rssi;   /* its RSSI (dBm) */
-	int8_t last_dl_snr;     /* its SNR (dB) */
-	uint32_t last_dl_age_s; /* seconds since it was received */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from
@@ -165,6 +166,15 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * vendor_reset zeroes secret_key, so this replacement is mandatory to keep the
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
+
+/* True for an action that ends in a reboot (save, reset, reboot), so a caller
+ * can finish what the operator must see first (NFC: the LED result). */
+bool app_cmd_action_reboots(enum app_cmd_action action);
+
+/* Run a deferred action returned by app_cmd_handle(). The one executor for
+ * every transport (#460 F3): the caller decides only when, after its reply was
+ * delivered. APP_CMD_ACTION_NONE and APP_CMD_ACTION_PAGE_STREAM do nothing. */
+void app_cmd_run_action(enum app_cmd_action action);
 
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
  * same payload a GetInfo command returns) into `out`. Used to send an autonomous
@@ -232,7 +242,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 
 /* Build one history-replay frame (Response{ seq, history_frame={...} }) into
  * `out`. `samples` holds values-only records (the shared `present` mask +
- * `interval_s` describe their layout/timing). Used by the app_lrw replay state
+ * `interval_s` describe their layout/timing). Used by the app_radio_lrw replay state
  * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
  * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode.
  * `time_synced` reports whether `t0_unix` is absolute UTC (L-1/L-3). */
