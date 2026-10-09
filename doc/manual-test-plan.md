@@ -855,11 +855,11 @@ sub-band's 8 channels have all been used by failed joins and after each rejoin's
 ### S4 — Free-fall → alarm
 
 **Goal:** Free-fall raises an `accel-motion` alarm.
-**Observable:** AlarmReport on fPort 3 with source `accel-motion`, edge ACTIVATE; orange LED blink.
+**Observable:** AlarmReport on fPort 3 with slot `mb`, channel `accel-motion`, edge ACTIVATE; orange LED blink.
 
 **Prompt for Claude:**
 > Ask me to perform a short, safe free-fall (drop onto a cushion). Confirm an AlarmReport arrives
-> on fPort 3 with an event whose source decodes to `accel-motion` and edge ACTIVATE, and that the
+> on fPort 3 with an event whose channel decodes to `accel-motion` and edge ACTIVATE, and that the
 > RTT log / orange LED reflect the alarm. Decode and report the event fields.
 
 - [ ] Pass
@@ -1212,14 +1212,18 @@ columns (it stays in `history-channels`).
 
 ## Alarms
 
-> **Alarms are dynamic rules** in 16 fixed slots (`0…15`). Arm/change/clear them locally with the
-> `alarm` shell command (`alarm set <i> <source> <quantity> <args>`, `alarm new …`,
-> `alarm clear <i>|all`, `alarm list`), or over the air with **SetParam** writing the slot config
-> parameter `alarm_<i>` (a packed 17-byte rule as hex) — the same message works on **fPort 85
-> (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*` config keys
-> any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See `doc/version 1.4.md` §7 for
-> the source/quantity enums, the kinds (threshold / state / count) and the packed-slot layout.
-> `alarm-limit` (rate-limit) still applies globally.
+> **Alarms are dynamic rules** in 16 fixed rule entries (`0…15`). Each rule targets a **channel**
+> of a sensor **slot** (#430): `mb` = motherboard, `s1`…`s4` = 1-Wire slots; `sensor types [<type>]`
+> lists every type's channels with their kind (threshold / state / rate). Arm/change/clear rules
+> locally with the `alarm` shell command (`alarm set <rule> <slot> <channel> <key> <value>...`,
+> `alarm new <slot> <channel> ...`, `alarm clear <rule>|all`, `alarm list`), or over the air with
+> **SetParam** writing the config parameter `alarm_<rule>` (a packed 18-byte rule as hex: flags,
+> slot, channel, sensor_type, from, to, then float32 LE lo, hi, dwell) — the same message works on
+> **fPort 85 (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*`
+> config keys any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See
+> `doc/version 1.5.md` (sensor channel model) for the channel registry, the kinds and the rule
+> layout. A rule written for another sensor type than the slot now holds is **stale**: kept,
+> listed as `STALE`, never evaluated. `alarm-limit` (rate-limit) still applies globally.
 >
 > **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band** —
 > `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` config keys are gone.
@@ -1228,12 +1232,12 @@ columns (it stays in `history-channels`).
 > and give a concrete recipe to observe it, including the "canceled by an early revert" case that a
 > naive check-once-at-expiry implementation would get wrong.
 >
-> **Shell syntax gotcha:** `alarm new <source> <quantity> <kind-args>` / `alarm set <i> <source>
-> <quantity> <kind-args>` — `<source>`/`<quantity>` are **names** (e.g. `onboard`,
-> `temperature`), not numeric indices, and there is **no** literal `threshold`/`state`/`count`
-> keyword in the actual command line — the kind is inferred from the quantity. Threshold args are
-> `<lo> <hi> [dwell]` (e.g. `alarm new onboard temperature 0 20 1`); adding a `threshold` token as
-> if it were a positional argument shifts everything and fails with "wrong parameter count".
+> **Shell syntax:** `alarm new <slot> <channel> <key> <value>...` / `alarm set <rule> <slot>
+> <channel> <key> <value>...` — `<slot>` is `mb` or `s1`…`s4`, `<channel>` a channel name of the
+> slot's type (e.g. `temperature`, `hall-left-state`) or its number. The kind comes from the
+> channel; the keys are `lo`/`hi`/`dwell` (threshold), `from`/`to`/`dwell` (state) and `hi`/`dwell`
+> (rate), e.g. `alarm new mb temperature lo 0 hi 20 dwell 1`. A 1-Wire slot needs its
+> `sensorN-type` set first (the rule records that type).
 >
 > **Bench tip — testing alarms without a network join:** the alarm-poll loop in the main
 > application only runs while the LoRaWAN state is HEALTHY, so on a device that hasn't joined (or
@@ -1250,16 +1254,16 @@ columns (it stays in `history-channels`).
 band continuously for `dwell` seconds; a value that dips back inside the band before `dwell` elapses
 must NOT fire, and must NOT get credit toward a later attempt (the dwell window resets).
 Deactivation is always immediate.
-**Observable:** AlarmReport on fPort 3, source `onboard`, quantity `temperature`, edge + side
+**Observable:** AlarmReport on fPort 3, slot `mb`, channel `temperature`, edge + side
 (LO/HI); RTT alarm log; red LED while active.
 
 **Prompt for Claude:**
-> Arm `alarm set 0 onboard temperature <lo> <hi> <dwell>` with bounds near the current room
+> Arm `alarm set 0 mb temperature lo <lo> hi <hi> dwell <dwell>` with bounds near the current room
 > temperature and `dwell` a few seconds (note the values); confirm with `alarm list`. Then, in order:
 > (1) push the sensor just past the bound and back inside within less than `dwell` seconds — confirm
 > **no** AlarmReport fires (the dwell was interrupted); (2) push it past the bound and hold it there
 > for longer than `dwell` — confirm an AlarmReport fires only after roughly `dwell` seconds have
-> elapsed, with source `onboard`/quantity `temperature` and the correct side (LO/HI); (3) bring the
+> elapsed, with slot `mb`/channel `temperature` and the correct side (LO/HI); (3) bring the
 > value back inside the band and confirm the alarm clears **immediately** (no matching dwell on the
 > way down). Decode and report all three events/non-events with their timing.
 
@@ -1267,14 +1271,16 @@ Deactivation is always immediate.
 
 ### A2 — Threshold alarms: humidity / pressure / 1-Wire slots
 
-**Goal:** The other analog quantities behave like temperature (band + dwell + immediate clear).
-**Observable:** AlarmReport fPort 3 with the matching source and side.
+**Goal:** The other analog channels behave like temperature (band + dwell + immediate clear).
+**Observable:** AlarmReport fPort 3 with the matching slot/channel and side.
 
 **Prompt for Claude:**
-> For each present analog quantity (onboard humidity/pressure, and 1-Wire slot s1…s4 temperature/
-> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [dwell]`, stimulate a crossing held past
-> `dwell`, and confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side after
-> the dwell. Summarize per source; mark any sensor not fitted as N/A.
+> For each present analog channel (`mb` humidity/pressure, and the 1-Wire slots s1…s4 per their
+> type — dallas `temperature`, machine-probe `temperature`/`temperature-aux`/`humidity`), arm
+> `alarm set <i> <slot> <channel> lo <lo> hi <hi> [dwell <s>]`, stimulate a crossing held past
+> `dwell`, and confirm an AlarmReport on fPort 3 with the correct slot/channel (and `sensor_type`
+> for a 1-Wire slot) and LO/HI side after the dwell. Summarize per channel; mark any sensor not
+> fitted as N/A.
 
 - [ ] Pass
 
@@ -1284,7 +1290,7 @@ Deactivation is always immediate.
 to persist for `dwell` seconds before it fires; an edge that fires then also **holds** the alarm
 active (and blocks re-arming) for that same `dwell`. `dwell = 0` reproduces the old immediate
 behavior. Level deactivation is always immediate.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-state`/`hall-right-state`.
 
 **Polarity (#352):** `state 1` = magnet **present**, `state 0` = magnet **absent** —
 `ats sensors sample`/`alarm poll` reading `hall_left=1` while no magnet is applied (or `=0` while
@@ -1293,17 +1299,17 @@ one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue 
 **Prompt for Claude:**
 > First confirm the raw polarity: `ats sensors sample` with no magnet must show `hall_left=0`, and
 > `=1` only while a magnet is held against it. Then arm an **edge** rule with a confirm+hold
-> window, `alarm set 0 hall-left state 0 1 5` (fires on 0→1, 5 s confirm+hold) and confirm with
+> window, `alarm set 0 mb hall-left-state from 0 to 1 dwell 5` (fires on 0→1, 5 s confirm+hold) and confirm with
 > `alarm list` it reads `0->1 (edge) dwell=5.00`. Ask me to briefly tap the magnet on and off within
 > less than 5 s — confirm **no** AlarmReport fires (the confirm was interrupted). Then ask me to
 > apply the magnet and hold it past 5 s — confirm one AlarmReport fires roughly 5 s after the raw
 > transition, i.e. when the magnet is **applied**, not removed, and that reapplying the magnet
 > within the next 5 s produces **no** second report (holding/re-arm-blocked). Then arm a **level**
-> rule `alarm set 0 hall-left state 1 1 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
+> rule `alarm set 0 mb hall-left-state from 1 to 1 dwell 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
 > after the magnet has been present continuously for ~5 s, and clears immediately on removal.
 > Report all four checks with timing.
 
-**Reverse direction (edge on removal, `alarm set 0 hall-left state 1 0 5`):** symmetric to the
+**Reverse direction (edge on removal, `alarm set 0 mb hall-left-state from 1 to 0 dwell 5`):** symmetric to the
 `0→1` case above — confirmed to fire ~5 s after the magnet is removed (not reapplied), with the
 same early-revert-cancel on a quick remove+reapply within 5 s. Worth testing explicitly at least
 once, not just assuming symmetry: a bounce-prone reed switch has different release vs. close
@@ -1316,16 +1322,16 @@ way to confirm the physical transition actually settled before timing the dwell.
 ### A4 — Binary alarm: Input A/B (state)
 
 **Goal:** Input edges/levels raise `state` alarms (same confirm/hold model as A3).
-**Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, quantity `state`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `input-a-state`/`input-b-state`.
 
 **Polarity (#352):** `state 1` = input **asserted** (shorted to GND), `state 0` = input **idle** —
 same fix/regression check as A3's hall polarity note.
 
 **Prompt for Claude:**
 > With PIR disabled (shared pins), confirm `ats sensors sample` shows `input_a=0`/`input_b=0` idle,
-> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1 [dwell]` (and
-> `input-b`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3 with source
-> `input-a`/`input-b` fire on **assertion**, not release. Report results.
+> and `=1` only while shorted to GND. Then arm `alarm set <i> mb input-a-state from 0 to 1 [dwell <s>]`
+> (and `input-b-state`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3
+> with channel `input-a-state`/`input-b-state` fire on **assertion**, not release. Report results.
 
 - [ ] Pass
 
@@ -1335,7 +1341,7 @@ same fix/regression check as A3's hall polarity note.
 the sensor already reports a discrete event, not a raw level) and then use `dwell` purely as the
 hold/re-arm window: a further pulse within `dwell` seconds of the last is suppressed. `dwell = 0` re-
 arms on the very next poll.
-**Observable:** AlarmReport fPort 3, source `pir`/`accel`, quantity `state`, edge ACTIVATE; one
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `pir-motion`/`accel-motion`, edge ACTIVATE; one
 report per pulse, suppressed for `dwell` seconds, then re-armed; a motion burst is flood-suppressed
 (no permanent latch).
 
@@ -1349,8 +1355,8 @@ its own fire.
 **Prompt for Claude:**
 > Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
-> `alarm set 0 pir state 0 1 <dwell>` (or `accel state 0 1 <dwell>`, note the value) — edge and level
-> behave alike for these momentary sources. Ask me to trigger motion repeatedly; confirm the FIRST
+> `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — only
+> edge rules are accepted on these momentary channels. Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
 > `dwell` seconds of it are suppressed, that it re-arms and fires again once `dwell` has elapsed, and
 > that a sustained burst produces only periodic reports (not a flood, not a stuck `active`). Report
@@ -1360,26 +1366,26 @@ its own fire.
 
 ### A6 — Count / rate alarm (hall / input) — dwell as hold/re-arm
 
-**Goal:** A `count` rule fires when a counter exceeds the per-interval rate, then holds/re-arm-
+**Goal:** A rate rule on a counter channel fires when it exceeds the per-interval rate, then holds/re-arm-
 blocks for `dwell` seconds (same role as A5). `dwell = 0` re-arms on the next report interval.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
-`count`.
+**Observable:** AlarmReport fPort 3, slot `mb`, channel `hall-left-count`/`hall-right-count`/
+`input-a-count`/`input-b-count`.
 
 **Gotcha:** `interval_report` has a hard shell-enforced minimum of 60 s (`config interval-report`,
 `cmd_int` min=60) — it cannot be shrunk for a faster manual test cycle, so each rate-window
 iteration costs a real 60+ s wait. Also: re-arming a rule via `alarm clear all` immediately
-followed by `alarm new <same source+quantity>` does **not** reset the runtime dwell/window
-state — `rt_sync()` only resets on a `(source, quantity)` mismatch, and nothing re-syncs while the
+followed by `alarm new <same slot+channel>` does **not** reset the runtime dwell/window
+state — `rt_sync()` only resets on a rule change, and nothing re-syncs while the
 rule is briefly absent — so a "fresh" rule can silently inherit a stale window baseline from the
 previous test run. Insert an `alarm poll` **between** `alarm clear all` and `alarm new` to force a
 true reset before timing a fresh window.
 
 **Prompt for Claude:**
-> Arm `alarm new hall-left count <N> <dwell>` (small N, note both values; `alarm list` shows
+> Arm `alarm new mb hall-left-count hi <N> dwell <dwell>` (small N, note both values; `alarm list` shows
 > `rate>=N/interval dwell=…`) — if re-arming an existing rate rule, `alarm clear all` then
 > `alarm poll` then `alarm new` (not `clear` immediately followed by `new`, see gotcha above).
 > Ask me to pulse the hall sensor more than N times within a report interval and confirm an
-> AlarmReport on fPort 3 for that source/quantity, then confirm a second over-rate interval
+> AlarmReport on fPort 3 for that slot/channel, then confirm a second over-rate interval
 > within `dwell` seconds of the first does **not** produce a second report while one after `dwell`
 > has elapsed does. Report the result.
 
@@ -1387,15 +1393,15 @@ true reset before timing a fresh window.
 
 ### A7 — Set & read alarms over LoRaWAN & NFC (SetParam / GetParam)
 
-**Goal:** Alarm slots are written/read as `alarm_<i>` config parameters over both transports
+**Goal:** Alarm rules are written/read as `alarm_<i>` config parameters over both transports
 (native protobuf bytes, not hex strings on the wire).
-**Observable:** `set_param.alarms.alarm_<i>` arms a slot (Ack); `get_param.alarms_field=[54+i]`
+**Observable:** `set_param.alarms.alarm_<i>` arms a rule (Ack); `get_param.alarms_field=[54+i]`
 returns the packed rule in `config_dump`; `alarm list` matches; identical behaviour on fPort 85
 and NFC.
 
 **Prompt for Claude:**
-> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed onboard-
-> temperature rule (hex), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
+> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed 18-byte `mb`
+> temperature rule (hex, e.g. `0300000100000000a0400000f0410000803f` = lo 5, hi 30, dwell 1), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
 > shows the rule. Then GetParam `alarms_field:[54]` and confirm the returned hex matches what was
 > set. Repeat the SetParam over NFC and confirm the same result. Report both transports.
 
@@ -1403,32 +1409,32 @@ and NFC.
 
 ### A8 — Change / delete / deactivate a rule
 
-**Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
-**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
+**Goal:** A rule can be overwritten, cleared, and disabled-without-losing-its-definition.
+**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 36
 zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
-`01…`) keeps the slot listed with `en=0` and is **not** evaluated. Since the 2026-08-18
+`01…`) keeps the rule listed with `en=0` and is **not** evaluated. Since the 2026-08-18
 final-review fix, clearing/disabling/editing a rule whose latch is currently ACTIVE also emits
 the matching fPort-3 deactivate edge on the next poll (previously the activate was left
 dangling for edge-pairing backends).
 
 **Prompt for Claude:**
-> Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 5` then re-set to
-> `5 30 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
+> Using rule 0: (1) **change** it — `alarm set 0 mb temperature lo 0 hi 10 dwell 5` then re-set to
+> `lo 5 hi 30 dwell 5`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
 > `alarm_0` with the same rule but flags `01` (present, not enabled); confirm `alarm list` shows
 > `en=0` and that crossing the bound raises **no** alarm. (3) **delete** it (`alarm clear 0`, or
-> SetParam `alarm_0` = all zeros); confirm the slot disappears from `alarm list`. Report all three.
+> SetParam `alarm_0` = all zeros); confirm the rule disappears from `alarm list`. Report all three.
 
 - [ ] Pass
 
-### A9 — Multi-level (two slots, same source + quantity)
+### A9 — Multi-level (two rules, same slot + channel)
 
-**Goal:** Several slots may carry the same `(source, quantity)` as independent rules (e.g. a warning
+**Goal:** Several rules may target the same `(slot, channel)` independently (e.g. a warning
 band and a critical band), each latching/reporting on its own.
 
 **Prompt for Claude:**
-> Arm two onboard-temperature rules — slot 0 a wide "warning" band and slot 1 a tighter "critical"
-> band (note both). Stimulate crossings into each band and confirm each slot raises its own
-> AlarmReport independently (the `slot`/event fields distinguish them) and clears independently.
+> Arm two `mb temperature` rules — rule 0 a wide "warning" band and rule 1 a tighter "critical"
+> band (note both). Stimulate crossings into each band and confirm each rule raises its own
+> AlarmReport independently (the `rule` field distinguishes them) and clears independently.
 > Report.
 
 - [ ] Pass
@@ -1436,13 +1442,14 @@ band and a critical band), each latching/reporting on its own.
 ### A10 — AlarmReport structure
 
 **Goal:** AlarmReport fields are well-formed.
-**Observable:** `base_time`, `total`, `events[]` with `source`, `edge`, `side`, `rel_s`, and
-optional scaled `value` (×100 temp/hum, ×10 pressure; absent for discrete).
+**Observable:** `base_time`, `total`, `events[]` with `rule`, `slot`, `channel` (+ `sensor_type`
+for a 1-Wire slot), `edge`, `type`, `rel_s`, and optional `value` scaled by the channel's wire
+scale (×100 temperature, ×2 humidity, ×10 pressure, ×1000 voltage; see `sensor types`).
 
 **Prompt for Claude:**
 > Capture any AlarmReport on fPort 3 and fully decode it. Confirm `base_time` and `total` are
-> sensible, each event has a valid `source`/`edge`/`side`/`rel_s`, threshold events carry a scaled
-> `value` (×100 for temp/hum, ×10 for pressure) while discrete events omit it, and that no more
+> sensible, each event has a valid `rule`/`slot`/`channel`/`edge`/`type`/`rel_s`, threshold events
+> carry `value` scaled by the channel's wire scale, and that no more
 > than 8 events appear per frame. Report the decoded structure.
 
 - [ ] Pass
@@ -2568,7 +2575,7 @@ cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 
 ### X9 — H: alarm `rt_sync()` resets stale latch on any rule edit; RATE/COUNT holds after firing
 
-**Goal:** Editing an alarm rule (not just source/quantity changes) resets its runtime latch; a
+**Goal:** Editing an alarm rule (not just slot/channel changes) resets its runtime latch; a
 RATE/COUNT alarm holds after firing instead of re-firing every window.
 **Observable:** Editing any field of an armed rule clears its latched state cleanly; a RATE/COUNT
 alarm fires once per window then stays quiet (no report spam) until the condition genuinely

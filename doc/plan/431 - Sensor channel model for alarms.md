@@ -606,10 +606,47 @@ of every step.
        left the slot without a reading until the next sample, so the 5 s no-data
        watchdog raised a spurious no_data pair (pre-existing for `w1 enroll`); the
        shell now queues a sample after scan / enroll / clear.
-4. **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
+4. ✅ **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
    18 B blob with `sensor_type`, stale-rule detection, validity/kind/scale/liveness/
    watchdogs from the registry, `AlarmEvent` / `AlarmStatus` changes (incl. the
    `slot` / `rule` renames), `ttn.js`, shell, ATS.
+   - Rule blob (`alarm_N`, 18 B): flags, slot, channel, sensor_type, from, to, lo, hi,
+     dwell. `app_alarm_rule_valid()` checks the target against the registry (slot 0 ↔
+     motherboard, slots 1..4 ↔ a 1-Wire type, channel in range, not `none` / retired /
+     watchdog-only); momentary channels take edge rules only.
+   - Stale rule = `sensor_type` ≠ the slot's type: `set` accepts it, reload keeps it
+     (LOG_WRN) and counts it with the invalid ones, `alarm list` marks it `STALE`, the
+     evaluator never arms it. A SetParam fails only when the batch leaves more faulty
+     rules than before it (`app_alarm_rules_stale_count()` before vs reload after;
+     `sensors` changes trigger the reload too), so an already stale table does not block
+     unrelated writes.
+   - Armed = enabled && !stale && the channel's capability on (motherboard). An inert
+     STATE rule drops a held non-momentary latch with a deactivate edge.
+   - Evaluation by `kind`; value from the slot's channel vector (a 1-Wire slot whose data
+     type differs from the rule's reads NaN, so a mismatched sensor never feeds a rule);
+     counters from `.u`; event value = `lroundf(v × wire_scale)` of the channel.
+   - Watchdogs: no-data watches every `liveness` channel of the slot's type (latches 4
+     motherboard + 2 per 1-Wire slot, guarded by a test), re-armed on a type change;
+     low battery reads `battery-voltage` (ch 20, value in mV); both use rule 0xFF / 0xFE.
+     Active mask: 16 rule bits, 5 no-data (per slot), battery, 4 mismatch.
+   - Wire: `AlarmEvent` slot(1) / rule(7) / channel(10) / sensor_type(11, 1-Wire only),
+     `quantity` (6) reserved; `Info.AlarmStatus` slot(1) / type(3) / channel(4) /
+     sensor_type(5), `quantity` (2) reserved. `app_alarm_event(channel, …)` and the
+     event callback take the motherboard channel.
+   - Shell: `alarm set <rule> <slot> <channel> <key> <value>...` / `alarm new`, keys
+     `lo` / `hi` / `from` / `to` / `dwell`, the type taken from the staged
+     `sensorN-type`; `sensor types [<type>]` lists the registry.
+   - `ttn.js`: events `{rule, slot, channel, sensor_type?, event, type, value, time}`
+     (value ÷ the channel's `s`; rule null for the watchdogs; channel null for a
+     mismatch), active alarms `{slot, channel, sensor_type?, type}`.
+   - Size: release 187 412 B flash / 55 716 B RAM (step 3 was 187 044 B / 55 588 B);
+     debug 98.78 % / 98.52 %; debug + `CONFIG_W1=y` + `CONFIG_LOG=n` 89.23 % / 92.07 %.
+   - Tests: `alarm_rules` (19: target pairing, channel validation, momentary edge-only,
+     18 B layout round-trip, stale kept + counted, armed), `alarm_eval` (43, ported +7:
+     two machine-probe temperatures independent, mismatched slot inert, stale rule
+     inert with a deactivate edge, event routed by channel, value wire scale, low
+     battery on ch 20, registry liveness fits the latches), `cmd` (AlarmEvent rule /
+     slot / channel / sensor_type, 18 B SetParam vectors), `ttn.test.js` (108).
 5. **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
    output with units, `i32` history encoding.
 6. ✅ **History per channel.** `history_channels`, `sensorN_type`, derived layout with
