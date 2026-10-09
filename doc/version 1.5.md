@@ -1747,6 +1747,11 @@ Release +136 B flash, RAM unchanged. `tests/nfc_hw` `test_clm_latch_fails_closed
 `tests/cmd` `test_claim_active` (kept, replaced and generated token, always
 `claim_info`, rejected over LoRaWAN without generating).
 
+HW-verified (2026-10-09, STICKER 2162190413, PR #474 head): the shell and NFC
+reset tiers (G6a), NFC `factory_reset` (N9), the NFC claim flow (`get_claim_info`,
+`claim_active` generating and then keeping a token, `claim_done`,
+`new_claim_token`, N10) and the LoRaWAN refusal (`NOT_READY`).
+
 ---
 
 ## 36. Onboard SHT4x capability flag `cap_sht` (#465)
@@ -1801,6 +1806,9 @@ Tests: `compose/test_cap_sht_gating`, `history/test_cap_sht_off_drops_onboard_ch
 `cmd/test_build_config_status_worst_case_dr0`, the settings-info field counts
 (12 → 14) and the `ttn.js` decoder tests.
 
+HW-verified (2026-10-09, STICKER 2162190413, PR #475 head): `cap_buzzer` and
+`cap_sht` in the boot settings-info (L4b) and the `cap_sht` gating (S10b).
+
 ---
 
 ## 37. Periodic Info + settings-info announce (#445)
@@ -1844,7 +1852,11 @@ reboots.
   the period, off at 0, deferred to the link-up while the link is down,
   restarted by a re-join; the delay bounds. `ttn.test.js`: the
   `set_param application.interval_announce` round-trip. Manual: L4d.
-- **Not covered yet:** HIL on the bench (L4d, both radios).
+- **HIL so far** (2026-10-09, STICKER 2162190413, LoRaWAN EU868, PR #472 head):
+  boot announce Info → settings-info → telemetry, then the first periodic
+  announce after `interval-announce 1` carrying a staged `interval-sample`.
+- **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
+  `interval-announce 0`) and P2P.
 
 ---
 
