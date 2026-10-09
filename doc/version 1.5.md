@@ -15,7 +15,7 @@ technical detail.
 
 | | What you get | Details |
 |---|---|---|
-| **P2P radio** | A second radio mode for sites with no LoRaWAN network: `radio-mode p2p` talks directly to a HARDWARIO FIBER modem and a ProXimos Hub. Telemetry, alarms, commands, history backfill, network time and link supervision work as over LoRaWAN; the same firmware image does both, the choice is made at boot. | §6, §23–§34 |
+| **P2P radio** | A second radio mode for sites with no LoRaWAN network: `radio-mode p2p` talks directly to a HARDWARIO FIBER modem and a ProXimos Hub over the HARDWARIO TOWER radio protocol (AES-CCM frames, confirmed sends with a local gateway ACK). Telemetry, alarms, commands, history backfill, network time and link supervision work as over LoRaWAN; the same firmware image does both, the choice is made at boot. | §6, §23–§34, §41 |
 | **One-tap NFC, iOS included** | All phone commands go through the ST25DV Fast-Transfer-Mode mailbox: one tap, phone held still, a full configuration read or write in one hold (~0.1–0.3 s per exchange). iOS now works the same as Android. | §18 |
 | **Safer claiming** | The claim token is no longer readable from an unpowered box. The claim window is an explicit `active` / `done` switch that the app closes with `claim_done`; a corrupted NVS value closes it. After a `vendor_reset` the owner re-opens it with `claim_active`, which also creates a new token. | §19, §35 |
 | **The network knows the configuration** | After every boot/join the device sends its Info **and** its key settings (intervals, every sensor capability flag, detected 1-Wire sensors). The same pair is re-sent every `interval-announce` hours (default 24 h), and `GetSettings` asks for it at any time. | §4, §14, §37 |
@@ -37,7 +37,7 @@ technical detail.
 | `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
 | `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
 | `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
-| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power` | — | shell only | P2P radio parameters; must match the Hub | §6, §28 |
+| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora`; `fsk` not supported yet) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
 | `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
 | `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
@@ -123,8 +123,9 @@ technical detail.
    (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
    wire format changed with no migration. Rewrite the alarm rules and the history selection,
    and update the Hub/Portal decoder (§40).
-9. **P2P deployments only:** the P2P frame header changed (flag day). Nodes and the Hub must
-   be updated together (§28).
+9. **P2P deployments only:** P2P now speaks the TOWER protocol (flag day, no fallback). Nodes
+   and the Hub (Northbridge + central) must be updated together, and every node joins afresh
+   (§41).
 
 ### Known limitations
 
@@ -194,6 +195,7 @@ technical detail.
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
+| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 100 B MTU), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
 
 ---
 
@@ -1664,6 +1666,10 @@ all three retries of both colliding). Two causes, two fixes (decision #22
 
 ## 28. P2P: unconfirmed telemetry, FCtrl header, link supervision (decision #22)
 
+> **Superseded by §41** (TOWER protocol, #470): the header, the `FCtrl` byte, the RX1 after
+> every uplink and the `p2p_join_kat` / `p2p_data_kat` fixtures below are gone. The confirmed
+> policy and link supervision carry over.
+
 Hynek, 2026-09-27: "zrušíme pro p2p potvrzování telemetrie ihned". With every
 uplink confirmed, the Hub's ACK traffic alone (57 ms per ACK at SF7, 1 % duty)
 capped a 60 s network at ~10 Nodes; LoRaWAN confirms nothing but its link
@@ -1718,7 +1724,7 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.6.
   - `true` sends alarms confirmed on both radios. On LoRaWAN that is a confirmed uplink, retried as below.
 - **One retry ladder** in `app_radio`:
   - A confirmed frame without its Ack goes again after a random 1..2^n s (n = the retry), on top of any duty-cycle wait, at most 3 times. Nothing else is sent meanwhile.
-  - Given up, the frame counts as sent and as a failed link check (link supervision, §28).
+  - Given up, the frame counts as sent. Only a link-check report given up is a failed link check (§41); an alarm, answer or plain report is not.
   - P2P resends the same counter (a byte-identical frame). LoRaWAN takes a new FCnt, with LoRaMac NbTrans left at 1.
   - A deferred command action (reboot, settings save) waits for a pending retry on either radio.
 - Answers and history frames stay confirmed on P2P and unconfirmed on LoRaWAN; telemetry is unchanged.
@@ -1780,6 +1786,9 @@ The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequ
 - HIL (2026-09-28, STICKER 2162190413, P2P, paired): flashed without an erase from the #462 image to this one and back. The DevEUI and the AppKey survived both ways, under `config radio-*` after the upgrade and `config lrw-*` after the downgrade. The session resumed with no JoinRequest, and the Info and telemetry frames were acked.
 
 ## 34. Network time through `app_radio` (`TIME_REQ`)
+
+> The P2P half (`FCtrl` bit 1 `TIME_REQ`, the Ack's Unix tail) is **superseded by §41**:
+> P2P asks with a TimeReq in the `0x91` control envelope. The `app_radio` half is unchanged.
 
 Before, `app_clock` called the LoRaWAN stack directly: the DeviceTimeReq on join, the weekly re-sync (#96) and the GPS → Unix conversion. P2P took the time only from the Ack tail, when the central chose to send it, and could not ask for it. The weekly re-sync did not run on P2P at all.
 
@@ -2251,6 +2260,71 @@ over GetConfig, STALE rules after a type change. Step 5: machine-probe and absen
 `device` alarm and `absent`, re-plug → deactivate and values back without a reboot. History
 per channel on 2162190413: a 6-column selection survives a reboot. Not tested on HW: dwell
 on 1-Wire channels.
+
+## 41. P2P on the TOWER protocol (#470)
+
+Hynek, 2026-09-28 (plan T1–T7): STICKER P2P is replaced by the HARDWARIO TOWER radio
+protocol, wire-compatible with `tower-firmware` / `tower-protocol` wire v3. The old P2P
+is abandoned, with no rollback. Design: `doc/plan/470 - TOWER protocol as the P2P
+transport.md`; node behaviour: `doc/p2p.md`.
+
+- **Frames:** `ver_type | flags | src(4 LE) | dest(4 LE) | counter(4 LE)`, all 14 B as
+  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 100 B,
+  which leaves a 76 B body. The node's address is low32(DevEUI), the gateway's the
+  `net_id`.
+- **Confirmed send:** up to 3 byte-identical transmissions, each with a 200 ms (SF7)
+  ACK window armed at TX-done. An ACK with PENDING keeps the receiver on for one
+  downlink, which the node ACKs when it is confirmed. An app_radio retry is a new send
+  under a new counter. Unconfirmed frames open no window.
+- **Envelopes:** `0x81 | port | LoRaWAN fPort payload` (telemetry 2, alarm 3,
+  answers 85, commands 86). `0x91 | TLV…` for control:
+  - Capabilities `0x01`, Hello `0x02`;
+  - Detach `0x03`, RejoinReq `0x04`;
+  - JoinReq `0x07`, JoinAccept `0x08`;
+  - LinkCheck `0x10`, Time `0x20`.
+- **Join:** a JoinReq under `join_key = CMAC(app_key, "HIO-TWR-JOIN" ‖ 1 ‖ DevEUI)`,
+  counter = the dev_nonce. The JoinAccept arrives in a 1 s RX window and carries
+  `net_id`, `central_nonce`, `rx_delay` and `tx_power`. `session_key = CMAC(app_key,
+  "HIO-TWR-SES" ‖ 1 ‖ dev_nonce ‖ central_nonce ‖ DevEUI)`. The old 24 B pairing record
+  does not load, so every node joins afresh after the update.
+- **Time:** a TimeReq in the `0x91` frame. The TimeAns carries the time at the TimeReq's
+  TX-done and names its counter; answers to another counter or older than 2 h are dropped.
+- **Answers in the ACK** (plan §13.5, Hynek 2026-10-06): the gateway answers a
+  LinkCheckReq / TimeReq in the request's own ACK. ACK flags bit 1 (CTRL) marks a `0x91`
+  TLV tail after the flags: LinkCheckAns, then TimeAns. The request's ACK window grows
+  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only; any other
+  TLV there is skipped. Clock sync no longer waits a report interval for the next
+  PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
+- **Confirmed uplinks:** every telemetry report is confirmed, like answers and
+  history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
+  downlink rides the next report's PENDING, so it waits at most one report interval.
+  With the link-check-only policy a command waited up to 5 × 900 s.
+- **Link check:** the link-check report also queues a LinkCheckReq. The
+  LinkCheckAns fills the uplink RSSI / SNR / margin in `RadioState`.
+- **Failed link check:** only a link-check report left unacknowledged after its
+  retries counts towards WARNING and the rejoin (Hynek 2026-10-06), on both radios.
+  A lost alarm, answer or plain report no longer does. This keeps F6 from shortening
+  the outage a node rides out: the link-check cadence and WARNING set it, as before. On
+  LoRaWAN it only changes `radio-alarm-ack true`: a lost confirmed alarm is no failed
+  check; LoRaWAN's link check itself is the LinkCheckAns, as before.
+- **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
+  rung; the SF sweep and adoption are gone.
+- **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
+  P5: P2P refuses to start with it.
+- **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
+  `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`.
+  `tests/ccm/p2p_tower_ack_ctrl_kat.txt` (ACK tails) is the Northbridge's file, copied
+  verbatim. The
+  `tests/p2p` gw-sim firmware (old wire only) is removed.
+- **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
+- **Cost:** release 183 060 B flash / 48 636 B RAM merged with v1.5.0 `60d982dc` (+3.2 KB /
+  +1.1 KB vs that head); 185 556 B / 56 036 B on `feat-p2p` before the #479 trim. About +2.3 KB of it is the new
+  config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
+- **Tests:**
+  - `tests/p2p_logic` is rewritten (77 cases). It runs against a gateway emulator on
+    the fake radio: codec, join and ACK-tail KATs byte for byte, repetitions, ACK /
+    PENDING / node ACK, ACK tails and their window, replay, control TLVs.
+  - All 14 native suites pass.
 
 ---
 

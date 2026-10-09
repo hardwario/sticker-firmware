@@ -161,8 +161,8 @@ var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
 // Names drop the `p2p_` prefix the YAML carries (frequency <- p2p_frequency, ...).
 // Radio parity (doc/plan/439): readable everywhere, like the LoRaWAN radio params above.
-var _P2P_NAMES = { 1: "frequency", 2: "spreading_factor", 3: "tx_power" };
-var _P2P_ENUMS = {};
+var _P2P_NAMES = { 1: "frequency", 2: "spreading_factor", 3: "tx_power", 4: "modulation" };
+var _P2P_ENUMS = { 4: ["lora", "fsk"] };
 var _P2P_FLOAT = {};
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the

@@ -138,6 +138,9 @@ struct app_cmd_info {
  * reset is visible in the field (#88). */
 void app_cmd_set_reset_cause(uint32_t cause);
 
+/* The cached reset-cause bitmask (app_cmd_set_reset_cause()); 0 = unknown. */
+uint32_t app_cmd_get_reset_cause(void);
+
 /* Fill `info` with the current device info: FW version, build type, serial,
  * uptime, and wall-clock time (has_unix_time=false when the RTC is unsynced or
  * the clock module is absent). Single source of truth for GetInfo + shell. */

@@ -224,7 +224,8 @@ static const struct app_radio_backend be_p2p = {
 static const struct profile PROFILE_LRW = {&be_lrw, 51, 0, APP_RADIO_FRAME_LINK_CHECK,
 					   APP_CMD_TRANSPORT_LRW};
 static const struct profile PROFILE_P2P = {&be_p2p, 239, APP_RADIO_FRAME_CONFIRMED,
-					   APP_RADIO_FRAME_CONFIRMED, APP_CMD_TRANSPORT_P2P};
+					   APP_RADIO_FRAME_CONFIRMED | APP_RADIO_FRAME_LINK_CHECK,
+					   APP_CMD_TRANSPORT_P2P};
 
 static void use_profile(const struct profile *p)
 {
@@ -616,7 +617,8 @@ static void confirmed_alarm_retried_until_acked(void)
 BOTH_PROFILES(confirmed_alarm_retried_until_acked)
 
 /* Unacknowledged after its retries, the frame is given up as sent -- it went
- * out -- and is a failed link check; the next frame goes then. */
+ * out -- and the next frame goes then. An alarm is no link check: the streak
+ * stays (only a link-check report judges the link, Hynek 2026-10-06). */
 static void confirmed_frame_given_up_after_its_retries(void)
 {
 	struct app_radio_link l;
@@ -635,9 +637,42 @@ static void confirmed_frame_given_up_after_its_retries(void)
 	zassert_equal(fk.log[4].attempt, 0);
 	zassert_false(app_radio_ack_pending());
 	app_radio_get_link(&l);
-	zassert_equal(l.fail_streak, 1, "a failed link check");
+	zassert_equal(l.fail_streak, 0, "an alarm is no link check");
 }
 BOTH_PROFILES(confirmed_frame_given_up_after_its_retries)
+
+/* P2P (F6): every report goes confirmed, but only the link-check one, lost
+ * after its retries, is a failed check. */
+ZTEST(radio_common, test_only_a_lost_link_check_report_fails_the_link)
+{
+	const size_t lens[] = {20};
+	struct app_radio_link l;
+
+	use_profile(&PROFILE_P2P);
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	g_app_config.radio_link_check_interval = 5;
+	app_radio_link_up(); /* report #1 is a check, #2 is not */
+
+	script_fill(-ETIMEDOUT, 1 + APP_RADIO_ACK_MAX_RETRIES);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(20)); /* > 2 + 4 + 8 s of spread */
+	zassert_true(fk.log[0].flags & APP_RADIO_FRAME_LINK_CHECK);
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 1, "the link-check report was lost");
+
+	size_t n = fk.n;
+
+	script_fill(-ETIMEDOUT, n + 1 + APP_RADIO_ACK_MAX_RETRIES);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(20));
+	zassert_equal(fk.n, n + 1 + APP_RADIO_ACK_MAX_RETRIES, "a confirmed report, retried");
+	zassert_false(fk.log[n].flags & APP_RADIO_FRAME_LINK_CHECK);
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 1, "a lost plain report is no failed check");
+	g_app_config.radio_link_check_interval = 0;
+}
 
 /* A duty-cycle hold of a retry takes a fresh spread on top of its wait, or the
  * nodes it held would retry together again; the held send is no retry. */
@@ -1398,8 +1433,8 @@ ZTEST(radio_common, test_stale_known_hold_lasts_until_its_end)
 
 	/* A send ends it. */
 	app_radio_stale_note(&dc, true, false, t0 + 2 * 60 * 1000);
-	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60),
-		      APP_RADIO_STALE_REJOIN, "the streak is gone");
+	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60), APP_RADIO_STALE_REJOIN,
+		      "the streak is gone");
 
 	/* The cap still bounds a hold longer than the window plus its margin. */
 	app_radio_stale_note_hold(&dc, t0, 2 * APP_RADIO_STALE_DC_HOLD_MAX_MS);
@@ -1464,6 +1499,62 @@ static void uplinks_refresh_the_stale_clock(void)
 	zassert_equal(fk.rejoin_calls, 1);
 }
 BOTH_PROFILES(uplinks_refresh_the_stale_clock)
+
+/* An outage: confirmed telemetry goes on air but no Ack comes back. Given up,
+ * it still counts as sent, so M-2 stays quiet and supervision alone judges the
+ * link by the reports that carried a link check: WARNING after 3, the rejoin
+ * (not forced) radio-link-check-fail-rejoin later. */
+static void outage_leaves_the_link_to_supervision(void)
+{
+	const size_t lens[] = {20};
+
+	g_app_config.radio_link_check_interval = 1;
+	g_app_config.radio_link_check_fail_rejoin = 5;
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	script_fill(-ETIMEDOUT, LOG_MAX);
+	app_radio_link_up();
+
+	for (int i = 0; i < 8; i++) {
+		frames(lens, 1);
+		app_radio_send_telemetry_now();
+		k_sleep(K_SECONDS(60));
+		zassert_equal(fk.n, 4 * (i + 1), "report %d: sent and retried 3 times", i);
+		zassert_equal(app_radio_get_state(),
+			      i < 2 ? APP_RADIO_STATE_HEALTHY : APP_RADIO_STATE_WARNING,
+			      "report %d", i);
+		app_radio_test_stale_tick(k_uptime_get());
+		zassert_equal(fk.rejoin_calls, i < 7 ? 0 : 1, "report %d", i);
+	}
+	zassert_false(fk.rejoin_forced, "the supervision rejoin, not M-2");
+	zassert_true(k_uptime_get() > 2 * STALE_MS, "M-2 had its chance");
+}
+BOTH_PROFILES(outage_leaves_the_link_to_supervision)
+
+/* ats radio tx_mute: telemetry never reaches the air, M-2 rejoins. */
+static void tx_mute_trips_m2(void)
+{
+	const size_t lens[] = {20};
+
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_debug_tx_mute(true);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(150));
+	zassert_equal(fk.n, 0, "nothing on air");
+	zassert_equal(g_compose_reset_calls, 1, "abandoned after its retries");
+	app_radio_test_stale_tick(t0 + STALE_MS + 1000);
+	zassert_equal(fk.rejoin_calls, 1, "mute: M-2 rejoin");
+	zassert_true(fk.rejoin_forced);
+
+	app_radio_debug_tx_mute(false);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(4));
+	zassert_equal(fk.n, 1, "unmuted: sent");
+}
+BOTH_PROFILES(tx_mute_trips_m2)
 
 /* ---- Rejoin backoff (common) ------------------------------------------------ */
 
@@ -2252,6 +2343,58 @@ static void replay_ends_with_the_link(void)
 	zassert_equal(m_ready_calls, 2, "the link-up kicks the cadence, not the drop");
 }
 BOTH_PROFILES(replay_ends_with_the_link)
+
+static size_t telemetry_frames(void)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < fk.n; i++) {
+		n += fk.log[i].kind == APP_RADIO_FRAME_TELEMETRY;
+	}
+	return n;
+}
+
+/* T3a-F3: the end of a replay right after a report does not ask for the same
+ * snapshot again; once READY_COALESCE_MS (10 s) has passed, it does. */
+static void replay_end_right_after_a_report_does_not_kick(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	hist_fill(0);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(1));
+	zassert_equal(telemetry_frames(), 1);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(8));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 0, "a report went < 10 s ago");
+
+	k_sleep(K_SECONDS(10));
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 43));
+	k_sleep(K_SECONDS(10));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1, "> 10 s after the report: the end kicks");
+}
+BOTH_PROFILES(replay_end_right_after_a_report_does_not_kick)
+
+/* T3a-F3: a report held back by the replay goes at its end, and the kick
+ * folds into it instead of composing a second one. */
+static void replay_end_folds_the_kick_into_a_held_report(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	hist_fill(0);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(1));
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(30));
+	zassert_false(g_hist_replay_active);
+	zassert_equal(telemetry_frames(), 1, "the held report went, once");
+	zassert_equal(m_ready_calls, 0, "folded into the held report");
+}
+BOTH_PROFILES(replay_end_folds_the_kick_into_a_held_report)
 
 /* M-2: a replay holds telemetry back, so its frames refresh the stale-uplink
  * clock; a long replay does not rejoin a healthy session. */

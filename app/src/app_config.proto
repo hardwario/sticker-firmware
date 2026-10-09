@@ -145,9 +145,15 @@ message AppConfigMessage {
     }
 
     message P2P {
+        enum Modulation {
+            LORA = 0;
+            FSK = 1;
+        }
+
         optional uint32 frequency = 1;
         optional uint32 spreading_factor = 2;
         optional uint32 tx_power = 3;
+        optional Modulation modulation = 4;
     }
 }
 // END GENERATED CONFIG

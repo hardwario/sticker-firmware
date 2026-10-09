@@ -86,6 +86,11 @@ void app_cmd_set_reset_cause(uint32_t cause)
 	m_reset_cause = cause;
 }
 
+uint32_t app_cmd_get_reset_cause(void)
+{
+	return m_reset_cause;
+}
+
 /* F-1: SetParam mutates the staging config (m_app_config); the running copy
  * (g_app_config) — which lrw_join/lrw_reset build the join from — is only
  * re-synced from staging at boot (h_commit) or factory reset, both of which
@@ -641,6 +646,7 @@ static const struct {
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},
+	{DUMP_SECTION_P2P, 4, 2, false, false},
 	// END GENERATED DUMP_FIELDS
 };
 

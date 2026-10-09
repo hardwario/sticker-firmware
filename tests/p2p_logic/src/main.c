@@ -2,24 +2,32 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Native unit tests for app_radio_p2p.c's pure decision logic: LoRa time-on-air, the
- * CCM nonce layout, the data-plane frame codec, and the token-bucket duty-cycle
- * governor (doc/plan/408 §7 Steps 1-2). app_radio_p2p.c is compiled directly (with a
- * no-op fake LoRa device, src/emul_lora.c, and thin stubs, src/stubs.c) and its
- * internal helpers are reached via the CONFIG_ZTEST hooks in app_radio_p2p.h. Crypto
- * known-answer vectors live in tests/ccm; this suite is framing/timing/duty.
+ * Native unit tests for app_radio_p2p.c on the TOWER wire (doc/plan/470): the
+ * time-on-air and window arithmetic, the TOWER frame codec and the join, both
+ * pinned byte for byte to the shared KATs (tests/ccm/tower_frame_kat.json,
+ * tower_join_kat.json, p2p_tower_ack_ctrl_kat.txt), the join retry policy, and the exchange --
+ * confirmed repetitions, the ACK, a PENDING downlink and its ACK, the 0x81/0x91 envelopes.
+ * app_radio_p2p.c is compiled directly, with a fake LoRa device (src/emul_lora.c) and thin stubs
+ * (src/stubs.c); its internals are reached via the CONFIG_ZTEST hooks in app_radio_p2p.h. The
+ * gateway side of every exchange is played by gw_respond() below, answering from the fake radio.
  */
 
 #include "app_ccm.h"
 #include "app_config.h"
 #include "app_radio.h"
 #include "app_radio_p2p.h"
+#include "emul_lora.h"
+#include "tower_ack_ctrl_kat.h"
+#include "tower_join_kat.h"
+#include "tower_kat.h"
 
-/* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
-extern int g_test_saved_sf;
-extern int g_test_save_sf_calls;
-extern int test_save_sf_ret;
-extern int test_lora_send_ret;
+#include <zephyr/ztest.h>
+#include <zephyr/sys/byteorder.h>
+
+#include <errno.h>
+#include <string.h>
+
+/* src/stubs.c */
 extern bool p2p_test_time_wanted;
 extern int p2p_test_time_events;
 extern int p2p_test_air_begins;
@@ -28,69 +36,215 @@ extern uint32_t g_test_network_time;
 extern int64_t test_duty_wait_ms;
 extern uint32_t test_duty_charges;
 extern uint64_t test_duty_charged_ms;
-extern uint32_t test_duty_budget_ms;
+extern int test_settings_save_ret;
+extern int p2p_test_announce_calls;
+extern int p2p_test_tx_kick_calls;
+extern bool p2p_test_ack_pending;
+extern int p2p_test_link_ups;
+extern int p2p_test_link_ok_calls;
+extern int p2p_test_link_fail_calls;
+extern int16_t p2p_test_dl_rssi;
+extern int8_t p2p_test_dl_snr;
+extern int p2p_test_dl_calls;
+extern uint8_t p2p_test_ul_margin;
+extern uint8_t p2p_test_ul_gw_count;
+extern int p2p_test_downlinks;
+extern uint8_t p2p_test_downlink_buf[80];
+extern size_t p2p_test_downlink_len;
 
-#include <zephyr/ztest.h>
-#include <zephyr/sys/byteorder.h>
+/* The tower_frame_kat.json session key; the join KAT's app_key is the same. */
+static const uint8_t tower_kat_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
 
-#include <errno.h>
-#include <string.h>
+/* ---- the gateway --------------------------------------------------------- */
 
-/* ---- p2p_frame_toa_ms ------------------------------------------------- */
+/* A TOWER gateway on the other end of the fake radio: it opens every frame the
+ * node sends under the session key, records it, and answers a confirmed Data
+ * frame with an ACK -- and, when a downlink is set, PENDING and that Data
+ * frame. What it pushes reaches the node's next receive window. */
+static struct {
+	uint32_t net_id;
+	uint8_t key[16];
+	uint32_t counter; /* its last TX counter */
+	bool ack;
+	uint8_t ack_from;        /* ACK from this transmission of a frame on (0/1 = the first) */
+	int32_t acked_offset;    /* ACK a counter this far off the uplink's */
+	bool bad_tag;            /* break the ACK's tag */
+	const uint8_t *ack_tail; /* a CTRL tail for every ACK (plan §13.5) */
+	size_t ack_tail_len;
+	bool ack_time;          /* append a TimeAns for the acked frame ... */
+	uint32_t ack_time_unix; /* ... at this time, frac 0 */
+	const uint8_t *dl;
+	size_t dl_len;
+	bool dl_confirmed;
+	uint32_t dl_counter; /* 0 = its next counter */
 
-/* Documented reference point (app_radio_p2p.c comment, doc/plan/408 §3): a full
- * 255 B frame at SF10/BW125 is ~2.3 s of air. */
-ZTEST(p2p_logic, test_toa_sf10_max_frame_reference)
+	/* What it heard. */
+	uint32_t uplinks;
+	uint8_t reps; /* transmissions of the current counter */
+	struct twr_hdr up_hdr;
+	uint8_t up_pt[TWR_PAYLOAD_MAX];
+	size_t up_len;
+	uint32_t node_acks;
+	struct twr_hdr node_ack_hdr;
+	struct twr_ack node_ack;
+	uint8_t ack_frame[P2P_FRAME_MAX]; /* the last ACK it pushed */
+	size_t ack_frame_len;
+} gw;
+
+static void gw_push(uint8_t type, uint8_t flags, uint32_t counter, const uint8_t *pt, size_t len,
+		    int16_t rssi, int8_t snr)
 {
-	uint32_t toa = p2p_toa_ms(10, 255);
+	const struct twr_hdr h = {.type = type,
+				  .flags = flags,
+				  .src = gw.net_id,
+				  .dest = TOWER_KAT_NODE_ADDR,
+				  .counter = counter};
+	uint8_t frame[P2P_FRAME_MAX];
+	size_t flen;
 
-	zassert_between_inclusive(toa, 2200, 2400,
-				  "SF10/255 B ToA %u ms outside the documented ~2296 ms", toa);
+	zassert_ok(twr_seal(gw.key, &h, pt, len, frame, sizeof(frame), &flen));
+	if (type == TWR_TYPE_ACK) {
+		if (gw.bad_tag) {
+			frame[flen - 1] ^= 0x01;
+		}
+		memcpy(gw.ack_frame, frame, flen);
+		gw.ack_frame_len = flen;
+	}
+	test_lora_rx_push(frame, flen, rssi, snr);
 }
 
-/* The exact SF10 airtimes doc/p2p.md §3.3/§6 and the RX-window arithmetic
- * quote. These are load-bearing numbers -- the "2434 ms -> 468 ms" claim for
- * D2's window sizing is derived from them, and a silent formula change would
- * make the documentation wrong without failing anything else.
- *
- * The window a caller actually opens is
- * rx1_preamble_catch_ms() + frame_toa_ms(len) + P2P_RX1_TRAILING_MARGIN_MS,
- * i.e. a fixed 218 ms at SF10 (12 symbols = 98 ms, plus 120 ms, F-P2P-2) on
- * top of the figures below: 548 ms for a 2 B command, 589 ms for a bare Ack,
- * 2514 ms for the 255 B worst case D2 removes. Those two helpers are static and not part
- * of this suite's surface, so the ToA terms are what get pinned here. */
-ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
+static void gw_respond(const uint8_t *frame, uint32_t len)
+{
+	struct twr_hdr h;
+	uint8_t pt[TWR_PAYLOAD_MAX];
+	size_t pt_len;
+
+	if (twr_open(gw.key, frame, len, &h, pt, sizeof(pt), &pt_len)) {
+		return; /* a JoinRequest (join_key), or a frame of another session */
+	}
+	if (h.type == TWR_TYPE_ACK) {
+		gw.node_acks++;
+		gw.node_ack_hdr = h;
+		zassert_ok(twr_parse_ack(pt, pt_len, &gw.node_ack));
+		return;
+	}
+	gw.reps = (gw.uplinks > 0 && h.counter == gw.up_hdr.counter) ? gw.reps + 1 : 1;
+	gw.uplinks++;
+	gw.up_hdr = h;
+	memcpy(gw.up_pt, pt, pt_len);
+	gw.up_len = pt_len;
+
+	if (!(h.flags & TWR_FLAG_CONFIRMED) || !gw.ack || gw.reps < gw.ack_from) {
+		return;
+	}
+
+	uint8_t ack[TWR_PAYLOAD_MAX];
+	size_t n = TWR_ACK_PAYLOAD_LEN;
+
+	sys_put_le32(h.counter + gw.acked_offset, &ack[0]);
+	ack[4] = (uint8_t)(int8_t)-57;
+	ack[5] = gw.dl_len ? TWR_ACK_PENDING : 0;
+	if (gw.ack_tail_len) {
+		memcpy(&ack[n], gw.ack_tail, gw.ack_tail_len);
+		n += gw.ack_tail_len;
+	}
+	if (gw.ack_time) {
+		ack[n++] = P2P_CTRL_TIME;
+		ack[n++] = P2P_TIME_ANS_LEN;
+		sys_put_le32(gw.ack_time_unix, &ack[n]);
+		ack[n + 4] = 0;
+		sys_put_le32(h.counter, &ack[n + 5]);
+		n += P2P_TIME_ANS_LEN;
+	}
+	if (n > TWR_ACK_PAYLOAD_LEN) {
+		ack[5] |= TWR_ACK_CTRL;
+	}
+	gw_push(TWR_TYPE_ACK, 0, ++gw.counter, ack, n, -60, 8);
+
+	if (gw.dl_len) {
+		uint32_t c = gw.dl_counter ? gw.dl_counter : ++gw.counter;
+
+		gw_push(TWR_TYPE_DATA, gw.dl_confirmed ? TWR_FLAG_CONFIRMED : 0, c, gw.dl,
+			gw.dl_len, -61, 7);
+	}
+}
+
+/* A live session with the frame KAT's gateway and key (tower_kat.h): the node's
+ * frames are then the KAT's own, and the gateway's first ACK is its counter
+ * 100, as in the KAT. */
+static void paired(void)
+{
+	p2p_test_set_session(TOWER_KAT_GW_ADDR, tower_kat_key);
+	p2p_test_tx_reset();
+	gw.net_id = TOWER_KAT_GW_ADDR;
+	memcpy(gw.key, tower_kat_key, sizeof(gw.key));
+	gw.counter = 99;
+	test_lora_responder = gw_respond;
+}
+
+static void before(void *fixture)
+{
+	ARG_UNUSED(fixture);
+
+	/* The join KAT's identity: DevEUI 5876070000000413, address 1043. */
+	memcpy(g_app_config.radio_appkey, tower_join_kat_app_key,
+	       sizeof(g_app_config.radio_appkey));
+	memcpy(g_app_config.radio_deveui, tower_join_kat_dev_eui,
+	       sizeof(g_app_config.radio_deveui));
+	g_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA;
+	g_app_config.p2p_frequency = 869525000;
+	g_app_config.p2p_tx_power = 14;
+	g_app_config.radio_link_check_interval = 5;
+
+	p2p_test_ack_pending = false;
+	test_lora_reset();
+	test_duty_wait_ms = 0;
+	test_settings_save_ret = 0;
+	p2p_test_time_wanted = false;
+
+	p2p_test_join_setup(7);
+	p2p_test_join_stop();
+	p2p_test_link_reset();
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	p2p_test_set_session_tx_power(false, 0);
+	p2p_test_set_fcnt(1, 256);
+	p2p_test_set_dev_nonce(TOWER_JOIN_KAT_DEV_NONCE);
+	memset(&gw, 0, sizeof(gw));
+}
+
+/* ---- time on air and windows ----------------------------------------------- */
+
+/* The SF7 airtimes of the frames on the TOWER wire (plan §3.3): the empty Data
+ * frame (header + tag), the ACK, the JoinAccept and JoinRequest, the MTU. */
+ZTEST(p2p_logic, test_toa_sf7_frame_airtimes)
 {
 	const struct {
 		uint8_t len;
 		uint32_t ms;
 	} cases[] = {
-		/* Lengths with the 12 B header (decision #22 FCtrl); every row has
-		 * the same SF10 airtime as its 11 B predecessor. */
-		{18, 330},  /* 2 B command / minimum data frame */
-		{23, 371},  /* time-extended Ack (pre-D2 max) */
-		{24, 371},  /* fully-extended Ack (D2 max) */
-		{42, 535},  /* JoinRequest (#417 DevEUI + #22 FCtrl) */
-		{43, 535},  /* JoinAccept */
-		{56, 658},  /* the 40 B command in the P2E-20 bench row (657 before
-			     * T2d: LoRaMac's formula rounds up) */
-		{255, 2296} /* PHY maximum */
+		{TWR_HDR_LEN + TWR_TAG_LEN, 57}, {TWR_ACK_FRAME_LEN, 67}, {P2P_JOIN_ACCEPT_LEN, 83},
+		{P2P_JOIN_REQ_LEN, 83},          {P2P_FRAME_MAX, 175},
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		uint32_t got = p2p_toa_ms(10, cases[i].len);
+		uint32_t got = p2p_toa_ms(7, cases[i].len);
 
-		zassert_equal(got, cases[i].ms, "SF10 ToA(%u B) = %u ms, documented as %u",
-			      cases[i].len, got, cases[i].ms);
+		zassert_equal(got, cases[i].ms, "SF7 ToA(%u B) = %u ms, expected %u", cases[i].len,
+			      got, cases[i].ms);
 	}
+
+	/* The radio's fixed 4 s TX timeout: the MTU fits it even at SF12. */
+	zassert_equal(p2p_toa_ms(12, P2P_FRAME_MAX), 3941);
 }
 
 ZTEST(p2p_logic, test_toa_monotonic_in_length)
 {
-	uint32_t prev = p2p_toa_ms(10, 15); /* header+tag only */
+	uint32_t prev = p2p_toa_ms(7, TWR_HDR_LEN + TWR_TAG_LEN);
 
-	for (uint16_t len = 16; len <= 255; len++) {
-		uint32_t cur = p2p_toa_ms(10, (uint8_t)len);
+	for (uint16_t len = TWR_HDR_LEN + TWR_TAG_LEN + 1; len <= 255; len++) {
+		uint32_t cur = p2p_toa_ms(7, (uint8_t)len);
 
 		zassert_true(cur >= prev, "ToA not monotonic in length at %u B (%u < %u)", len, cur,
 			     prev);
@@ -111,992 +265,873 @@ ZTEST(p2p_logic, test_toa_monotonic_in_sf)
 	}
 }
 
-ZTEST(p2p_logic, test_toa_small_frame_bounded)
+/* The JoinAccept window: lora_recv()'s timeout aborts a reception in flight, so
+ * it must outlast the preamble-catch budget, the whole 38 B JoinAccept and the
+ * 120 ms trailing margin for a late central (F-P2P-2). */
+ZTEST(p2p_logic, test_join_accept_window_scales_with_sf)
 {
-	/* A short frame is well under the max frame's air time. */
-	uint32_t small = p2p_toa_ms(10, 15);
-	uint32_t big = p2p_toa_ms(10, 255);
+	zassert_equal(p2p_rx1_timeout_ms(7, P2P_JOIN_ACCEPT_LEN), 215u);
+	zassert_equal(p2p_rx1_timeout_ms(10, P2P_JOIN_ACCEPT_LEN), 712u);
+	zassert_equal(p2p_rx1_timeout_ms(12, P2P_JOIN_ACCEPT_LEN), 2488u);
 
-	zassert_true(small > 0, "ToA must be positive");
-	zassert_true(small < big, "small frame ToA %u not < max frame ToA %u", small, big);
-}
+	uint32_t prev = 0;
 
-/* ---- RX1 window sizing ------------------------------------------------ */
+	for (int sf = 7; sf <= 12; sf++) {
+		uint32_t cur = p2p_rx1_timeout_ms(sf, P2P_JOIN_ACCEPT_LEN);
 
-/* The RX1 window is sized from the SF the node is CURRENTLY tried on, not from
- * the configured one: a join sweep re-tunes the radio between attempts, and a
- * window still sized for the configured SF would either close mid-JoinAccept
- * (too short) or waste the retry budget (too long). Both terms of the window
- * -- the preamble-catch budget and the expected frame's whole time-on-air --
- * scale with SF, so they take it as an argument. */
-ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
-{
-	/* JoinAccept is 43 B on air. Computed from the formula
-	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 43) + 120 ms trailing margin
-	 * (F-P2P-2): SF10 = 98 + 535 + 120, SF12 = 393 + 2139 + 120 (2138 before
-	 * T2d: the time on air rounds up). */
-	zassert_equal(p2p_rx1_timeout_ms(10, P2P_JOIN_ACCEPT_LEN), 753u,
-		      "SF10 JoinAccept window should be 753 ms");
-	zassert_equal(p2p_rx1_timeout_ms(12, P2P_JOIN_ACCEPT_LEN), 2652u,
-		      "SF12 JoinAccept window should be 2652 ms");
-
-	/* F-P2P-2: a fixed trailing margin, not SF-scaled, so a central that is a
-	 * constant ~80 ms late still fits at SF7 (the 22 ms timeout-start delay on
-	 * top is not part of this formula). */
-	zassert_true(p2p_rx1_timeout_ms(7, 24) >= p2p_toa_ms(7, 24) + 100,
-		     "SF7 Ack window must leave >= 100 ms after the frame");
-
-	uint32_t prev = p2p_rx1_timeout_ms(7, 42);
-
-	for (int sf = 8; sf <= 12; sf++) {
-		uint32_t cur = p2p_rx1_timeout_ms(sf, 42);
-
-		zassert_true(cur > prev, "RX1 window not increasing at SF%d (%u <= %u)", sf, cur,
-			     prev);
+		zassert_true(cur > prev, "window not increasing at SF%d", sf);
+		zassert_true(cur > p2p_toa_ms(sf, P2P_JOIN_ACCEPT_LEN) + rx1_preamble_catch_ms(sf),
+			     "SF%d window must outlast the frame plus the catch budget", sf);
 		prev = cur;
 	}
+}
 
-	/* #118 phase 2 HW finding: this driver's timeout aborts an in-flight
-	 * reception, so at every SF the window must outlast the whole expected
-	 * frame, and the preamble-catch budget must be a real part of it. */
+/* TOWER windows (plan §5): turnaround + the awaited frame + 3 symbols + margin,
+ * never under 200 ms. The ACK window takes the 28 B ACK, the downlink window
+ * after PENDING the MTU. */
+ZTEST(p2p_logic, test_twr_windows)
+{
+	zassert_equal(p2p_twr_window_ms(7, TWR_ACK_FRAME_LEN), 200u, "SF7 ACK: the 200 ms floor");
+	zassert_equal(p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN), 479u);
+	zassert_equal(p2p_twr_window_ms(12, TWR_ACK_FRAME_LEN), 1786u);
+	zassert_equal(p2p_twr_window_ms(7, P2P_FRAME_MAX), 221u);
+	zassert_equal(p2p_twr_window_ms(12, P2P_FRAME_MAX), 4080u);
+
+	/* A request's ACK may carry the answers (plan §13.5). */
+	zassert_equal(p2p_twr_window_ms(7, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 200u);
+	zassert_equal(p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 643u);
+	zassert_equal(p2p_twr_window_ms(12, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX), 2278u);
+
 	for (int sf = 7; sf <= 12; sf++) {
-		uint32_t catch_ms = rx1_preamble_catch_ms(sf);
-
-		zassert_true(catch_ms > 0, "SF%d preamble catch budget must be positive", sf);
-		zassert_true(p2p_rx1_timeout_ms(sf, 42) > p2p_toa_ms(sf, 42) + catch_ms,
-			     "SF%d window must outlast the frame plus the catch budget", sf);
+		zassert_true(p2p_twr_window_ms(sf, TWR_ACK_FRAME_LEN) >=
+				     20 + p2p_toa_ms(sf, TWR_ACK_FRAME_LEN),
+			     "SF%d ACK window shorter than turnaround + ACK", sf);
 	}
 }
 
-/* ---- p2p_build_nonce -------------------------------------------------- */
+/* ---- TOWER frame codec (tower_frame_kat.json) ----------------------------- */
 
-ZTEST(p2p_logic, test_nonce_layout)
+static void tower_kat_hdr(const struct tower_kat *v, struct twr_hdr *h)
 {
-	uint8_t nonce[P2P_NONCE_LEN];
+	h->type = v->frame_type;
+	h->flags = v->flags;
+	h->src = v->src;
+	h->dest = v->dest;
+	h->counter = v->counter;
+}
 
-	build_nonce(nonce, 0x01020304u, 0xAABBu, 0x02 /* TELEMETRY */, P2P_DIR_TX);
+ZTEST(p2p_logic, test_tower_seal_matches_the_kat)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t nonce[TWR_NONCE_LEN];
+		uint8_t frame[P2P_FRAME_MAX];
+		size_t len = 0;
 
-	/* counter(4 BE) | dev_addr(2 BE) | frame_type(1) | dir(1) | zero-pad. */
-	zassert_equal(sys_get_be32(&nonce[0]), 0x01020304u, "counter mis-encoded");
-	zassert_equal(sys_get_be16(&nonce[4]), 0xAABBu, "dev_addr mis-encoded");
-	zassert_equal(nonce[6], 0x02, "frame_type mis-encoded");
-	zassert_equal(nonce[7], P2P_DIR_TX, "direction mis-encoded");
-	for (size_t i = 8; i < P2P_NONCE_LEN; i++) {
-		zassert_equal(nonce[i], 0, "nonce byte %zu not zero-padded", i);
+		tower_kat_hdr(v, &h);
+		twr_nonce(nonce, v->src, v->counter);
+		zassert_mem_equal(nonce, v->nonce, TWR_NONCE_LEN, "%s: nonce", v->name);
+		zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				    sizeof(frame), &len),
+			   "%s: seal", v->name);
+		zassert_equal(len, v->frame_len, "%s: length %zu", v->name, len);
+		zassert_mem_equal(frame, v->frame, v->frame_len, "%s: frame bytes", v->name);
 	}
 }
 
-ZTEST(p2p_logic, test_nonce_direction_separates_keystream)
+ZTEST(p2p_logic, test_tower_open_matches_the_kat)
 {
-	uint8_t tx[P2P_NONCE_LEN];
-	uint8_t rx[P2P_NONCE_LEN];
+	for (size_t i = 0; i < ARRAY_SIZE(tower_kat); i++) {
+		const struct tower_kat *v = &tower_kat[i];
+		struct twr_hdr h;
+		uint8_t pt[P2P_FRAME_MAX];
+		size_t pt_len = 0xffff;
 
-	build_nonce(tx, 5, 7, 0xFA, P2P_DIR_TX);
-	build_nonce(rx, 5, 7, 0xFA, P2P_DIR_RX);
-
-	zassert_true(memcmp(tx, rx, P2P_NONCE_LEN) != 0,
-		     "TX and RX nonce identical under the same counter — keystream reuse");
-	zassert_equal(tx[7], P2P_DIR_TX, "TX dir byte wrong");
-	zassert_equal(rx[7], P2P_DIR_RX, "RX dir byte wrong");
+		zassert_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, sizeof(pt),
+				    &pt_len),
+			   "%s: open", v->name);
+		zassert_equal(h.type, v->frame_type, "%s: type", v->name);
+		zassert_equal(h.flags, v->flags, "%s: flags", v->name);
+		zassert_equal(h.src, v->src, "%s: src", v->name);
+		zassert_equal(h.dest, v->dest, "%s: dest", v->name);
+		zassert_equal(h.counter, v->counter, "%s: counter", v->name);
+		zassert_equal(pt_len, v->plaintext_len, "%s: plaintext length", v->name);
+		if (pt_len > 0) {
+			zassert_mem_equal(pt, v->plaintext, pt_len, "%s: plaintext", v->name);
+		}
+	}
 }
 
-/* ---- p2p_build_frame -------------------------------------------------- */
-
-static const uint8_t k_session_key[P2P_KEY_LEN] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-						   0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
-
-ZTEST(p2p_logic, test_build_frame_roundtrip)
+ZTEST(p2p_logic, test_tower_header_layout)
 {
-	const uint32_t net_id = 0x00000001u;
-	const uint16_t dev_addr = 0x0042u;
-	const uint8_t frame_type = 0x02; /* TELEMETRY */
-	const uint32_t counter = 12345;
-	const uint8_t body[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03};
-	const size_t body_len = sizeof(body);
+	/* ver_type = version << 5 | type; the other fields little-endian. */
+	const struct twr_hdr h = {.type = TWR_TYPE_ACK,
+				  .flags = 0x5a,
+				  .src = 0x04030201,
+				  .dest = 0x08070605,
+				  .counter = 0x0c0b0a09};
+	const uint8_t want[TWR_HDR_LEN] = {0x21, 0x5a, 0x01, 0x02, 0x03, 0x04, 0x05,
+					   0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c};
+	uint8_t out[TWR_HDR_LEN];
 
+	twr_hdr_put(out, &h);
+	zassert_mem_equal(out, want, TWR_HDR_LEN);
+	zassert_equal(tower_kat[0].frame[0], 0x20, "KAT data frame: ver 1, type 0");
+	zassert_equal(tower_kat[2].frame[0], 0x21, "KAT ack frame: ver 1, type 1");
+}
+
+ZTEST(p2p_logic, test_tower_open_rejects_a_bad_frame)
+{
+	const struct tower_kat *v = &tower_kat[1]; /* uplink_confirmed */
 	uint8_t frame[P2P_FRAME_MAX];
+	uint8_t pt[P2P_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
 
-	zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type,
-				     P2P_FCTRL_CONFIRMED, body, body_len, counter, frame),
-		   "build_frame failed");
+	/* A flipped bit anywhere -- header (AAD), ciphertext or tag -- fails auth. */
+	const size_t spots[] = {0, 1, 5, 13, TWR_HDR_LEN, v->frame_len - 1};
 
-	/* Cleartext header is the AAD, in the clear. */
-	zassert_equal(sys_get_be32(&frame[0]), net_id, "net_id header wrong");
-	zassert_equal(sys_get_be16(&frame[4]), dev_addr, "dev_addr header wrong");
-	zassert_equal(frame[6], frame_type, "frame_type header wrong");
-	zassert_equal(frame[7], P2P_FCTRL_CONFIRMED, "FCtrl header wrong");
-	zassert_equal(sys_get_be32(&frame[8]), counter, "counter header wrong");
+	for (size_t i = 0; i < ARRAY_SIZE(spots); i++) {
+		memcpy(frame, v->frame, v->frame_len);
+		frame[spots[i]] ^= (spots[i] == 0) ? 0x01 : 0x80;
+		zassert_equal(
+			twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+			-EBADMSG, "byte %zu", spots[i]);
+	}
 
-	struct p2p_hdr hdr;
+	/* Another version is not a TOWER v1 frame, whatever its tag. */
+	memcpy(frame, v->frame, v->frame_len);
+	frame[0] = (2 << 5) | TWR_TYPE_DATA;
+	zassert_equal(twr_open(tower_kat_key, frame, v->frame_len, &h, pt, sizeof(pt), &pt_len),
+		      -EPROTO);
+	zassert_equal(twr_hdr_get(frame, v->frame_len, &h), -EPROTO);
 
-	p2p_hdr_get(frame, &hdr);
-	zassert_equal(hdr.net_id, net_id);
-	zassert_equal(hdr.dev_addr, dev_addr);
-	zassert_equal(hdr.frame_type, frame_type);
-	zassert_equal(hdr.fctrl, P2P_FCTRL_CONFIRMED);
-	zassert_equal(hdr.counter, counter);
+	/* Shorter than header + tag, or truncated: never authentic. */
+	zassert_equal(twr_hdr_get(v->frame, TWR_HDR_LEN + TWR_TAG_LEN - 1, &h), -EMSGSIZE);
+	zassert_not_ok(
+		twr_open(tower_kat_key, v->frame, v->frame_len - 1, &h, pt, sizeof(pt), &pt_len));
 
-	/* Decrypt the body with an independently built RX-direction nonce and
-	 * the header as AAD — proves the frame is a valid CCM sealing. */
-	uint8_t nonce[P2P_NONCE_LEN];
+	/* A wrong key. */
+	uint8_t key[16];
 
-	build_nonce(nonce, counter, dev_addr, frame_type, P2P_DIR_TX);
+	memcpy(key, tower_kat_key, sizeof(key));
+	key[15] ^= 1;
+	zassert_equal(twr_open(key, v->frame, v->frame_len, &h, pt, sizeof(pt), &pt_len), -EBADMSG);
 
-	uint8_t pt[sizeof(body)];
-
-	zassert_ok(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
-					&frame[P2P_HDR_LEN], body_len,
-					&frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
-		   "decrypt/verify of a freshly built frame failed");
-	zassert_mem_equal(pt, body, body_len, "recovered body mismatch");
+	/* No room for the plaintext. */
+	zassert_not_ok(twr_open(tower_kat_key, v->frame, v->frame_len, &h, pt, v->plaintext_len - 1,
+				&pt_len));
 }
 
-ZTEST(p2p_logic, test_build_frame_tag_detects_tamper)
+ZTEST(p2p_logic, test_tower_seal_refuses_a_short_buffer)
 {
-	const uint32_t counter = 7;
-	const uint16_t dev_addr = 0x0042u;
-	const uint8_t frame_type = 0x03; /* ALARM */
-	const uint8_t body[] = {0xAA, 0xBB, 0xCC};
-	const size_t body_len = sizeof(body);
-
+	const struct tower_kat *v = &tower_kat[6]; /* uplink_max_payload */
 	uint8_t frame[P2P_FRAME_MAX];
+	uint8_t big[TWR_PAYLOAD_MAX + 1] = {0};
+	struct twr_hdr h;
+	size_t len;
 
-	zassert_ok(build_frame_keyed(1, dev_addr, k_session_key, frame_type, P2P_FCTRL_CONFIRMED,
-				     body, body_len, counter, frame),
-		   "build_frame failed");
+	tower_kat_hdr(v, &h);
+	zassert_not_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame,
+				v->frame_len - 1, &len));
+	zassert_ok(twr_seal(tower_kat_key, &h, v->plaintext, v->plaintext_len, frame, v->frame_len,
+			    &len));
 
-	uint8_t nonce[P2P_NONCE_LEN];
-
-	build_nonce(nonce, counter, dev_addr, frame_type, P2P_DIR_TX);
-
-	uint8_t pt[sizeof(body)];
-
-	/* Flip one ciphertext byte -> tag must reject. */
-	frame[P2P_HDR_LEN] ^= 0x01;
-	zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
-					   &frame[P2P_HDR_LEN], body_len,
-					   &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
-		      -EBADMSG, "tampered ciphertext accepted");
-	frame[P2P_HDR_LEN] ^= 0x01; /* restore */
-
-	/* Corrupt the header (AAD) -> tag must reject. */
-	frame[0] ^= 0x80;
-	zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
-					   &frame[P2P_HDR_LEN], body_len,
-					   &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
-		      -EBADMSG, "tampered AAD accepted");
-	frame[0] ^= 0x80; /* restore */
-
-	/* FCtrl is AAD too: an unconfirmed frame cannot be turned into a
-	 * confirmed one (or back) on the air. */
-	frame[P2P_HDR_OFF_FCTRL] ^= P2P_FCTRL_CONFIRMED;
-	zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
-					   &frame[P2P_HDR_LEN], body_len,
-					   &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
-		      -EBADMSG, "tampered FCtrl accepted");
+	/* The MTU is a wire limit, not only the caller's buffer. */
+	zassert_ok(twr_seal(tower_kat_key, &h, big, TWR_PAYLOAD_MAX, frame, sizeof(frame), &len));
+	zassert_equal(len, P2P_FRAME_MAX);
+	zassert_equal(twr_seal(tower_kat_key, &h, big, sizeof(big), frame, 255, &len), -EMSGSIZE);
 }
 
-/* Detach (0xFD) and RejoinRequest (0xFE) are empty-bodied on the wire, so
- * recv_ack()'s link-control branch (§5.4) authenticates a zero-length CCM
- * message whose tag covers only the nonce and the 12 B header AAD. Nothing
- * else in the transport exercises that shape -- pin it here, both directions
- * of the verdict, since the central relies on it. */
-ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
+ZTEST(p2p_logic, test_tower_ack_payload)
 {
-	const uint32_t net_id = 0xB595CF19u;
-	const uint16_t dev_addr = 0x0001u;
-	const uint32_t counter = 4242;
+	struct twr_ack ack;
+	uint8_t pt[P2P_FRAME_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
 
-	for (uint8_t i = 0; i < 2; i++) {
-		const uint8_t frame_type =
-			i ? APP_RADIO_P2P_FRAME_REJOIN_REQUEST : APP_RADIO_P2P_FRAME_DETACH;
-		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 16 B, no ciphertext */
+	/* ack_no_pending: acked 2, rssi -57, no PENDING. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[2].frame, tower_kat[2].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_equal(h.type, TWR_TYPE_ACK);
+	zassert_equal(h.src, TOWER_KAT_GW_ADDR);
+	zassert_equal(h.dest, TOWER_KAT_NODE_ADDR);
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_equal(ack.rssi, -57);
+	zassert_false(ack.pending);
 
-		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type,
-					     P2P_FCTRL_ACK, NULL, 0, counter, frame),
-			   "empty-body build failed for type 0x%02x", frame_type);
+	/* ack_pending: PENDING set, a downlink follows. */
+	zassert_ok(twr_open(tower_kat_key, tower_kat[3].frame, tower_kat[3].frame_len, &h, pt,
+			    sizeof(pt), &pt_len));
+	zassert_ok(twr_parse_ack(pt, pt_len, &ack));
+	zassert_equal(ack.acked, 2);
+	zassert_true(ack.pending);
 
-		zassert_equal(sys_get_be32(&frame[0]), net_id, "net_id header wrong");
-		zassert_equal(sys_get_be16(&frame[4]), dev_addr, "dev_addr header wrong");
-		zassert_equal(frame[6], frame_type, "frame_type header wrong");
-		zassert_equal(frame[7], P2P_FCTRL_ACK, "FCtrl header wrong");
-		zassert_equal(sys_get_be32(&frame[8]), counter, "counter header wrong");
+	/* The minimum ACK carries only the acked counter; appended fields are
+	 * ignored. */
+	const uint8_t bare[4] = {0x07, 0x00, 0x00, 0x80};
+	const uint8_t longer[9] = {0x07, 0x00, 0x00, 0x80, 0xc4, 0x01, 0xaa, 0xbb, 0xcc};
 
-		uint8_t nonce[P2P_NONCE_LEN];
-		uint8_t empty[1];
+	zassert_ok(twr_parse_ack(bare, sizeof(bare), &ack));
+	zassert_equal(ack.acked, 0x80000007);
+	zassert_equal(ack.rssi, 0);
+	zassert_false(ack.pending);
+	zassert_equal(twr_parse_ack(bare, 3, &ack), -EMSGSIZE);
+	zassert_ok(twr_parse_ack(longer, sizeof(longer), &ack));
+	zassert_equal(ack.rssi, -60);
+	zassert_true(ack.pending);
+	zassert_equal(ack.tail_len, 0, "trailing bytes without CTRL are no tail");
+	zassert_is_null(ack.tail);
+}
 
-		build_nonce(nonce, counter, dev_addr, frame_type, P2P_DIR_TX);
+/* Plan §13.5: with CTRL (flags bit 1) the bytes after the flags are a 0x91 TLV
+ * list, with or without PENDING; CTRL with nothing after it is no tail. */
+ZTEST(p2p_logic, test_tower_ack_ctrl_tail)
+{
+	const uint8_t ctrl[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL, P2P_CTRL_LINK_CHECK,
+				4,    1, 2, 3, 4};
+	const uint8_t both[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL | TWR_ACK_PENDING, 0x3f, 0};
+	const uint8_t empty[] = {0x05, 0, 0, 0, 0xc7, TWR_ACK_CTRL};
+	struct twr_ack ack;
 
-		zassert_ok(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
-						P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
-						&frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
-			   "empty-body verify failed for type 0x%02x", frame_type);
+	zassert_ok(twr_parse_ack(ctrl, sizeof(ctrl), &ack));
+	zassert_equal(ack.acked, 5);
+	zassert_false(ack.pending);
+	zassert_equal_ptr(ack.tail, &ctrl[TWR_ACK_PAYLOAD_LEN]);
+	zassert_equal(ack.tail_len, 6);
 
-		/* A flipped tag byte must fail: with no ciphertext the tag is
-		 * the only thing standing between the node and a forged
-		 * unpair. */
-		frame[P2P_HDR_LEN] ^= 0x01;
-		zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
-						   P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
-						   &frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
-			      -EBADMSG, "tampered empty-body tag accepted");
-		frame[P2P_HDR_LEN] ^= 0x01;
+	zassert_ok(twr_parse_ack(both, sizeof(both), &ack));
+	zassert_true(ack.pending);
+	zassert_equal_ptr(ack.tail, &both[TWR_ACK_PAYLOAD_LEN]);
+	zassert_equal(ack.tail_len, 2);
 
-		/* Same for the header AAD -- e.g. retargeting a captured
-		 * Detach at another dev_addr. */
-		frame[4] ^= 0x01;
-		zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
-						   P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
-						   &frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
-			      -EBADMSG, "tampered empty-body AAD accepted");
+	zassert_ok(twr_parse_ack(empty, sizeof(empty), &ack));
+	zassert_false(ack.pending);
+	zassert_is_null(ack.tail);
+	zassert_equal(ack.tail_len, 0);
+}
+
+/* The Northbridge's ACK CTRL-tail KAT (p2p_tower_ack_ctrl_kat.txt): every ACK
+ * opens under the session key to the KAT plaintext, acks the uplink, and its
+ * tail holds LinkCheckAns before TimeAns -- or, hand-built, exactly the listed
+ * ids, unknown ones included. The node seals the KAT uplinks byte for byte. */
+ZTEST(p2p_logic, test_ack_ctrl_kat_frames)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(tower_ack_ctrl_kat); i++) {
+		const struct tower_ack_ctrl_kat *v = &tower_ack_ctrl_kat[i];
+		uint8_t pt[P2P_FRAME_MAX];
+		struct twr_hdr h;
+		struct twr_ack ack;
+		size_t pt_len;
+
+		zassert_ok(twr_open(tower_kat_key, v->ack_frame, v->ack_frame_len, &h, pt,
+				    sizeof(pt), &pt_len),
+			   "%s: ACK does not open", v->name);
+		zassert_equal(h.type, TWR_TYPE_ACK, "%s", v->name);
+		zassert_equal(h.src, TOWER_KAT_GW_ADDR, "%s", v->name);
+		zassert_equal(h.dest, TOWER_KAT_NODE_ADDR, "%s", v->name);
+		zassert_equal(h.counter, v->ack_ctr, "%s", v->name);
+		zassert_equal(pt_len, v->ack_pt_len, "%s", v->name);
+		zassert_mem_equal(pt, v->ack_pt, pt_len, "%s", v->name);
+
+		zassert_ok(twr_parse_ack(pt, pt_len, &ack), "%s", v->name);
+		zassert_equal(ack.tail_len > 0, pt_len > TWR_ACK_PAYLOAD_LEN, "%s: CTRL iff a tail",
+			      v->name);
+
+		struct p2p_tlv t;
+		size_t off = 0;
+		size_t n = 0;
+		uint8_t last = 0;
+		int ret;
+
+		while ((ret = p2p_tlv_next(ack.tail, ack.tail_len, &off, &t)) > 0) {
+			if (v->tail_line) {
+				zassert_true(n < v->tlv_count, "%s: extra TLV", v->name);
+				zassert_equal(t.cmd, v->tlvs[n], "%s: TLV %zu", v->name, n);
+			} else {
+				zassert_true(t.cmd == P2P_CTRL_LINK_CHECK || t.cmd == P2P_CTRL_TIME,
+					     "%s: 0x%02x", v->name, t.cmd);
+				zassert_true(t.cmd > last, "%s: LinkCheckAns first", v->name);
+			}
+			last = t.cmd;
+			n++;
+		}
+		zassert_equal(ret, 0, "%s: tail malformed", v->name);
+		if (v->tail_line) {
+			zassert_equal(n, v->tlv_count, "%s", v->name);
+			continue;
+		}
+
+		zassert_equal(ack.acked, v->up_ctr, "%s", v->name);
+		zassert_equal(ack.pending, v->pending, "%s", v->name);
+
+		const struct twr_hdr up = {.type = TWR_TYPE_DATA,
+					   .flags = TWR_FLAG_CONFIRMED,
+					   .src = TOWER_KAT_NODE_ADDR,
+					   .dest = TOWER_KAT_GW_ADDR,
+					   .counter = v->up_ctr};
+		uint8_t frame[P2P_FRAME_MAX];
+		size_t flen;
+
+		zassert_ok(twr_seal(tower_kat_key, &up, v->up_pt, v->up_pt_len, frame,
+				    sizeof(frame), &flen));
+		zassert_equal(flen, v->up_frame_len, "%s", v->name);
+		zassert_mem_equal(frame, v->up_frame, flen, "%s: the KAT uplink", v->name);
 	}
 }
 
-/* The frame-type numbers are a cross-repo wire constant (the central's
- * src/p2p/frame.rs::frame_type and app/decoder/p2p.js both hard-code them), so
- * a renumbering here has to fail loudly rather than desync three code bases. */
-ZTEST(p2p_logic, test_frame_type_constants)
+/* ---- replay lane, TLV list, JoinAccept, TimeAns --------------------------- */
+
+/* Plan §4: above the lane is fresh, equal a retransmission (re-ACK, never
+ * re-deliver), below it -- and the reserved counter 0 -- a replay. */
+ZTEST(p2p_logic, test_replay_check)
 {
-	zassert_equal(APP_RADIO_P2P_FRAME_TELEMETRY, 0x02, "telemetry");
-	zassert_equal(APP_RADIO_P2P_FRAME_ALARM, 0x03, "alarm");
-	zassert_equal(APP_RADIO_P2P_FRAME_RESPONSE, 0x55, "response");
-	zassert_equal(APP_RADIO_P2P_FRAME_COMMAND, 0x56, "command");
-	zassert_equal(APP_RADIO_P2P_FRAME_JOIN_REQUEST, 0xF0, "join request");
-	zassert_equal(APP_RADIO_P2P_FRAME_JOIN_ACCEPT, 0xF1, "join accept");
-	zassert_equal(APP_RADIO_P2P_FRAME_ACK, 0xFA, "ack");
-	zassert_equal(APP_RADIO_P2P_FRAME_DETACH, 0xFD, "detach");
-	zassert_equal(APP_RADIO_P2P_FRAME_REJOIN_REQUEST, 0xFE, "rejoin request");
+	zassert_equal(p2p_replay_check(0, 0), -EALREADY, "counter 0 is reserved");
+	zassert_equal(p2p_replay_check(0, 1), P2P_RX_FRESH);
+	zassert_equal(p2p_replay_check(5, 6), P2P_RX_FRESH);
+	zassert_equal(p2p_replay_check(5, 5), P2P_RX_REPEAT);
+	zassert_equal(p2p_replay_check(5, 4), -EALREADY);
+	zassert_equal(p2p_replay_check(5, 0), -EALREADY);
+	zassert_equal(p2p_replay_check(UINT32_MAX - 1, UINT32_MAX), P2P_RX_FRESH);
 }
 
-ZTEST(p2p_logic, test_build_frame_max_body)
+ZTEST(p2p_logic, test_tlv_walk)
 {
-	uint8_t body[P2P_MAX_BODY];
+	const uint8_t list[] = {0x10, 0x04, 0xb0, 0x05, 0x0c, 0x01, /* LinkCheckAns */
+				0x77, 0x00,                         /* unknown, empty */
+				0x03, 0x01, 0x02};                  /* Detach */
+	struct p2p_tlv t;
+	size_t off = 0;
 
-	for (size_t i = 0; i < sizeof(body); i++) {
-		body[i] = (uint8_t)i;
-	}
+	zassert_equal(p2p_tlv_next(list, sizeof(list), &off, &t), 1);
+	zassert_equal(t.cmd, P2P_CTRL_LINK_CHECK);
+	zassert_equal(t.len, 4);
+	zassert_equal(t.val, &list[2]);
+	zassert_equal(p2p_tlv_next(list, sizeof(list), &off, &t), 1);
+	zassert_equal(t.cmd, 0x77);
+	zassert_equal(t.len, 0);
+	zassert_equal(p2p_tlv_next(list, sizeof(list), &off, &t), 1);
+	zassert_equal(t.cmd, P2P_CTRL_DETACH);
+	zassert_equal(t.val[0], 0x02);
+	zassert_equal(p2p_tlv_next(list, sizeof(list), &off, &t), 0, "end of the list");
+	zassert_equal(off, sizeof(list));
 
-	uint8_t frame[P2P_FRAME_MAX];
-
-	zassert_ok(build_frame_keyed(1, 2, k_session_key, 0x02, 0, body, sizeof(body), 99, frame),
-		   "build_frame failed at max body");
-
-	uint8_t nonce[P2P_NONCE_LEN];
-
-	build_nonce(nonce, 99, 2, 0x02, P2P_DIR_TX);
-
-	uint8_t pt[P2P_MAX_BODY];
-
-	zassert_ok(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
-					&frame[P2P_HDR_LEN], sizeof(body),
-					&frame[P2P_HDR_LEN + sizeof(body)], P2P_TAG_LEN, pt),
-		   "decrypt of max-body frame failed");
-	zassert_mem_equal(pt, body, sizeof(body), "max-body recovered mismatch");
+	/* A value that runs past the list, and a lone cmd byte, are malformed. */
+	off = 0;
+	zassert_equal(p2p_tlv_next(list, 5, &off, &t), -EBADMSG);
+	off = 0;
+	zassert_equal(p2p_tlv_next(list, 1, &off, &t), -EBADMSG);
+	off = 0;
+	zassert_equal(p2p_tlv_next(list, 0, &off, &t), 0, "an empty list");
 }
 
-/* The duty ledger itself is app_radio's since T2d: tests/radio_common. This
- * suite stubs it (stubs.c) and checks what the backend asks and charges. */
-
-/* ---- JoinAccept reserved(4) radio assignment (D3) --------------------- */
-
-/* Every unsupported or out-of-range field is warned about and ignored, never
- * refused: a JoinAccept is authenticated and otherwise valid, and declining to
- * pair over a byte this release cannot honour would strand the node. */
-
-ZTEST(p2p_logic, test_join_accept_reserved_all_zero_is_no_assignment)
+/* The JoinAccept value of the join KAT: net_id, central_nonce, rx_delay 1 s,
+ * tx_power 14 dBm. */
+static const uint8_t *kat_ja_value(void)
 {
-	const uint8_t reserved[4] = {0, 0, 0, 0};
-	struct p2p_radio_assign a;
-
-	p2p_parse_join_accept_reserved(reserved, &a);
-
-	zassert_false(a.tx_power_assigned, "all-zero reserved must assign nothing");
-	zassert_equal(a.tx_power_dbm, 0, "no assignment must leave the power at 0");
-	zassert_equal(a.sf_hint, 0, "no SF hint expected");
+	/* plaintext = 0x91 | 0x08 | 0x0d | value(13) */
+	return &tower_join_kat_join_accept_plaintext[3];
 }
 
-ZTEST(p2p_logic, test_join_accept_reserved_assigns_tx_power)
+ZTEST(p2p_logic, test_join_accept_parse)
 {
-	struct p2p_radio_assign a;
+	struct p2p_join_accept ja;
+	uint8_t v[16];
 
-	/* Both ends of the configured envelope, plus a middling value. */
-	const uint8_t powers[] = {P2P_TX_POWER_MIN_DBM, 8, 14, P2P_TX_POWER_MAX_DBM};
+	zassert_ok(p2p_parse_join_accept(kat_ja_value(), P2P_JOIN_ACCEPT_VALUE_LEN,
+					 TOWER_JOIN_KAT_NET_ID, &ja));
+	zassert_equal(ja.net_id, TOWER_JOIN_KAT_NET_ID);
+	zassert_equal(ja.central_nonce, TOWER_JOIN_KAT_CENTRAL_NONCE);
+	zassert_equal(ja.rx_delay_s, 1);
+	zassert_true(ja.tx_power_assigned);
+	zassert_equal(ja.tx_power_dbm, 14);
+
+	/* tx_power: 0 assigns nothing; an out-of-range one is ignored, and the
+	 * JoinAccept still pairs; both ends of the range are taken. */
+	const struct {
+		uint8_t dbm;
+		bool assigned;
+	} powers[] = {{0, false},
+		      {1, false},
+		      {P2P_TX_POWER_MIN_DBM, true},
+		      {8, true},
+		      {P2P_TX_POWER_MAX_DBM, true},
+		      {23, false},
+		      {0xff, false}};
 
 	for (size_t i = 0; i < ARRAY_SIZE(powers); i++) {
-		const uint8_t reserved[4] = {0, 0, powers[i], 0};
+		memcpy(v, kat_ja_value(), P2P_JOIN_ACCEPT_VALUE_LEN);
+		v[9] = powers[i].dbm;
+		zassert_ok(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN,
+						 TOWER_JOIN_KAT_NET_ID, &ja),
+			   "%u dBm must still pair", powers[i].dbm);
+		zassert_equal(ja.tx_power_assigned, powers[i].assigned, "%u dBm", powers[i].dbm);
+		zassert_equal(ja.tx_power_dbm, powers[i].assigned ? (int8_t)powers[i].dbm : 0);
+	}
 
-		p2p_parse_join_accept_reserved(reserved, &a);
-		zassert_true(a.tx_power_assigned, "%u dBm must be accepted", powers[i]);
-		zassert_equal(a.tx_power_dbm, (int8_t)powers[i], "wrong power recorded");
+	/* Refused: the frame's src is not the net_id it assigns; a reserved
+	 * net_id; an rx_delay outside 1..15 s; a short value. */
+	memcpy(v, kat_ja_value(), P2P_JOIN_ACCEPT_VALUE_LEN);
+	zassert_equal(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN, 0x12345678, &ja),
+		      -EBADMSG);
+	sys_put_le32(TWR_ADDR_NONE, v);
+	zassert_equal(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN, TWR_ADDR_NONE, &ja),
+		      -EBADMSG);
+	sys_put_le32(TWR_ADDR_BROADCAST, v);
+	zassert_equal(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN, TWR_ADDR_BROADCAST, &ja),
+		      -EBADMSG);
+
+	const uint8_t delays[] = {0, 16, 0xff};
+
+	for (size_t i = 0; i < ARRAY_SIZE(delays); i++) {
+		memcpy(v, kat_ja_value(), P2P_JOIN_ACCEPT_VALUE_LEN);
+		v[8] = delays[i];
+		zassert_equal(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN,
+						    TOWER_JOIN_KAT_NET_ID, &ja),
+			      -EBADMSG, "rx_delay %u", delays[i]);
+	}
+	v[8] = 15;
+	zassert_ok(p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN, TOWER_JOIN_KAT_NET_ID, &ja));
+	zassert_equal(
+		p2p_parse_join_accept(v, P2P_JOIN_ACCEPT_VALUE_LEN - 1, TOWER_JOIN_KAT_NET_ID, &ja),
+		-EBADMSG);
+
+	/* A longer value carries appended fields: the tail is ignored. */
+	memcpy(v, kat_ja_value(), P2P_JOIN_ACCEPT_VALUE_LEN);
+	v[13] = v[14] = v[15] = 0xee;
+	zassert_ok(p2p_parse_join_accept(v, sizeof(v), TOWER_JOIN_KAT_NET_ID, &ja));
+}
+
+/* TimeAns (plan §8.2): unix + frac/256 s at the TimeReq's TX-done, plus the
+ * time since, rounded to the second. */
+ZTEST(p2p_logic, test_time_at)
+{
+	zassert_equal(p2p_time_at(1790000000u, 0, 0), 1790000000u);
+	zassert_equal(p2p_time_at(1790000000u, 127, 0), 1790000000u, "496 ms rounds down");
+	zassert_equal(p2p_time_at(1790000000u, 128, 0), 1790000001u, "500 ms rounds up");
+	zassert_equal(p2p_time_at(1790000000u, 0, 1499), 1790000001u);
+	zassert_equal(p2p_time_at(1790000000u, 0, 1500), 1790000002u);
+	zassert_equal(p2p_time_at(1790000000u, 0, -5000), 1790000000u, "no negative age");
+	zassert_equal(p2p_time_at(1790000000u, 0, 3600000), 1790003600u);
+}
+
+/* ---- the join (tower_join_kat.json) ---------------------------------------- */
+
+/* The keys and frames through the firmware's own KDF and builders (the
+ * CONFIG_ZTEST hooks), so the vectors pin what the radio path sends rather than
+ * a re-spelling of it. */
+ZTEST(p2p_logic, test_join_keys_match_the_kat)
+{
+	uint8_t key[P2P_KEY_LEN];
+	uint8_t other[P2P_KEY_LEN];
+
+	p2p_test_derive_join_key(key);
+	zassert_mem_equal(key, tower_join_kat_join_key, P2P_KEY_LEN, "join_key");
+	p2p_test_derive_session_key(TOWER_JOIN_KAT_DEV_NONCE, TOWER_JOIN_KAT_CENTRAL_NONCE, key);
+	zassert_mem_equal(key, tower_join_kat_session_key, P2P_KEY_LEN, "session_key");
+
+	/* Every input moves the session key: dev_nonce, central_nonce, DevEUI. */
+	p2p_test_derive_session_key(TOWER_JOIN_KAT_DEV_NONCE + 1, TOWER_JOIN_KAT_CENTRAL_NONCE,
+				    other);
+	zassert_true(memcmp(key, other, P2P_KEY_LEN) != 0, "dev_nonce is a KDF input");
+	p2p_test_derive_session_key(TOWER_JOIN_KAT_DEV_NONCE, TOWER_JOIN_KAT_CENTRAL_NONCE + 1,
+				    other);
+	zassert_true(memcmp(key, other, P2P_KEY_LEN) != 0, "central_nonce is a KDF input");
+	g_app_config.radio_deveui[0] ^= 0x01;
+	p2p_test_derive_session_key(TOWER_JOIN_KAT_DEV_NONCE, TOWER_JOIN_KAT_CENTRAL_NONCE, other);
+	zassert_true(memcmp(key, other, P2P_KEY_LEN) != 0, "the DevEUI is a KDF input");
+	p2p_test_derive_join_key(other);
+	zassert_true(memcmp(tower_join_kat_join_key, other, P2P_KEY_LEN) != 0,
+		     "the DevEUI is a join_key input");
+}
+
+ZTEST(p2p_logic, test_join_request_matches_the_kat)
+{
+	uint8_t frame[P2P_JOIN_REQ_LEN];
+
+	zassert_equal(sizeof(tower_join_kat_join_request), P2P_JOIN_REQ_LEN, "39 B on the air");
+	zassert_ok(p2p_test_build_join_request(TOWER_JOIN_KAT_DEV_NONCE, frame));
+	zassert_mem_equal(frame, tower_join_kat_join_request, P2P_JOIN_REQ_LEN,
+			  "JoinRequest differs from the shared KAT");
+}
+
+ZTEST(p2p_logic, test_join_accept_kat_opens)
+{
+	uint8_t frame[P2P_JOIN_ACCEPT_LEN];
+
+	zassert_equal(sizeof(tower_join_kat_join_accept), P2P_JOIN_ACCEPT_LEN, "38 B on the air");
+	zassert_ok(p2p_test_open_join_accept(TOWER_JOIN_KAT_DEV_NONCE, tower_join_kat_join_accept,
+					     P2P_JOIN_ACCEPT_LEN));
+
+	/* The answer to another JoinRequest (counter = its dev_nonce). */
+	zassert_not_ok(p2p_test_open_join_accept(TOWER_JOIN_KAT_DEV_NONCE + 1,
+						 tower_join_kat_join_accept, P2P_JOIN_ACCEPT_LEN));
+
+	/* Tampered. */
+	memcpy(frame, tower_join_kat_join_accept, sizeof(frame));
+	frame[TWR_HDR_LEN + 5] ^= 0x10;
+	zassert_not_ok(p2p_test_open_join_accept(TOWER_JOIN_KAT_DEV_NONCE, frame, sizeof(frame)));
+
+	/* Addressed to another node. */
+	g_app_config.radio_deveui[7] ^= 0x01;
+	zassert_not_ok(p2p_test_open_join_accept(TOWER_JOIN_KAT_DEV_NONCE,
+						 tower_join_kat_join_accept, P2P_JOIN_ACCEPT_LEN));
+}
+
+static void kat_central(const uint8_t *frame, uint32_t len)
+{
+	if (len == P2P_JOIN_REQ_LEN && memcmp(frame, tower_join_kat_join_request, len) == 0) {
+		test_lora_rx_push(tower_join_kat_join_accept, P2P_JOIN_ACCEPT_LEN, -70, 6);
 	}
 }
 
-ZTEST(p2p_logic, test_join_accept_reserved_rejects_out_of_range_tx_power)
+/* The whole join on the fake radio: the KAT JoinRequest goes out, the KAT
+ * JoinAccept comes back in its window, and the session it leaves sends the
+ * KAT's first uplink byte for byte. */
+ZTEST(p2p_logic, test_join_end_to_end_under_the_kat)
 {
-	struct p2p_radio_assign a;
-	/* Just outside both bounds, and the 0xFF a corrupt/garbage byte gives. */
-	const uint8_t bad[] = {1,   P2P_TX_POWER_MIN_DBM - 1, P2P_TX_POWER_MAX_DBM + 1, 23, 100,
-			       0xFF};
+	struct app_radio_p2p_info info;
+	uint32_t sends = test_lora_send_count;
+	int announces = p2p_test_announce_calls;
+	int ups = p2p_test_link_ups;
 
-	for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
-		const uint8_t reserved[4] = {0, 0, bad[i], 0};
+	p2p_test_join_setup(7);
+	test_lora_responder = kat_central;
+	p2p_test_join_step();
 
-		p2p_parse_join_accept_reserved(reserved, &a);
-		zassert_false(a.tx_power_assigned, "%u dBm must be refused, not applied", bad[i]);
-		zassert_equal(a.tx_power_dbm, 0, "a refused power must not leak through");
+	zassert_equal(test_lora_send_count, sends + 1, "one JoinRequest");
+	zassert_mem_equal(test_lora_sent_frame(sends)->buf, tower_join_kat_join_request,
+			  P2P_JOIN_REQ_LEN);
+	zassert_true(app_radio_p2p_is_ready(), "paired");
+	zassert_equal(p2p_test_announce_calls, announces + 1, "the link-up announces");
+	zassert_equal(p2p_test_link_ups, ups + 1);
+
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_PAIRED);
+	zassert_equal(info.addr, TOWER_JOIN_KAT_ADDR);
+	zassert_equal(info.net_id, TOWER_JOIN_KAT_NET_ID);
+	zassert_equal(info.rx_delay_s, 1);
+	zassert_true(info.tx_power_assigned);
+	zassert_equal(info.tx_power_dbm, 14);
+	zassert_equal(info.dev_nonce, TOWER_JOIN_KAT_DEV_NONCE + 1, "the next dev_nonce kept");
+	zassert_equal(info.gw_last, 0, "a fresh replay lane");
+	/* Capabilities + Hello wait for their jittered 0x91 uplink. */
+	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1));
+
+	/* The first uplink of the session: counter 1 (0 is reserved), under the
+	 * derived session key. Unanswered, it goes three times, byte-identical. */
+	p2p_test_tx_reset();
+	test_lora_responder = NULL;
+	sends = test_lora_send_count;
+	zassert_equal(p2p_test_uplink(tower_join_kat_first_uplink_plaintext,
+				      sizeof(tower_join_kat_first_uplink_plaintext), true),
+		      -ETIMEDOUT);
+	zassert_equal(test_lora_send_count, sends + 3);
+	for (uint32_t i = 0; i < 3; i++) {
+		const struct test_lora_frame *f = test_lora_sent_frame(sends + i);
+
+		zassert_equal(f->len, sizeof(tower_join_kat_first_uplink));
+		zassert_mem_equal(f->buf, tower_join_kat_first_uplink,
+				  sizeof(tower_join_kat_first_uplink), "transmission %u", i);
 	}
 }
 
-ZTEST(p2p_logic, test_join_accept_reserved_ignores_channel_but_keeps_power)
+/* A JoinRequest is TOWER counter dev_nonce, and TOWER reserves 0: a new device
+ * starts at 1. */
+ZTEST(p2p_logic, test_join_request_counter_skips_zero)
 {
-	/* A nonzero channel is unsupported (one physical channel), but it must
-	 * not cost the node an otherwise-valid power assignment. */
-	const uint8_t reserved[4] = {3, 0, 8, 0};
-	struct p2p_radio_assign a;
+	struct twr_hdr h;
+	uint32_t sends = test_lora_send_count;
 
-	p2p_parse_join_accept_reserved(reserved, &a);
+	p2p_test_set_dev_nonce(0);
+	p2p_test_join_setup(7);
+	p2p_test_join_step();
 
-	zassert_true(a.tx_power_assigned, "an unsupported channel must not veto the power");
-	zassert_equal(a.tx_power_dbm, 8, "wrong power recorded");
+	zassert_equal(test_lora_send_count, sends + 1);
+	zassert_ok(twr_hdr_get(test_lora_last_frame, test_lora_last_len, &h));
+	zassert_equal(h.counter, 1);
+	zassert_equal(h.src, TOWER_KAT_NODE_ADDR);
+	zassert_equal(h.dest, TWR_ADDR_NONE);
+	zassert_equal(p2p_test_get_dev_nonce(), 2);
+	p2p_test_join_stop();
 }
 
-ZTEST(p2p_logic, test_join_accept_reserved_records_sf_hint)
-{
-	/* SF is judged by the caller (only it knows the configured SF), so the
-	 * parser must pass the raw byte through untouched. */
-	const uint8_t reserved[4] = {0, 12, 0, 0};
-	struct p2p_radio_assign a;
-
-	p2p_parse_join_accept_reserved(reserved, &a);
-
-	zassert_equal(a.sf_hint, 12, "SF hint must be reported verbatim");
-	zassert_false(a.tx_power_assigned, "an SF hint alone assigns no power");
-}
-
-ZTEST(p2p_logic, test_join_accept_reserved_ignores_unknown_flags)
-{
-	const uint8_t reserved[4] = {0, 0, 14, 0xA5};
-	struct p2p_radio_assign a;
-
-	p2p_parse_join_accept_reserved(reserved, &a);
-
-	zassert_true(a.tx_power_assigned, "unknown flags must not veto the power");
-	zassert_equal(a.tx_power_dbm, 14, "wrong power recorded");
-}
+/* ---- join retry policy ------------------------------------------------------ */
 
 ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 {
 	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
 
-	/* The defect: app_radio_duty_wait_ms returns "time until the oldest ledger entry
-	 * leaves the sliding hour" -- up to APP_RADIO_DUTY_WINDOW_MS when the 48-entry
-	 * ring is full. A boot join that waited that long would be answered long
-	 * after its 120 s window closed, which is how a 120 s window was still
-	 * JOINING 7 m 38 s in on the bench (2026-09-10 §9). The wait is capped at
-	 * the window edge so the NEXT wake-up is the one that gives up, on time. */
+	/* app_radio_duty_wait_ms can return up to APP_RADIO_DUTY_WINDOW_MS. A boot
+	 * join that waited that long would be answered long after its 120 s
+	 * window closed (bench 2026-09-10 §9): the wait is capped at the window
+	 * edge, so the NEXT wake-up is the one that hands over, on time. */
 	int64_t d = p2p_join_retry_delay_ms(false, 119000, 3500000, 0, jitter);
 
 	zassert_true(d >= 0, "119 s into a 120 s window is not yet expired");
-	zassert_true(d <= 1000,
-		     "a duty wait of 3500 s must be capped to the 1000 ms remaining, "
-		     "got %lld",
+	zassert_true(d <= 1000, "a 3500 s duty wait must be capped to the 1000 ms left, got %lld",
 		     (long long)d);
 
-	/* Past the window: refuse, so the caller logs the give-up instead of
-	 * rescheduling. */
 	zassert_true(p2p_join_retry_delay_ms(false, P2P_JOIN_BOOT_WINDOW_MS, 0, 0, jitter) < 0,
 		     "at the window edge the boot join must report the window closed");
 	zassert_true(p2p_join_retry_delay_ms(false, 500000, 0, 0, jitter) < 0,
 		     "well past the window the boot join must report the window closed");
 
-	/* A self-heal has no window at all (§7) -- a paired device recovers for its
-	 * whole life, so this must never refuse no matter how long it has run. */
+	/* The slow policy has no window (§7). */
 	for (uint8_t a = 0; a < 255; a++) {
 		uint32_t base = app_radio_rejoin_backoff_ms(a);
 
 		zassert_true(p2p_join_retry_delay_ms(true, 999999999, 3500000, base, jitter) >= 0,
-			     "a self-healing re-join must never be capped by the boot window "
-			     "(attempt %u)",
-			     a);
+			     "a slow re-join is never capped by the boot window (attempt %u)", a);
 	}
 
-	/* Free radio at the start of the window: no wait beyond the caller's jitter. */
 	zassert_true(p2p_join_retry_delay_ms(false, 0, 0, 0, jitter) < (int64_t)jitter,
-		     "an unblocked retry should go essentially immediately");
-
-	/* And an ordinary duty wait well inside the window passes through untouched
-	 * -- the cap must not make every retry immediate. */
+		     "an unblocked retry goes essentially immediately");
 	zassert_equal(p2p_join_retry_delay_ms(false, 1000, 30000, 0, jitter), 30000,
 		      "a 30 s duty wait 1 s into the window is not capped");
 }
 
-/* The slow policy competes with the duty ledger, not just with the clock: a
- * JoinRequest the ledger refuses never reaches the air, so a round that waits
- * only its backoff wakes to be refused again and has spent a backoff step for
- * nothing. The wait has to be the longer of the two. */
+/* A JoinRequest the ledger refuses never reaches the air, so a round that waits
+ * only its backoff wakes to be refused again: the wait is the longer of the
+ * two. */
 ZTEST(p2p_logic, test_slow_retry_waits_for_duty_and_stays_bounded)
 {
 	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
 
-	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 0, jitter), 1500,
-		      "a duty-blocked slow retry with no backoff must wait out the ledger");
-	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 90000, 60000, jitter), 90000,
-		      "a 90 s duty wait must outrank a 60 s backoff");
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 0, jitter), 1500);
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 90000, 60000, jitter), 90000);
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 60000, jitter), 60000);
 
-	/* ...and the backoff still wins when it is the longer of the two, so the
-	 * fix cannot turn a long backoff into a busy retry loop. */
-	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 60000, jitter), 60000,
-		      "a 60 s backoff must outrank a 1.5 s duty wait");
-
-	/* The worst case the ledger can produce: a full 48-entry ring puts the
-	 * wait within a second of the whole sliding hour, three orders of
-	 * magnitude past the first backoff step. The duty wait has to come
-	 * through intact, and it is still bounded -- app_radio_duty_wait_ms never
-	 * returns more than the window, and the backoff caps at the same value,
-	 * so their maximum is bounded too and the slow policy never oversleeps. */
 	int64_t d = p2p_join_retry_delay_ms(true, 999999, APP_RADIO_DUTY_WINDOW_MS - 1000,
 					    app_radio_rejoin_backoff_ms(0), jitter);
 
-	zassert_equal(d, APP_RADIO_DUTY_WINDOW_MS - 1000,
-		      "a near-window duty wait must survive a 60 s backoff, got %lld ms",
-		      (long long)d);
-	zassert_true(d <= APP_RADIO_DUTY_WINDOW_MS,
-		     "a slow retry wait of %lld ms must stay inside the sliding hour",
-		     (long long)d);
+	zassert_equal(d, APP_RADIO_DUTY_WINDOW_MS - 1000);
+	zassert_true(d <= APP_RADIO_DUTY_WINDOW_MS);
 }
 
-/* The jitter that spreads a fleet's re-join rounds is scaled to the BACKOFF,
- * but it is applied to the wait that p2p_join_retry_delay_ms returned -- which
- * after the duty fix may be the duty wait instead. A negative draw of up to
- * base/4 (15 s at the 60 s base, 15 min at the 1 h cap) then wakes the node
- * before the ledger has cleared, send_join_request() is refused again, and
- * m_rejoin_attempt++ burns a backoff step for a frame that never went out --
- * exactly the waste the duty fix exists to stop. The duty wait is a floor the
- * jitter may push up but never through. */
+/* The fleet-spreading jitter may push the wait up but never under the duty
+ * wait, or the node wakes into a refusal and burns a backoff step. */
 ZTEST(p2p_logic, test_slow_retry_jitter_never_dips_below_the_duty_wait)
 {
 	const uint32_t base = app_radio_rejoin_backoff_ms(0); /* 60 s */
 	const int64_t duty = 90000;
 
-	/* The most negative draw there is: rand 0 subtracts the whole base/4. */
-	zassert_equal(app_radio_backoff_jitter_ms(duty, duty, base, 0), duty,
-		      "the most negative jitter draw must not undercut the duty wait");
-
-	/* Every draw, not just the extreme one. */
+	zassert_equal(app_radio_backoff_jitter_ms(duty, duty, base, 0), duty);
 	for (uint32_t r = 0; r <= base / 2; r += 1000) {
 		int64_t d = app_radio_backoff_jitter_ms(duty, duty, base, r);
 
-		zassert_true(d >= duty, "draw %u dipped to %lld ms, below the %lld ms duty wait", r,
-			     (long long)d, (long long)duty);
-		zassert_true(d <= duty + (int64_t)(base / 4),
-			     "draw %u overshot to %lld ms, past +25%% of the backoff", r,
-			     (long long)d);
+		zassert_true(d >= duty, "draw %u dipped to %lld ms", r, (long long)d);
+		zassert_true(d <= duty + (int64_t)(base / 4), "draw %u overshot", r);
 	}
-
-	/* The floor must not swallow the jitter: with no duty block the spread is
-	 * the full +/-25%, which is what keeps a fleet from re-joining in lockstep. */
-	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, 0), base - base / 4,
-		      "an unblocked round must still take the full negative jitter");
-	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, base / 2), base + base / 4,
-		      "an unblocked round must still take the full positive jitter");
+	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, 0), base - base / 4);
+	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, base / 2), base + base / 4);
 }
 
-/* ---- join SF sweep ---------------------------------------------------- */
-
-/* The SF is network-wide and the Hub owns it, so a Hub that changes it strands
- * every node still tuned to the old one. A node can only find it again by
- * trying other SFs during join, and the cheapest order is nearest-first: the
- * likeliest change is by one step. Ties break HIGHER first -- an SF change is
- * almost always upward, for range. */
-ZTEST(p2p_logic, test_join_sweep_order_is_nearest_first_higher_first)
+/* §3.3: the SF is a fixed network constant -- every JoinRequest goes out on
+ * the configured one, no sweep. */
+ZTEST(p2p_logic, test_join_stays_on_the_configured_sf)
 {
-	const struct {
-		int cfg_sf;
-		uint8_t steps;
-		int expect[8];
-	} cases[] = {
-		{10, 6, {10, 11, 9, 12, 8, 7}},
-		{12, 6, {12, 11, 10, 9, 8, 7}},
-		{7, 6, {7, 8, 9, 10, 11, 12}},
-		/* SF6 is configurable but below the sweep range: step 0 still
-		 * honours the configured SF, then the whole range follows. */
-		{6, 7, {6, 7, 8, 9, 10, 11, 12}},
-	};
-
-	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		int cfg = cases[i].cfg_sf;
-
-		for (uint8_t step = 0; step < cases[i].steps; step++) {
-			zassert_equal(p2p_join_sweep_sf(cfg, step), cases[i].expect[step],
-				      "cfg SF%d step %u should be SF%d, got %d", cfg, step,
-				      cases[i].expect[step], p2p_join_sweep_sf(cfg, step));
-		}
-
-		/* Past the end the pass is exhausted, and stays exhausted. */
-		zassert_equal(p2p_join_sweep_sf(cfg, cases[i].steps), -1,
-			      "cfg SF%d must be exhausted after %u steps", cfg, cases[i].steps);
-		zassert_equal(p2p_join_sweep_sf(cfg, 255), -1, "cfg SF%d must stay exhausted", cfg);
-	}
-}
-
-/* A sweep pass is a burst of JoinRequests at rising SFs, and the SF12 ones are
- * expensive. The pass has to stay a small fraction of the hourly budget or the
- * retries it feeds would be duty-blocked before the pass even finished. */
-ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
-{
-	const uint8_t join_req_len = P2P_JOIN_REQ_LEN; /* 42 B, see the ToA table above */
-	uint32_t total = 0;
-
-	for (uint8_t step = 0;; step++) {
-		int sf = p2p_join_sweep_sf(10, step);
-
-		if (sf < 0) {
-			break;
-		}
-		total += (step == 0 ? P2P_JOIN_SF_ATTEMPTS : 1) * p2p_toa_ms(sf, join_req_len);
-	}
-
-	/* 2 x 535 (SF10) + 1151 + 288 + 2139 + 155 + 88 (rounded up since T2d). */
-	zassert_equal(total, 4891u, "a cfg-SF10 sweep pass should be 4891 ms of air, got %u ms",
-		      total);
-	zassert_true(total < APP_RADIO_DUTY_1PCT_MS / 4,
-		     "a sweep pass (%u ms) must stay well inside the hourly budget", total);
-
-	/* The other edge of the same budget: SF12 JoinRequests are 2139 ms each
-	 * at 42 B (as at 41 B), so the hour holds 16 of them and no more -- it was
-	 * 18 at 37 B, which is what the four extra identity bytes cost (#417). A sweep that
-	 * retried at SF12 more often than that would be blocked by the duty
-	 * ledger, not by its own policy. */
-	uint32_t sf12 = p2p_toa_ms(12, join_req_len);
-
-	zassert_true(16 * sf12 <= APP_RADIO_DUTY_1PCT_MS, "16 SF12 joins (%u ms) must fit the hour",
-		     16 * sf12);
-	zassert_true(17 * sf12 > APP_RADIO_DUTY_1PCT_MS,
-		     "17 SF12 joins (%u ms) must not fit the hour", 17 * sf12);
-}
-
-/* ---- join episode: walking the sweep ---------------------------------- */
-
-/* The sweep order is only half the story: the episode has to actually walk it.
- * One pass is P2P_JOIN_SF_ATTEMPTS JoinRequests at the configured SF -- the
- * likeliest answer deserves a second chance at a lost frame -- then one at
- * every other SF in the order, then back to the configured SF for the next
- * pass. The radio must be tuned to that SF when the JoinRequest goes out, so
- * the state is read BEFORE each attempt. */
-ZTEST(p2p_logic, test_join_sweep_walks_the_order_and_wraps)
-{
-	const uint8_t expect[] = {10, 10, 11, 9, 12, 8, 7};
-	uint8_t sf, step, attempts, rejoin;
+	uint8_t sf, rejoin;
 	bool slow;
 	enum p2p_link_state state;
 
-	p2p_test_join_setup(10);
-	p2p_test_allow_join_sweep(); /* the last-resort pass, decision #22 §3.1 */
+	p2p_test_join_setup(9);
+	for (int i = 0; i < 4; i++) {
+		uint32_t sends = test_lora_send_count;
 
-	for (size_t i = 0; i < ARRAY_SIZE(expect); i++) {
-		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-		zassert_equal(sf, expect[i],
-			      "attempt %zu should go out at SF%u, the radio is on SF%u", i,
-			      expect[i], sf);
 		p2p_test_join_step();
+		p2p_test_get_join(&sf, &slow, &rejoin, &state);
+		zassert_equal(sf, 9, "attempt %d must go out on SF9, got SF%u", i, sf);
+		zassert_equal(test_lora_send_count, sends + 1, "attempt %d: one JoinRequest", i);
+		zassert_equal(test_lora_last_len, P2P_JOIN_REQ_LEN);
+		zassert_false(slow, "inside the boot window: the fast policy");
+		zassert_equal(rejoin, 0);
+		zassert_equal(state, P2P_LINK_JOINING);
 	}
-
-	/* The pass wrapped: back to step 0 / the configured SF, with a clean
-	 * attempt count, ready to start the next pass. */
-	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-	zassert_equal(sf, 10, "a wrapped pass must return to the configured SF, got SF%u", sf);
-	zassert_equal(step, 0, "a wrapped pass must return to sweep step 0, got %u", step);
-	zassert_equal(attempts, 0, "a wrapped pass must reset the attempt count, got %u", attempts);
-
-	/* The boot policy owns this episode: the window has not closed, so the
-	 * policy has not changed and no backoff step has been spent. */
-	zassert_false(slow, "an episode inside its boot window must stay on the fast policy");
-	zassert_equal(rejoin, 0, "the fast policy must not spend backoff steps, got %u", rejoin);
-	zassert_equal(state, P2P_LINK_JOINING, "a sweeping episode is still JOINING");
+	p2p_test_join_stop();
 }
 
-/* Decision #22 §3.1: the join stays on the configured SF -- no sweep until the
- * last resort (a day without a JoinAccept). A pass is then just the
- * P2P_JOIN_SF_ATTEMPTS JoinRequests at the configured SF. */
-ZTEST(p2p_logic, test_join_stays_on_the_configured_sf_without_last_resort)
+/* A duty bounce puts nothing on the air and spends neither a dev_nonce nor a
+ * backoff step. */
+ZTEST(p2p_logic, test_join_duty_block_sends_nothing)
 {
-	uint8_t sf, step, attempts, rejoin;
-	bool slow;
-	enum p2p_link_state state;
+	uint8_t rejoin;
+	uint32_t sends = test_lora_send_count;
 
 	p2p_test_join_setup(7);
-
-	for (int i = 0; i < 3 * P2P_JOIN_SF_ATTEMPTS; i++) {
-		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-		zassert_equal(sf, 7, "attempt %d must go out on the configured SF7, got SF%u", i,
-			      sf);
-		zassert_equal(step, 0, "attempt %d: no sweep step, got %u", i, step);
-		p2p_test_join_step();
-	}
-}
-
-/* A JoinRequest the duty ledger refuses never reaches the air, so it tried no
- * SF at all. Advancing the sweep on it would skip an SF per duty bounce and a
- * blocked node would walk the whole order without transmitting once. */
-ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
-{
-	uint8_t sf, step, attempts, rejoin;
-	bool slow;
-	enum p2p_link_state state;
-
-	p2p_test_join_setup(10);
-
-	/* The common ledger (stubbed) holds the JoinRequest, so send_join_request()
-	 * returns -EAGAIN. */
 	test_duty_wait_ms = APP_RADIO_DUTY_WINDOW_MS / 2;
 	p2p_test_join_step();
 	test_duty_wait_ms = 0;
 
-	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-	zassert_equal(sf, 10, "a duty bounce tried no SF, so the radio must stay on SF10, got SF%u",
-		      sf);
-	zassert_equal(step, 0, "a duty bounce must not advance the sweep step, got %u", step);
-	zassert_equal(attempts, 0, "a duty bounce is not a sent attempt, got %u", attempts);
+	p2p_test_get_join(NULL, NULL, &rejoin, NULL);
+	zassert_equal(test_lora_send_count, sends, "nothing on the air");
+	zassert_equal(p2p_test_get_dev_nonce(), TOWER_JOIN_KAT_DEV_NONCE, "no dev_nonce spent");
+	zassert_equal(rejoin, 0);
+	p2p_test_join_stop();
 }
 
-/* The SF a sweep lands on has to outlive the session: app_radio_p2p_start()'s PAIRED
- * shortcut never joins, so a node that joined at a swept SF and rebooted would
- * come up on the stale configured one with nothing left to re-discover it.
- * Persisting an unchanged SF, on the other hand, is a pointless flash write on
- * every ordinary join. */
-ZTEST(p2p_logic, test_join_adopt_sf_persists_only_a_changed_sf)
-{
-	p2p_test_join_setup(10);
-
-	g_test_save_sf_calls = 0;
-	test_save_sf_ret = 0;
-
-	zassert_equal(p2p_join_adopt_sf(10), 0, "joining at the configured SF must succeed");
-	zassert_equal(g_test_save_sf_calls, 0,
-		      "joining at the configured SF must not write it back, %d write(s) seen",
-		      g_test_save_sf_calls);
-
-	zassert_equal(p2p_join_adopt_sf(12), 0, "adopting a swept SF must succeed");
-	zassert_equal(g_test_save_sf_calls, 1, "adopting an SF is exactly one write, got %d",
-		      g_test_save_sf_calls);
-	zassert_equal(g_test_saved_sf, 12, "the adopted SF must be the one persisted, got %d",
-		      g_test_saved_sf);
-
-	/* A failed persist is surfaced, not swallowed: the session still runs at
-	 * the swept SF, but the next boot comes back on the stale configured one
-	 * and the bench has to be able to see that coming. */
-	g_test_save_sf_calls = 0;
-	test_save_sf_ret = -EIO;
-
-	zassert_equal(p2p_join_adopt_sf(12), -EIO, "a failed persist must return its errno");
-	zassert_equal(g_test_save_sf_calls, 1, "the failing write still happened once, got %d",
-		      g_test_save_sf_calls);
-}
-
-/* The boot window used to end the episode, not just the fast policy: the node
- * went UNPAIRED and stayed silent until someone power-cycled it. A node
- * deployed before its Hub, or one switched on after the Hub moved the network
- * SF, would never come back on its own -- and the sweep above is worth nothing
- * if the episode it runs in has already stopped. The window still ends the fast
- * policy; it no longer ends the episode. */
+/* The boot window ends the fast policy, not the episode: the node keeps
+ * looking on the slow curve, one backoff step per unanswered JoinRequest. */
 ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
 {
-	uint8_t sf, step, attempts, rejoin;
+	uint8_t rejoin;
 	bool slow;
 	enum p2p_link_state state;
 
-	p2p_test_join_setup(10);
-	p2p_test_allow_join_sweep(); /* a full sweep pass, so the pass has 7 attempts */
+	p2p_test_join_setup(7);
 	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
 
 	p2p_test_join_step();
-
-	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-	zassert_equal(state, P2P_LINK_JOINING,
-		      "an expired boot window must leave the episode JOINING, got %d", state);
-	zassert_true(slow, "an expired boot window must hand the episode to the slow policy");
-	zassert_equal(rejoin, 0, "the slow curve starts at its first step, got %u", rejoin);
-
-	/* The curve is charged per PASS, not per attempt: the rest of this pass
-	 * spends no backoff step, and the pass end spends exactly one. */
-	for (int i = 0; i < 5; i++) {
-		p2p_test_join_step();
-		p2p_test_get_join(NULL, NULL, NULL, NULL, &rejoin, NULL);
-		zassert_equal(rejoin, 0, "attempt %d is mid-pass and must spend no backoff step",
-			      i + 2);
-	}
+	p2p_test_get_join(NULL, &slow, &rejoin, &state);
+	zassert_equal(state, P2P_LINK_JOINING, "an expired boot window leaves the episode JOINING");
+	zassert_true(slow, "and hands it to the slow policy");
+	zassert_equal(rejoin, 1, "the first slow round spent its step, got %u", rejoin);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT);
 
 	p2p_test_join_step();
-	p2p_test_get_join(&sf, &step, NULL, NULL, &rejoin, &state);
-	zassert_equal(rejoin, 1, "a pass end must spend exactly one backoff step, got %u", rejoin);
-	zassert_equal(step, 0, "and leave the next pass at sweep step 0, got %u", step);
-	zassert_equal(sf, 10, "which is the configured SF, got SF%u", sf);
-	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
+	p2p_test_get_join(NULL, &slow, &rejoin, &state);
+	zassert_equal(rejoin, 2);
+	zassert_true(p2p_test_join_pending_ms() == 0, "the step's retry was cancelled");
+	p2p_test_join_stop();
 }
 
-/* R-05: dev_eui_is_set() sat above the PAIRED shortcut, so a node paired under
- * pre-#417 firmware -- whose 24 B p2pjoin/state record join_settings_set() still
- * accepts, restoring it straight to PAIRED -- was refused on the next boot and
- * went silent. No telemetry, no self-heal, one ERR line. The other three DevEUI
- * gates only refuse a NEW join, which is the right shape; this one refused a
- * session that was already working. */
-ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
+/* R-06: a hard radio fault tried nothing but must still end the round, or the
+ * slow policy collapses into a jitter-only loop with a dev_nonce write each
+ * turn. The dev_nonce is spent: it could have reached the air. */
+ZTEST(p2p_logic, test_join_send_failure_still_ends_the_round)
 {
-	uint8_t saved[8];
+	uint8_t rejoin;
 
-	memcpy(saved, g_app_config.radio_deveui, sizeof(saved));
+	p2p_test_join_setup(7);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+	test_lora_send_ret = -EIO;
+	p2p_test_join_step();
+	test_lora_send_ret = 0;
 
-	p2p_test_join_setup(10);
-	p2p_test_set_paired();
-	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
-
-	app_radio_p2p_start();
-
-	zassert_true(app_radio_p2p_is_ready(),
-		     "a persisted session must survive an upgrade that added the DevEUI");
-
-	memcpy(g_app_config.radio_deveui, saved, sizeof(saved));
+	p2p_test_get_join(NULL, NULL, &rejoin, NULL);
+	zassert_equal(rejoin, 1, "the round ends, so the slow policy backs off");
+	zassert_equal(p2p_test_get_dev_nonce(), TOWER_JOIN_KAT_DEV_NONCE + 1);
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed send ends at once");
+	p2p_test_join_stop();
 }
 
-/* doc/plan/439 T3: a P2P link coming up announces Info + settings-info through
- * the common app_radio path, exactly like a LoRaWAN join -- the boot with a
- * persisted pairing included, which never sends a JoinRequest. */
-extern int p2p_test_announce_calls;
+/* R-01: the shell `join` must pre-empt a slow retry pending for up to an hour
+ * (k_work_schedule is a no-op on a scheduled item). */
+ZTEST(p2p_logic, test_shell_join_preempts_a_pending_slow_retry)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+	p2p_test_join_arm_retry(3600000);
+	zassert_true(p2p_test_join_pending_ms() > 10000, "the retry to pre-empt is pending");
 
+	p2p_test_join_restart();
+	zassert_equal(p2p_test_join_pending_ms(), 0, "an operator join goes now, %lld ms left",
+		      (long long)p2p_test_join_pending_ms());
+	p2p_test_join_stop();
+}
+
+/* Review of #400 (M4): the next dev_nonce is persisted BEFORE the JoinRequest
+ * leaves, fail-closed. */
+ZTEST(p2p_logic, test_join_request_not_sent_without_a_durable_dev_nonce)
+{
+	uint32_t sends = test_lora_send_count;
+
+	p2p_test_join_setup(7);
+	test_settings_save_ret = -EIO;
+	p2p_test_join_step();
+	test_settings_save_ret = 0;
+
+	zassert_equal(test_lora_send_count, sends, "no JoinRequest without a durable dev_nonce");
+	zassert_equal(p2p_test_get_dev_nonce(), TOWER_JOIN_KAT_DEV_NONCE);
+	p2p_test_join_stop();
+}
+
+/* ---- start, state, rejoin ---------------------------------------------------- */
+
+/* doc/plan/439 T3: a P2P link coming up announces through the common app_radio
+ * path, the boot with a persisted pairing included. */
 ZTEST(p2p_logic, test_paired_boot_announces_through_app_radio)
 {
-	p2p_test_join_setup(10);
-	p2p_test_set_paired();
-	p2p_test_announce_calls = 0;
+	int announces = p2p_test_announce_calls;
 
+	p2p_test_set_paired();
 	app_radio_p2p_start();
 
 	zassert_true(app_radio_p2p_is_ready(), "paired boot must be ready");
-	zassert_equal(p2p_test_announce_calls, 1, "announce calls %d", p2p_test_announce_calls);
+	zassert_equal(p2p_test_announce_calls, announces + 1);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1), "Capabilities + Hello queued");
 }
 
-/* The P2P TX backend (doc/plan/460 F4): app_radio owns the queues, the retries
- * and the report split (tests/radio_common); the backend sends the one frame it
- * is handed and says why it did not. */
-extern int test_lora_send_ret;
-extern uint32_t test_lora_send_count;
-extern int p2p_test_tx_queue_calls;
-extern int p2p_test_tx_kick_calls;
-extern enum app_radio_frame_kind p2p_test_tx_queue_kind;
-
-/* One 10 B frame through the backend, the way app_radio's scheduler sends it. */
-static int backend_send(enum app_radio_frame_kind kind, uint8_t flags,
-			struct app_radio_tx_result *res)
+/* The address is in every frame header (plan §6.1): no session is any use
+ * without it, so a zero DevEUI refuses even a persisted pairing. */
+ZTEST(p2p_logic, test_start_refuses_without_an_address_even_when_paired)
 {
-	static uint8_t body[10];
-	struct app_radio_frame f = {.kind = kind, .flags = flags, .len = sizeof(body), .buf = body};
-
-	return app_radio_p2p_backend.send(&f, res);
-}
-
-/* A radio fault is reported as one (app_radio retries it, LoRaWAN #219). The
- * duty cycle is app_radio's (T2d): the backend charges every frame's air to
- * the ledger, a failed TX too (the PA may have keyed). */
-ZTEST(p2p_logic, test_backend_send_result_mapping)
-{
-	struct app_radio_tx_result res = {0};
-	uint32_t sends;
-
-	p2p_test_join_setup(7);
 	p2p_test_set_paired();
-	p2p_test_tx_reset();
+	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
+	app_radio_p2p_start();
 
-	/* 10 B body + 12 B header + 4 B tag at SF7, what airtime_ms() tells app_radio. */
-	const uint32_t air = p2p_toa_ms(7, 26);
-	uint32_t charges = test_duty_charges;
-	uint64_t charged = test_duty_charged_ms;
+	zassert_false(app_radio_p2p_is_ready());
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED);
 
-	zassert_equal(app_radio_p2p_backend.airtime_ms(10), air, "airtime of a 10 B body");
-
-	test_lora_send_ret = -EIO;
-	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EIO, "radio fault");
-	test_lora_send_ret = 0;
-	zassert_equal(test_duty_charges, charges + 1, "a failed TX is charged");
-	p2p_test_tx_reset();
-
-	sends = test_lora_send_count;
-	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), 0, "sent");
-	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air");
-	zassert_equal(test_duty_charges, charges + 2, "the sent frame is charged");
-	zassert_equal(test_duty_charged_ms - charged, 2 * air, "both at their air");
-
-	/* A held ledger is app_radio's to honour: the backend sends what it gets. */
-	test_duty_wait_ms = APP_RADIO_DUTY_WINDOW_MS / 2;
-	sends = test_lora_send_count;
-	(void)backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res);
-	zassert_equal(test_lora_send_count, sends + 1, "the backend does not check the ledger");
-	test_duty_wait_ms = 0;
-	p2p_test_tx_reset();
+	/* An all-ones low word is the reserved broadcast address. */
+	p2p_test_set_link(P2P_LINK_PAIRED, false, false, false);
+	memset(&g_app_config.radio_deveui[4], 0xff, 4);
+	app_radio_p2p_start();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED);
 }
 
-/* Every exchange a TX begins ends again -- after its RX1 window, or at once when
- * the frame never reached the air -- or flash writers would wait for a radio
- * that is long idle (app_radio_air_begin()). */
-ZTEST(p2p_logic, test_every_exchange_ends_its_air_window)
+/* p2p-modulation fsk is plan P5: nothing that would transmit LoRa into an fsk
+ * network runs -- not the boot, not a self-heal. */
+ZTEST(p2p_logic, test_fsk_refuses_to_start)
 {
-	struct app_radio_tx_result res = {0};
-	int begins = p2p_test_air_begins;
-
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_tx_reset();
-
-	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), 0, "sent");
-	zassert_equal(p2p_test_air_begins, begins + 1, "the uplink is one exchange");
-	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "ended after its RX1 window");
-	p2p_test_tx_reset();
-
-	test_lora_send_ret = -EIO;
-	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EIO, "radio fault");
-	test_lora_send_ret = 0;
-	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed send ends at once");
-	p2p_test_tx_reset();
-
-	begins = p2p_test_air_begins;
-	p2p_test_join_setup(7);
-	p2p_test_join_step(); /* JoinRequest, no JoinAccept */
-	zassert_equal(p2p_test_air_begins, begins + 1, "the JoinRequest is one exchange");
-	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "ended after the JoinAccept window");
-	p2p_test_join_step(); /* leave nothing armed for the next test */
-	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "balanced");
-
-	begins = p2p_test_air_begins;
-	test_lora_send_ret = -EIO;
-	p2p_test_join_setup(7);
-	p2p_test_join_step(); /* the JoinRequest never reached the air */
-	test_lora_send_ret = 0;
-	zassert_equal(p2p_test_air_begins, begins + 1);
-	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed JoinRequest ends at once");
-}
-
-extern uint8_t test_lora_last_frame[255];
-extern uint32_t test_lora_last_len;
-
-/* §6 / F-P1-1: a confirmed frame without its Ack is -ETIMEDOUT, and app_radio's
- * retry of it (attempt > 0) goes byte for byte under the SAME counter, so the
- * central's strict high-water holds; the next fresh frame takes the next
- * counter. When and how often is app_radio's (tests/radio_common). */
-ZTEST(p2p_logic, test_retry_resends_the_same_counter)
-{
-	static uint8_t body[10] = {0x10, 0x11, 0x12};
-	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
-				    .flags = APP_RADIO_FRAME_CONFIRMED,
-				    .len = sizeof(body),
-				    .buf = body};
-	struct app_radio_tx_result res = {0};
-	uint8_t first[255];
-	uint32_t first_len;
-
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_set_fcnt(100, 200);
-	p2p_test_tx_reset();
-
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT, "no Ack in its RX1");
-	first_len = test_lora_last_len;
-	memcpy(first, test_lora_last_frame, first_len);
-	zassert_equal(sys_get_be32(&first[P2P_HDR_OFF_COUNTER]), 100);
-
-	f.attempt = 1;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT, "the retry, no Ack either");
-	zassert_equal(test_lora_last_len, first_len);
-	zassert_mem_equal(test_lora_last_frame, first, first_len, "the same frame on the air");
-
-	f.attempt = 0;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 101,
-		      "a new frame, the next counter");
-
-	f.flags = 0;
-	f.kind = APP_RADIO_FRAME_TELEMETRY;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), 0, "unconfirmed: sent once, done");
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-}
-
-/* A wanted network time sets FCtrl TIME_REQ on a fresh confirmed uplink only
- * (an unconfirmed one gets no Ack to carry the tail), and the retry of that
- * frame keeps it even when the want ended meanwhile: byte for byte (F-P1-1). */
-ZTEST(p2p_logic, test_time_req_on_confirmed_uplinks_kept_on_retry)
-{
-	static uint8_t body[10] = {0x20, 0x21};
-	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
-				    .flags = APP_RADIO_FRAME_CONFIRMED,
-				    .len = sizeof(body),
-				    .buf = body};
-	struct app_radio_tx_result res = {0};
-	uint8_t first[255];
-	uint32_t first_len;
-
-	zassert_equal(p2p_uplink_fctrl(false), 0);
-	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED, "no time wanted");
-	p2p_test_time_wanted = true;
-	zassert_equal(p2p_uplink_fctrl(false), 0, "unconfirmed: never TIME_REQ");
-	zassert_equal(p2p_uplink_fctrl(true), P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ);
-
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_set_fcnt(400, 500);
-	p2p_test_tx_reset();
-
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL],
-		      P2P_FCTRL_CONFIRMED | P2P_FCTRL_TIME_REQ, "the time is asked for");
-	first_len = test_lora_last_len;
-	memcpy(first, test_lora_last_frame, first_len);
-
-	p2p_test_time_wanted = false; /* e.g. landed from a later request's answer */
-	f.attempt = 1;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_mem_equal(test_lora_last_frame, first, first_len, "the retry is the same frame");
-
-	f.attempt = 0;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], P2P_FCTRL_CONFIRMED,
-		      "a fresh frame drops TIME_REQ once the time landed");
-
-	p2p_test_time_wanted = true;
-	f.flags = 0;
-	f.kind = APP_RADIO_FRAME_TELEMETRY;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), 0);
-	zassert_equal(test_lora_last_frame[P2P_HDR_OFF_FCTRL], 0, "unconfirmed telemetry");
-	p2p_test_time_wanted = false;
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-}
-
-/* LoRaWAN parity: an empty clock_sync forces no uplink -- like LoRaWAN's
- * DeviceTimeReq it waits for the next regular uplink, whose Ack time tail then
- * sets the RTC and triggers the Info with the command's seq. */
-ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
-{
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_tx_reset();
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
 	uint32_t sends = test_lora_send_count;
-	int kicks = p2p_test_tx_kick_calls;
 
-	p2p_test_time_wanted = true;
-	app_radio_p2p_backend.time_request();
-	k_sleep(K_MSEC(50)); /* a forced send would run on the radio work queue by now */
-	zassert_equal(test_lora_send_count, sends, "clock_sync must not send an uplink");
-	zassert_equal(p2p_test_tx_kick_calls, kicks, "nor ask app_radio for one");
-	p2p_test_time_wanted = false;
-	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
+	g_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_FSK;
+	app_radio_p2p_start();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED, "unpaired boot");
+
+	p2p_test_set_link(P2P_LINK_PAIRED, false, false, false);
+	app_radio_p2p_start();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED, "paired boot");
+	zassert_false(app_radio_p2p_is_ready());
+
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
+	zassert_equal(be->rejoin(false), -ENOTSUP, "no self-heal on fsk");
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "the session is kept");
+	zassert_equal(test_lora_send_count, sends, "nothing on the air");
 }
 
-/* LoRaWAN parity: answers and alarms stay queued in app_radio while the node is
- * not paired (joining, self-heal) -- the backend is not ready -- and the link-up
+/* §7: app_radio's rejoin op is the self-healing re-join on the slow policy,
+ * refused while unprovisioned. */
+ZTEST(p2p_logic, test_rejoin_op_self_heals_or_refuses_unprovisioned)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
+	memset(g_app_config.radio_appkey, 0, sizeof(g_app_config.radio_appkey));
+	zassert_equal(be->rejoin(false), -ENOTSUP, "all-zero app_key: refused");
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "session kept");
+
+	memcpy(g_app_config.radio_appkey, tower_join_kat_app_key,
+	       sizeof(g_app_config.radio_appkey));
+	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
+	zassert_equal(be->rejoin(true), -ENOTSUP, "all-zero DevEUI: refused");
+
+	memcpy(g_app_config.radio_deveui, tower_join_kat_dev_eui,
+	       sizeof(g_app_config.radio_deveui));
+	zassert_equal(be->rejoin(false), 0, "provisioned: re-join");
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT, "on the slow policy");
+	zassert_false(app_radio_p2p_is_ready(), "not ready while the session is replaced");
+	p2p_test_join_stop();
+}
+
+/* Answers and alarms stay queued in app_radio while unpaired; the link-up
  * kicks them out under the new session. */
 ZTEST(p2p_logic, test_not_ready_while_unpaired_and_link_up_kicks)
 {
-	p2p_test_join_setup(7);
-	p2p_test_tx_reset();
 	p2p_test_set_link(P2P_LINK_JOINING, true, false, false);
 	zassert_false(app_radio_p2p_backend.tx_ready(), "frames wait while joining");
 
@@ -1106,413 +1141,19 @@ ZTEST(p2p_logic, test_not_ready_while_unpaired_and_link_up_kicks)
 	app_radio_p2p_start();
 	zassert_true(app_radio_p2p_backend.tx_ready(), "ready once paired");
 	zassert_true(p2p_test_tx_kick_calls > kicks, "the link-up sends what waited");
-
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
 
-/* Review of #400 (H1): a new session restarts the counter at 0 under a new key,
- * so a retry must never go out with a counter of the old session: after the
- * session changed, a retry takes a fresh counter (app_radio also starts the
- * frame afresh at the link-up). */
-ZTEST(p2p_logic, test_new_session_never_resends_an_old_counter)
-{
-	static uint8_t body[10] = {0x20};
-	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ALARM,
-				    .flags = APP_RADIO_FRAME_CONFIRMED,
-				    .len = sizeof(body),
-				    .buf = body};
-	struct app_radio_tx_result res = {0};
-
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_set_fcnt(300, 400);
-	p2p_test_tx_reset();
-
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 300);
-
-	p2p_test_drop_old_session();
-	f.attempt = 1;
-	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
-	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 301,
-		      "a fresh counter, never the old session's");
-
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-}
-
-/* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
- * simply broken walked the whole SF order without transmitting once and then
- * charged a backoff step for the "pass" it never flew.
- *
- * Advancing only on a sent frame is half the fix. Alone it makes pass_end never
- * true on a dead modem, which collapses the slow-phase wait to the bare jitter
- * (p2p_join_retry_delay_ms with base 0) -- a sub-2-second retry loop, each turn
- * costing a dev_nonce flash write. The round has to end even when the sweep does
- * not move, so the slow policy backs off. */
-ZTEST(p2p_logic, test_join_send_failure_holds_the_sweep_and_ends_the_round)
-{
-	uint8_t sf, step, attempts, rejoin;
-	bool slow;
-	enum p2p_link_state state;
-
-	p2p_test_join_setup(10);
-	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
-
-	test_lora_send_ret = -EIO;
-	p2p_test_join_step();
-	test_lora_send_ret = 0;
-
-	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-	zassert_equal(sf, 10, "a radio fault tried no SF, so the radio stays on SF10, got SF%u",
-		      sf);
-	zassert_equal(step, 0, "a radio fault must not advance the sweep step, got %u", step);
-	zassert_equal(attempts, 0, "a frame that never reached the air is not an attempt, got %u",
-		      attempts);
-	zassert_equal(rejoin, 1,
-		      "but the round must still end, so the slow policy backs off, got %u", rejoin);
-}
-
-/* R-01: 8227954 made the join episode endless -- the slow policy backs off to an
- * hour and never gives up -- but start_join_episode() still armed the first
- * attempt with k_work_schedule_for_queue(), which Zephyr defines as a no-op
- * while the item is already scheduled. So the shell `join` rewrote
- * m_join_episode_fresh / m_join_slow / m_join_started_at and the pending timer
- * ignored all of it for up to P2P_REJOIN_BACKOFF_MAX_MS. An operator asking a
- * stuck node to re-join has to be answered now, not in an hour. */
-ZTEST(p2p_logic, test_shell_join_preempts_a_pending_slow_retry)
-{
-	p2p_test_join_setup(10);
-	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
-
-	/* A slow-phase pass end arms the backoff curve, which reaches an hour. The
-	 * delay is placed directly rather than spent: running real passes to get
-	 * there would leave the work-queue thread racing these assertions. */
-	p2p_test_join_arm_retry(3600000); /* P2P_REJOIN_BACKOFF_MAX_MS, the curve's cap */
-	zassert_true(p2p_test_join_pending_ms() > 10000,
-		     "the retry this test pre-empts must be pending, got %lld ms",
-		     (long long)p2p_test_join_pending_ms());
-
-	p2p_test_join_restart();
-
-	/* Nothing yields between the two calls, so the work-queue thread cannot
-	 * have run the item yet: 0 means it is queued to run now, not still
-	 * waiting out the old delay. */
-	zassert_equal(p2p_test_join_pending_ms(), 0,
-		      "an operator join must pre-empt the pending retry, %lld ms still to wait",
-		      (long long)p2p_test_join_pending_ms());
-
-	/* Leave nothing armed for the next test. */
-	p2p_test_join_step();
-}
-
-/* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */
-
-ZTEST(p2p_logic, test_fcnt_normal_advance)
-{
-	uint32_t c;
-
-	/* Within the reserved window: hands out the value and advances, no reserve
-	 * needed (so no dependency on the settings backend). */
-	p2p_test_set_fcnt(100, 200);
-	zassert_ok(p2p_test_fcnt_next(&c), "fcnt_next should succeed within the window");
-	zassert_equal(c, 100u, "counter value wrong");
-	zassert_equal(p2p_test_get_fcnt(), 101u, "counter not advanced");
-}
-
-extern int test_settings_save_ret;
-
-ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
-{
-	uint32_t c = 0xDEADBEEF;
-
-	/* At the window edge a durable reserve is required; with the stub store
-	 * failing its saves, fcnt_next must refuse rather than hand out an
-	 * unreserved counter -- and must NOT advance the counter. */
-	test_settings_save_ret = -EIO;
-	p2p_test_set_fcnt(200, 200);
-	zassert_true(p2p_test_fcnt_next(&c) != 0,
-		     "fcnt_next must fail closed when the reservation can't be persisted");
-	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced despite a failed reservation");
-	zassert_equal(c, 0xDEADBEEFu, "counter_out written despite a failed reservation");
-
-	/* Call again from the same window edge. This is the assertion that guards the
-	 * ORDERING, not just the return value: if fcnt_reserve advanced the in-RAM
-	 * watermark before the durable write (the pre-B9 bug), the first call still
-	 * refused -- but left m_fcnt_reserved at the un-persisted target, so this one
-	 * finds itself inside a window that was never written and hands out counter
-	 * 200 unreserved. A reboot then resumes below it and repeats a (key, nonce)
-	 * pair, which is a full CCM break. Refusing once is not the property; refusing
-	 * until the reservation is durable is. */
-	zassert_true(p2p_test_fcnt_next(&c) != 0,
-		     "a second fcnt_next must also fail closed -- the reservation is still "
-		     "not durable, so the window must not be treated as extended");
-	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced on the second refusal");
-	zassert_equal(c, 0xDEADBEEFu, "counter_out written on the second refusal");
-	test_settings_save_ret = 0;
-}
-
-/* Review of #400 (M4): the next dev_nonce is persisted BEFORE the JoinRequest
- * leaves, fail-closed. A dev_nonce the flash does not hold would be presented
- * again after a reboot, and a recorded JoinAccept for it replayed. */
-ZTEST(p2p_logic, test_join_request_not_sent_without_a_durable_dev_nonce)
-{
-	struct app_radio_p2p_info before, after;
-
-	p2p_test_join_setup(7);
-	app_radio_p2p_get_info(&before);
-
-	test_settings_save_ret = -EIO;
-	p2p_test_join_step();
-	test_settings_save_ret = 0;
-
-	app_radio_p2p_get_info(&after);
-	zassert_equal(after.dev_nonce, before.dev_nonce,
-		      "dev_nonce advanced although it was never persisted");
-
-	uint8_t sf, step, attempts, rejoin;
-	bool slow;
-	enum p2p_link_state state;
-
-	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
-	zassert_equal(attempts, 0, "a JoinRequest that never left must not use an attempt");
-	p2p_test_join_step(); /* leave nothing armed for the next test */
-}
-
-ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
-{
-	uint32_t c = 0xDEADBEEF;
-
-	/* At the ceiling the counter must refuse rather than wrap (a wrap repeats
-	 * every (key, nonce) -- a full CCM break). */
-	p2p_test_set_fcnt(UINT32_MAX, UINT32_MAX);
-	zassert_equal(p2p_test_fcnt_next(&c), -EOVERFLOW,
-		      "exhausted counter must return -EOVERFLOW");
-	zassert_equal(p2p_test_get_fcnt(), UINT32_MAX, "counter must not wrap past UINT32_MAX");
-}
-
-/* ---- Ack body parse (B1 rssi/snr + B5 time) --------------------------- */
-
-ZTEST(p2p_logic, test_ack_body_base)
-{
-	uint8_t body[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_PENDING, (uint8_t)(int8_t)-57,
-					       (uint8_t)(int8_t)9};
-	struct p2p_ack_info info;
-
-	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "base body must parse");
-	zassert_equal(info.flags, P2P_ACK_FLAG_PENDING, "flags wrong");
-	zassert_equal(info.rssi, -57, "rssi wrong (signed)");
-	zassert_equal(info.snr, 9, "snr wrong");
-	zassert_false(info.time_present, "no time tail in a base body");
-}
-
-ZTEST(p2p_logic, test_ack_body_with_time)
-{
-	/* The 7 B time form, spelled out rather than as P2P_ACK_BODY_MAX_LEN:
-	 * D2 grew the max to 8 (base + length + time), and this test is about
-	 * the shape with no length byte. */
-	uint8_t body[P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN] = {0};
-
-	body[0] = P2P_ACK_FLAG_TIME;
-	body[1] = (uint8_t)(int8_t)-110; /* rssi */
-	body[2] = (uint8_t)(int8_t)-3;   /* snr */
-	sys_put_be32(1735689600u, &body[3]);
-	struct p2p_ack_info info;
-
-	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "7 B body must parse");
-	zassert_equal(info.rssi, -110, "rssi wrong");
-	zassert_equal(info.snr, -3, "snr wrong");
-	zassert_true(info.time_present, "time tail must be reported present");
-	zassert_equal(info.unix_time, 1735689600u, "unix time decoded wrong");
-}
-
-ZTEST(p2p_logic, test_ack_body_time_bit_without_tail_is_ignored)
-{
-	/* 3-byte body but the time bit set: no tail bytes, so time must NOT be
-	 * reported present (length is authoritative, not the flag). */
-	uint8_t body[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_TIME, 0, 0};
-	struct p2p_ack_info info;
-
-	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "base body must parse");
-	zassert_false(info.time_present, "time flag with no tail must be ignored");
-}
-
-/* D2: the announcing Ack states the pending 0x56's on-air length so the node
- * can size its RX1 window exactly. 4 B = base + length. */
-ZTEST(p2p_logic, test_ack_body_pending_len)
-{
-	uint8_t body[4] = {P2P_ACK_FLAG_PENDING, (uint8_t)(int8_t)-71, (uint8_t)(int8_t)7, 17};
-	struct p2p_ack_info info;
-
-	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "4 B body must parse");
-	zassert_equal(info.rssi, -71, "rssi wrong");
-	zassert_equal(info.snr, 7, "snr wrong");
-	zassert_true(info.pending_len_present, "length byte must be reported present");
-	zassert_equal(info.pending_frame_len, 17, "a 2 B command is 11+2+4 = 17 B on air");
-	zassert_false(info.time_present, "no time tail in a 4 B body");
-}
-
-/* 8 B = base + length + time: the length byte precedes the tail, so a parser
- * that read the tail from a fixed offset 3 would decode garbage. */
-ZTEST(p2p_logic, test_ack_body_pending_len_with_time)
-{
-	uint8_t body[P2P_ACK_BODY_MAX_LEN] = {0};
-	struct p2p_ack_info info;
-
-	body[0] = P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME;
-	body[1] = (uint8_t)(int8_t)-110;
-	body[2] = (uint8_t)(int8_t)-3;
-	body[3] = 55;
-	sys_put_be32(1735689600u, &body[4]);
-
-	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "8 B body must parse");
-	zassert_equal(info.rssi, -110, "rssi wrong");
-	zassert_equal(info.snr, -3, "snr wrong");
-	zassert_true(info.pending_len_present, "length byte must be present");
-	zassert_equal(info.pending_frame_len, 55, "length byte wrong");
-	zassert_true(info.time_present, "time tail must be present");
-	zassert_equal(info.unix_time, 1735689600u, "time tail decoded from the wrong offset");
-}
-
-/* Transitional tolerance: a central still emitting the pre-D2 body with bit 0
- * set means "pending, length unknown" -- it must parse, with the caller left
- * to fall back to the 255 B worst-case window. Both legacy shapes.
- */
-ZTEST(p2p_logic, test_ack_body_legacy_pending_without_len_still_parses)
-{
-	struct p2p_ack_info info;
-	uint8_t base[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_PENDING, 0, 0};
-
-	zassert_true(p2p_parse_ack_body(base, sizeof(base), &info), "legacy 3 B must parse");
-	zassert_equal(info.flags & P2P_ACK_FLAG_PENDING, P2P_ACK_FLAG_PENDING, "pending lost");
-	zassert_false(info.pending_len_present, "3 B body cannot carry a length");
-	zassert_equal(info.pending_frame_len, 0, "length must read 0 when absent");
-
-	uint8_t timed[P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN] = {0};
-
-	timed[0] = P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME;
-	sys_put_be32(1735689600u, &timed[3]);
-
-	zassert_true(p2p_parse_ack_body(timed, sizeof(timed), &info), "legacy 7 B must parse");
-	zassert_false(info.pending_len_present, "7 B body cannot carry a length");
-	zassert_true(info.time_present, "the 7 B tail is still a time tail");
-	zassert_equal(info.unix_time, 1735689600u, "legacy time tail decoded wrong");
-}
-
-ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
-{
-	uint8_t body[16] = {P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME, 0, 0, 17, 0, 0, 0, 0};
-	struct p2p_ack_info info;
-
-	/* Only 3, 4, 7 and 8 are valid shapes. */
-	zassert_false(p2p_parse_ack_body(body, 0, &info), "0 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 1, &info), "1 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 2, &info), "2 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 5, &info), "5 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 6, &info), "6 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 9, &info), "9 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, P2P_ACK_BODY_MAX_LEN + 1, &info),
-		      "over-long body must be rejected");
-
-	/* A length byte is only meaningful when a downlink is pending: the 4 and
-	 * 8 B shapes require bit 0, or the byte is unexplained. */
-	uint8_t no_pending[P2P_ACK_BODY_MAX_LEN] = {P2P_ACK_FLAG_TIME, 0, 0, 17, 0, 0, 0, 0};
-
-	zassert_false(p2p_parse_ack_body(no_pending, 4, &info),
-		      "4 B without the pending bit must be rejected");
-	zassert_false(p2p_parse_ack_body(no_pending, 8, &info),
-		      "8 B without the pending bit must be rejected");
-}
-
-/* ---- the shared join KAT fixture (#417 / GitLab #73) ------------------- */
-
-/* tests/ccm/p2p_join_kat.json, sha256
- * 9269a529618d4a3bbf27d70e3e28db616a5d10f4e4ece8fbdf1c8a2bf1f1bb64 (12 B
- * header with FCtrl since decision #22; regenerated by p2p_join_kat.py) -- the
- * fixture shared byte-for-byte with proximos-v2 control-radio and the
- * NorthBridge Python replica, generated by an independent PyCryptodome oracle.
- *
- * tests/ccm pins the raw CMAC construction; these two pin the *firmware's own*
- * builder and KDF, reached through the CONFIG_ZTEST hooks so they run the code
- * the radio path runs rather than a re-spelling of it. That is the difference
- * that matters: a correct construction assembled from the wrong config field
- * would pass over there and fail here. */
-static const uint8_t KAT_APP_KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-					0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
-static const uint8_t KAT_DEV_EUI[8] = {0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe};
-
-static void kat_provision(void)
-{
-	memcpy(g_app_config.radio_appkey, KAT_APP_KEY, sizeof(KAT_APP_KEY));
-	memcpy(g_app_config.radio_deveui, KAT_DEV_EUI, sizeof(KAT_DEV_EUI));
-	/* Deliberately a different value from anything in the fixture: since
-	 * #417 the serial must not reach the air or the KDF at all, so a test
-	 * that still depended on it would fail here. */
-	g_app_config.serial_number = 0x80e00591;
-}
-
-ZTEST(p2p_logic, test_join_request_bytes_match_the_kat_fixture)
-{
-	static const uint8_t expected[P2P_JOIN_REQ_LEN] = {
-		/* header: net_id=0 | dev_addr=0 | 0xF0 | FCtrl=0 | counter=dev_nonce=7 */
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x07,
-		/* body: product_type=1 | proto_version=1 | dev_eui(8) | fw 1.4.0.0 */
-		0x01, 0x01, 0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
-		/* tag: CMAC(app_key, "HIO-P2P-JOIN" || header || body) */
-		0xfb, 0xab, 0x37, 0xb9, 0x7c, 0x7d, 0xeb, 0xb4, 0xef, 0xc2, 0x81, 0x1f, 0x47, 0x3c,
-		0xc3, 0x7f};
-	uint8_t frame[P2P_JOIN_REQ_LEN];
-
-	kat_provision();
-	p2p_test_build_join_request(7, frame);
-
-	zassert_equal(sizeof(frame), 42, "the JoinRequest is 42 B on the air since decision #22");
-	zassert_mem_equal(frame, expected, sizeof(expected),
-			  "JoinRequest bytes differ from the "
-			  "shared KAT fixture");
-}
-
-ZTEST(p2p_logic, test_session_key_matches_the_kat_fixture)
-{
-	static const uint8_t expected[P2P_KEY_LEN] = {0x51, 0x28, 0x94, 0xff, 0xc3, 0x9f,
-						      0xd4, 0x45, 0x9d, 0x4f, 0x65, 0x55,
-						      0x3c, 0x87, 0x0e, 0xed};
-	uint8_t key[P2P_KEY_LEN];
-
-	kat_provision();
-	p2p_test_derive_session_key(7, 0x22222222, key);
-
-	zassert_mem_equal(key, expected, sizeof(expected),
-			  "session_key differs from the shared KAT fixture -- the join would "
-			  "still succeed and every data frame after it would fail to decrypt");
-
-	/* And it really depends on the DevEUI: one flipped bit must move it.
-	 * Without this the test would pass even if the memcpy were dropped. */
-	uint8_t other[P2P_KEY_LEN];
-
-	g_app_config.radio_deveui[7] ^= 0x01;
-	p2p_test_derive_session_key(7, 0x22222222, other);
-	zassert_true(memcmp(key, other, sizeof(key)) != 0,
-		     "the dev_eui must be an input to the KDF");
-}
-
-/* doc/plan/439 T1: the P2P link state in the common app_radio terms, which
- * drive the status LED, Info.lrw_state and the device_status radio bits. */
+/* doc/plan/439 T1: the link state in the common app_radio terms. */
 ZTEST(p2p_logic, test_radio_state_mapping)
 {
 	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY);
 	zassert_true(app_radio_p2p_is_ready());
 
-	/* WARNING is app_radio's overlay on HEALTHY (tests/radio_common). */
-
 	p2p_test_set_link(P2P_LINK_JOINING, false, false, false);
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_JOINING, "boot / forced join");
 	zassert_false(app_radio_p2p_is_ready());
 
-	/* A self-heal / RejoinRequest join keeps m_started from the old session;
-	 * it must not report HEALTHY or accept uplinks (parity review 2026-09-26). */
 	p2p_test_set_link(P2P_LINK_JOINING, true, true, false);
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT);
 	zassert_false(app_radio_p2p_is_ready(), "not ready while the session is replaced");
@@ -1521,17 +1162,8 @@ ZTEST(p2p_logic, test_radio_state_mapping)
 	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_IDLE, "after a Detach");
 
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, true);
-	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED,
-		      "unprovisioned: radio_appkey / radio_deveui all-zero");
-
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED, "unprovisioned");
 }
-
-/* The node-measured quality of the last downlink is pushed to app_radio, where
- * get_radio_state reads it (#446). */
-extern int16_t p2p_test_dl_rssi;
-extern int8_t p2p_test_dl_snr;
-extern int p2p_test_dl_calls;
 
 ZTEST(p2p_logic, test_last_downlink_recorded)
 {
@@ -1543,256 +1175,1018 @@ ZTEST(p2p_logic, test_last_downlink_recorded)
 	zassert_equal(p2p_test_dl_snr, 12);
 }
 
-/* ---- the shared data-frame KAT (decision #22) ----------------------------- */
-
-/* tests/ccm/p2p_data_kat.json, sha256
- * 1215e877f37fc053119a9c2b9c2f0d17d4ffba1d95da9ff85969c9e2187cb01f --
- * generated by p2p_join_kat.py --data (pycryptodome) and shared with the
- * central. Pins the 12 B header with FCtrl through build_frame_keyed(), the
- * builder the radio path runs, under a fixed key independent of the join. */
-ZTEST(p2p_logic, test_data_frame_bytes_match_the_kat_fixture)
+/* §7.4: no power control on P2P -- WARNING has no rung, straight to the rejoin
+ * budget. */
+ZTEST(p2p_logic, test_warning_has_no_rung)
 {
-	static const uint8_t key[P2P_KEY_LEN] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-						 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
-	static const uint8_t body[] = {0x01, 0x02, 0x03, 0x04};
-	/* net_id 0x6d249662 | dev_addr 2 | 0x02 | FCtrl CONFIRMED | counter 16 | ct | tag */
-	static const uint8_t confirmed[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0x02,
-					    0x01, 0x00, 0x00, 0x00, 0x10, 0x47, 0x25,
-					    0x9c, 0xc8, 0x4d, 0x88, 0xa9, 0x9a};
-	/* the same frame unconfirmed: same ciphertext (FCtrl is not in the nonce),
-	 * another tag (it is in the AAD) */
-	static const uint8_t unconfirmed[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0x02,
-					      0x00, 0x00, 0x00, 0x00, 0x10, 0x47, 0x25,
-					      0x9c, 0xc8, 0xab, 0x58, 0x3d, 0x27};
-	uint8_t frame[P2P_HDR_LEN + sizeof(body) + P2P_TAG_LEN];
-
-	zassert_ok(build_frame_keyed(0x6d249662u, 2, key, APP_RADIO_P2P_FRAME_TELEMETRY,
-				     P2P_FCTRL_CONFIRMED, body, sizeof(body), 16, frame));
-	zassert_mem_equal(frame, confirmed, sizeof(confirmed),
-			  "confirmed telemetry differs from the shared data KAT");
-
-	zassert_ok(build_frame_keyed(0x6d249662u, 2, key, APP_RADIO_P2P_FRAME_TELEMETRY, 0, body,
-				     sizeof(body), 16, frame));
-	zassert_mem_equal(frame, unconfirmed, sizeof(unconfirmed),
-			  "unconfirmed telemetry differs from the shared data KAT");
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
+	p2p_test_set_session_tx_power(true, 10);
+	zassert_false(app_radio_p2p_backend.warning_step());
+	p2p_test_set_session_tx_power(false, 0);
+	zassert_false(app_radio_p2p_backend.warning_step());
 }
 
-/* The downlink side of the same KAT: an Ack with FCtrl.ACK opens under the RX
- * nonce, and the header decodes to the fields the central wrote. */
-ZTEST(p2p_logic, test_data_kat_ack_opens)
+/* ---- the exchange -------------------------------------------------------------- */
+
+/* The node's confirmed uplink is the KAT's uplink_confirmed frame, and the
+ * gateway's answer the KAT's ack_no_pending (counter 100, acked 2, rssi -57). */
+ZTEST(p2p_logic, test_confirmed_uplink_matches_the_kat_and_takes_the_kat_ack)
 {
-	static const uint8_t key[P2P_KEY_LEN] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-						 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
-	static const uint8_t ack[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0xfa, 0x20, 0x00, 0x00,
-				      0x00, 0x10, 0x1c, 0x6f, 0x06, 0x30, 0x1b, 0x76, 0xb6};
-	static const uint8_t want_pt[] = {0x00, 0xc4, 0x07};
-	struct p2p_hdr hdr;
-	uint8_t nonce[P2P_NONCE_LEN];
-	uint8_t pt[sizeof(want_pt)];
+	const struct tower_kat *up = &tower_kat[1];
+	struct app_radio_p2p_info info;
+	uint32_t sends;
 
-	p2p_hdr_get(ack, &hdr);
-	zassert_equal(hdr.net_id, 0x6d249662u);
-	zassert_equal(hdr.dev_addr, 2);
-	zassert_equal(hdr.frame_type, APP_RADIO_P2P_FRAME_ACK);
-	zassert_equal(hdr.fctrl, P2P_FCTRL_ACK);
-	zassert_equal(hdr.counter, 16);
+	paired();
+	gw.ack = true;
+	p2p_test_set_fcnt(2, 256);
+	sends = test_lora_send_count;
 
-	build_nonce(nonce, hdr.counter, hdr.dev_addr, hdr.frame_type, P2P_DIR_RX);
-	zassert_ok(app_ccm_auth_decrypt(key, nonce, P2P_NONCE_LEN, ack, P2P_HDR_LEN,
-					&ack[P2P_HDR_LEN], sizeof(want_pt),
-					&ack[P2P_HDR_LEN + sizeof(want_pt)], P2P_TAG_LEN, pt),
-		   "the KAT Ack must open under the RX nonce");
-	zassert_mem_equal(pt, want_pt, sizeof(want_pt));
+	zassert_ok(p2p_test_uplink(up->plaintext, up->plaintext_len, true));
+	zassert_equal(test_lora_send_count, sends + 1, "ACKed at the first transmission");
+	zassert_equal(test_lora_last_len, up->frame_len);
+	zassert_mem_equal(test_lora_last_frame, up->frame, up->frame_len, "the KAT uplink");
+	zassert_equal(gw.ack_frame_len, tower_kat[2].frame_len);
+	zassert_mem_equal(gw.ack_frame, tower_kat[2].frame, tower_kat[2].frame_len, "the KAT ACK");
+
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.gw_last, 100, "the ACK lifted the replay lane");
+	zassert_true(info.last_ack_valid);
+	zassert_equal(info.last_ack_rssi, -57, "the gateway's RSSI of the uplink");
+	zassert_equal(info.fcnt, 3);
+	zassert_equal(p2p_test_dl_rssi, -60, "this node's RSSI of the ACK");
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins);
 }
 
-/* ---- decision #22: confirmed policy and link supervision ---------------- */
-
-extern int p2p_test_link_ok_calls;
-extern int p2p_test_link_fail_calls;
-
-/* Send one single-frame telemetry report the way app_radio does (report_flags
- * at its first frame, with app_radio's cadence verdict `due`) and return
- * whether it went CONFIRMED (FCtrl bit 0 of the frame on the air); clears the
- * retry state it leaves behind. */
-static bool send_report_confirmed(bool due)
+/* An unconfirmed uplink goes once and opens no receive window. */
+ZTEST(p2p_logic, test_unconfirmed_uplink_matches_the_kat)
 {
-	const struct app_radio_backend *be = &app_radio_p2p_backend;
+	const struct tower_kat *up = &tower_kat[0];
+	uint32_t sends;
+
+	paired();
+	gw.ack = true;
+	sends = test_lora_send_count;
+
+	zassert_ok(p2p_test_uplink(up->plaintext, up->plaintext_len, false));
+	zassert_equal(test_lora_send_count, sends + 1);
+	zassert_mem_equal(test_lora_last_frame, up->frame, up->frame_len, "the KAT uplink");
+	zassert_equal(gw.ack_frame_len, 0, "nothing to ACK");
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins);
+}
+
+/* Plan §7.1: a confirmed frame without its ACK goes P2P_REPS (3) times, byte
+ * for byte under the same counter. Unheard, it is neither a link success nor a
+ * failure: that verdict is app_radio's, after its retries. */
+ZTEST(p2p_logic, test_unacked_confirmed_frame_goes_three_times)
+{
+	static const uint8_t pt[] = {P2P_ENV_DATA, P2P_PORT_ALARM, 0x01, 0x02};
+	int ok = p2p_test_link_ok_calls;
+	int fail = p2p_test_link_fail_calls;
+	uint32_t sends;
+
+	paired();
+	sends = test_lora_send_count;
+
+	zassert_equal(p2p_test_uplink(pt, sizeof(pt), true), -ETIMEDOUT);
+	zassert_equal(test_lora_send_count, sends + 3);
+	zassert_equal(gw.reps, 3, "three transmissions of one counter");
+	for (uint32_t i = 1; i < 3; i++) {
+		zassert_mem_equal(
+			test_lora_sent_frame(sends + i)->buf, test_lora_sent_frame(sends)->buf,
+			test_lora_sent_frame(sends)->len, "transmission %u is byte-identical", i);
+	}
+	zassert_equal(p2p_test_link_ok_calls, ok);
+	zassert_equal(p2p_test_link_fail_calls, fail);
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "every transmission ended");
+}
+
+ZTEST(p2p_logic, test_ack_on_the_second_transmission_ends_the_send)
+{
+	static const uint8_t pt[] = {P2P_ENV_DATA, P2P_PORT_ALARM, 0x01};
+	uint32_t sends;
+
+	paired();
+	gw.ack = true;
+	gw.ack_from = 2;
+	sends = test_lora_send_count;
+
+	zassert_ok(p2p_test_uplink(pt, sizeof(pt), true));
+	zassert_equal(test_lora_send_count, sends + 2);
+}
+
+/* An ACK the node must not take: for another counter, failing its tag, or
+ * below the replay lane. Each leaves the frame unacknowledged. */
+ZTEST(p2p_logic, test_foreign_or_replayed_ack_is_ignored)
+{
+	static const uint8_t pt[] = {P2P_ENV_DATA, P2P_PORT_ALARM, 0x01};
+	uint32_t sends;
+
+	paired();
+	gw.ack = true;
+	gw.acked_offset = 1;
+	sends = test_lora_send_count;
+	zassert_equal(p2p_test_uplink(pt, sizeof(pt), true), -ETIMEDOUT, "acks another counter");
+	zassert_equal(test_lora_send_count, sends + 3);
+
+	gw.acked_offset = 0;
+	gw.bad_tag = true;
+	zassert_equal(p2p_test_uplink(pt, sizeof(pt), true), -ETIMEDOUT, "tag check fails");
+
+	/* A good ACK lifts the lane to its counter; one below it is a replay. */
+	gw.bad_tag = false;
+	zassert_ok(p2p_test_uplink(pt, sizeof(pt), true));
+	zassert_equal(p2p_test_get_gw_last(), gw.counter);
+	gw.counter -= 5; /* all three ACKs of the next send land below the lane */
+	zassert_equal(p2p_test_uplink(pt, sizeof(pt), true), -ETIMEDOUT, "a replayed ACK");
+
+	/* Another session's gateway. */
+	gw.counter = 1000;
+	gw.net_id = 0x01020304;
+	zassert_equal(p2p_test_uplink(pt, sizeof(pt), true), -ETIMEDOUT, "another gateway");
+}
+
+/* Plan §9.1: PENDING keeps the receiver on for one Data frame. A confirmed
+ * command is delivered to app_cmd and ACKed with the node's own fresh counter,
+ * acked = the downlink's counter, rssi = this node's RSSI of it. */
+ZTEST(p2p_logic, test_pending_command_is_delivered_and_acked)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08, 0x01};
+	static const uint8_t cmd[] = {P2P_ENV_DATA, P2P_PORT_COMMAND, 0x01, 0x0a, 0x0b};
+	int dls = p2p_test_downlinks;
+
+	paired();
+	gw.ack = true;
+	gw.dl = cmd;
+	gw.dl_len = sizeof(cmd);
+	gw.dl_confirmed = true;
+
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_downlinks, dls + 1, "delivered once");
+	zassert_equal(p2p_test_downlink_len, 3, "the envelope is stripped");
+	zassert_mem_equal(p2p_test_downlink_buf, &cmd[P2P_ENV_LEN], 3);
+
+	zassert_equal(gw.node_acks, 1, "the node ACKed the downlink");
+	zassert_equal(gw.node_ack.acked, 101, "acked = the downlink's counter");
+	zassert_equal(gw.node_ack.rssi, -61, "the node's RSSI of the downlink");
+	zassert_false(gw.node_ack.pending);
+	zassert_equal(gw.node_ack_hdr.counter, gw.up_hdr.counter + 1, "the node's next counter");
+	zassert_equal(gw.node_ack_hdr.src, TOWER_KAT_NODE_ADDR);
+	zassert_equal(gw.node_ack_hdr.dest, TOWER_KAT_GW_ADDR);
+	zassert_equal(p2p_test_get_gw_last(), 101);
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins);
+}
+
+ZTEST(p2p_logic, test_unconfirmed_downlink_is_delivered_without_an_ack)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t cmd[] = {P2P_ENV_DATA, P2P_PORT_COMMAND, 0x01};
+	int dls = p2p_test_downlinks;
+
+	paired();
+	gw.ack = true;
+	gw.dl = cmd;
+	gw.dl_len = sizeof(cmd);
+
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_downlinks, dls + 1);
+	zassert_equal(gw.node_acks, 0);
+}
+
+/* A recorded downlink replayed under an older counter is neither delivered nor
+ * ACKed. */
+ZTEST(p2p_logic, test_replayed_downlink_is_not_delivered)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t cmd[] = {P2P_ENV_DATA, P2P_PORT_COMMAND, 0x01};
+	int dls = p2p_test_downlinks;
+
+	paired();
+	gw.ack = true;
+	gw.dl = cmd;
+	gw.dl_len = sizeof(cmd);
+	gw.dl_confirmed = true;
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_downlinks, dls + 1);
+
+	gw.dl_counter = 101; /* the one just delivered, now below the lane */
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_downlinks, dls + 1, "not delivered again");
+	zassert_equal(gw.node_acks, 1, "and not ACKed again");
+}
+
+/* Only a command (0x81 port 86) or a control list (0x91) is taken. */
+ZTEST(p2p_logic, test_unknown_downlink_envelope_is_dropped)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t wrong_port[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x01};
+	static const uint8_t wrong_env[] = {0x55, P2P_PORT_COMMAND, 0x01};
+	int dls = p2p_test_downlinks;
+
+	paired();
+	gw.ack = true;
+	gw.dl = wrong_port;
+	gw.dl_len = sizeof(wrong_port);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	gw.dl = wrong_env;
+	gw.dl_len = sizeof(wrong_env);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_downlinks, dls, "neither reaches app_cmd");
+}
+
+/* ---- the TX backend ------------------------------------------------------------ */
+
+static int backend_send(enum app_radio_frame_kind kind, uint8_t port, uint8_t flags,
+			const uint8_t *body, size_t len, struct app_radio_tx_result *res)
+{
+	static uint8_t buf[P2P_MAX_BODY + 1];
+	struct app_radio_frame f = {
+		.kind = kind, .port = port, .flags = flags, .len = (uint16_t)len, .buf = buf};
+
+	memcpy(buf, body, MIN(len, sizeof(buf)));
+	return app_radio_p2p_backend.send(&f, res);
+}
+
+/* One app_radio send of a confirmed telemetry body, `attempt` its retry. */
+static int backend_retry(const uint8_t *body, size_t len, uint8_t attempt)
+{
+	static uint8_t buf[P2P_MAX_BODY];
+	struct app_radio_tx_result res = {0};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_TELEMETRY,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .attempt = attempt,
+				    .len = (uint16_t)len,
+				    .buf = buf};
+
+	memcpy(buf, body, len);
+	return app_radio_p2p_backend.send(&f, &res);
+}
+
+/* Plan §7.3 (T3a-F1): an app_radio retry goes under the counter of the frame
+ * it repeats, so a frame the gateway heard but whose ACKs were all lost is a
+ * retransmission there, not a second report. */
+ZTEST(p2p_logic, test_app_retry_keeps_the_counter)
+{
+	static const uint8_t body[] = {0x01, 0x08, 0xa0};
+	uint32_t counter;
+
+	paired();
+	zassert_equal(backend_retry(body, sizeof(body), 0), -ETIMEDOUT);
+	counter = gw.up_hdr.counter;
+	zassert_equal(backend_retry(body, sizeof(body), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter, "retry 1 under the same counter");
+	zassert_equal(gw.reps, 6, "the gateway sees six transmissions of one counter");
+	gw.ack = true;
+	zassert_ok(backend_retry(body, sizeof(body), 2));
+	zassert_equal(gw.up_hdr.counter, counter, "retry 2 under the same counter");
+	zassert_equal(p2p_test_get_fcnt(), counter + 1, "no counter spent on the retries");
+
+	/* The next frame is a new one. */
+	zassert_ok(backend_retry(body, sizeof(body), 0));
+	zassert_equal(gw.up_hdr.counter, counter + 1);
+}
+
+/* A counter taken in between (here a 0x91 control frame) would make the old
+ * one a replay, and another body must never be sealed under a used counter:
+ * both retries take a new counter. */
+ZTEST(p2p_logic, test_app_retry_takes_a_new_counter_when_it_must)
+{
+	static const uint8_t body[] = {0x01, 0x08, 0xa0};
+	static const uint8_t other[] = {0x01, 0x08, 0xa1};
+	static const uint8_t ctrl[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	uint32_t counter;
+
+	paired();
+	zassert_equal(backend_retry(body, sizeof(body), 0), -ETIMEDOUT);
+	counter = gw.up_hdr.counter;
+	zassert_equal(p2p_test_uplink(ctrl, sizeof(ctrl), true), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 1);
+	zassert_equal(backend_retry(body, sizeof(body), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 2, "after another frame: a new counter");
+
+	zassert_equal(backend_retry(other, sizeof(other), 1), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 3, "another body: a new counter");
+
+	/* A new session forgets the frame. */
+	paired();
+	zassert_equal(backend_retry(other, sizeof(other), 2), -ETIMEDOUT);
+	zassert_equal(gw.up_hdr.counter, counter + 4, "after a session reset: a new counter");
+}
+
+/* A control frame waits while app_radio holds a frame for its retry, so the
+ * retry still finds its counter the newest. */
+ZTEST(p2p_logic, test_control_frame_waits_for_an_app_retry)
+{
+	uint32_t uplinks;
+
+	paired();
+	gw.ack = true;
+	p2p_test_set_paired();
+	app_radio_p2p_start();
+	zassert_not_equal(p2p_test_ctrl_pending(), 0);
+	uplinks = gw.uplinks;
+
+	p2p_test_ack_pending = true;
+	p2p_test_ctrl_run();
+	zassert_equal(gw.uplinks, uplinks, "nothing sent while a retry waits");
+	zassert_not_equal(p2p_test_ctrl_pending(), 0, "still pending");
+
+	p2p_test_ack_pending = false;
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), 0, "sent once the retry is done");
+	zassert_true(gw.uplinks > uplinks);
+}
+
+/* D-a: the LoRaWAN fPort payload behind the 0x81 envelope, on the LoRaWAN
+ * port: telemetry 2, alarm 3, answers 85 (or the command's own port). */
+ZTEST(p2p_logic, test_backend_envelopes_and_ports)
+{
+	static const uint8_t body[] = {0x01, 0xaa, 0xbb};
+	const struct {
+		enum app_radio_frame_kind kind;
+		uint8_t port;
+		uint8_t flags;
+		uint8_t want_port;
+	} cases[] = {
+		{APP_RADIO_FRAME_TELEMETRY, 0, 0, P2P_PORT_TELEMETRY},
+		{APP_RADIO_FRAME_ALARM, 0, APP_RADIO_FRAME_CONFIRMED, P2P_PORT_ALARM},
+		{APP_RADIO_FRAME_ANSWER, 0, APP_RADIO_FRAME_CONFIRMED, P2P_PORT_RESPONSE},
+		{APP_RADIO_FRAME_ANSWER, 90, APP_RADIO_FRAME_CONFIRMED, 90},
+	};
+	struct app_radio_tx_result res = {0};
+
+	paired();
+	gw.ack = true;
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		zassert_ok(backend_send(cases[i].kind, cases[i].port, cases[i].flags, body,
+					sizeof(body), &res),
+			   "case %zu", i);
+		zassert_equal(gw.up_len, P2P_ENV_LEN + sizeof(body), "case %zu", i);
+		zassert_equal(gw.up_pt[0], P2P_ENV_DATA);
+		zassert_equal(gw.up_pt[1], cases[i].want_port, "case %zu port %u", i, gw.up_pt[1]);
+		zassert_mem_equal(&gw.up_pt[P2P_ENV_LEN], body, sizeof(body));
+		zassert_equal((gw.up_hdr.flags & TWR_FLAG_CONFIRMED) != 0,
+			      (cases[i].flags & APP_RADIO_FRAME_CONFIRMED) != 0, "case %zu", i);
+		p2p_test_tx_reset();
+	}
+}
+
+/* D14: a 76 B body fills the 100 B frame; one more is the budget's to split. */
+ZTEST(p2p_logic, test_backend_budget_and_oversize)
+{
+	static const uint8_t body[P2P_MAX_BODY + 1];
+	struct app_radio_tx_result res = {0};
+
+	paired();
+	zassert_equal(app_radio_p2p_backend.budget(), P2P_MAX_BODY);
+	zassert_equal(app_radio_p2p_get_max_payload(), 76);
+
+	zassert_ok(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, P2P_MAX_BODY, &res));
+	zassert_equal(test_lora_last_len, P2P_FRAME_MAX, "the MTU");
+	p2p_test_tx_reset();
+
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, P2P_MAX_BODY + 1, &res),
+		      -EMSGSIZE);
+	zassert_equal(res.budget, P2P_MAX_BODY);
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, 0, &res), -EINVAL);
+}
+
+/* A radio fault is -EIO (app_radio retries it) and its air is charged; a duty
+ * hold is -EAGAIN with the wait, nothing sent; an ACKed confirmed frame is a
+ * link success. */
+ZTEST(p2p_logic, test_backend_send_result_mapping)
+{
+	static const uint8_t body[10];
+	struct app_radio_tx_result res = {0};
+	const uint32_t air = p2p_toa_ms(7, TWR_HDR_LEN + P2P_ENV_LEN + 10 + TWR_TAG_LEN);
+	uint32_t charges = test_duty_charges;
+	uint64_t charged = test_duty_charged_ms;
+	uint32_t sends;
+	int ok = p2p_test_link_ok_calls;
+
+	paired();
+	zassert_equal(app_radio_p2p_backend.airtime_ms(10), air, "airtime of a 10 B body");
+
+	test_lora_send_ret = -EIO;
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, 10, &res), -EIO);
+	test_lora_send_ret = 0;
+	zassert_equal(test_duty_charges, charges + 1, "a failed TX is charged");
+	p2p_test_tx_reset();
+
+	sends = test_lora_send_count;
+	zassert_ok(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, 10, &res));
+	zassert_equal(test_lora_send_count, sends + 1);
+	zassert_equal(test_duty_charged_ms - charged, 2 * air, "both at their air");
+	p2p_test_tx_reset();
+
+	test_duty_wait_ms = 5000;
+	sends = test_lora_send_count;
+	zassert_equal(
+		backend_send(APP_RADIO_FRAME_ALARM, 0, APP_RADIO_FRAME_CONFIRMED, body, 10, &res),
+		-EAGAIN);
+	zassert_equal(res.wait_ms, 5000);
+	zassert_equal(test_lora_send_count, sends, "held: nothing on the air");
+	test_duty_wait_ms = 0;
+
+	gw.ack = true;
+	zassert_ok(
+		backend_send(APP_RADIO_FRAME_ALARM, 0, APP_RADIO_FRAME_CONFIRMED, body, 10, &res));
+	zassert_equal(p2p_test_link_ok_calls, ok + 1, "an ACK is a passed link check");
+	p2p_test_tx_reset();
+
+	gw.ack = false;
+	zassert_equal(
+		backend_send(APP_RADIO_FRAME_ALARM, 0, APP_RADIO_FRAME_CONFIRMED, body, 10, &res),
+		-ETIMEDOUT, "no ACK: app_radio retries");
+}
+
+ZTEST(p2p_logic, test_not_paired_sends_nothing)
+{
+	static const uint8_t body[4];
 	struct app_radio_tx_result res = {0};
 	uint32_t sends = test_lora_send_count;
-	uint8_t flags = be->report_flags(due);
-	int ret = backend_send(APP_RADIO_FRAME_TELEMETRY, flags, &res);
 
-	/* No Ack in the test's RX1: a confirmed report waits for app_radio's
-	 * retry, an unconfirmed one is done. */
-	zassert_equal(ret, (flags & APP_RADIO_FRAME_CONFIRMED) ? -ETIMEDOUT : 0, "got %d", ret);
-	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air per report");
-
-	bool confirmed = (test_lora_last_frame[P2P_HDR_OFF_FCTRL] & P2P_FCTRL_CONFIRMED) != 0;
-
-	zassert_equal(confirmed, (flags & APP_RADIO_FRAME_CONFIRMED) != 0,
-		      "the report's flag reaches the air");
-	p2p_test_tx_reset();
-	return confirmed;
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, 4, &res), -ENOTCONN);
+	zassert_equal(test_lora_send_count, sends);
 }
 
-/* §3.2: a report app_radio's cadence picked as the link check goes CONFIRMED,
- * the others unconfirmed and once (the cadence itself: tests/radio_common). */
-ZTEST(p2p_logic, test_link_check_report_goes_confirmed)
+/* A new session starts a new replay lane: the next gateway counts from 1. */
+ZTEST(p2p_logic, test_new_session_resets_the_replay_lane)
 {
-	p2p_test_join_setup(7);
+	static const uint8_t pt[] = {P2P_ENV_DATA, P2P_PORT_ALARM, 0x01};
+
+	paired();
+	gw.ack = true;
+	zassert_ok(p2p_test_uplink(pt, sizeof(pt), true));
+	zassert_equal(p2p_test_get_gw_last(), 100);
+
+	paired();
+	zassert_equal(p2p_test_get_gw_last(), 0);
+}
+
+/* ---- the control envelope --------------------------------------------------------- */
+
+/* Plan §8.2: Capabilities (proto 1, MTU 100, lora, the cmd bitmap, battery)
+ * and Hello (session id, reset reason, fw 1.5.0) in one confirmed 0x91 frame. */
+ZTEST(p2p_logic, test_ctrl_caps_hello_layout)
+{
+	static const uint8_t caps[] = {P2P_CTRL_CAPABILITIES,
+				       P2P_CAPS_LEN,
+				       0x01,
+				       100,
+				       0x02,
+				       0x9e,
+				       0x01,
+				       0x01,
+				       0x00,
+				       0x01,
+				       0x00,
+				       0x00,
+				       0x00,
+				       0x01};
+
+	paired();
+	gw.ack = true;
 	p2p_test_set_paired();
-	p2p_test_set_fcnt(100, 200); /* an earlier case may leave it exhausted */
-	p2p_test_tx_reset();
-	p2p_test_link_reset();
+	app_radio_p2p_start();
+	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1));
+	p2p_test_ctrl_run();
 
-	zassert_true(send_report_confirmed(true), "a due link check is CONFIRMED");
-	zassert_false(send_report_confirmed(false), "any other report is unconfirmed");
+	zassert_equal(p2p_test_ctrl_pending(), 0, "acknowledged: done");
+	zassert_true(gw.up_hdr.flags & TWR_FLAG_CONFIRMED);
+	zassert_equal(gw.up_len, 1 + sizeof(caps) + 2 + P2P_HELLO_LEN, "26 B");
+	zassert_equal(gw.up_pt[0], P2P_ENV_CTRL);
+	zassert_mem_equal(&gw.up_pt[1], caps, sizeof(caps));
 
-	p2p_test_link_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	const uint8_t *hello = &gw.up_pt[1 + sizeof(caps)];
+
+	zassert_equal(hello[0], P2P_CTRL_HELLO);
+	zassert_equal(hello[1], P2P_HELLO_LEN);
+	zassert_equal(hello[6], 0x08, "reset reason: the hwinfo POR bit");
+	zassert_equal(hello[7], 1);
+	zassert_equal(hello[8], 5);
+	zassert_equal(hello[9], 0);
+	zassert_equal(hello[10], 0);
 }
 
-/* An Ack of the given shape, as p2p_parse_ack_body() would leave it. */
-static void apply_ack(bool with_time, uint32_t unix_time)
+/* Every TLV the node sends fits one frame: Capabilities, Hello, LinkCheckReq
+ * and TimeReq are 30 B, in that order. The cmd bitmap names the IDs this node
+ * implements. */
+ZTEST(p2p_logic, test_ctrl_full_set_is_30_bytes)
 {
-	struct p2p_ack_info ack = {
-		.rssi = -60, .snr = 7, .time_present = with_time, .unix_time = unix_time};
-
-	p2p_apply_ack(&ack, 1, -70, 5);
-}
-
-/* PF-2: a wanted network time (clock_sync, link-up, weekly re-sync) makes the
- * next reports CONFIRMED so an Ack (and its time tail) comes back even with the
- * periodic check off -- at most P2P_TIME_REPORTS_MAX (3) of them per request,
- * then the node stops paying for it. */
-ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
-{
-	p2p_test_join_setup(7);
+	paired();
+	gw.ack = true;
+	p2p_test_time_wanted = true;
 	p2p_test_set_paired();
-	p2p_test_tx_reset();
-	p2p_test_link_reset();
-	g_app_config.radio_link_check_interval = 0;
+	app_radio_p2p_start();
+	(void)app_radio_p2p_backend.report_flags(true); /* a link check: LinkCheckReq */
+	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1) | BIT(2) | BIT(3));
+	p2p_test_ctrl_run();
 
+	zassert_equal(gw.up_len, 30);
+	zassert_equal(gw.up_pt[1], P2P_CTRL_CAPABILITIES);
+	zassert_equal(gw.up_pt[15], P2P_CTRL_HELLO);
+	zassert_mem_equal(&gw.up_pt[26], ((uint8_t[]){P2P_CTRL_LINK_CHECK, 0, P2P_CTRL_TIME, 0}), 4,
+			  "LinkCheckReq, then TimeReq, both empty");
+
+	const uint8_t *bitmap = &gw.up_pt[1 + 2 + 3];
+	const uint8_t want[] = {0x01, 0x02, 0x03, 0x04, 0x07, 0x08, 0x10, 0x20};
+	size_t n = 0;
+
+	for (unsigned int id = 0; id < 64; id++) {
+		if (bitmap[id / 8] & BIT(id % 8)) {
+			zassert_true(n < ARRAY_SIZE(want), "extra ID 0x%02x", id);
+			zassert_equal(id, want[n], "ID %zu is 0x%02x", n, id);
+			n++;
+		}
+	}
+	zassert_equal(n, ARRAY_SIZE(want));
+}
+
+/* Unacknowledged, the set goes again, up to 3 tries, then it is dropped. */
+ZTEST(p2p_logic, test_ctrl_unacked_retries_then_drops)
+{
+	uint32_t sends;
+
+	paired();
+	app_radio_p2p_backend.time_request();
+	sends = test_lora_send_count;
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), BIT(3), "kept after the 1st try");
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), BIT(3), "kept after the 2nd try");
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), 0, "dropped after the 3rd");
+	zassert_equal(test_lora_send_count, sends + 9, "3 tries x 3 transmissions");
+}
+
+/* TimeReq -> TimeAns (plan §8.2, TimeAns addendum): the answer names the
+ * TimeReq's counter and the time at its TX-done; the node adds the time since. */
+ZTEST(p2p_logic, test_time_req_then_time_ans_sets_the_clock)
+{
+	int events = p2p_test_time_events;
+	uint8_t ans[2 + P2P_TIME_ANS_LEN] = {P2P_CTRL_TIME, P2P_TIME_ANS_LEN};
+
+	paired();
+	gw.ack = true;
 	p2p_test_time_wanted = true;
 	app_radio_p2p_backend.time_request();
-	for (int i = 0; i < 3; i++) {
-		zassert_true(send_report_confirmed(false), "time request report %d", i);
-	}
-	zassert_false(send_report_confirmed(false), "the 4th report is back to the cadence");
+	p2p_test_ctrl_run();
+	zassert_equal(gw.up_len, 3);
+	zassert_mem_equal(gw.up_pt, ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_TIME, 0}), 3);
 
-	/* A new request gets its own three. */
-	app_radio_p2p_backend.time_request();
-	zassert_true(send_report_confirmed(false), "a new request confirms again");
+	g_test_network_time = 0;
+	sys_put_le32(1790000000u, &ans[2]);
+	ans[6] = 0;
+	sys_put_le32(gw.up_hdr.counter + 1, &ans[7]); /* another request's */
+	p2p_test_ctrl_downlink(ans, sizeof(ans));
+	zassert_equal(p2p_test_time_events, events, "not an answer to this TimeReq");
 
-	/* The time landed (app_radio clears the want): back to the cadence at once. */
-	p2p_test_link_reset();
-	app_radio_p2p_backend.time_request();
-	p2p_test_time_wanted = false;
-	zassert_false(send_report_confirmed(false), "nothing pending, the cadence");
+	sys_put_le32(gw.up_hdr.counter, &ans[7]);
+	p2p_test_ctrl_downlink(ans, sizeof(ans));
+	zassert_equal(p2p_test_time_events, events + 1, "the time landed");
+	zassert_between_inclusive(g_test_network_time, 1790000000u, 1790000001u);
 
-	g_app_config.radio_link_check_interval = 5;
-	p2p_test_link_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	/* Consumed: a replay of the same answer is dropped. */
+	g_test_network_time = 0;
+	p2p_test_ctrl_downlink(ans, sizeof(ans));
+	zassert_equal(p2p_test_time_events, events + 1);
+	zassert_equal(g_test_network_time, 0);
 }
 
-/* PF-2: only an Ack time tail is a network time -- it sets the clock and
- * reports the time event app_radio answers a pending clock_sync on (F3d); an
- * Ack without it reports nothing. */
-ZTEST(p2p_logic, test_clock_sync_time_event_only_with_the_time_tail)
+ZTEST(p2p_logic, test_stale_time_ans_is_dropped)
+{
+	int events = p2p_test_time_events;
+	uint8_t ans[2 + P2P_TIME_ANS_LEN] = {P2P_CTRL_TIME, P2P_TIME_ANS_LEN};
+
+	paired();
+	g_test_network_time = 0;
+	sys_put_le32(1790000000u, &ans[2]);
+	sys_put_le32(55, &ans[7]);
+	p2p_test_set_time_req(55, k_uptime_get() - 2LL * 60 * 60 * 1000 - 1);
+	p2p_test_ctrl_downlink(ans, sizeof(ans));
+	zassert_equal(p2p_test_time_events, events);
+	zassert_equal(g_test_network_time, 0);
+
+	/* A TimeAns shorter than its 9 B is not one. */
+	p2p_test_set_time_req(55, k_uptime_get());
+	ans[1] = P2P_TIME_ANS_LEN - 1;
+	p2p_test_ctrl_downlink(ans, sizeof(ans) - 1);
+	zassert_equal(p2p_test_time_events, events);
+}
+
+/* A report the cadence made a link check. */
+#define LC_REPORT (APP_RADIO_FRAME_CONFIRMED | APP_RADIO_FRAME_LINK_CHECK)
+
+/* Plan §7.2 (F6): every report goes CONFIRMED, link check or not, whatever
+ * answer is outstanding -- a queued downlink waits one report at most. */
+ZTEST(p2p_logic, test_every_report_goes_confirmed)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	paired();
+	g_app_config.radio_link_check_interval = 0;
+	for (int i = 0; i < 5; i++) {
+		zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED, "report %d", i);
+	}
+	p2p_test_time_wanted = true;
+	p2p_test_set_time_req(7, k_uptime_get());
+	for (int i = 0; i < 5; i++) {
+		zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED,
+			      "report %d with a TimeAns outstanding", i);
+	}
+	zassert_equal(p2p_test_ctrl_pending(), 0, "no LinkCheckReq off the cadence");
+}
+
+/* No Poll (plan H3.8): a LinkCheckAns still missing after three reports is
+ * lost, so the next link check may ask again. */
+ZTEST(p2p_logic, test_lost_link_check_ans_frees_the_next_request)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	paired();
+	gw.ack = true;
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");
+	p2p_test_ctrl_run(); /* acknowledged, no answer yet */
+	zassert_equal(p2p_test_ctrl_pending(), 0);
+
+	/* Outstanding: a due report does not ask again. */
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), 0, "the earlier one is unanswered");
+	(void)be->report_flags(false);
+	(void)be->report_flags(false);
+	(void)be->report_flags(false); /* the 4th since the request: lost */
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "asked again");
+}
+
+/* §3.2: every report goes CONFIRMED, only the one the cadence made a link
+ * check is flagged as one (its lost ACK alone is a failed check) and asks the
+ * central for the numbers (LinkCheckReq). */
+ZTEST(p2p_logic, test_link_check_report_goes_confirmed)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	paired();
+	zassert_equal(be->report_flags(false), APP_RADIO_FRAME_CONFIRMED);
+	zassert_equal(p2p_test_ctrl_pending(), 0);
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "LinkCheckReq queued");
+}
+
+ZTEST(p2p_logic, test_link_check_ans_applies)
+{
+	static const uint8_t ans[] = {P2P_CTRL_LINK_CHECK, 4, (uint8_t)-80, 5, 12, 1};
+	struct app_radio_p2p_info info;
+	int ok = p2p_test_link_ok_calls;
+
+	paired();
+	p2p_test_ctrl_downlink(ans, sizeof(ans));
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -80);
+	zassert_equal(info.lc_snr, 5);
+	zassert_equal(info.lc_margin, 12);
+	zassert_equal(info.lc_gw_count, 1);
+	zassert_equal(p2p_test_ul_margin, 12);
+	zassert_equal(p2p_test_ul_gw_count, 1);
+	zassert_equal(p2p_test_link_ok_calls, ok + 1, "an answer is a passed link check");
+}
+
+/* Plan §6.5: a Detach drops the session at once; nothing after it applies. */
+ZTEST(p2p_logic, test_detach_clears_the_pairing)
+{
+	static const uint8_t dl[] = {P2P_CTRL_DETACH, 1, 2, P2P_CTRL_LINK_CHECK, 4, 1, 2, 3, 4};
+	struct app_radio_p2p_info info;
+
+	paired();
+	p2p_test_ctrl_downlink(dl, sizeof(dl));
+	zassert_false(app_radio_p2p_is_ready());
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_IDLE);
+	app_radio_p2p_get_info(&info);
+	zassert_false(info.lc_valid, "the LinkCheckAns after the Detach is ignored");
+}
+
+/* RejoinReq: a slow-policy join, unless the identity was cleared since. */
+ZTEST(p2p_logic, test_rejoin_req_starts_a_slow_join)
+{
+	static const uint8_t dl[] = {P2P_CTRL_REJOIN_REQ, 1, 0};
+
+	paired();
+	memset(g_app_config.radio_appkey, 0, sizeof(g_app_config.radio_appkey));
+	p2p_test_ctrl_downlink(dl, sizeof(dl));
+	zassert_true(app_radio_p2p_is_ready(), "unprovisioned: not re-joining");
+
+	memcpy(g_app_config.radio_appkey, tower_join_kat_app_key,
+	       sizeof(g_app_config.radio_appkey));
+	p2p_test_ctrl_downlink(dl, sizeof(dl));
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT);
+	zassert_false(app_radio_p2p_is_ready());
+	p2p_test_join_stop();
+}
+
+/* An unknown ID is skipped by its length; a malformed list stops the walk. */
+ZTEST(p2p_logic, test_ctrl_unknown_skipped_malformed_stops)
+{
+	static const uint8_t skip[] = {0x77, 2, 0xaa, 0xbb, P2P_CTRL_LINK_CHECK, 4, 1, 2, 3, 4};
+	static const uint8_t bad[] = {P2P_CTRL_LINK_CHECK, 5, 1, 2, 3, 4};
+	struct app_radio_p2p_info info;
+
+	paired();
+	p2p_test_ctrl_downlink(bad, sizeof(bad));
+	app_radio_p2p_get_info(&info);
+	zassert_false(info.lc_valid, "a value past the list is not applied");
+
+	p2p_test_ctrl_downlink(skip, sizeof(skip));
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid, "applied past the unknown entry");
+	zassert_equal(info.lc_gw_count, 4);
+}
+
+/* A 0x91 answer can also ride a PENDING downlink. */
+ZTEST(p2p_logic, test_ctrl_downlink_in_pending)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t dl[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 4, (uint8_t)-90, 3, 8, 2};
+	struct app_radio_p2p_info info;
+
+	paired();
+	gw.ack = true;
+	gw.dl = dl;
+	gw.dl_len = sizeof(dl);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -90);
+	zassert_equal(info.lc_gw_count, 2);
+}
+
+/* ---- answers in the ACK (plan §13.5) ------------------------------------- */
+
+/* The KAT vector the gateway answers with: its ACK frame, as sealed by the
+ * Northbridge, to the node's first transmission. */
+static const struct tower_ack_ctrl_kat *m_kat;
+static bool m_kat_pushed;
+
+static void kat_gateway(const uint8_t *frame, uint32_t len)
+{
+	ARG_UNUSED(frame);
+	ARG_UNUSED(len);
+	if (!m_kat_pushed) {
+		m_kat_pushed = true;
+		test_lora_rx_push(m_kat->ack_frame, m_kat->ack_frame_len, -60, 8);
+	}
+}
+
+/* Every KAT ACK, end to end: the node sends the KAT uplink (or, for a
+ * hand-built one, any request under the acked counter), takes the
+ * Northbridge's ACK and applies what its tail answers -- the LinkCheckAns
+ * numbers, the TimeAns time -- and nothing else: an unknown TLV is skipped,
+ * an ACK without a tail leaves both alone. */
+ZTEST(p2p_logic, test_ack_ctrl_kat_answers_apply)
+{
+	static const uint8_t req[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0, P2P_CTRL_TIME, 0};
+
+	for (size_t i = 0; i < ARRAY_SIZE(tower_ack_ctrl_kat); i++) {
+		const struct tower_ack_ctrl_kat *v = &tower_ack_ctrl_kat[i];
+		uint32_t up_ctr = v->tail_line ? sys_get_le32(v->ack_pt) : v->up_ctr;
+		int events = p2p_test_time_events;
+		struct app_radio_p2p_info info;
+		const uint8_t *lc = NULL;
+		const uint8_t *time = NULL;
+		struct twr_ack ack;
+		struct p2p_tlv t;
+		size_t off = 0;
+
+		zassert_ok(twr_parse_ack(v->ack_pt, v->ack_pt_len, &ack));
+		while (p2p_tlv_next(ack.tail, ack.tail_len, &off, &t) > 0) {
+			if (t.cmd == P2P_CTRL_LINK_CHECK) {
+				lc = t.val;
+			} else if (t.cmd == P2P_CTRL_TIME) {
+				time = t.val;
+			}
+		}
+
+		paired();
+		m_kat = v;
+		m_kat_pushed = false;
+		test_lora_responder = kat_gateway;
+		p2p_test_set_fcnt(up_ctr, up_ctr + 256);
+		p2p_test_set_time_req(up_ctr, k_uptime_get());
+		g_test_network_time = 0;
+
+		zassert_ok(p2p_test_uplink_tail(v->tail_line ? req : v->up_pt,
+						v->tail_line ? sizeof(req) : v->up_pt_len, true,
+						TWR_ACK_TAIL_MAX),
+			   "%s: not ACKed", v->name);
+		if (!v->tail_line) {
+			zassert_mem_equal(test_lora_sent_frame(test_lora_send_count - 1)->buf,
+					  v->up_frame, v->up_frame_len, "%s: the KAT uplink",
+					  v->name);
+		}
+
+		app_radio_p2p_get_info(&info);
+		zassert_equal(info.gw_last, v->ack_ctr, "%s", v->name);
+		zassert_equal(info.lc_valid, lc != NULL, "%s: LinkCheckAns", v->name);
+		if (lc != NULL) {
+			zassert_equal(info.lc_rssi, (int8_t)lc[0], "%s", v->name);
+			zassert_equal(info.lc_snr, (int8_t)lc[1], "%s", v->name);
+			zassert_equal(info.lc_margin, (int8_t)lc[2], "%s", v->name);
+			zassert_equal(info.lc_gw_count, lc[3], "%s", v->name);
+		}
+		if (time != NULL) {
+			uint32_t unix_s = sys_get_le32(time);
+
+			zassert_equal(sys_get_le32(&time[5]), up_ctr, "%s: TimeAns req", v->name);
+			zassert_equal(p2p_test_time_events, events + 1, "%s: TimeAns", v->name);
+			zassert_between_inclusive(g_test_network_time, unix_s, unix_s + 1, "%s",
+						  v->name);
+		} else {
+			zassert_equal(p2p_test_time_events, events, "%s: no TimeAns", v->name);
+			zassert_equal(g_test_network_time, 0, "%s", v->name);
+		}
+	}
+}
+
+/* The ACK of a request may carry the answers, so its window is longer by
+ * their airtime: at SF10 an ACK arriving between the plain and the longer
+ * window's end is missed by a data frame's wait, caught by a request's. */
+ZTEST(p2p_logic, test_ack_ctrl_window_waits_for_the_tail)
+{
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	uint32_t plain = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN);
+	uint32_t longer = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX);
+	uint32_t sends;
+
+	zassert_true(longer >= plain + 100, "SF10: %u vs %u ms", longer, plain);
+	p2p_test_join_setup(10);
+	p2p_test_join_stop();
+	paired();
+	gw.ack = true;
+	test_lora_rx_delay_ms = (plain + longer) / 2;
+
+	sends = test_lora_send_count;
+	zassert_equal(p2p_test_uplink_tail(up, sizeof(up), true, 0), -ETIMEDOUT);
+	zassert_equal(test_lora_send_count, sends + 3, "every ACK late for the plain window");
+
+	sends = test_lora_send_count;
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
+	zassert_equal(test_lora_send_count, sends + 1, "caught at the first transmission");
+}
+
+/* A due link check end to end: the LinkCheckReq's ACK answers it, so the
+ * link check passes at once and the next due report may ask again. */
+ZTEST(p2p_logic, test_link_check_answered_in_the_ack)
+{
+	static const uint8_t lc[] = {P2P_CTRL_LINK_CHECK, 4, (uint8_t)-77, 6, 13, 1};
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+	struct app_radio_p2p_info info;
+	int ok = p2p_test_link_ok_calls;
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = lc;
+	gw.ack_tail_len = sizeof(lc);
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	p2p_test_ctrl_run();
+	zassert_mem_equal(gw.up_pt, ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0}), 3);
+
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -77);
+	zassert_equal(info.lc_margin, 13);
+	zassert_equal(p2p_test_link_ok_calls, ok + 2, "the ACK and the answer: passed");
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "answered: the next one asks again");
+}
+
+/* A TimeReq end to end: its ACK carries the TimeAns for its counter. */
+ZTEST(p2p_logic, test_time_ans_in_the_ack_sets_the_clock)
 {
 	int events = p2p_test_time_events;
 
+	paired();
+	gw.ack = true;
+	gw.ack_time = true;
+	gw.ack_time_unix = 1790000000u;
 	g_test_network_time = 0;
-	apply_ack(false, 0);
-	zassert_equal(p2p_test_time_events, events, "no time tail, no time event");
-	zassert_equal(g_test_network_time, 0u);
-
-	apply_ack(true, 1790000100u);
-	zassert_equal(p2p_test_time_events, events + 1, "the time tail is a time event");
-	zassert_equal(g_test_network_time, 1790000100u, "the tail sets the clock");
-
-	apply_ack(true, 1790000200u);
-	zassert_equal(p2p_test_time_events, events + 2, "every tail is one");
-	zassert_equal(g_test_network_time, 1790000200u, "later tails still set the clock");
+	p2p_test_time_wanted = true;
+	app_radio_p2p_backend.time_request();
+	p2p_test_ctrl_run();
+	zassert_mem_equal(gw.up_pt, ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_TIME, 0}), 3);
+	zassert_equal(p2p_test_time_events, events + 1, "the time landed");
+	zassert_between_inclusive(g_test_network_time, 1790000000u, 1790000001u);
 }
 
-/* §3.4: the backend only reports what it saw -- an Ack is a passed link check;
- * a confirmed frame given up after all its retries is a failed one, and that is
- * app_radio's ladder, as are the streak and WARNING (tests/radio_common). An
- * unheard try is neither here. */
-ZTEST(p2p_logic, test_unheard_first_try_is_no_link_result)
+/* An ACK tail and a PENDING command in one exchange: both are delivered. */
+ZTEST(p2p_logic, test_ack_tail_and_pending_command)
 {
-	int ok = p2p_test_link_ok_calls;
-	int fail = p2p_test_link_fail_calls;
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	static const uint8_t lc[] = {P2P_CTRL_LINK_CHECK, 4, (uint8_t)-70, 7, 14, 1};
+	static const uint8_t cmd[] = {P2P_ENV_DATA, P2P_PORT_COMMAND, 0x01, 0x0a, 0x0b};
+	struct app_radio_p2p_info info;
+	int dls = p2p_test_downlinks;
 
-	p2p_test_join_setup(7);
-	p2p_test_set_paired();
-	p2p_test_set_fcnt(100, 200); /* an earlier case may leave it exhausted */
-	p2p_test_tx_reset();
-	zassert_true(send_report_confirmed(true), "confirmed link check");
-	zassert_false(send_report_confirmed(false), "unconfirmed report");
-	zassert_equal(p2p_test_link_ok_calls, ok, "nothing heard: no success");
-	zassert_equal(p2p_test_link_fail_calls, fail, "retries not run out: no failure");
+	paired();
+	gw.ack = true;
+	gw.ack_tail = lc;
+	gw.ack_tail_len = sizeof(lc);
+	gw.dl = cmd;
+	gw.dl_len = sizeof(cmd);
+	gw.dl_confirmed = true;
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
 
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-	p2p_test_link_reset();
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -70);
+	zassert_equal(p2p_test_downlinks, dls + 1, "the command too");
+	zassert_mem_equal(p2p_test_downlink_buf, &cmd[P2P_ENV_LEN], 3);
+	zassert_equal(gw.node_acks, 1, "the command ACKed");
 }
 
-/* §3.4 / §7: app_radio's rejoin op is the self-healing re-join on the slow
- * policy, refused while unprovisioned (no JoinRequest can succeed then). */
-ZTEST(p2p_logic, test_rejoin_op_self_heals_or_refuses_unprovisioned)
+/* An ACK tail answers requests only: a Detach, a RejoinReq or an unknown entry
+ * there is skipped (the node stays paired), the answers around it apply. */
+ZTEST(p2p_logic, test_ack_tail_skips_all_but_answers)
 {
-	const struct app_radio_backend *be = &app_radio_p2p_backend;
-
-	memset(g_app_config.radio_appkey, 0, sizeof(g_app_config.radio_appkey));
-	memset(g_app_config.radio_deveui, 0x22, sizeof(g_app_config.radio_deveui));
-	p2p_test_join_setup(7);
-	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
-	zassert_equal(be->rejoin(false), -ENOTSUP, "all-zero app_key: refused");
-	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "session kept");
-
-	memset(g_app_config.radio_appkey, 0x11, sizeof(g_app_config.radio_appkey));
-	memset(g_app_config.radio_deveui, 0, sizeof(g_app_config.radio_deveui));
-	zassert_equal(be->rejoin(true), -ENOTSUP, "all-zero DevEUI: refused");
-
-	memset(g_app_config.radio_deveui, 0x22, sizeof(g_app_config.radio_deveui));
-	zassert_equal(be->rejoin(false), 0, "provisioned: re-join");
-	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT,
-		      "a self-heal on the slow policy");
-
-	p2p_test_join_stop();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-	p2p_test_link_reset();
-}
-
-/* §3.4: WARNING's rung with a fixed SF -- the TX power steps back up towards
- * the node's own p2p-tx-power, one 2 dB step per call, never above it; no step
- * left lets app_radio count towards the rejoin. */
-ZTEST(p2p_logic, test_warning_steps_tx_power_up_to_the_config)
-{
-	const struct app_radio_backend *be = &app_radio_p2p_backend;
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	static const uint8_t tail[] = {P2P_CTRL_DETACH,
+				       1,
+				       2,
+				       P2P_CTRL_REJOIN_REQ,
+				       1,
+				       0,
+				       0x7f,
+				       1,
+				       0,
+				       P2P_CTRL_LINK_CHECK,
+				       4,
+				       (uint8_t)-66,
+				       1,
+				       2,
+				       1};
 	struct app_radio_p2p_info info;
 
-	g_app_config.p2p_tx_power = 14;
-	p2p_test_join_setup(7);
-	p2p_test_set_link(P2P_LINK_PAIRED, true, false, false);
-	p2p_test_set_session_tx_power(true, 10);
+	paired();
+	gw.ack = true;
+	gw.ack_tail = tail;
+	gw.ack_tail_len = sizeof(tail);
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
 
-	zassert_true(be->warning_step(), "10 dBm: a step");
+	zassert_true(app_radio_p2p_is_ready(), "still paired");
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "no Detach, no rejoin");
 	app_radio_p2p_get_info(&info);
-	zassert_equal(info.tx_power_dbm, 12, "one 2 dB step, got %d", info.tx_power_dbm);
-	zassert_true(be->warning_step(), "12 dBm: a step");
-	app_radio_p2p_get_info(&info);
-	zassert_equal(info.tx_power_dbm, 14, "next step: 14 dBm, got %d", info.tx_power_dbm);
-	zassert_false(be->warning_step(), "at p2p-tx-power: no step left");
-	app_radio_p2p_get_info(&info);
-	zassert_equal(info.tx_power_dbm, 14, "capped at p2p-tx-power, got %d", info.tx_power_dbm);
-
-	p2p_test_set_session_tx_power(false, 0);
-	zassert_false(be->warning_step(), "no assigned power: no step");
-
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
-	p2p_test_link_reset();
+	zassert_true(info.lc_valid);
+	zassert_equal(info.lc_rssi, -66);
 }
 
-ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);
+/* ---- frame counter (B9) --------------------------------------------------------- */
+
+ZTEST(p2p_logic, test_fcnt_normal_advance)
+{
+	uint32_t c;
+
+	p2p_test_set_fcnt(100, 200);
+	zassert_ok(p2p_test_fcnt_next(&c));
+	zassert_equal(c, 100u);
+	zassert_equal(p2p_test_get_fcnt(), 101u);
+}
+
+/* At the window edge a durable reserve is required: refuse, and keep refusing
+ * until it is durable -- advancing the in-RAM watermark first (the pre-B9 bug)
+ * would hand out an unreserved counter on the second call, and a reboot would
+ * then repeat a (key, nonce) pair. */
+ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
+{
+	uint32_t c = 0xDEADBEEF;
+
+	test_settings_save_ret = -EIO;
+	p2p_test_set_fcnt(200, 200);
+	zassert_true(p2p_test_fcnt_next(&c) != 0);
+	zassert_equal(p2p_test_get_fcnt(), 200u);
+	zassert_equal(c, 0xDEADBEEFu);
+	zassert_true(p2p_test_fcnt_next(&c) != 0, "the second call must also refuse");
+	zassert_equal(p2p_test_get_fcnt(), 200u);
+	zassert_equal(c, 0xDEADBEEFu);
+}
+
+ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
+{
+	uint32_t c = 0xDEADBEEF;
+
+	p2p_test_set_fcnt(UINT32_MAX, UINT32_MAX);
+	zassert_equal(p2p_test_fcnt_next(&c), -EOVERFLOW);
+	zassert_equal(p2p_test_get_fcnt(), UINT32_MAX);
+}
+
+/* TOWER reserves counter 0: a new session's first frame is counter 1. */
+ZTEST(p2p_logic, test_session_counter_skips_zero)
+{
+	static const uint8_t pt[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+
+	paired();
+	p2p_test_set_fcnt(0, 256);
+	zassert_ok(p2p_test_uplink(pt, sizeof(pt), false));
+	zassert_equal(gw.up_hdr.counter, 1);
+}
+
+ZTEST_SUITE(p2p_logic, NULL, NULL, before, NULL, NULL);

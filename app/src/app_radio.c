@@ -203,6 +203,7 @@ static K_WORK_DELAYABLE_DEFINE(m_hist_work, hist_work_handler);
 static bool m_hist_active;
 /* app_report's link-ready kick, also fired when a replay ends. */
 static void (*m_ready_cb)(void);
+static void ready_kick(void);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -747,6 +748,8 @@ static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
 static uint8_t m_tlm_retries;
 static size_t m_tlm_len;
 static uint8_t m_tlm_buf[TLM_BUF_SIZE];
+static bool m_tlm_done_valid;
+static int64_t m_tlm_done_ms; /* uptime of the last completed report */
 
 static void tx_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_tx_work, tx_work_handler);
@@ -778,8 +781,9 @@ static void tx_request_telemetry(void)
  * frame the backend sent without an Ack (-ETIMEDOUT) stays with its path -- the
  * queued frame, the report's frame or the replay's -- and goes again after
  * app_radio_ack_backoff_ms(), APP_RADIO_ACK_MAX_RETRIES times at most; every
- * other send waits meanwhile. P2P sends it under the same counter (the central
- * keeps a strict counter high-water), LoRaWAN under a new FCnt. Given up, it
+ * other send waits meanwhile. P2P sends it under the same counter while no
+ * other frame took one since (the gateway re-ACKs a retransmission and does
+ * not deliver it again, plan §7.3), LoRaWAN under a new FCnt. Given up, it
  * is a failed link check, and the frame counts as sent: it went out. A new
  * session starts it afresh. Radio work queue only. */
 #define TX_ACK_RETRY      1 /* tx_send(): no Ack; sent again after res->wait_ms */
@@ -875,7 +879,12 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 				"up",
 				f->kind, APP_RADIO_ACK_MAX_RETRIES);
 			ack_release(f->kind);
-			app_radio_link_result(false);
+			/* Only a frame sent as a link check judges the link (Hynek
+			 * 2026-10-06): a lost alarm, answer or plain report does not
+			 * count towards WARNING and the rejoin. */
+			if (f->flags & APP_RADIO_FRAME_LINK_CHECK) {
+				app_radio_link_result(false);
+			}
 			return 0;
 		}
 		m_ack_pending = true;
@@ -1102,6 +1111,19 @@ static bool tx_queued_step(void)
 static int64_t m_last_uplink_ms;
 static struct app_radio_stale_dc m_dc;
 static bool m_dc_hold_logged;
+
+#if defined(CONFIG_SHELL) || defined(CONFIG_ZTEST)
+/* ats radio tx_mute: telemetry fails before it reaches the air (M-2 on the bench). */
+static bool m_debug_tx_mute;
+
+void app_radio_debug_tx_mute(bool on)
+{
+	m_debug_tx_mute = on;
+	LOG_WRN("Debug: telemetry TX %s", on ? "muted" : "unmuted");
+}
+#else
+#define m_debug_tx_mute false
+#endif
 
 static void link_set_streak(uint32_t n)
 {
@@ -1410,7 +1432,7 @@ static void tlm_step(void)
 		.buf = m_tlm_buf,
 	};
 	struct app_radio_tx_result res = {0};
-	int ret = tx_send(&f, &res);
+	int ret = m_debug_tx_mute ? -EIO : tx_send(&f, &res);
 
 	switch (ret) {
 	case 0:
@@ -1455,6 +1477,8 @@ static void tlm_step(void)
 	if (ret == 0) {
 		/* Reports, not frames, drive the link-check cadence (#267). */
 		m_link.reports++;
+		m_tlm_done_ms = k_uptime_get();
+		m_tlm_done_valid = true;
 		LOG_INF("Snapshot complete");
 	}
 	tlm_close(false);
@@ -1551,9 +1575,7 @@ static void hist_finish(void)
 {
 	hist_end();
 	app_radio_tx_kick();
-	if (m_ready_cb) {
-		m_ready_cb();
-	}
+	ready_kick();
 }
 
 static void hist_drop(void)
@@ -1807,8 +1829,10 @@ void app_radio_test_tx_reset(void)
 	atomic_clear(&m_tlm_requested);
 	m_tlm_open = false;
 	m_tlm_frame = false;
+	m_tlm_done_valid = false;
 	m_hist_active = false;
 	m_ack_pending = false;
+	m_debug_tx_mute = false;
 	m_ready_cb = NULL;
 	app_radio_duty_init(0); /* no limit unless a test sets one */
 }
@@ -1906,6 +1930,29 @@ static void jitter_work_handler(struct k_work *work)
 
 	atomic_clear(&m_telemetry_held);
 	tx_request_telemetry();
+}
+
+/* The link-ready kick (a join, the end of a history replay) asks app_report
+ * for an immediate report. It is folded into a report already on its way,
+ * and skipped right after one: the same snapshot again would be a second,
+ * identical Portal point (T3a-F3). */
+#define READY_COALESCE_MS 10000
+
+static void ready_kick(void)
+{
+	if (m_tlm_open || atomic_get(&m_tlm_requested) || atomic_get(&m_telemetry_held) ||
+	    k_work_delayable_is_pending(&m_jitter_work)) {
+		LOG_INF("Link-ready report folded into the one on its way");
+		return;
+	}
+	if (m_tlm_done_valid && k_uptime_get() - m_tlm_done_ms < READY_COALESCE_MS) {
+		LOG_INF("Link-ready report skipped: one went %lld ms ago",
+			(long long)(k_uptime_get() - m_tlm_done_ms));
+		return;
+	}
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
 }
 
 /* Uplink phase (O9, p2p_link_check.md §3.7, Hynek 2026-09-27): the report
@@ -2010,12 +2057,12 @@ void app_radio_register_ready_cb(void (*cb)(void))
 	m_ready_cb = cb;
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
-		app_radio_p2p_register_ready_cb(cb);
+		app_radio_p2p_register_ready_cb(ready_kick);
 		return;
 	}
 #endif
 #if defined(CONFIG_LORAWAN)
-	app_radio_lrw_register_ready_cb(cb);
+	app_radio_lrw_register_ready_cb(ready_kick);
 #endif
 }
 

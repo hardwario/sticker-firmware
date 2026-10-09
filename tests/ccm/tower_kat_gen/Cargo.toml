@@ -1,0 +1,11 @@
+[package]
+name = "tower_kat_gen"
+version = "0.1.0"
+edition = "2024"
+
+# KAT generator for STICKER / Northbridge TOWER-over-LoRa (plan "TOWER protocol as the P2P transport").
+# vendor/ = verbatim copies of hardwario/tower firmware/crates @ 24259e35b4607b1978e678153092bb1641d8d2a1.
+[dependencies]
+tower-radio-core = { path = "vendor/tower-radio-core" }
+tower-net-core = { path = "vendor/tower-net-core" }
+aes = "0.9"

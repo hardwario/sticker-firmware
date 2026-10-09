@@ -52,9 +52,10 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
-	.p2p_frequency = 868100000,
+	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
+	.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA,
 };
 
 /* Set by h_commit when a schema version migration ran; init persists the
@@ -92,9 +93,10 @@ static struct app_config m_app_config = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
-	.p2p_frequency = 868100000,
+	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
+	.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA,
 };
 
 /* Guards m_app_config/g_app_config against concurrent mutation:
@@ -241,6 +243,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
 		     sizeof(m_app_config.p2p_spreading_factor));
 	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
+	SETTINGS_SET("p2p-modulation", &m_app_config.p2p_modulation,
+		     sizeof(m_app_config.p2p_modulation));
 
 #undef SETTINGS_SET
 
@@ -297,6 +301,7 @@ static int h_commit(void)
 		m_app_config.p2p_frequency = stored.p2p_frequency;
 		m_app_config.p2p_spreading_factor = stored.p2p_spreading_factor;
 		m_app_config.p2p_tx_power = stored.p2p_tx_power;
+		m_app_config.p2p_modulation = stored.p2p_modulation;
 
 		m_app_config_migrated = true;
 	}
@@ -391,6 +396,9 @@ static int h_commit(void)
 	}
 	if (m_app_config.p2p_tx_power > 22) {
 		m_app_config.p2p_tx_power = 22;
+	}
+	if ((int)m_app_config.p2p_modulation < 0 || (int)m_app_config.p2p_modulation > 1) {
+		m_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -507,6 +515,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
 		    sizeof(m_app_config.p2p_spreading_factor));
 	EXPORT_FUNC("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
+	EXPORT_FUNC("p2p-modulation", &m_app_config.p2p_modulation,
+		    sizeof(m_app_config.p2p_modulation));
 	/* Export config-version LAST: settings_save is per-key atomic, so writing
 	 * the schema marker after every value means a brownout mid-save leaves an
 	 * old version with a partial new payload rather than a new version flagging
@@ -1128,6 +1138,23 @@ static void print_p2p_tx_power(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " p2p-tx-power %d", m_app_config.p2p_tx_power);
 }
 
+static void print_p2p_modulation(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.p2p_modulation) {
+	case APP_CONFIG_P2P_MODULATION_LORA:
+		str = "lora";
+		break;
+	case APP_CONFIG_P2P_MODULATION_FSK:
+		str = "fsk";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " p2p-modulation %s", str);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1189,6 +1216,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_p2p_frequency(shell);
 	print_p2p_spreading_factor(shell);
 	print_p2p_tx_power(shell);
+	print_p2p_modulation(shell);
 
 	return 0;
 }
@@ -1992,6 +2020,37 @@ static int cmd_p2p_tx_power(const struct shell *shell, size_t argc, char **argv)
 	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 2, 22, print_p2p_tx_power);
 }
 
+static int cmd_p2p_modulation(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_p2p_modulation(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: lora, fsk");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "lora")) {
+		m_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA;
+	} else if (!strcmp(argv[1], "fsk")) {
+		m_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_FSK;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: lora, fsk");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2239,16 +2298,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_input_b_counter, 1, 1),
 
 	SHELL_CMD_ARG(p2p-frequency, NULL,
-	              "Get/Set P2P carrier frequency in Hz (EU868 band).",
+	              "Get/Set P2P carrier frequency in Hz (EU868 band). Must match the Hub; default 869.525 MHz (10 % duty).",
 	              cmd_p2p_frequency, 1, 1),
 
 	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
-	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept).",
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a fixed network constant, no sweep and no ADR.",
 	              cmd_p2p_spreading_factor, 1, 1),
 
 	SHELL_CMD_ARG(p2p-tx-power, NULL,
 	              "Get/Set P2P TX power in dBm.",
 	              cmd_p2p_tx_power, 1, 1),
+
+	SHELL_CMD_ARG(p2p-modulation, NULL,
+	              "Get/Set P2P modulation (lora/fsk). Must match the Hub; fsk is not supported yet.",
+	              cmd_p2p_modulation, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
@@ -2309,6 +2372,7 @@ int app_config_device_reset(void)
 	m_app_config.p2p_frequency = preserved.p2p_frequency;
 	m_app_config.p2p_spreading_factor = preserved.p2p_spreading_factor;
 	m_app_config.p2p_tx_power = preserved.p2p_tx_power;
+	m_app_config.p2p_modulation = preserved.p2p_modulation;
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 

@@ -470,8 +470,10 @@ enum app_radio_frame_tag {
 	APP_RADIO_TAG_SETTINGS,     /* autonomous settings-info (#412) */
 };
 
-#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: P2P FCtrl, LoRaWAN MType */
-#define APP_RADIO_FRAME_LINK_CHECK BIT(1) /* LoRaWAN: ride a LinkCheckReq on it */
+#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: TOWER flags, LoRaWAN MType */
+/* A link check: LoRaWAN rides a LinkCheckReq on it; on P2P it is confirmed and
+ * its Ack is the check, so only this frame unacknowledged is a failed one. */
+#define APP_RADIO_FRAME_LINK_CHECK BIT(1)
 #define APP_RADIO_FRAME_MORE       BIT(2) /* telemetry: more frames of this report follow */
 
 /* Slot size of the answer and alarm queues. */
@@ -484,7 +486,8 @@ struct app_radio_frame {
 	uint8_t port;  /* LoRaWAN fPort of an answer (0 = the command port) */
 	uint8_t flags; /* APP_RADIO_FRAME_* */
 	/* Retries of a confirmed frame so far (0 = its first TX). On a retry P2P
-	 * sends the same counter again; LoRaWAN takes a new FCnt. */
+	 * sends the same counter again while no other frame took one since;
+	 * LoRaWAN takes a new FCnt. */
 	uint8_t attempt;
 	uint16_t len; /* 0 = no payload: LoRaWAN flushes its pending MAC answers */
 	uint8_t *buf;
@@ -534,9 +537,9 @@ struct app_radio_backend {
 	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
 	int (*rejoin)(bool forced);
 	/* A network time is wanted (app_radio_time_request()): LoRaWAN queues a
-	 * DeviceTimeReq onto the next uplink, P2P sets FCtrl TIME_REQ on its
-	 * confirmed uplinks and sends its next reports (at most 3) confirmed so
-	 * an Ack brings the time tail. Neither sends an uplink of its own. The
+	 * DeviceTimeReq onto the next uplink, P2P a TimeReq onto its next 0x91
+	 * control uplink, the TimeAns rides a later report's PENDING. Neither
+	 * sends a report of its own. The
 	 * backend calls app_radio_time_event() when the time lands. */
 	void (*time_request)(void);
 	/* Time on air (ms) of an uplink carrying `len` payload bytes now, for the
@@ -658,6 +661,13 @@ void app_radio_heartbeat_start(void);
  * feeds the liveness channel itself, as the heartbeat cannot run meanwhile. */
 void app_radio_heartbeat_feed(void);
 
+#if defined(CONFIG_SHELL) || defined(CONFIG_ZTEST)
+/* Debug (ats radio tx_mute): every telemetry frame fails with -EIO before it
+ * reaches the air while the work queue goes on draining -- the mute node M-2
+ * rejoins after APP_RADIO_STALE_FACTOR report intervals. Not in release. */
+void app_radio_debug_tx_mute(bool on);
+#endif
+
 #if defined(CONFIG_ZTEST)
 /* Run the common TX path on `be` (tests/radio_common). */
 void app_radio_test_set_backend(const struct app_radio_backend *be);
@@ -743,9 +753,9 @@ int app_radio_send_info(uint32_t seq);
 /* clock_sync with an empty body: re-sync the RTC from the network and answer
  * with an Info carrying `seq` once the time has landed -- the same shape on
  * both radios, no extra uplink: LoRaWAN's DeviceTimeReq rides on the next
- * uplink and the answer comes in its downlink; P2P sends its next report
- * CONFIRMED (at most 3 of them) with FCtrl TIME_REQ and the time comes in the
- * Ack's tail (app_radio_time_request()). A network
+ * uplink and the answer comes in its downlink; P2P sends a TimeReq in a 0x91
+ * control uplink and the TimeAns rides a later report's PENDING
+ * (app_radio_time_request()). A network
  * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2).
  * A newer request before the time lands takes over the seq. Any thread. */
 void app_radio_clock_sync(uint32_t seq);

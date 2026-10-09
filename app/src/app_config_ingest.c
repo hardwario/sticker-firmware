@@ -972,6 +972,18 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(3);
 		}
 	}
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	if (src->has_modulation &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+	     tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(4);
+	} else if (src->has_modulation) {
+		if ((int)src->modulation >= 0 && (int)src->modulation <= 1) {
+			config->p2p_modulation = (enum app_config_p2p_modulation)src->modulation;
+		} else {
+			FAULT(4);
+		}
+	}
 	return ret;
 }
 
@@ -990,5 +1002,9 @@ void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t 
 	if (requested(ids, n, 3)) {
 		dst->has_tx_power = true;
 		dst->tx_power = c->p2p_tx_power;
+	}
+	if (requested(ids, n, 4)) {
+		dst->has_modulation = true;
+		dst->modulation = (AppConfigMessage_P2P_Modulation)c->p2p_modulation;
 	}
 }
