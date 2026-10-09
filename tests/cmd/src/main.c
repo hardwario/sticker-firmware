@@ -34,6 +34,7 @@ extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
 extern int g_claim_done_calls;
 extern int g_claim_active_calls;
+extern int g_claim_active_saves_before;
 extern uint8_t g_claim_state;
 extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
@@ -1451,21 +1452,37 @@ ZTEST(cmd, test_claim_done)
 	zassert_equal(g_claim_done_calls, 1, "app_nfc_claim_done called exactly once");
 }
 
-/* #351/#415 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected over
- * lrw, same pattern as claim_done/set_secret_key above). Both the
- * no/zero-new_claim_token and the non-zero-new_claim_token cases defer
- * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way — restart-style, Ack delivered
- * to the phone first, then main.c flips the latch (app_nfc_claim_active()) and
- * reboots — so the phone can always assume "ack read -> reboot" regardless of
- * which case it took. A non-zero new_claim_token additionally stages it into
- * g_app_config synchronously in the handler, before the deferred reboot lands it
- * via h_commit. Wire id 27 is unchanged by the rename. */
+/* #351/#415/#471 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected
+ * over lrw, same pattern as claim_done/set_secret_key above). Every case defers
+ * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way (restart-style: the answer is
+ * delivered first, then main.c saves, flips the latch and reboots) and answers
+ * Response.claim_info with the token that holds after the reboot: a non-zero
+ * new_claim_token replaces it, otherwise the stored token is kept, and when none
+ * is stored (vendor_reset wiped it) a new one comes from the CSPRNG. */
+static bool buffer_is_zero_test(const uint8_t *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void expect_claim_info(const Response *r, const uint8_t *token)
+{
+	zassert_equal(r->which_body, Response_claim_info_tag,
+		      "claim_active answers claim_info (%d)", r->which_body);
+	zassert_equal(r->body.claim_info.serial_number, g_app_config.serial_number, "serial");
+	zassert_mem_equal(r->body.claim_info.claim_token, token, 16, "claim_info token");
+	zassert_mem_equal(g_app_config.claim_token, token, 16, "staged token");
+}
+
 ZTEST(cmd, test_claim_active)
 {
 	Response r;
-	uint8_t expect_token[16];
-
-	memset(expect_token, 0x33, sizeof(expect_token));
+	uint8_t token[16];
+	uint8_t zero[16] = {0};
 
 	reset_cfg();
 	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE,
@@ -1474,25 +1491,44 @@ ZTEST(cmd, test_claim_active)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(g_claim_active_calls, 0, "must not call app_nfc_claim_active over lrw");
+	zassert_mem_equal(g_app_config.claim_token, zero, sizeof(zero),
+			  "a rejected claim_active must not generate a token");
 
+	/* Stored token kept. */
 	reset_cfg();
+	g_app_config.serial_number = 2162190413U;
+	memset(g_app_config.claim_token, 0x22, sizeof(g_app_config.claim_token));
+	memset(token, 0x22, sizeof(token));
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active without token also defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously in the handler");
 
-	reset_cfg();
+	/* new_claim_token replaces the stored one. */
 	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);
 	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
 		      "claim_active with token defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
-	zassert_mem_equal(g_app_config.claim_token, expect_token, sizeof(expect_token),
-			  "new_claim_token not staged");
+	memset(token, 0x33, sizeof(token));
+	expect_claim_info(&r, token);
 	zassert_equal(g_claim_active_calls, 0,
 		      "app_nfc_claim_active must NOT run synchronously when staging a new token");
+
+	/* No stored token (after vendor_reset): a fresh one is generated. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, "generated token defers save+reboot");
+	zassert_false(buffer_is_zero_test(g_app_config.claim_token, 16),
+		      "a token must be generated when none is stored");
+	memcpy(token, g_app_config.claim_token, sizeof(token));
+	expect_claim_info(&r, token);
+
+	/* A second generation differs from the first. */
+	reset_cfg();
+	(void)handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_true(memcmp(g_app_config.claim_token, token, sizeof(token)) != 0,
+		     "two generated tokens must differ");
 }
 
 /* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
@@ -3065,11 +3101,14 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 	zassert_equal(test_run_settings_save_calls, 1, "and is saved (+ reboot)");
 	g_app_config.calibration = false;
 
-	/* The claim latch flips first, then the save persists the token with it. */
+	/* #471: the token is saved first, only then the claim latch flips, then the
+	 * reboot (a second, no-op save). */
 	run_action_reset();
+	g_claim_active_saves_before = -1;
 	app_cmd_run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE);
 	zassert_equal(g_claim_active_calls, 1, "claim window re-opened");
-	zassert_equal(test_run_settings_save_calls, 1, "claim token saved (+ reboot)");
+	zassert_equal(g_claim_active_saves_before, 1, "latch flips after the token save");
+	zassert_equal(test_run_settings_save_calls, 2, "then save + reboot");
 }
 
 ZTEST(cmd, test_run_action_none_and_page_stream_do_nothing)

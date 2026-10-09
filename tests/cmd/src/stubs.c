@@ -374,17 +374,21 @@ bool app_nfc_mailbox_available(void)
  * tests/nfc_hw). */
 int g_claim_done_calls;
 
-void app_nfc_claim_done(void)
+void app_nfc_claim_done(const char *reason)
 {
 	g_claim_done_calls++;
 }
 
 /* #351/#415: mirrors g_claim_done_calls above, for the claim_active command. */
 int g_claim_active_calls;
+/* #471: settings saves seen when the latch flipped (the token must be on flash first). */
+int g_claim_active_saves_before;
+extern int test_run_settings_save_calls;
 
-void app_nfc_claim_active(void)
+void app_nfc_claim_active(const char *reason)
 {
 	g_claim_active_calls++;
+	g_claim_active_saves_before = test_run_settings_save_calls;
 }
 
 /* #415: claim window state seen by app_cmd_handle_get_claim_info(); the test

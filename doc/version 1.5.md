@@ -27,6 +27,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
 | NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §18. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §19. |
+| NFC claiming / resets | **Changed** — the claim latch fails closed on a corrupt NVS value; `vendor_reset` closes the claim window and wipes the token; `claim_active` generates a token when none is set and answers `ClaimInfo` (breaking for the Manager-App, was `Ack`); `factory_reset` also clears the counters and the history (#471). See §35. |
 | NFC | ~~**New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2)~~ — superseded before release by `get_radio_state` (#446, §24): the fields moved out of Info. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
@@ -1055,12 +1056,14 @@ decrypted command closed the window (#308); now it closes **only** on an explici
 `claim_done`. The app must therefore send `claim_done` after storing the claimed
 keys; a crash in between leaves the token readable on a powered unit (accepted:
 the backend refuses a second claim of the same serial, so only the token leaks,
-not control). Mutators are explicit only: `claim_done` / `ats claim done` →
-`done`; `claim_active` / `ats claim active` / `vendor_reset` → `active`.
-`device_reset` / `factory_reset` leave the state alone.
+not control). Mutators are explicit only: `claim_done` / `ats claim done` /
+`vendor_reset` → `done`; `claim_active` / `ats claim active` → `active`.
+`device_reset` / `factory_reset` leave the state alone. (`vendor_reset` opened the
+window before #471, see §35.)
 
 Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
-`active`, `consumed` → `done`.
+`active`, `consumed` → `done`. Any other stored value, a wrong length or a read
+error closes the window (`done`, #471, see §35).
 
 ### 19.4 Command rename (wire-compatible)
 
@@ -1650,6 +1653,100 @@ Every time request now goes through `app_radio`, whatever the radio (Hynek, 2026
   - **Join:** `app_radio_link_up()` queued the DeviceTimeReq, and the DeviceTimeAns set the RTC 33 s later, on the next uplink, to host UTC.
   - **Shell `clock sync` + cooldown:** the first request was queued and landed on the next uplink. A second one 3.6 s later logged `cooldown active, ignoring`.
   - **Re-sync:** `Periodic time re-sync` fired 240 s after the first time and queued a DeviceTimeReq, which was answered on the next uplink. `clock get` matched host UTC to 1 s.
+
+---
+
+## 35. Claiming and reset tiers (#471)
+
+Four changes to the claim lifecycle and the reset ladder.
+
+### Fail-closed claim latch
+
+Before, every unexpected `clm/state` value opened the claim window, so a claimed
+unit with corrupted NVS disclosed its `claim_token` again through
+`get_claim_info`. Now only a missing key (fresh factory NVS) opens it:
+
+| Stored `clm/state` | Window |
+|---|---|
+| key missing | `active` (factory default) |
+| `0`, `1` (legacy `unset` / `pending`) | `active` |
+| `2` | `done` |
+| any other byte, wrong length, read error, subtree load failure | **`done`** + `WRN` |
+
+A window closed by mistake is reopened with `claim_active` (owner, NFC) or
+`ats claim active`.
+
+### `vendor_reset` closes the window
+
+`vendor_reset` still wipes the `claim_token` (it is not in its persistent tier),
+but it now sets the window to **`done`** instead of `active`. Before, the unit
+ended up `active` without a token (`get_claim_info` → `NOT_READY "no claim
+token"`) and could not be claimed through ATELOS. Now nothing claim-related is
+readable after a vendor reset (`get_claim_info` → `NOT_READY "claimed"`) until
+the owner re-opens the window with `claim_active`.
+
+### `claim_active` generates the token and answers `ClaimInfo`
+
+| `claim_active` request | Stored token | Token after the reboot |
+|---|---|---|
+| non-zero `new_claim_token` | any | `new_claim_token` |
+| no / zero `new_claim_token` | non-zero | unchanged |
+| no / zero `new_claim_token` | zero (after `vendor_reset`) | **new 128-bit token from the CSPRNG** (`sys_csrand_get()`, STM32 RNG) |
+
+The answer is now **`Response.claim_info {serial_number, claim_token}`** (field 9)
+with the token that holds after the reboot, instead of `Ack`. It goes over the
+secret_key channel (`0x01`) or the shell only (`claim_active` stays
+`transports: [nfc, shell]`), so the token is never sent in clear. The phone
+forwards it to ATELOS, which is how a unit gets claimable again after a vendor
+reset. If the RNG fails, the command answers `NOT_READY "no entropy"` and changes
+nothing.
+
+The deferred action (`APP_CMD_ACTION_CLAIM_ACTIVE_SAVE`) runs after the answer is
+read, as before, but in a new order: save the config, **then** flip the latch to
+`active`, then reboot. If the save fails, the unit reboots with the old token and
+the old latch, so it never ends up `active` with a token the phone was told about
+but the unit lost.
+
+**Host impact:** the Manager-App must accept `claim_info` as the answer to
+`claim_active` (an app that expects `Ack` reports an error although the unit
+re-opened the window), and push the token to ATELOS.
+
+### `factory_reset` clears counters and history
+
+`factory_reset` hands a unit to a new owner, so it now also resets the hall /
+input pulse totalizers and erases the history ring, as `vendor_reset` already
+did. `device_reset` keeps both.
+
+### Reset tiers
+
+| | `device_reset` | `factory_reset` | `vendor_reset` | `settings erase` |
+|---|---|---|---|---|
+| Transports | NFC, shell | NFC, shell | vendor NFC channel, shell | shell |
+| serial, `nonce_counter`, `vendor_token` | keep | keep | keep | wiped |
+| `secret_key` | keep | keep | replaced (from the command) | wiped |
+| `claim_token` | keep | keep | wiped | wiped |
+| Claim window | keep | keep | **→ `done`** | → `active` |
+| `vendor_reset_allow` | keep | keep | default | default |
+| DevEUI / JoinEUI | keep | keep | wiped | wiped |
+| Other LoRaWAN config and keys, `radio_mode` | keep | default | default | default |
+| Rest of the config, alarm rules | default | default | default | default |
+| Pulse counters, history | keep | **cleared** | cleared | counters wiped |
+| LoRaMac NVM (DevNonce, frame counters) | keep | wiped | wiped | — |
+
+### Upgrade from v1.4.x: wipe the old `hio.stck:clm` record
+
+v1.5.0 never writes the NFC user EEPROM (§18), so a unit upgraded from v1.4.x
+keeps the old plaintext `hio.stck:clm` NDEF record (serial + `claim_token`),
+readable without power even after `claim_done`. Part of the upgrade: wipe the
+NDEF area once, with `nfc clear` on a debug build or by writing an empty NDEF
+message from the phone.
+
+### Cost and tests
+
+Release +136 B flash, RAM unchanged. `tests/nfc_hw` `test_clm_latch_fails_closed`
+(0/1 → `active`, 2 / 0x7F / 0xFF / wrong length / read error → `done`);
+`tests/cmd` `test_claim_active` (kept, replaced and generated token, always
+`claim_info`, rejected over LoRaWAN without generating).
 
 ---
 
