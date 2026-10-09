@@ -718,9 +718,16 @@ message Telemetry {
     // 1-wire ROM-bound sensor slots (cap_w1_sensors). One SensorReading per
     // populated slot; type travels with the reading so heterogeneous mixes and
     // future sensor types need no new fields. The composer may split the list
-    // across frames (each reading is indivisible). Replaces fields 10-17.
+    // across pages (page_index / page_count below). Replaces fields 10-17.
     repeated SensorReading w1_sensors = 27;
-    // New sensors append at field >= 28 as new groups; never renumber.
+    // #425 paging, as AlarmReport / Response: a report that does not fit one
+    // frame is split into pages page_index = 0..page_count-1 of the same
+    // snapshot. A 1-Wire reading too big for a page is split by channel into
+    // SensorReadings with the same slot / type, each with its own valid bits.
+    // Absent = the whole report is in this frame.
+    uint32 page_index = 28;
+    uint32 page_count = 29;
+    // New sensors append at field >= 30 as new groups; never renumber.
 }
 
 // One ROM-bound 1-Wire slot's reading. type = the slot's expected sensor type

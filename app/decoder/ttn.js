@@ -820,8 +820,9 @@ var _W1_SLOT_STATES = ["none", "ok", "absent", "replaced", "mismatch"];
 // id), valid=11 (bit ch = channel ch has a value), value=12 (packed sint32, one
 // per set bit in ascending ch, each phys x channel wire scale). Every channel
 // of the type appears in `values` (null when its bit is clear, so a slot in
-// mismatch or with its probe absent is all null) with its unit in `units`.
-// `bytes[start..end)` is the submessage body.
+// mismatch or with its probe absent is all null) with its unit in `units`;
+// on a page of a split report only the channels carried there
+// (_applyTelemetryPages). `bytes[start..end)` is the submessage body.
 function _decodeSensorReading(bytes, start, end) {
   var sr = {};
   var valid = 0;
@@ -868,6 +869,7 @@ function _decodeSensorReading(bytes, start, end) {
     sr.values[c.n] = (r === undefined) ? null : r / c.s;
     sr.units[c.n] = c.u;
   }
+  sr._valid = valid; // for _applyTelemetryPages, removed there
   return sr;
 }
 
@@ -962,10 +964,36 @@ function decodeTelemetry(bytes) {
         d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
+      // #425 paging, as Response / AlarmReport
+      case 28: d.page_index = v.value; break;
+      case 29: d.page_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }
+  _applyTelemetryPages(d);
   return d;
+}
+
+// #425: a telemetry report that does not fit one frame comes as pages, each
+// decoded on its own ("i/N", 1-based). A 1-Wire reading may be split by
+// channel across pages, so on a page a reading lists only the channels it
+// carries: a channel without a value there may sit on another page, it is not
+// null. A slot sent with no values at all (valid = 0: absent / mismatch) stays
+// all null.
+function _applyTelemetryPages(d) {
+  var paged = d.page_count > 1;
+  if (paged) {
+    if (d.page_index === undefined) d.page_index = 0;
+    d.pages = (d.page_index + 1) + "/" + d.page_count;
+  }
+  (d.w1_sensors || []).forEach(function (sr) {
+    if (paged && sr._valid !== 0) {
+      Object.keys(sr.values).forEach(function (k) {
+        if (sr.values[k] === null) { delete sr.values[k]; delete sr.units[k]; }
+      });
+    }
+    delete sr._valid;
+  });
 }
 
 // ---------------------------------------------------------------------------

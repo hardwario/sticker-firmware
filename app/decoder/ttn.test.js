@@ -635,6 +635,28 @@ test("fPort-2 telemetry: unknown channel decodes raw as chN (#430)", () => {
   assert.deepEqual(got.w1_sensors[0].values, { temperature: -10.5, ch9: 7 });
 });
 
+// #425 paged telemetry (page_index 28, page_count 29): page 2/3 carries a part
+// of slot 2's machine-probe (ch 2 temperature-aux, ch 3 illuminance) — only
+// those channels are listed, the rest sit on other pages — and slot 3 sent
+// with no values (mismatch), which stays all null.
+test("fPort-2 telemetry page lists only the channels it carries (#425/#430)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("01da010b08021003580c6203942336da010408031003e00101e80103"),
+    fPort: 2,
+  }).data;
+  assert.equal(got.page_index, 1);
+  assert.equal(got.page_count, 3);
+  assert.equal(got.pages, "2/3");
+  assert.deepEqual(got.w1_sensors[0], {
+    slot: 2, type: 3, type_name: "machine-probe",
+    values: { "temperature-aux": 22.5, illuminance: 27 },
+    units: { "temperature-aux": "degC", illuminance: "lx" },
+  });
+  assert.equal(got.w1_sensors[1].values.temperature, null);
+  assert.equal(Object.keys(got.w1_sensors[1].values).length, 9);
+  assert.equal(got.w1_sensors[1]._valid, undefined);
+});
+
 // Every generated (type, channel) of a 1-Wire type survives an encode/decode
 // round trip at its wire scale.
 test("fPort-2 telemetry: every 1-Wire (type, channel) round-trips (#430)", () => {
