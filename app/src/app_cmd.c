@@ -575,6 +575,7 @@ static const struct {
 	{DUMP_SECTION_APPLICATION, 5, 6, false, false},
 	{DUMP_SECTION_APPLICATION, 6, 3, false, false},
 	{DUMP_SECTION_APPLICATION, 7, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 8, 3, false, false},
 	{DUMP_SECTION_SENSORS, 1, 2, false, false},
 	{DUMP_SECTION_SENSORS, 2, 2, false, false},
 	{DUMP_SECTION_SENSORS, 3, 2, false, false},

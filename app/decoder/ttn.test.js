@@ -996,6 +996,15 @@ test("set_param application.vendor_reset_allow round-trips (#H2)", () => {
   assert.equal(back.set_param.application.vendor_reset_allow, 1);
 });
 
+test("set_param application.interval_announce round-trips (#445)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 3, command: "set_param", set_param: { application: { interval_announce: 12 } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.interval_announce, 12);
+});
+
 test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)", () => {
   const enc = codec.encodeDownlink({
     data: {

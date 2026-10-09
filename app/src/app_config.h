@@ -86,6 +86,7 @@ struct app_config {
 	uint32_t history_sensors;
 	int battery_level;
 	bool vendor_reset_allow;
+	int interval_announce;
 	int alarm_limit;
 	enum app_config_lrw_region lrw_region;
 	enum app_config_radio_mode radio_mode;

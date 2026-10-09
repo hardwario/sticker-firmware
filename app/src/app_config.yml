@@ -450,6 +450,20 @@ parameters:
     persistent: [device_reset, factory_reset]
     help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
 
+  # #445: the periodic re-announce of the boot/join Info + settings-info, so the
+  # network's retained identity/config heals without a reboot. Hours, not seconds:
+  # the 168 h cap keeps the period plus its jitter inside one 32-bit ms delay.
+  - name: interval_announce
+    proto_group: application
+    proto_id: 8
+    type: int
+    default: 24
+    min: 1
+    max: 168
+    help: "Get/Set periodic Info + settings-info announce interval (range 1 to 168 hours; 0 = off)."
+    extras:
+      zero_allowed: true
+
   - name: alarm_limit
     proto_group: alarms
     proto_id: 1
