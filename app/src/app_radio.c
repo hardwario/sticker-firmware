@@ -35,12 +35,14 @@
 LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
 
 /* The radio work queue (doc/plan/439 T2a). Only one backend runs, so the two
- * 4 KB stacks they had became one. 4096 B covers the deepest paths of both:
- * lorawan_send -> LoRaMac -> nanopb encode -> AES-CCM (#187), and a P2P 0x56
- * command -- recv_ack -> app_cmd_handle -> nanopb decode/encode, ~1000 B before
- * nanopb touches the stack. Release builds carry no stack canary, so an
- * overflow here would corrupt RAM silently. */
-#define RADIO_WQ_STACK_SIZE 4096
+ * 4 KB stacks they had became one. Deepest paths: lorawan_send -> LoRaMac ->
+ * nanopb encode -> AES-CCM (#187), and a command downlink -- recv_ack ->
+ * app_cmd_handle -> nanopb decode/encode. HW high-water mark (CONFIG_INIT_STACKS,
+ * release + PM=n, 2026-10-09) over GetConfig paging, SetParam ack/OUT_OF_RANGE/
+ * NOT_WRITABLE: 2288 B LoRaWAN, 2272 B TOWER P2P. 3584 B keeps ~1.3 KB for
+ * paths not measured (static worst case ~3.2 KB). Release builds carry no
+ * stack canary, so an overflow here would corrupt RAM silently. */
+#define RADIO_WQ_STACK_SIZE 3584
 
 static K_THREAD_STACK_DEFINE(m_wq_stack, RADIO_WQ_STACK_SIZE);
 static struct k_work_q m_wq;
