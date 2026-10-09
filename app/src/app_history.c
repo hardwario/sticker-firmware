@@ -19,12 +19,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
 #if defined(CONFIG_APP_HISTORY_FLASH)
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
-#include <zephyr/sys/crc.h>
 #endif
 
 #if defined(CONFIG_SHELL)
@@ -38,94 +38,57 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_history, LOG_LEVEL_INF);
 
-/* ---- Sensor descriptor table -------------------------------------------- */
+/* ---- Record layout ------------------------------------------------------ */
 
-enum hist_enc {
-	ENC_TEMP,  /* float -> int16 x100, sentinel 0x7FFF, 2 B */
-	ENC_HUM,   /* float -> uint8 x2,   sentinel 0xFF,   1 B */
-	ENC_COUNT, /* uint32 absolute,                       4 B */
-	/* #311: same wire scale as the Telemetry message (app_compose.c) so a
-	 * consumer can share one conversion for both, just a fixed-width field
-	 * instead of a proto3-presence one. */
-	ENC_PRESSURE, /* float kPa -> uint16 hPa x10, sentinel 0xFFFF, 2 B */
-	ENC_LUX,      /* float lux -> uint16 lux/2,   sentinel 0xFFFF, 2 B */
-	ENC_ORIENT,   /* int (INT_MAX=absent) -> uint8 raw & 0xf, sentinel 0xFF, 1 B */
+/* A record holds the channels listed in config.history_channels, in list order
+ * (#430): entry `slot << 5 | ch` is channel ch of the slot's type (slot 0 = the
+ * motherboard, 1..4 = 1-Wire sensorN with its sensorN_type). Encoding and scale
+ * come from the registry (app_sensor_types.yaml `history`); the top value of an
+ * encoding marks an absent value. An entry naming an unknown or retired channel,
+ * a 1-Wire slot without a type, or a channel whose capability is off is
+ * skipped; the layout is rebuilt (and the buffer restarted) when that changes. */
+
+#define HIST_SLOT(e) ((uint8_t)((e) >> 5))
+#define HIST_CH(e)   ((uint8_t)((e) & 0x1F))
+
+struct hist_col {
+	const struct app_sensor_channel *desc;
+	uint8_t entry; /* slot << 5 | ch */
+	uint8_t type;  /* enum app_sensor_type_id of the slot */
+	uint8_t size;  /* encoded bytes */
 };
 
-#define NO_CAP SIZE_MAX
+#define MAX_RECORD_SIZE (APP_HISTORY_MAX_CH * 4) /* worst case: every column 4 B */
 
-struct hist_desc {
-	const char *name;
-	size_t src_off; /* offset in struct app_sensor_data */
-	enum hist_enc enc;
-	uint8_t size;
-	size_t cap_off; /* offset of bool capability in struct app_config, or NO_CAP */
+BUILD_ASSERT(SIZEOF_FIELD(struct app_config, history_channels) == APP_HISTORY_MAX_CH,
+	     "history_channels size");
+BUILD_ASSERT(APP_HISTORY_MAX_CH <= 32, "present mask is 32-bit");
+BUILD_ASSERT(APP_W1_SLOT_COUNT <= 7 && APP_SENSOR_MB_CH_MAX <= 32, "entry is slot<<5|ch");
+
+static const uint8_t m_enc_size[] = {
+	[APP_SENSOR_HIST_U8] = 1,  [APP_SENSOR_HIST_I16] = 2, [APP_SENSOR_HIST_U16] = 2,
+	[APP_SENSOR_HIST_I32] = 4, [APP_SENSOR_HIST_U32] = 4,
 };
-
-static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
-	[APP_HISTORY_TEMPERATURE] = {"temperature", offsetof(struct app_sensor_data, temperature),
-				     ENC_TEMP, 2, offsetof(struct app_config, cap_sht)},
-	[APP_HISTORY_HUMIDITY] = {"humidity", offsetof(struct app_sensor_data, humidity), ENC_HUM,
-				  1, offsetof(struct app_config, cap_sht)},
-	/* 1-Wire ROM-bound slots s1..s4 (= telemetry slot model, w1[0..3]); each slot
-	 * stores temperature + humidity. A Dallas slot has no humidity → sentinel. */
-	[APP_HISTORY_S1_TEMP] = {"s1-temp", offsetof(struct app_sensor_data, w1[0].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S1_HUM] = {"s1-hum", offsetof(struct app_sensor_data, w1[0].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S2_TEMP] = {"s2-temp", offsetof(struct app_sensor_data, w1[1].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S2_HUM] = {"s2-hum", offsetof(struct app_sensor_data, w1[1].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S3_TEMP] = {"s3-temp", offsetof(struct app_sensor_data, w1[2].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S3_HUM] = {"s3-hum", offsetof(struct app_sensor_data, w1[2].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S4_TEMP] = {"s4-temp", offsetof(struct app_sensor_data, w1[3].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S4_HUM] = {"s4-hum", offsetof(struct app_sensor_data, w1[3].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_HALL_LEFT] = {"hall-left", offsetof(struct app_sensor_data, hall_left_count),
-				   ENC_COUNT, 4, offsetof(struct app_config, cap_hall_left)},
-	[APP_HISTORY_HALL_RIGHT] = {"hall-right",
-				    offsetof(struct app_sensor_data, hall_right_count), ENC_COUNT,
-				    4, offsetof(struct app_config, cap_hall_right)},
-	[APP_HISTORY_INPUT_A] = {"input-a", offsetof(struct app_sensor_data, input_a_count),
-				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_a)},
-	[APP_HISTORY_INPUT_B] = {"input-b", offsetof(struct app_sensor_data, input_b_count),
-				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_b)},
-	[APP_HISTORY_MOTION] = {"motion", offsetof(struct app_sensor_data, motion_count), ENC_COUNT,
-				4, offsetof(struct app_config, cap_pir_detector)},
-	/* #311: barometer (MPL3115A2), light sensor (OPT3001), accelerometer
-	 * (LIS2DH) — all already sampled + in telemetry, newly recordable here. */
-	[APP_HISTORY_PRESSURE] = {"pressure", offsetof(struct app_sensor_data, pressure),
-				  ENC_PRESSURE, 2, offsetof(struct app_config, cap_barometer)},
-	[APP_HISTORY_ILLUMINANCE] = {"illuminance", offsetof(struct app_sensor_data, illuminance),
-				     ENC_LUX, 2, offsetof(struct app_config, cap_light_sensor)},
-	[APP_HISTORY_ORIENTATION] = {"orientation", offsetof(struct app_sensor_data, orientation),
-				     ENC_ORIENT, 1, offsetof(struct app_config, cap_accelerometer)},
-	[APP_HISTORY_ACCEL_MOTION] = {"accel-motion",
-				      offsetof(struct app_sensor_data, accel_motion_count),
-				      ENC_COUNT, 4, offsetof(struct app_config, cap_accelerometer)},
-};
-
-#define TEMP_SENTINEL     0x7FFF
-#define HUM_SENTINEL      0xFF
-#define PRESSURE_SENTINEL 0xFFFF
-#define LUX_SENTINEL      0xFFFF
-#define ORIENT_SENTINEL   0xFF
-#define MAX_RECORD_SIZE   (APP_HISTORY_SENSOR_COUNT * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
 
 static struct k_mutex m_lock;
 static bool m_enabled;
-static uint32_t m_mask; /* selected & available sensors (bit i = enum app_history_sensor i) */
+static uint8_t m_list[APP_HISTORY_MAX_CH];         /* selection (config.history_channels) */
+static struct hist_col m_cols[APP_HISTORY_MAX_CH]; /* recorded columns, record order */
+static uint8_t m_ncols;
+static uint8_t m_w1_types[APP_W1_SLOT_COUNT]; /* slot types the layout was built with */
+static uint32_t m_layout;                     /* layout CRC, stamped into page headers */
+/* Momentary columns record "asserted during the interval": the pulse counter
+ * at the previous capture (bit i of m_pulses_known = m_pulses_prev[i] set). */
+static uint32_t m_pulses_prev[APP_HISTORY_MAX_CH];
+static uint32_t m_pulses_known;
 static uint16_t m_sample_size;
 static uint16_t m_capacity;
 static uint16_t m_count;    /* logical record count (cached from the backend ring) */
@@ -160,14 +123,6 @@ struct hist_seg {
  * clock-sync fixup of a page stamped before the RTC was set is persisted once in
  * the page's fix-up double word (flash backend), written from the report work
  * queue, so it survives the next reboot too. */
-
-static bool cap_on(size_t cap_off)
-{
-	if (cap_off == NO_CAP) {
-		return true;
-	}
-	return *(const bool *)((const char *)&g_app_config + cap_off);
-}
 
 static uint32_t now_seconds(bool *synced)
 {
@@ -211,7 +166,7 @@ static uint32_t now_seconds(bool *synced)
  *                                change); the next append starts a fresh run
  *   backend_erase()              wipe all storage (explicit `history clear`)
  *   backend_capacity(size)       max records for a given sample size
- * The backend reads m_sample_size / m_mask / m_interval directly (same
+ * The backend reads m_sample_size / m_layout / m_interval directly (same
  * translation unit) to stamp page headers. */
 
 #if defined(CONFIG_APP_HISTORY_FLASH)
@@ -274,7 +229,7 @@ BUILD_ASSERT((uint32_t)HIST_NPAGES *PAGE_DATA_V1 <= UINT16_MAX,
 struct hist_page_hdr {
 	uint32_t magic;
 	uint32_t seq;         /* monotonic; newest page has the highest seq */
-	uint32_t mask;        /* layout guard: must match the current selection */
+	uint32_t layout;      /* layout guard: CRC of the current columns (#430) */
 	uint32_t interval;    /* seconds between records when the page was written */
 	uint32_t base_time;   /* clock time of this page's first record */
 	uint32_t first_ord;   /* absolute ordinal of this page's first record */
@@ -506,7 +461,7 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 	struct hist_page_hdr h = {
 		.magic = PAGE_MAGIC_V2,
 		.seq = m_next_seq,
-		.mask = m_mask,
+		.layout = m_layout,
 		.interval = m_interval,
 		.base_time = base,
 		.first_ord = m_abs_ord,
@@ -601,7 +556,7 @@ static bool backend_mount(void)
 	}
 
 	/* Find the head = valid page with the highest sequence number whose layout
-	 * (mask + sample size) matches the current selection. */
+	 * (layout CRC + sample size) matches the current selection. */
 	bool have_head = false;
 	uint16_t head_phys = 0;
 	struct hist_page_hdr head_hdr = {0};
@@ -611,7 +566,7 @@ static bool backend_mount(void)
 		if (read_hdr(p, &h) != 0 || !hdr_valid(&h)) {
 			continue;
 		}
-		if (h.mask != m_mask || h.sample_size != m_sample_size) {
+		if (h.layout != m_layout || h.sample_size != m_sample_size) {
 			continue;
 		}
 		if (!have_head || (int32_t)(h.seq - head_hdr.seq) > 0) {
@@ -638,7 +593,7 @@ static bool backend_mount(void)
 		if (read_hdr(prev, &h) != 0 || !hdr_valid(&h)) {
 			break;
 		}
-		if (h.mask != m_mask || h.sample_size != m_sample_size ||
+		if (h.layout != m_layout || h.sample_size != m_sample_size ||
 		    h.interval != head_hdr.interval || (uint32_t)(cur.seq - h.seq) != 1) {
 			break;
 		}
@@ -1081,155 +1036,249 @@ static void seg_of(uint32_t abs, struct hist_seg *s)
 	}
 }
 
-/* ---- Mask / sizing ------------------------------------------------------ */
+/* ---- Layout / sizing ---------------------------------------------------- */
 
-uint32_t app_history_available_mask(void)
+/* Registry type of a slot: the motherboard, or the configured sensorN_type. */
+static uint8_t slot_type(uint8_t slot)
 {
-	uint32_t m = 0;
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (cap_on(m_desc[i].cap_off)) {
-			m |= BIT(i);
-		}
+	switch (slot) {
+	case 0:
+		return APP_SENSOR_TYPE_MOTHERBOARD;
+	case 1:
+		return g_app_config.sensor1_type;
+	case 2:
+		return g_app_config.sensor2_type;
+	case 3:
+		return g_app_config.sensor3_type;
+	case 4:
+		return g_app_config.sensor4_type;
+	default:
+		return APP_SENSOR_TYPE_NONE;
 	}
-	return m;
 }
 
-static void recompute_sizing(void)
+/* The channel an entry names when it can be recorded now, else NULL. */
+static const struct app_sensor_channel *entry_channel(uint8_t entry, uint8_t *type)
 {
-	uint32_t avail = app_history_available_mask();
-	m_mask &= avail; /* drop sensors whose capability went away */
+	uint8_t slot = HIST_SLOT(entry);
 
-	uint16_t size = 0; /* values only; per-record time is implicit (base + ord*interval) */
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (m_mask & BIT(i)) {
-			size += m_desc[i].size;
-		}
+	if (slot > APP_W1_SLOT_COUNT || (slot > 0 && !g_app_config.cap_w1_sensors)) {
+		return NULL;
 	}
+	*type = slot_type(slot);
+	const struct app_sensor_channel *c = app_sensor_channel_get(*type, HIST_CH(entry));
+
+	if (c == NULL || (c->flags & APP_SENSOR_F_RETIRED) || c->hist_enc == APP_SENSOR_HIST_NONE ||
+	    c->hist_enc >= ARRAY_SIZE(m_enc_size)) {
+		return NULL;
+	}
+	if (c->cap_off != APP_SENSOR_NO_CAP &&
+	    !*(const bool *)((const char *)&g_app_config + c->cap_off)) {
+		return NULL;
+	}
+	return c;
+}
+
+/* Rebuild the columns from m_list and the live slot types / capabilities.
+ * Returns true when the layout changed. Caller holds m_lock (or is init). */
+static bool layout_build(void)
+{
+	struct hist_col cols[APP_HISTORY_MAX_CH];
+	uint8_t n = 0;
+	uint16_t size = 0;
+	uint32_t crc = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(m_list); i++) {
+		uint8_t e = m_list[i];
+		uint8_t type;
+		bool dup = false;
+
+		if (e == APP_HISTORY_ENTRY_UNUSED) {
+			continue;
+		}
+		for (uint8_t k = 0; k < n; k++) {
+			dup |= cols[k].entry == e;
+		}
+		const struct app_sensor_channel *c = dup ? NULL : entry_channel(e, &type);
+
+		if (c == NULL) {
+			continue;
+		}
+		cols[n] = (struct hist_col){
+			.desc = c, .entry = e, .type = type, .size = m_enc_size[c->hist_enc]};
+		size += cols[n].size;
+		/* The guard covers what decoding a stored record depends on. */
+		uint8_t key[3] = {e, type, c->hist_enc};
+
+		crc = crc32_ieee_update(crc, key, sizeof(key));
+		crc = crc32_ieee_update(crc, (const uint8_t *)&c->hist_scale,
+					sizeof(c->hist_scale));
+		n++;
+	}
+
+	bool changed = n != m_ncols || crc != m_layout || size != m_sample_size;
+
+	memcpy(m_cols, cols, n * sizeof(cols[0]));
+	m_ncols = n;
+	m_layout = crc;
 	m_sample_size = size;
-	/* An empty mask (no history sensor enabled) gives size 0; the RAM backend's
-	 * capacity is sizeof(m_ram)/sample_size, so guard the divisor here. capacity 0
-	 * disables the buffer (checked by capture/replay), which is the correct
-	 * behaviour for "nothing to record". */
+	for (uint8_t s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		m_w1_types[s] = slot_type(s + 1);
+	}
+	if (changed) {
+		m_pulses_known = 0;
+	}
+	/* No channel gives size 0; the RAM backend's capacity is
+	 * sizeof(m_ram)/sample_size, so guard the divisor here. capacity 0 disables
+	 * the buffer (checked by capture/replay) — "nothing to record". */
 	m_capacity = size ? backend_capacity(size) : 0;
+	return changed;
+}
+
+/* Logical reset only: the record layout changed, so the ring drops its live set
+ * and the next append opens a fresh page. Stale pages carry the old layout CRC
+ * in their headers, so mount rejects them and the ring reclaims them as it
+ * wraps — no full-partition erase stall. (`history clear` still erases.)
+ * Caller holds m_lock. */
+static void layout_reset(void)
+{
+	m_count = 0;
+	backend_reset_logical();
 }
 
 /* ---- Record codec ------------------------------------------------------- */
 
+static void enc_limits(uint8_t enc, int64_t *lo, int64_t *hi)
+{
+	switch (enc) {
+	case APP_SENSOR_HIST_U8:
+		*lo = 0, *hi = UINT8_MAX - 1;
+		break;
+	case APP_SENSOR_HIST_I16:
+		*lo = INT16_MIN, *hi = INT16_MAX - 1;
+		break;
+	case APP_SENSOR_HIST_U16:
+		*lo = 0, *hi = UINT16_MAX - 1;
+		break;
+	case APP_SENSOR_HIST_I32:
+		*lo = INT32_MIN, *hi = INT32_MAX - 1;
+		break;
+	default:
+		*lo = 0, *hi = (int64_t)UINT32_MAX - 1;
+		break;
+	}
+}
+
+/* The "absent" sentinel: the top value of the encoding (INT16_MAX / INT32_MAX /
+ * all-ones). */
+static uint32_t enc_sentinel(uint8_t enc)
+{
+	int64_t lo, hi;
+
+	enc_limits(enc, &lo, &hi);
+	return (uint32_t)(hi + 1);
+}
+
+static void put_raw(uint8_t *p, uint8_t size, uint32_t v)
+{
+	if (size == 1) {
+		p[0] = (uint8_t)v;
+	} else if (size == 2) {
+		sys_put_le16((uint16_t)v, p);
+	} else {
+		sys_put_le32(v, p);
+	}
+}
+
+/* Encode column i from g_app_sensor_data (caller holds its lock). */
 static size_t encode_value(uint8_t *p, int i)
 {
-	const struct hist_desc *d = &m_desc[i];
-	const char *src = (const char *)&g_app_sensor_data + d->src_off;
+	const struct hist_col *col = &m_cols[i];
+	const struct app_sensor_channel *c = col->desc;
+	uint8_t slot = HIST_SLOT(col->entry);
+	const union app_sensor_value *v;
+	uint32_t valid;
 
-	switch (d->enc) {
-	case ENC_TEMP: {
-		float f;
-		memcpy(&f, src, sizeof(f));
-		int16_t v = isnan(f) ? (int16_t)TEMP_SENTINEL : (int16_t)lroundf(f * 100.0f);
-		sys_put_le16((uint16_t)v, p);
-		return 2;
+	if (slot == 0) {
+		v = g_app_sensor_data.mb.v;
+		valid = g_app_sensor_data.mb.valid;
+	} else {
+		const struct app_sensor_w1 *w = &g_app_sensor_data.w1[slot - 1];
+
+		v = w->v;
+		/* A slot that does not hold the type the layout was built for (absent,
+		 * replaced, re-typed) records nothing. */
+		valid = (w->present && w->type == col->type) ? w->valid : 0;
 	}
-	case ENC_HUM: {
-		float f;
-		memcpy(&f, src, sizeof(f));
-		p[0] = isnan(f) ? HUM_SENTINEL : (uint8_t)lroundf(f * 2.0f);
-		return 1;
+
+	uint8_t ch = HIST_CH(col->entry);
+	uint32_t raw = enc_sentinel(c->hist_enc);
+	int64_t x = 0;
+	bool have = false;
+
+	if (c->flags & APP_SENSOR_F_MOMENTARY) {
+		/* Asserted during the interval = its pulse counter moved since the
+		 * previous record; the first record after a (re)start has no base. */
+		if (c->pulses_ch != APP_SENSOR_NO_CH && (valid & BIT(c->pulses_ch))) {
+			uint32_t cnt = v[c->pulses_ch].u;
+
+			if (m_pulses_known & BIT(i)) {
+				x = cnt > m_pulses_prev[i] ? 1 : 0;
+				have = true;
+			}
+			m_pulses_prev[i] = cnt;
+			m_pulses_known |= BIT(i);
+		}
+	} else if (valid & BIT(ch)) {
+		if (c->flags & APP_SENSOR_F_COUNTER) {
+			x = v[ch].u;
+			have = true;
+		} else if (!isnan(v[ch].f)) {
+			x = llroundf(v[ch].f * c->hist_scale);
+			have = true;
+		}
 	}
-	case ENC_COUNT: {
-		uint32_t c;
-		memcpy(&c, src, sizeof(c));
-		sys_put_le32(c, p);
-		return 4;
+	if (have) {
+		int64_t lo, hi;
+
+		enc_limits(c->hist_enc, &lo, &hi);
+		raw = (uint32_t)CLAMP(x, lo, hi);
 	}
-	case ENC_PRESSURE: {
-		float f;
-		memcpy(&f, src, sizeof(f));
-		uint16_t v = isnan(f) ? (uint16_t)PRESSURE_SENTINEL
-				      : (uint16_t)CLAMP(lroundf(f * 100.0f), 0, 65534);
-		sys_put_le16(v, p);
-		return 2;
-	}
-	case ENC_LUX: {
-		float f;
-		memcpy(&f, src, sizeof(f));
-		uint16_t v = isnan(f) ? (uint16_t)LUX_SENTINEL
-				      : (uint16_t)CLAMP(lroundf(f / 2.0f), 0, 65534);
-		sys_put_le16(v, p);
-		return 2;
-	}
-	case ENC_ORIENT: {
-		int iv;
-		memcpy(&iv, src, sizeof(iv));
-		p[0] = (iv == INT_MAX) ? ORIENT_SENTINEL : (uint8_t)(iv & 0xf);
-		return 1;
-	}
-	}
-	return 0;
+	put_raw(p, col->size, raw);
+	return col->size;
 }
 
 static void decode_record(const uint8_t *rec, struct app_history_record *out)
 {
-	out->present = 0;
 	const uint8_t *p = rec; /* values only — no per-record delta prefix */
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (!(m_mask & BIT(i))) {
-			out->value[i] = 0;
+
+	out->present = 0;
+	for (int i = 0; i < m_ncols; i++) {
+		const struct app_sensor_channel *c = m_cols[i].desc;
+		uint32_t raw = m_cols[i].size == 1   ? p[0]
+			       : m_cols[i].size == 2 ? sys_get_le16(p)
+						     : sys_get_le32(p);
+
+		p += m_cols[i].size;
+		out->value[i] = 0;
+		if (raw == enc_sentinel(c->hist_enc)) {
 			continue;
 		}
-		const struct hist_desc *d = &m_desc[i];
-		switch (d->enc) {
-		case ENC_TEMP: {
-			int16_t v = (int16_t)sys_get_le16(p);
-			if ((uint16_t)v != TEMP_SENTINEL) {
-				out->value[i] = v / 100.0;
-				out->present |= BIT(i);
-			}
-			p += 2;
+		double x;
+
+		switch (c->hist_enc) {
+		case APP_SENSOR_HIST_I16:
+			x = (int16_t)raw;
+			break;
+		case APP_SENSOR_HIST_I32:
+			x = (int32_t)raw;
+			break;
+		default:
+			x = raw;
 			break;
 		}
-		case ENC_HUM: {
-			uint8_t v = p[0];
-			if (v != HUM_SENTINEL) {
-				out->value[i] = v / 2.0;
-				out->present |= BIT(i);
-			}
-			p += 1;
-			break;
-		}
-		case ENC_COUNT: {
-			uint32_t v = sys_get_le32(p);
-			out->value[i] = (double)v;
-			out->present |= BIT(i);
-			p += 4;
-			break;
-		}
-		case ENC_PRESSURE: {
-			uint16_t v = sys_get_le16(p);
-			if (v != PRESSURE_SENTINEL) {
-				out->value[i] = v / 10.0;
-				out->present |= BIT(i);
-			}
-			p += 2;
-			break;
-		}
-		case ENC_LUX: {
-			uint16_t v = sys_get_le16(p);
-			if (v != LUX_SENTINEL) {
-				out->value[i] = v * 2.0;
-				out->present |= BIT(i);
-			}
-			p += 2;
-			break;
-		}
-		case ENC_ORIENT: {
-			uint8_t v = p[0];
-			if (v != ORIENT_SENTINEL) {
-				out->value[i] = v;
-				out->present |= BIT(i);
-			}
-			p += 1;
-			break;
-		}
-		}
+		out->value[i] = (c->flags & APP_SENSOR_F_COUNTER) ? x : x / (double)c->hist_scale;
+		out->present |= BIT(i);
 	}
 }
 
@@ -1301,7 +1350,8 @@ static bool slot_continues(uint32_t next, bool next_synced, uint32_t slot, bool 
 
 static void capture(bool have_slot, uint32_t slot, bool slot_synced)
 {
-	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
+	/* An empty layout is re-checked below: a slot typed later may fill it. */
+	if (!m_enabled || !app_history_is_ready()) {
 		return;
 	}
 
@@ -1325,13 +1375,22 @@ static void capture(bool have_slot, uint32_t slot, bool slot_synced)
 		m_count = 0;
 	}
 
+	/* A slot re-typed / a capability toggled since the last record changes the
+	 * columns: restart the buffer on the new layout (#430). */
+	if (layout_build()) {
+		LOG_INF("history layout changed: %u channels, %u B/record", m_ncols, m_sample_size);
+		layout_reset();
+	}
+	if (m_sample_size == 0 || m_capacity == 0) {
+		k_mutex_unlock(&m_lock);
+		return;
+	}
+
 	/* Snapshot sensor values atomically w.r.t. the sensor data. */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 	size_t pos = 0;
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (m_mask & BIT(i)) {
-			pos += encode_value(&rec[pos], i);
-		}
+	for (int i = 0; i < m_ncols; i++) {
+		pos += encode_value(&rec[pos], i);
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -1557,7 +1616,7 @@ static uint32_t next_in_window(uint32_t abs, uint32_t end, uint32_t from_unix, u
 }
 
 /* Records have a fixed size (m_sample_size, values only) and a shared present
- * mask (m_mask) — so a wire frame carries the mask + interval once and each
+ * column layout (m_cols) — so a wire frame carries the layout + interval once and each
  * record is just the raw stored bytes (sentinels mark absent values). Time is
  * implicit and periodic within a segment, so a frame never crosses a segment
  * boundary: its t0 and time_synced are the segment's, and the host's
@@ -1741,53 +1800,87 @@ void app_history_set_enabled(bool enable)
 	m_enabled = enable;
 }
 
-/* The selection mask is a uint32_t bitmap (one bit per channel), persisted as
- * config.history_sensors. Adding a 33rd channel would silently overflow it. */
-BUILD_ASSERT(APP_HISTORY_SENSOR_COUNT <= 32, "history mask is 32-bit");
+/* Record size is the sum of the selected columns' encodings (1..4 B each):
+ * the factory default (temperature + humidity) is 3 B/record, the worst case
+ * (24 four-byte columns) 96 B. This directly bounds records-per-tap on the NFC
+ * paged readout (req_history_page), whose samples payload is capped well under
+ * 512 B (see DUMP_PAGE_BUDGET_NFC in app_cmd.c) — selecting more channels
+ * trades off history depth per NFC tap. */
 
-/* Record size scales with the number of selected channels (m_desc[].size: 2 B
- * temperature, 1 B humidity, 4 B counter) — worst case, all 15 channels selected,
- * is ~35 B/record; the factory default (temperature + humidity) is 3 B/record.
- * This directly bounds records-per-tap on the NFC paged readout (req_history_page),
- * whose samples payload is capped well under 512 B (see DUMP_PAGE_BUDGET_NFC in
- * app_cmd.c) — selecting more channels trades off history depth per NFC tap. */
-
-uint32_t app_history_get_mask(void)
-{
-	return m_mask;
-}
-
-void app_history_set_mask(uint32_t mask)
+void app_history_get_layout(struct app_history_layout *out)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
-	uint32_t avail = app_history_available_mask();
-	m_mask = mask & avail;
-	/* Logical reset only: the record layout changed, so the ring drops its live
-	 * set and the next append opens a fresh page. Stale pages carry the old mask
-	 * in their headers, so mount rejects them and the ring reclaims them as it
-	 * wraps — no full-partition erase stall. (`history clear` still erases.) */
-	m_count = 0;
-	recompute_sizing();
-	backend_reset_logical();
+	memset(out, 0, sizeof(*out));
+	out->count = m_ncols;
+	for (uint8_t i = 0; i < m_ncols; i++) {
+		out->channels[i] = m_cols[i].entry;
+		out->has_w1 |= HIST_SLOT(m_cols[i].entry) != 0;
+	}
+	memcpy(out->w1_types, m_w1_types, sizeof(out->w1_types));
 	k_mutex_unlock(&m_lock);
 }
 
-enum app_history_sensor app_history_sensor_by_name(const char *name)
+void app_history_set_channels(const uint8_t *list, size_t n)
 {
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (strcmp(name, m_desc[i].name) == 0) {
-			return (enum app_history_sensor)i;
-		}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	memset(m_list, APP_HISTORY_ENTRY_UNUSED, sizeof(m_list));
+	memcpy(m_list, list, MIN(n, sizeof(m_list)));
+	if (layout_build()) {
+		layout_reset();
 	}
-	return APP_HISTORY_SENSOR_COUNT;
+	k_mutex_unlock(&m_lock);
 }
 
-bool app_history_sensor_available(enum app_history_sensor s)
+void app_history_get_channels(uint8_t list[APP_HISTORY_MAX_CH])
 {
-	if (s < 0 || s >= APP_HISTORY_SENSOR_COUNT) {
-		return false;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	memcpy(list, m_list, sizeof(m_list));
+	k_mutex_unlock(&m_lock);
+}
+
+int app_history_entry_name(uint8_t entry, char *buf, size_t cap)
+{
+	uint8_t slot = HIST_SLOT(entry);
+	const struct app_sensor_channel *c =
+		slot <= APP_W1_SLOT_COUNT ? app_sensor_channel_get(slot_type(slot), HIST_CH(entry))
+					  : NULL;
+
+	if (c == NULL) {
+		snprintf(buf, cap, "?%02x", entry);
+		return -ENOENT;
 	}
-	return cap_on(m_desc[s].cap_off);
+	if (slot == 0) {
+		snprintf(buf, cap, "%s", c->name);
+	} else {
+		snprintf(buf, cap, "s%u-%s", slot, c->name);
+	}
+	return 0;
+}
+
+int app_history_entry_by_name(const char *name, uint8_t *entry)
+{
+	uint8_t slot = 0;
+
+	/* "s<N>-<channel>" names a channel of 1-Wire slot N's configured type. */
+	if (name[0] == 's' && name[1] >= '1' && name[1] <= '0' + APP_W1_SLOT_COUNT &&
+	    name[2] == '-') {
+		slot = (uint8_t)(name[1] - '0');
+		name += 3;
+	}
+	int ch = app_sensor_channel_by_name(slot_type(slot), name);
+
+	if (ch < 0) {
+		return -EINVAL;
+	}
+	*entry = (uint8_t)(slot << 5 | ch);
+	return 0;
+}
+
+bool app_history_entry_available(uint8_t entry)
+{
+	uint8_t type;
+
+	return entry_channel(entry, &type) != NULL;
 }
 
 int app_history_init(void)
@@ -1795,10 +1888,7 @@ int app_history_init(void)
 	k_mutex_init(&m_lock);
 
 	m_enabled = g_app_config.history_enable;
-
-	/* Seed mask: explicit config bitmask, intersected with capability. */
-	uint32_t avail = app_history_available_mask();
-	m_mask = g_app_config.history_sensors & avail;
+	memcpy(m_list, g_app_config.history_channels, sizeof(m_list));
 
 	int ret = backend_init();
 	if (ret) {
@@ -1807,7 +1897,7 @@ int app_history_init(void)
 		return ret;
 	}
 
-	recompute_sizing();
+	(void)layout_build();
 
 	/* Restore a prior ring if its layout matches; else start clean. On success
 	 * backend_mount() sets m_interval and each page's time base from the page
@@ -1820,8 +1910,8 @@ int app_history_init(void)
 		m_interval = 0;
 	}
 
-	LOG_INF("history: enabled=%d, %u sensors, sample=%uB, capacity=%u, stored=%u", m_enabled,
-		(unsigned)POPCOUNT(m_mask), m_sample_size, m_capacity, m_count);
+	LOG_INF("history: enabled=%d, %u channels, sample=%uB, capacity=%u, stored=%u", m_enabled,
+		m_ncols, m_sample_size, m_capacity, m_count);
 	return 0;
 }
 
@@ -1834,18 +1924,23 @@ static const char *backend_name(void)
 	return IS_ENABLED(CONFIG_APP_HISTORY_FLASH) ? "flash" : "ram";
 }
 
-static void print_value(const struct shell *sh, char *buf, size_t cap, int i, bool present,
-			double v)
+static void print_value(char *buf, size_t cap, int i, bool present, double v)
 {
+	const struct app_sensor_channel *c = m_cols[i].desc;
+
 	if (!present) {
 		snprintf(buf, cap, "--");
-	} else if (m_desc[i].enc == ENC_COUNT || m_desc[i].enc == ENC_ORIENT) {
-		/* orientation is a discrete 0..15 code, not a fractional measurement. */
+	} else if ((c->flags & APP_SENSOR_F_COUNTER) || c->hist_scale <= 1.0f) {
+		/* Counters, states and enums (orientation) are whole numbers. */
 		snprintf(buf, cap, "%d", APP_FP0(v));
 	} else {
 		snprintf(buf, cap, "%s%d.%02d", APP_FP2(v));
 	}
-	ARG_UNUSED(sh);
+}
+
+static void col_name(int i, char *buf, size_t cap)
+{
+	(void)app_history_entry_name(m_cols[i].entry, buf, cap);
 }
 
 static int cmd_history_info(const struct shell *sh, size_t argc, char **argv)
@@ -1857,16 +1952,17 @@ static int cmd_history_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "backend:   %s", backend_name());
 
 	char list[256] = "";
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (m_mask & BIT(i)) {
-			if (list[0]) {
-				strncat(list, ", ", sizeof(list) - strlen(list) - 1);
-			}
-			strncat(list, m_desc[i].name, sizeof(list) - strlen(list) - 1);
+	for (int i = 0; i < m_ncols; i++) {
+		char name[32];
+
+		col_name(i, name, sizeof(name));
+		if (list[0]) {
+			strncat(list, ", ", sizeof(list) - strlen(list) - 1);
 		}
+		strncat(list, name, sizeof(list) - strlen(list) - 1);
 	}
-	shell_print(sh, "sensors:   %s (%u ch, %u B/record)", list[0] ? list : "(none)",
-		    (unsigned)POPCOUNT(m_mask), m_sample_size);
+	shell_print(sh, "channels:  %s (%u ch, %u B/record)", list[0] ? list : "(none)", m_ncols,
+		    m_sample_size);
 	shell_print(sh, "capacity:  %u records", m_capacity);
 
 	k_mutex_lock(&m_lock, K_FOREVER);
@@ -1909,10 +2005,11 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 	/* Header */
 	char hdr[256];
 	int off = snprintf(hdr, sizeof(hdr), "%-5s %-20s", "#", "time");
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT && off < (int)sizeof(hdr); i++) {
-		if (m_mask & BIT(i)) {
-			off += snprintf(hdr + off, sizeof(hdr) - off, " %8s", m_desc[i].name);
-		}
+	for (int i = 0; i < m_ncols && off < (int)sizeof(hdr); i++) {
+		char name[32];
+
+		col_name(i, name, sizeof(name));
+		off += snprintf(hdr + off, sizeof(hdr) - off, " %8s", name);
 	}
 	shell_print(sh, "%s", hdr);
 
@@ -1937,14 +2034,12 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 			snprintf(tbuf, sizeof(tbuf), "up %us (no-rtc)", (unsigned)r.time_unix);
 		}
 
-		char line[160];
+		char line[256];
 		int lo = snprintf(line, sizeof(line), "%-5u %-20s", (unsigned)k, tbuf);
-		for (int i = 0; i < APP_HISTORY_SENSOR_COUNT && lo < (int)sizeof(line); i++) {
-			if (m_mask & BIT(i)) {
-				char vb[16];
-				print_value(sh, vb, sizeof(vb), i, r.present & BIT(i), r.value[i]);
-				lo += snprintf(line + lo, sizeof(line) - lo, " %8s", vb);
-			}
+		for (int i = 0; i < m_ncols && lo < (int)sizeof(line); i++) {
+			char vb[16];
+			print_value(vb, sizeof(vb), i, r.present & BIT(i), r.value[i]);
+			lo += snprintf(line + lo, sizeof(line) - lo, " %8s", vb);
 		}
 		shell_print(sh, "%s", line);
 	}
@@ -1997,43 +2092,76 @@ static int cmd_history_enable(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_history_sensors(const struct shell *sh, size_t argc, char **argv)
 {
+	uint8_t list[APP_HISTORY_MAX_CH];
+
+	app_history_get_channels(list);
+
 	if (argc == 1) {
-		shell_print(sh, "%-12s %-7s %s", "sensor", "stored", "capability");
-		for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-			shell_print(sh, "%-12s %-7s %s", m_desc[i].name,
-				    (m_mask & BIT(i)) ? "yes" : "no",
-				    app_history_sensor_available((enum app_history_sensor)i)
-					    ? "available"
-					    : "off");
+		/* Every channel of the motherboard and of each typed 1-Wire slot. */
+		shell_print(sh, "%-24s %-7s %s", "channel", "stored", "capability");
+		for (uint8_t slot = 0; slot <= APP_W1_SLOT_COUNT; slot++) {
+			const struct app_sensor_type *t = app_sensor_type_get(slot_type(slot));
+
+			for (uint8_t ch = 0; t != NULL && ch < t->channel_count; ch++) {
+				uint8_t e = (uint8_t)(slot << 5 | ch);
+				char name[32];
+				bool stored = false;
+
+				if (t->channels[ch].flags & APP_SENSOR_F_RETIRED) {
+					continue;
+				}
+				for (int k = 0; k < m_ncols; k++) {
+					stored |= m_cols[k].entry == e;
+				}
+				(void)app_history_entry_name(e, name, sizeof(name));
+				shell_print(sh, "%-24s %-7s %s", name, stored ? "yes" : "no",
+					    app_history_entry_available(e) ? "available" : "off");
+			}
 		}
 		return 0;
 	}
 
 	if (argc != 3) {
-		shell_error(sh, "usage: history sensors [<name> on|off]");
+		shell_error(sh, "usage: history sensors [<channel> on|off]");
 		return -EINVAL;
 	}
 
-	enum app_history_sensor s = app_history_sensor_by_name(argv[1]);
-	if (s == APP_HISTORY_SENSOR_COUNT) {
-		shell_error(sh, "unknown sensor `%s`", argv[1]);
+	uint8_t e;
+
+	if (app_history_entry_by_name(argv[1], &e) != 0) {
+		shell_error(sh, "unknown channel `%s`", argv[1]);
 		return -EINVAL;
 	}
 	bool on = strcmp(argv[2], "on") == 0;
 	if (!on && strcmp(argv[2], "off") != 0) {
-		shell_error(sh, "usage: history sensors <name> on|off");
+		shell_error(sh, "usage: history sensors <channel> on|off");
 		return -EINVAL;
 	}
-	if (on && !app_history_sensor_available(s)) {
+	if (on && !app_history_entry_available(e)) {
 		shell_error(sh, "`%s` capability is off", argv[1]);
 		return -EINVAL;
 	}
 
-	uint32_t mask = app_history_get_mask();
-	mask = on ? (mask | BIT(s)) : (mask & ~BIT(s));
-	app_history_set_mask(mask);
-	app_config()->history_sensors = app_history_get_mask(); /* staged */
-	shell_print(sh, "sensor `%s` %s; buffer cleared", argv[1], on ? "enabled" : "disabled");
+	/* Drop the entry, then append it when on: the list stays compact. */
+	uint8_t out[APP_HISTORY_MAX_CH];
+	size_t n = 0;
+
+	memset(out, APP_HISTORY_ENTRY_UNUSED, sizeof(out));
+	for (size_t k = 0; k < ARRAY_SIZE(list); k++) {
+		if (list[k] != APP_HISTORY_ENTRY_UNUSED && list[k] != e) {
+			out[n++] = list[k];
+		}
+	}
+	if (on) {
+		if (n == ARRAY_SIZE(out)) {
+			shell_error(sh, "at most %u channels", APP_HISTORY_MAX_CH);
+			return -ENOSPC;
+		}
+		out[n++] = e;
+	}
+	app_history_set_channels(out, sizeof(out));
+	memcpy(app_config()->history_channels, out, sizeof(out)); /* staged */
+	shell_print(sh, "channel `%s` %s; buffer cleared", argv[1], on ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -2043,14 +2171,14 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	size_t count = app_history_count();
-	shell_print(sh, "%-12s %8s %8s %8s %5s", "sensor", "min", "max", "avg", "n");
+	shell_print(sh, "%-20s %8s %8s %8s %5s", "channel", "min", "max", "avg", "n");
 
-	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
-		if (!(m_mask & BIT(i))) {
-			continue;
-		}
+	for (int i = 0; i < m_ncols; i++) {
+		char name[32];
 		double mn = 0, mx = 0, sum = 0;
 		unsigned n = 0;
+
+		col_name(i, name, sizeof(name));
 		for (size_t k = 0; k < count; k++) {
 			struct app_history_record r;
 			if (app_history_get(k, &r) != 0) {
@@ -2070,10 +2198,9 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 			n++;
 		}
 		if (n == 0) {
-			shell_print(sh, "%-12s %8s %8s %8s %5u", m_desc[i].name, "--", "--", "--",
-				    0);
+			shell_print(sh, "%-20s %8s %8s %8s %5u", name, "--", "--", "--", 0);
 		} else {
-			shell_print(sh, "%-12s %s%d.%02d %s%d.%02d %s%d.%02d %5u", m_desc[i].name,
+			shell_print(sh, "%-20s %s%d.%02d %s%d.%02d %s%d.%02d %5u", name,
 				    APP_FP2(mn), APP_FP2(mx), APP_FP2(sum / n), n);
 		}
 	}
@@ -2087,11 +2214,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(clear, NULL, "Erase the buffer.", cmd_history_clear, 1, 0),
 	SHELL_CMD_ARG(capture, NULL, "Sample sensors and store one record now (test).",
 		      cmd_history_capture, 1, 0),
-	SHELL_CMD_ARG(sensors, NULL, "List/select sensors. Usage: sensors [<name> on|off]",
+	SHELL_CMD_ARG(sensors, NULL, "List/select channels. Usage: sensors [<channel> on|off]",
 		      cmd_history_sensors, 1, 2),
 	SHELL_CMD_ARG(enable, NULL, "Master on/off. Usage: enable on|off", cmd_history_enable, 2,
 		      0),
-	SHELL_CMD_ARG(stats, NULL, "Per-sensor min/max/avg.", cmd_history_stats, 1, 0),
+	SHELL_CMD_ARG(stats, NULL, "Per-channel min/max/avg.", cmd_history_stats, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(history, &sub_history, "Sensor history store-and-forward.", NULL);

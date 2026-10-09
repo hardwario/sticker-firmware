@@ -36,7 +36,9 @@ static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
 	.history_enable = false,
-	.history_sensors = 3,
+	.history_channels = {0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.interval_announce = 24,
@@ -74,7 +76,9 @@ static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
 	.history_enable = false,
-	.history_sensors = 3,
+	.history_channels = {0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.interval_announce = 24,
@@ -148,8 +152,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.interval_report));
 	SETTINGS_SET("history-enable", &m_app_config.history_enable,
 		     sizeof(m_app_config.history_enable));
-	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
-		     sizeof(m_app_config.history_sensors));
+	SETTINGS_SET("history-channels", m_app_config.history_channels,
+		     sizeof(m_app_config.history_channels));
 	SETTINGS_SET("battery-level", &m_app_config.battery_level,
 		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
@@ -217,9 +221,13 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	SETTINGS_SET("sensor1-type", &m_app_config.sensor1_type, sizeof(m_app_config.sensor1_type));
 	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	SETTINGS_SET("sensor2-type", &m_app_config.sensor2_type, sizeof(m_app_config.sensor2_type));
 	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	SETTINGS_SET("sensor3-type", &m_app_config.sensor3_type, sizeof(m_app_config.sensor3_type));
 	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	SETTINGS_SET("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
 	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
 		     sizeof(m_app_config.hall_left_counter));
 	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
@@ -410,8 +418,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.interval_report));
 	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
 		    sizeof(m_app_config.history_enable));
-	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
-		    sizeof(m_app_config.history_sensors));
+	EXPORT_FUNC("history-channels", m_app_config.history_channels,
+		    sizeof(m_app_config.history_channels));
 	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
 		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
@@ -479,9 +487,13 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	EXPORT_FUNC("sensor1-type", &m_app_config.sensor1_type, sizeof(m_app_config.sensor1_type));
 	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	EXPORT_FUNC("sensor2-type", &m_app_config.sensor2_type, sizeof(m_app_config.sensor2_type));
 	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	EXPORT_FUNC("sensor3-type", &m_app_config.sensor3_type, sizeof(m_app_config.sensor3_type));
 	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	EXPORT_FUNC("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
 	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
 		    sizeof(m_app_config.hall_left_counter));
 	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
@@ -698,9 +710,10 @@ static void print_history_enable(const struct shell *shell)
 		    m_app_config.history_enable ? "true" : "false");
 }
 
-static void print_history_sensors(const struct shell *shell)
+static void print_history_channels(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
+	print_bytes(shell, "history-channels", m_app_config.history_channels,
+		    sizeof(m_app_config.history_channels));
 }
 
 static void print_battery_level(const struct shell *shell)
@@ -1037,10 +1050,20 @@ static void print_sensor1_rom(const struct shell *shell)
 		    sizeof(m_app_config.sensor1_rom));
 }
 
+static void print_sensor1_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor1-type %u", m_app_config.sensor1_type);
+}
+
 static void print_sensor2_rom(const struct shell *shell)
 {
 	print_bytes(shell, "sensor2-rom", m_app_config.sensor2_rom,
 		    sizeof(m_app_config.sensor2_rom));
+}
+
+static void print_sensor2_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor2-type %u", m_app_config.sensor2_type);
 }
 
 static void print_sensor3_rom(const struct shell *shell)
@@ -1049,10 +1072,20 @@ static void print_sensor3_rom(const struct shell *shell)
 		    sizeof(m_app_config.sensor3_rom));
 }
 
+static void print_sensor3_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor3-type %u", m_app_config.sensor3_type);
+}
+
 static void print_sensor4_rom(const struct shell *shell)
 {
 	print_bytes(shell, "sensor4-rom", m_app_config.sensor4_rom,
 		    sizeof(m_app_config.sensor4_rom));
+}
+
+static void print_sensor4_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor4-type %u", m_app_config.sensor4_type);
 }
 
 static void print_hall_left_counter(const struct shell *shell)
@@ -1106,7 +1139,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_interval_sample(shell);
 	print_interval_report(shell);
 	print_history_enable(shell);
-	print_history_sensors(shell);
+	print_history_channels(shell);
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
 	print_interval_announce(shell);
@@ -1142,9 +1175,13 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
+	print_sensor1_type(shell);
 	print_sensor2_rom(shell);
+	print_sensor2_type(shell);
 	print_sensor3_rom(shell);
+	print_sensor3_type(shell);
 	print_sensor4_rom(shell);
+	print_sensor4_type(shell);
 	print_hall_left_counter(shell);
 	print_hall_right_counter(shell);
 	print_input_a_counter(shell);
@@ -1299,44 +1336,10 @@ static int cmd_history_enable(const struct shell *shell, size_t argc, char **arg
 	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
 }
 
-static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
+static int cmd_history_channels(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_history_sensors(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (argv[1][0] == '-') {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	char *endptr;
-
-	errno = 0;
-	unsigned long value = strtoul(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* errno==ERANGE catches strtoul saturating an out-of-range input to
-	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
-	 * slip past the max check when max is itself UINT32_MAX. */
-	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	m_app_config.history_sensors = (uint32_t)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.history_channels,
+			 sizeof(m_app_config.history_channels), false, print_history_channels);
 }
 
 static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv)
@@ -1772,10 +1775,90 @@ static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
 			 sizeof(m_app_config.sensor1_rom), false, print_sensor1_rom);
 }
 
+static int cmd_sensor1_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor1_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT8_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor1_type = (uint8_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
 static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bytes(shell, argc, argv, m_app_config.sensor2_rom,
 			 sizeof(m_app_config.sensor2_rom), false, print_sensor2_rom);
+}
+
+static int cmd_sensor2_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor2_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT8_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor2_type = (uint8_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
 }
 
 static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
@@ -1784,10 +1867,90 @@ static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
 			 sizeof(m_app_config.sensor3_rom), false, print_sensor3_rom);
 }
 
+static int cmd_sensor3_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor3_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT8_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor3_type = (uint8_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
 static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bytes(shell, argc, argv, m_app_config.sensor4_rom,
 			 sizeof(m_app_config.sensor4_rom), false, print_sensor4_rom);
+}
+
+static int cmd_sensor4_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor4_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT8_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor4_type = (uint8_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
 }
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
@@ -1887,9 +2050,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set sensor history store-and-forward (true/false).",
 	              cmd_history_enable, 1, 1),
 
-	SHELL_CMD_ARG(history-sensors, NULL,
-	              "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity.",
-	              cmd_history_sensors, 1, 1),
+	SHELL_CMD_ARG(history-channels, NULL,
+	              "Get/Set recorded history channels (24 bytes, slot<<5|ch each, ff = unused). Default 0001ff.. = temperature + humidity.",
+	              cmd_history_channels, 1, 1),
 
 	SHELL_CMD_ARG(battery-level, NULL,
 	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
@@ -2031,17 +2194,33 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty).",
 	              cmd_sensor1_rom, 1, 1),
 
+	SHELL_CMD_ARG(sensor1-type, NULL,
+	              "Get/Set 1-Wire slot 1 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign).",
+	              cmd_sensor1_type, 1, 1),
+
 	SHELL_CMD_ARG(sensor2-rom, NULL,
 	              "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty).",
 	              cmd_sensor2_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-type, NULL,
+	              "Get/Set 1-Wire slot 2 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign).",
+	              cmd_sensor2_type, 1, 1),
 
 	SHELL_CMD_ARG(sensor3-rom, NULL,
 	              "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty).",
 	              cmd_sensor3_rom, 1, 1),
 
+	SHELL_CMD_ARG(sensor3-type, NULL,
+	              "Get/Set 1-Wire slot 3 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign).",
+	              cmd_sensor3_type, 1, 1),
+
 	SHELL_CMD_ARG(sensor4-rom, NULL,
 	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
 	              cmd_sensor4_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-type, NULL,
+	              "Get/Set 1-Wire slot 4 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign).",
+	              cmd_sensor4_type, 1, 1),
 
 	SHELL_CMD_ARG(hall-left-counter, NULL,
 	              "Get/Set hall left switch counter enabled (true/false).",

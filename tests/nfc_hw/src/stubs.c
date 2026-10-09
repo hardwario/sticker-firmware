@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Config under test — seeded per test; app_config_ingest/app_nfc write through
  * here. app_config() and g_app_config share one struct (a test simplification
@@ -115,7 +116,8 @@ void app_report_force(void)
 }
 
 /* Battery (GetInfo battery field). */
-struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
+struct app_sensor_data g_app_sensor_data = {
+	.mb = {.v = {[APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE] = {.f = NAN}}}};
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 int app_battery_measure(float *voltage)
@@ -185,9 +187,9 @@ size_t app_history_count(void)
 	return 0;
 }
 
-uint32_t app_history_get_mask(void)
+void app_history_get_layout(struct app_history_layout *out)
 {
-	return 0;
+	memset(out, 0, sizeof(*out));
 }
 
 uint32_t app_history_get_interval(void)
@@ -201,16 +203,16 @@ bool app_history_is_ready(void)
 }
 
 /* Dynamic alarm rules — inert; no test here exercises alarm_rule mutation. */
-int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t rule_idx, const struct app_alarm_rule *rule)
 {
-	(void)slot;
+	(void)rule_idx;
 	(void)rule;
 	return 0;
 }
 
-int app_alarm_rules_clear(uint8_t slot)
+int app_alarm_rules_clear(uint8_t rule)
 {
-	(void)slot;
+	(void)rule;
 	return 0;
 }
 
@@ -223,17 +225,16 @@ int app_alarm_rules_reload_from_config(void)
 	return 0;
 }
 
-bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
+bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 {
-	(void)slot;
+	(void)rule;
 	(void)out;
 	return false;
 }
 
-enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+int app_alarm_rules_stale_count(void)
 {
-	(void)q;
-	return APP_ALARM_KIND_THRESHOLD;
+	return 0;
 }
 
 enum app_radio_state app_radio_get_state(void)

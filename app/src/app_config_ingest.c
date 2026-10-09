@@ -359,9 +359,6 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 	if (src->has_history_enable) {
 		config->history_enable = src->history_enable;
 	}
-	if (src->has_history_sensors) {
-		config->history_sensors = src->history_sensors;
-	}
 	if (src->has_battery_level) {
 		int val = src->battery_level;
 
@@ -388,6 +385,11 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 			FAULT(8);
 		}
 	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_history_channels) {
+		memcpy(config->history_channels, src->history_channels,
+		       sizeof(config->history_channels));
+	}
 	return ret;
 }
 
@@ -411,10 +413,6 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 		dst->has_history_enable = true;
 		dst->history_enable = c->history_enable;
 	}
-	if (requested(ids, n, 5)) {
-		dst->has_history_sensors = true;
-		dst->history_sensors = c->history_sensors;
-	}
 	if (requested(ids, n, 6)) {
 		dst->has_battery_level = true;
 		dst->battery_level = c->battery_level;
@@ -426,6 +424,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 8)) {
 		dst->has_interval_announce = true;
 		dst->interval_announce = c->interval_announce;
+	}
+	if (requested(ids, n, 9)) {
+		dst->has_history_channels = true;
+		memcpy(dst->history_channels, c->history_channels, sizeof(c->history_channels));
 	}
 }
 
@@ -509,6 +511,18 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	}
 	if (src->has_cap_sht) {
 		config->cap_sht = src->cap_sht;
+	}
+	if (src->has_sensor1_type) {
+		config->sensor1_type = src->sensor1_type;
+	}
+	if (src->has_sensor2_type) {
+		config->sensor2_type = src->sensor2_type;
+	}
+	if (src->has_sensor3_type) {
+		config->sensor3_type = src->sensor3_type;
+	}
+	if (src->has_sensor4_type) {
+		config->sensor4_type = src->sensor4_type;
 	}
 	return ret;
 }
@@ -597,6 +611,22 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 22)) {
 		dst->has_cap_sht = true;
 		dst->cap_sht = c->cap_sht;
+	}
+	if (requested(ids, n, 23)) {
+		dst->has_sensor1_type = true;
+		dst->sensor1_type = c->sensor1_type;
+	}
+	if (requested(ids, n, 24)) {
+		dst->has_sensor2_type = true;
+		dst->sensor2_type = c->sensor2_type;
+	}
+	if (requested(ids, n, 25)) {
+		dst->has_sensor3_type = true;
+		dst->sensor3_type = c->sensor3_type;
+	}
+	if (requested(ids, n, 26)) {
+		dst->has_sensor4_type = true;
+		dst->sensor4_type = c->sensor4_type;
 	}
 }
 

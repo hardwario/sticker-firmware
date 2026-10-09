@@ -278,9 +278,11 @@ size_t stub_hist_overhead(uint32_t frame_index_bound)
 	return 6 + 2 * varint_len(frame_index_bound);
 }
 
-uint32_t app_history_get_mask(void)
+void app_history_get_layout(struct app_history_layout *out)
 {
-	return 0x01;
+	memset(out, 0, sizeof(*out));
+	out->count = 1;
+	out->channels[0] = 0x00;
 }
 
 uint32_t app_history_get_interval(void)
@@ -337,13 +339,13 @@ size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t sta
 }
 
 size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				       size_t out_cap)
+				       uint32_t t0_unix, const struct app_history_layout *layout,
+				       uint32_t interval_s, size_t out_cap)
 {
 	ARG_UNUSED(seq);
 	ARG_UNUSED(frame_count);
 	ARG_UNUSED(t0_unix);
-	ARG_UNUSED(present);
+	ARG_UNUSED(layout);
 	ARG_UNUSED(interval_s);
 
 	size_t over = stub_hist_overhead(frame_index);
@@ -352,12 +354,12 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
-				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				bool time_synced, const uint8_t *samples, size_t samples_len,
+				uint32_t t0_unix, const struct app_history_layout *layout,
+				uint32_t interval_s, bool time_synced, const uint8_t *samples, size_t samples_len,
 				uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	ARG_UNUSED(t0_unix);
-	ARG_UNUSED(present);
+	ARG_UNUSED(layout);
 	ARG_UNUSED(interval_s);
 	ARG_UNUSED(time_synced);
 

@@ -918,10 +918,15 @@ on release FW verify via the next fPort-2 telemetry (slower — prefer debug for
 
 ## 12. Alarm engine (AT-ALM)
 
-Alarm rules live in 16 packed byte-slots (`alarm-0`…`alarm-15`); layout
-`[0]flags [1]source [2]quantity [3]from [4]to [5..8]lo [9..12]hi [13..16]dwell` (floats LE).
-On debug, manage via `alarm new/set/list/clear/poll`; over transports via SetParam on the
-slot bytes (the manual plan's set_param vector includes a worked alarm_0 example).
+Alarm rules live in 16 packed 18-byte entries (`alarm-0`…`alarm-15`); layout (#430)
+`[0]flags [1]slot [2]channel [3]sensor_type [4]from [5]to [6..9]lo [10..13]hi [14..17]dwell`
+(floats LE). A rule targets a channel of a sensor slot (`mb` = motherboard, `s1`…`s4` = 1-Wire);
+`sensor types [<type>]` lists the channels of each type. A rule whose `sensor_type` differs
+from the slot's current type is stale: kept, shown `STALE` in `alarm list`, never evaluated.
+On debug, manage via `alarm new/set/list/clear/poll`
+(`alarm set <rule> <slot> <channel> <key> <value>...`, keys `lo`/`hi`/`from`/`to`/`dwell`);
+over transports via SetParam on the rule bytes (the manual plan's set_param vector includes a
+worked alarm_0 example).
 
 **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band.** `alarm-notif-time`
 and the illuminance-only `alarm-light-confirm-delay` config keys are removed — every kind now
@@ -934,8 +939,8 @@ themselves are still wall-clock (`k_uptime_get()`), so waiting real time past th
 still required before the next `alarm poll` will observe it as elapsed.
 
 ### AT-ALM-01 — onboard temperature threshold + dwell (D, SA; maps A1)
-- **Steps:** arm slot 0: onboard temp, hi = ambient + 3 °C, dwell = 5 (`alarm set 0 onboard
-  temperature <lo> <hi> 5`); `alarm poll` for baseline (no alarm); assist: finger on sensor
+- **Steps:** arm slot 0: onboard temp, hi = ambient + 3 °C, dwell = 5 (`alarm set 0 mb
+  temperature lo <lo> hi <hi> dwell 5`); `alarm poll` for baseline (no alarm); assist: finger on sensor
   until it crosses; `alarm poll` immediately (before 5 s), then again after 5 s; then cool
   down and `alarm poll` once more.
 - **Expect:** the immediate poll (before the dwell elapses) shows no alarm yet; the poll
@@ -955,19 +960,21 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Cleanup:** `alarm clear 0`.
 
 ### AT-ALM-02 — 1-Wire slot threshold (D, SA; maps A2)
-- Same as AT-ALM-01 with source = enrolled slot 1 (warm the probe in hand).
+- Same as AT-ALM-01 on the enrolled slot 1 (`alarm set 0 s1 temperature lo <lo> hi <hi> dwell 5`,
+  warm the probe in hand). On a machine probe, also arm `temperature-aux` as a second rule and
+  confirm the two fire independently (#430).
 
 ### AT-ALM-03 — state alarms hall/input, edge & level with confirm+hold (D, SA; maps A3, A4)
-- **Steps:** arm an edge rule with a confirm+hold window, `alarm set 0 hall-left state 0 1 5`;
+- **Steps:** arm an edge rule with a confirm+hold window, `alarm set 0 mb hall-left-state from 0 to 1 dwell 5`;
   assist: apply the magnet, `alarm poll` immediately (expect no alarm — confirm not yet
   elapsed), `alarm poll` again after 5 s (expect exactly one alarm), then re-apply the magnet
   within the next 5 s and `alarm poll` (expect no second alarm — hold/re-arm-blocked). Then
-  arm a level rule `alarm set 0 hall-left state 1 1 5` and confirm it only activates once the
+  arm a level rule `alarm set 0 mb hall-left-state from 1 to 1 dwell 5` and confirm it only activates once the
   magnet has been held continuously past 5 s, clearing immediately on removal.
 - **Expect:** edge fires only after the 5 s confirm, then blocks re-arming for the same 5 s;
   level dwells the same way on activation but clears immediately; with `alarm-limit 0`
   (explicitly set, not the baseline since #346) ⇒ dual uplink per edge (A13 behaviour).
-- **Reverse direction** (`alarm set 0 hall-left state 1 0 5`, edge on removal): HW-confirmed
+- **Reverse direction** (`alarm set 0 mb hall-left-state from 1 to 0 dwell 5`, edge on removal): HW-confirmed
   symmetric to the `0->1` case. A falling edge gives no counter tell (hall counter only counts
   rises) — use `ats sensors sample`'s `active` field, not the counter, to confirm the physical
   transition has genuinely settled before timing the 5 s dwell.
@@ -984,7 +991,7 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Pre (accel):** `cap-accelerometer true` alone is not enough — `accel-motion-sensitivity`
   defaults to `off` and must also be set (`low`/`medium`/`high`) for the LIS2DH12 any-motion
   interrupt to fire; both need `settings save` + reboot (deferred init).
-- **Steps:** arm PIR state one-shot with a hold window, `alarm set 0 pir state 0 1 8`; wave
+- **Steps:** arm PIR state one-shot with a hold window, `alarm set 0 mb pir-motion from 0 to 1 dwell 8`; wave
   once and `alarm poll` immediately.
 - **Expect:** the alarm fires on the very same poll as the pulse (no confirm delay — momentary
   sources fire immediately, unlike AT-ALM-01/03); a real shake/wave produces many rapid pulse
@@ -997,12 +1004,12 @@ still required before the next `alarm poll` will observe it as elapsed.
 ### AT-ALM-05 — rate (count) alarm, dwell as hold/re-arm (D, SA; maps A6)
 - **Gotcha:** `interval_report` has a hard shell-enforced 60 s minimum — cannot be shrunk for a
   faster cycle, each window costs a real 60+ s wait. Re-arming via `alarm clear all` immediately
-  followed by `alarm new <same source+quantity>` does **not** reset the runtime window state
-  (`rt_sync()` only resets on a source/quantity mismatch) — insert `alarm poll` between `clear
+  followed by `alarm new <same slot+channel>` does **not** reset the runtime window state
+  (`rt_sync()` only resets on a rule change) — insert `alarm poll` between `clear
   all` and `new` to force a true reset, otherwise a "fresh" rule silently inherits a stale
   `count_window_start`/baseline from the previous run and appears to not fire.
 - **Steps:** rule: hall count rate hi=2 per report interval, dwell = 10 (`alarm clear all`,
-  `alarm poll`, `alarm new hall-left count 2 10`); assist: 3 magnet passes within one interval,
+  `alarm poll`, `alarm new mb hall-left-count hi 2 dwell 10`); assist: 3 magnet passes within one interval,
   then another 3-pass over-rate window within 10 s of the first firing, then one more after 10 s.
 - **Expect:** fires on the first over-rate window (delta > 2, not on 2 or fewer); the second
   over-rate window within the 10 s hold produces no second alarm; the one after 10 s does.
@@ -1029,11 +1036,15 @@ still required before the next `alarm poll` will observe it as elapsed.
   (`hi <= lo`, e.g. `lo=20, hi=20`) — expect rejection, not silent acceptance (#348 replaces
   the old `hi-lo <= 2*dwell` band-collapse guard with a direct `hi > lo` check, since `dwell` no
   longer offsets the band); (b) attempt a rule with `dwell` outside `[0, 3600]` (e.g. `-1` or
-  `4000`) on any kind — expect rejection; (c) write a malformed 17-byte blob into `alarm-15`
-  directly via SetParam (bad source/quantity, flags=present) and read `alarm list`.
-- **Expect:** (a) and (b) rejected with an error, slot NOT stored; (c) invalid slot
-  sanitised/ignored with a report (reload returns invalid count); the other 15 slots
-  unaffected; no crash on the next poll.
+  `4000`) on any kind — expect rejection; (c) write a malformed 18-byte blob into `alarm-15`
+  directly via SetParam (e.g. slot 0 with a 1-Wire `sensor_type`, a channel past the type's
+  count, or the watchdog-only `battery-voltage` channel; flags=present) and read `alarm list`;
+  (d) #430: arm a rule on `s1` for the slot's type, then change `sensor1-type` over SetParam.
+- **Expect:** (a) and (b) rejected with an error, rule NOT stored; (c) invalid rule
+  sanitised/ignored with a report (reload returns invalid count); the other 15 rules
+  unaffected; no crash on the next poll; (d) the SetParam answers an error (the rule went
+  stale) unless the same batch fixes or clears the rule; the stale rule stays listed as
+  `STALE` and never fires.
 - **Cleanup:** clear slot 15.
 
 ### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)

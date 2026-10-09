@@ -10,6 +10,7 @@
 #include "app_config.h"
 
 static struct app_config m_test_config;
+struct app_config g_app_config;
 
 struct app_config *app_config(void)
 {

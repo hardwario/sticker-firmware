@@ -150,14 +150,14 @@ test("config_dump renders cap_buzzer + cap_sht (sensors tags 19, 22) (#465)", ()
 });
 
 // #412: the boot settings-info uplink carries the detected 1-Wire slot type per
-// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Names mirror
-// enum app_w1_slot_type: 0=empty, 1=dallas, 2=machine-probe (same _W1_SLOT_TYPES
-// map as the fPort-2 telemetry per-slot type).
+// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Values are
+// the sensor type ids (#430): 0=empty, 2=dallas, 3=machine-probe (same
+// _W1_SLOT_TYPES map as the fPort-2 telemetry per-slot type).
 test("config_dump decodes w1_slot_type (packed, #412)", () => {
-  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[2,1,0,0] } },
+  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[3,2,0,0] } },
   // 1-byte version prefix: 01 | 22 08 (config_dump, len 8) | 10 01 (page_count=1)
-  //                              | 3a 04 02 01 00 00 (field7 packed: 2,1,0,0)
-  const dump = hex("01220810013a0402010000");
+  //                              | 3a 04 03 02 00 00 (field7 packed: 3,2,0,0)
+  const dump = hex("01220810013a0403020000");
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.page_count, 1);
   assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
@@ -198,13 +198,15 @@ test("envelope paging: an unpaged answer has no pages field (#425)", () => {
 // Page 2/2 decodes alone (stateless decoder): its own base_time / total.
 test("fPort 3 AlarmReport page 2/2 decodes alone (#425)", () => {
   const d = codec.decodeUplink({
-    bytes: hex("0108a487ccd50610041a0b200928ca59300138034802200128013002"), fPort: 3,
+    bytes: hex("0108a487ccd50610041a0b200928ca59500138034802200128013002"), fPort: 3,
   }).data;
   assert.equal(d.pages, "2/2");
   assert.equal(d.total, 4);
   assert.equal(d.truncated, undefined); // paged: "fewer than total" is expected
   assert.equal(d.alarms.length, 1);
-  assert.equal(d.alarms[0].slot, 3);
+  assert.equal(d.alarms[0].rule, 3);
+  assert.equal(d.alarms[0].slot, "mb");
+  assert.equal(d.alarms[0].channel, "humidity");
   assert.equal(d.alarms[0].time, 1790116772 + 9);
 });
 
@@ -417,18 +419,48 @@ test("decodeUplink decodes get_info device_status (fPort 85)", () => {
 
 // Info carries active_alarms (field 15, repeated AlarmStatus, #288). Inner Info:
 // fw 1.4.2, device_status=0x11 (alarm_any | alarm_no_data), one active alarm
-// AlarmStatus{ source=1 (s1), quantity=0 (temperature, proto3-omitted), type=4
-// (no_data) } = 7a04 08011804. Mirrors an absent 1-Wire sensor in slot 1.
+// AlarmStatus{ slot=1 (s1), type=4 (no_data), channel=0 (temperature,
+// proto3-omitted), sensor_type=2 (dallas) } = 7a06 080118042802. Mirrors an
+// absent DS18B20 in slot 1.
 test("decodeUplink decodes get_info active_alarms (fPort 85)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("0108031a0e08011004180270117a0408011804"),
+    bytes: hex("0108031a1008011004180270117a06080118042802"),
     fPort: 85,
   }).data;
   assert.equal(got.info.device_status, 0x11);
   assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_no_data"]);
   assert.deepEqual(got.info.active_alarms, [
-    { source: "s1", quantity: "temperature", type: "no_data" },
+    { slot: "s1", channel: "temperature", part: "ds18b20", sensor_type: "dallas", type: "no_data" },
   ]);
+});
+
+// The same with channel 255 (20 ff 01): the whole 1-Wire device stopped
+// answering, one alarm instead of one per part.
+test("decodeUplink decodes get_info active_alarms device no_data (channel 255)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a1308011004180270117a090801180420ff012803"),
+    fPort: 85,
+  }).data;
+  assert.deepEqual(got.info.active_alarms, [
+    { slot: "s1", channel: "device", sensor_type: "machine-probe", type: "no_data" },
+  ]);
+});
+
+// #430 step 3: Info.w1_slot_state (field 19, packed) + a sensor-mismatch entry
+// in active_alarms. Inner Info: fw 1.4.2 | 70 41 (device_status = alarm_any |
+// alarm_sensor_mismatch) | 7a 06 08 02 18 05 28 03 (AlarmStatus s2, type 5,
+// expected machine-probe) |
+// 9a 01 04 01 04 00 00 (w1_slot_state ok, mismatch, none, none).
+test("decodeUplink decodes get_info w1_slot_state + sensor_mismatch (#430)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a170801100418027041" + "7a0608021805" + "2803" + "9a010401040000"),
+    fPort: 85,
+  }).data;
+  assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_sensor_mismatch"]);
+  assert.deepEqual(got.info.active_alarms, [
+    { slot: "s2", channel: null, sensor_type: "machine-probe", type: "sensor_mismatch" },
+  ]);
+  assert.deepEqual(got.info.w1_slot_state, ["ok", "mismatch", "none", "none"]);
 });
 
 // A healthy device sends no active_alarms (empty repeated field) -> [].
@@ -534,43 +566,94 @@ test("fPort-2 telemetry: pressure/altitude/illuminance numeric scaling", () => {
 });
 
 // 1-Wire slots are a repeated SensorReading on field 27 (tag 0xda 0x01,
-// length-delimited). slot is 1-based (matches sensorN / `w1 list`). type travels
-// with each reading; the firmware emits one per populated slot and may split the
-// list across frames. Two readings here:
-//   reading A: slot=3 type=2(machine-probe) temp=23.65 hum=54 flags=tilt
-//     08 03 | 10 02 | 18 fa 24 | 20 6c | 28 01   (11 B body)
-//   reading B: slot=1 type=1(dallas) temp=21.5 (temperature-only)
-//     08 01 | 10 01 | 18 cc 21                   (7 B body)
-test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
+// length-delimited), #430 channel model: slot=1 (1-based), type=2, valid=11
+// (bit ch = channel present), value=12 (packed sint32 of the set bits,
+// ascending ch, phys x wire scale). Every channel of the type is listed in
+// `values` (null when absent) with its unit in `units`. Two readings here:
+//   A: slot=3 machine-probe, valid 0x23 (temperature, humidity, tilt)
+//      08 03 | 10 03 | 58 23 | 62 05 fa24 d801 02          (13 B body)
+//   B: slot=1 dallas, valid 0x01, temperature 21.5
+//      08 01 | 10 02 | 58 01 | 62 02 cc21                  (10 B body)
+const MP_UNITS = {
+  temperature: "degC", humidity: "%RH", "temperature-aux": "degC", illuminance: "lx",
+  "magnetic-field": "mT", tilt: "bool", "accel-x": "m/s2", "accel-y": "m/s2", "accel-z": "m/s2",
+};
+test("fPort-2 telemetry decodes SensorReading valid mask + packed values (#430)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da010b0803100218fa24206c2801da01070801100118cc21"),
+    bytes: hex("01da010d0803100358236205fa24d80102da010a0801100258016202cc21"),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 2);
   assert.deepEqual(got.w1_sensors[0], {
-    slot: 3, type: 2, type_name: "machine-probe",
-    temperature: 23.65, humidity: 54, tilt_alert: true,
+    slot: 3, type: 3, type_name: "machine-probe",
+    values: {
+      temperature: 23.65, humidity: 54, "temperature-aux": null, illuminance: null,
+      "magnetic-field": null, tilt: 1, "accel-x": null, "accel-y": null, "accel-z": null,
+    },
+    units: MP_UNITS,
   });
-  assert.equal(got.w1_sensors[1].slot, 1);
-  assert.equal(got.w1_sensors[1].type_name, "dallas");
-  assert.equal(got.w1_sensors[1].temperature, 21.5);
-  assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
+  assert.deepEqual(got.w1_sensors[1], {
+    slot: 1, type: 2, type_name: "dallas",
+    values: { temperature: 21.5 }, units: { temperature: "degC" },
+  });
 });
 
-// Machine-probe sensor cluster: a single reading carrying the full set
-// (slot=1 type=2 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
-//   08 01 | 10 02 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
-test("fPort-2 telemetry decodes machine-probe sensor cluster (fields 6-10)", () => {
+// Machine-probe, all nine channels (incl. TMP112 temperature-aux, ch 2):
+// 21.5 degC, 45 %RH, 21.25 degC, 27 lx, 0.062 mT, tilt 0, 0.38/-9.35/-0.54 m/s2.
+test("fPort-2 telemetry decodes every machine-probe channel with its scale (#430)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da011208011002 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
+    bytes: hex("01da01160801100358ff03620dcc21b4019a21367c004ccd0e6b"),
     fPort: 2,
   }).data;
-  assert.equal(got.w1_sensors.length, 1);
-  assert.deepEqual(got.w1_sensors[0], {
-    slot: 1, type: 2, type_name: "machine-probe",
-    temperature: 21.5, illuminance: 27, magnetic_field: 0.062,
-    accel_x: 0.38, accel_y: -9.35, accel_z: -0.54,
+  assert.deepEqual(got.w1_sensors[0].values, {
+    temperature: 21.5, humidity: 45, "temperature-aux": 21.25, illuminance: 27,
+    "magnetic-field": 0.062, tilt: 0, "accel-x": 0.38, "accel-y": -9.35, "accel-z": -0.54,
   });
+  assert.deepEqual(got.w1_sensors[0].units, MP_UNITS);
+});
+
+// A slot whose probe is absent or mismatched is sent with valid = 0 (slot +
+// type only); every channel of that type decodes to null.
+//   da 01 04 | 08 01 10 03          (slot 1, machine-probe, no values)
+//   da 01 04 | 08 02 10 02          (slot 2, dallas, no values)
+test("fPort-2 telemetry: valid = 0 SensorReading decodes to nulls (#430)", () => {
+  const got = codec.decodeUplink({ bytes: hex("01da010408011003da010408021002"), fPort: 2 }).data;
+  assert.equal(got.w1_sensors.length, 2);
+  assert.deepEqual(got.w1_sensors[0].values, {
+    temperature: null, humidity: null, "temperature-aux": null, illuminance: null,
+    "magnetic-field": null, tilt: null, "accel-x": null, "accel-y": null, "accel-z": null,
+  });
+  assert.deepEqual(got.w1_sensors[1], {
+    slot: 2, type: 2, type_name: "dallas", values: { temperature: null }, units: { temperature: "degC" },
+  });
+});
+
+// A channel newer than this decoder (dallas ch 9) still keeps the following
+// values aligned and surfaces raw as "ch9"; negative values round-trip.
+test("fPort-2 telemetry: unknown channel decodes raw as chN (#430)", () => {
+  const got = codec.decodeUplink({ bytes: hex("01da010c080410025881046203b3100e"), fPort: 2 }).data;
+  assert.deepEqual(got.w1_sensors[0].values, { temperature: -10.5, ch9: 7 });
+});
+
+// Every generated (type, channel) of a 1-Wire type survives an encode/decode
+// round trip at its wire scale.
+test("fPort-2 telemetry: every 1-Wire (type, channel) round-trips (#430)", () => {
+  const zz = (n) => (n < 0 ? (-n * 2 - 1) : n * 2);
+  const varint = (n) => { const o = []; do { let b = n % 128; n = Math.floor(n / 128); o.push(n ? b | 128 : b); } while (n); return o; };
+  for (const id of [2, 3]) {
+    const t = codec.sensorTypes[id];
+    t.ch.forEach((c, ch) => {
+      if (c.r) return;
+      const phys = c.u === "bool" ? 1 : 12.5;
+      const raw = Math.round(phys * c.s);
+      const packed = varint(zz(raw));
+      const body = [0x08, 1, 0x10, id, 0x58, ...varint(2 ** ch), 0x62, packed.length, ...packed];
+      const bytes = [0x01, 0xda, 0x01, body.length, ...body];
+      const got = codec.decodeUplink({ bytes, fPort: 2 }).data.w1_sensors[0];
+      assert.equal(got.values[c.n], raw / c.s, `${t.name}/${c.n}`);
+      assert.equal(got.units[c.n], c.u, `${t.name}/${c.n} unit`);
+    });
+  }
 });
 
 // Legacy flat 1-Wire fields (10-17, pre-SensorReading firmware) stay decodable
@@ -656,6 +739,48 @@ test("decodeUplink decodes + reassembles multi-frame history (fPort 85)", () => 
   assert.equal(all.length, 3);
   assert.deepEqual(all.map((r) => r.time), [t0a, t0a + interval, t0b]);
 });
+
+// #430: a layout-described frame — `channels` (field 10) lists the columns as
+// slot << 5 | channel, `w1_types` (field 11) the 1-Wire slot types.
+function buildLayoutFrame(t0, interval, channels, w1Types, samples) {
+  let hf = pbTV(2, 1).concat(pbTV(3, t0)).concat(pbLD(4, samples))
+    .concat(pbTV(5, (1 << channels.length) - 1)).concat(pbTV(6, interval))
+    .concat(pbTV(7, 1)).concat(pbLD(10, channels));
+  if (w1Types) hf = hf.concat(pbLD(11, w1Types));
+  return [0x01].concat(pbTV(1, 7)).concat(pbLD(5, hf));
+}
+const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
+const le32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+
+test("history frame with channels/w1_types decodes any registry channel (#430)", () => {
+  // temperature, humidity, s1 temperature (dallas), pir-motion, hall-left-count,
+  // altitude (motherboard ch 21)
+  const channels = [0x00, 0x01, 0x20, 0x0f, 0x06, 0x15];
+  const rec0 = [].concat(le16(2150), [90], le16(-525), [1], le32(1234), le16(-123));
+  const rec1 = [].concat(le16(0x7fff), [0xff], le16(0x7fff), [0], le32(0xffffffff),
+    le16(0x7fff));
+  const f = buildLayoutFrame(1780000000, 60, channels, [2, 0, 0, 0], rec0.concat(rec1));
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+
+  assert.deepEqual(hf.channels, ["temperature", "humidity", "s1_temperature", "pir_motion",
+    "hall_left_count", "altitude"]);
+  assert.deepEqual(hf.w1_types, [2, 0, 0, 0]);
+  assert.equal(hf.records.length, 2);
+  assert.deepEqual(hf.records[0], { time: 1780000000, temperature: 21.5, humidity: 45,
+    s1_temperature: -5.25, pir_motion: 1, hall_left_count: 1234, altitude: -123 });
+  assert.deepEqual(hf.records[1], { time: 1780000060, temperature: null, humidity: null,
+    s1_temperature: null, pir_motion: 0, hall_left_count: null, altitude: null });
+});
+
+test("history frame with an unknown column leaves records undecoded (#430)", () => {
+  // slot 2 has no type (w1_types[1] = 0): the record size is unknown.
+  const f = buildLayoutFrame(1780000000, 60, [0x00, 0x40], [2, 0, 0, 0], [1, 2, 3, 4]);
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+
+  assert.equal(hf.channels, null);
+  assert.deepEqual(hf.records, []);
+});
+
 
 // #260: an NFC paged-read frame carries next_ord + has_more (fields 8/9). The
 // shared decoder must surface them for the phone's cursor while still decoding
@@ -755,24 +880,24 @@ test("history time_synced=true keeps absolute record times", () => {
 
 // --- Uplink: alarm-detail batch (fPort 3, protobuf AlarmReport) -----------
 // AlarmReport{ base_time(1), total(2), repeated AlarmEvent events(3) };
-// AlarmEvent{ source(1), edge(2), rel_s(4), optional sint32 value(5),
-// quantity(6), slot(7), type(9) }. Dynamic-alarm-rule model: source = enum
-// app_alarm_source (0=onboard, 1..4=s1..s4, 5/6=hall l/r, 7/8=input a/b, 9=pir,
-// 10=accel), quantity = enum app_alarm_quantity (0=temperature … 6=state,
-// 7=count). type = enum AlarmEvent.Type (0=none, 1=low, 2=high, 3=trigger,
-// 4=no_data) — orthogonal to edge (#212). proto3 omits zero fields — the
-// builders mirror that (default source=onboard, quantity=temperature,
-// edge=activate, type=none).
+// AlarmEvent{ slot(1), edge(2), rel_s(4), optional sint32 value(5), rule(7),
+// type(9), channel(10), optional sensor_type(11) } (#430 sensor channel
+// model). slot 0 = motherboard, 1..4 = s1..s4; channel = channel of the slot's
+// sensor type; rule 0xFF = no-data / mismatch watchdog, 0xFE = low battery.
+// type = enum AlarmEvent.Type (0=none, 1=low, 2=high, 3=trigger, 4=no_data,
+// 5=sensor_mismatch) — orthogonal to edge (#212). value = channel value x the
+// channel's wire scale. proto3 omits zero fields — the builder mirrors that.
 function pbSint(tag, v) { return pbTV(tag, v < 0 ? -v * 2 - 1 : v * 2); }
-function alarmEvent(source, quantity, edge, type, rel, value, slot) {
+function alarmEvent(slot, channel, edge, type, rel, value, rule, sensorType) {
   let e = [];
-  if (source) e = e.concat(pbTV(1, source));
+  if (slot) e = e.concat(pbTV(1, slot));
   if (edge) e = e.concat(pbTV(2, edge));
   if (rel) e = e.concat(pbTV(4, rel));
   if (value !== null && value !== undefined) e = e.concat(pbSint(5, value));
-  if (quantity) e = e.concat(pbTV(6, quantity));
-  if (slot) e = e.concat(pbTV(7, slot));
+  if (rule) e = e.concat(pbTV(7, rule));
   if (type) e = e.concat(pbTV(9, type));
+  if (channel) e = e.concat(pbTV(10, channel));
+  if (sensorType !== undefined) e = e.concat(pbTV(11, sensorType));
   return e;
 }
 function buildAlarmReport(base, total, events, synced) {
@@ -787,8 +912,8 @@ function buildAlarmReport(base, total, events, synced) {
 test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   const base = 1780000000;
   const f = buildAlarmReport(base, 2, [
-    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // onboard temp, activate, HIGH, 26.6 °C, slot 7
-    alarmEvent(5, 6, 0, 3, 15, 1),       // hall-left state, activate, TRIGGER, level=1, slot 0
+    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // mb temperature, activate, HIGH, 26.6 °C, rule 7
+    alarmEvent(0, 5, 0, 3, 15, 1),       // mb hall-left-state, activate, TRIGGER, level=1, rule 0
   ]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
 
@@ -797,28 +922,44 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   assert.equal(d.truncated, false);
   assert.equal(d.alarms.length, 2);
 
-  assert.equal(d.alarms[0].slot, 7);
-  assert.equal(d.alarms[0].source, "onboard");
-  assert.equal(d.alarms[0].quantity, "temperature");
+  assert.equal(d.alarms[0].rule, 7);
+  assert.equal(d.alarms[0].slot, "mb");
+  assert.equal(d.alarms[0].channel, "temperature");
+  assert.equal(d.alarms[0].sensor_type, undefined); // motherboard: not sent
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].type, "high");
   assert.equal(d.alarms[0].value, 26.6);
   assert.equal(d.alarms[0].time, base + 10);
 
-  assert.equal(d.alarms[1].slot, 0); // omitted on the wire → defaults to slot 0
-  assert.equal(d.alarms[1].source, "hall-left");
-  assert.equal(d.alarms[1].quantity, "state");
+  assert.equal(d.alarms[1].rule, 0); // omitted on the wire → defaults to rule 0
+  assert.equal(d.alarms[1].slot, "mb");
+  assert.equal(d.alarms[1].channel, "hall-left-state");
   assert.equal(d.alarms[1].event, "activate");
   assert.equal(d.alarms[1].type, "trigger");
   assert.equal(d.alarms[1].value, 1); // digital level
   assert.equal(d.alarms[1].time, base + 15);
 });
 
+// #430: TYPE_SENSOR_MISMATCH (5) on slot s1: rule 0xFF (watchdog), channel
+// null (the whole slot), sensor_type (field 11) = expected machine-probe (3),
+// value = detected dallas (2). Then the deactivate edge naming the same types.
+test("fPort-3 batch: sensor mismatch names expected + detected type (#430)", () => {
+  const ev = (edge) => alarmEvent(1, 0, edge, 5, 3, 2, 0xff, 3);
+  const d = codec.decodeUplink({ bytes: buildAlarmReport(1780000000, 2, [ev(0), ev(1)]), fPort: 3 }).data;
+  assert.equal(d.alarms.length, 2);
+  assert.deepEqual(d.alarms[0], {
+    slot: "s1", channel: null, sensor_type: "machine-probe", rule: null, event: "activate",
+    type: "sensor_mismatch", value: 2, time: 1780000003, detected_type: "dallas",
+  });
+  assert.equal(d.alarms[1].event, "deactivate");
+  assert.equal(d.alarms[1].detected_type, "dallas");
+});
+
 test("fPort-3 batch time_synced=false → per-event time null (L-3/L-4)", () => {
   // base_time is uptime-relative; the report flags it unsynced, so per-event
   // times must be null instead of a bogus ~1970 date. Values still decode.
   const f = buildAlarmReport(120, 1, [
-    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // onboard temp HIGH 26.6 °C
+    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // mb temperature HIGH 26.6 °C
   ], false);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.time_synced, false);
@@ -829,14 +970,15 @@ test("fPort-3 batch time_synced=false → per-event time null (L-3/L-4)", () => 
 
 test("fPort-3 batch: slot humidity deactivate + truncation flag (total > events)", () => {
   const base = 1780000000;
-  // s2 humidity (source=2, quantity=1), deactivate, type low, 45 %RH
-  const f = buildAlarmReport(base, 5, [alarmEvent(2, 1, 1, 1, 0, 4500)]);
+  // s2 machine-probe humidity (channel 1, x2), deactivate, type low, 45 %RH
+  const f = buildAlarmReport(base, 5, [alarmEvent(2, 1, 1, 1, 0, 90, 0, 3)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.total, 5);
   assert.equal(d.alarms.length, 1);
   assert.equal(d.truncated, true); // 5 alarms occurred, only 1 fit the frame
-  assert.equal(d.alarms[0].source, "s2");
-  assert.equal(d.alarms[0].quantity, "humidity");
+  assert.equal(d.alarms[0].slot, "s2");
+  assert.equal(d.alarms[0].channel, "humidity");
+  assert.equal(d.alarms[0].sensor_type, "machine-probe");
   assert.equal(d.alarms[0].event, "deactivate");
   assert.equal(d.alarms[0].type, "low");
   assert.equal(d.alarms[0].value, 45);
@@ -845,59 +987,79 @@ test("fPort-3 batch: slot humidity deactivate + truncation flag (total > events)
 
 test("fPort-3 batch: negative threshold value round-trips via sint zigzag", () => {
   const base = 1780000000;
-  // s3 temperature (source=3, quantity=0), -12.34 °C, lo
-  const f = buildAlarmReport(base, 1, [alarmEvent(3, 0, 0, 1, 5, -1234)]);
+  // s3 dallas temperature (channel 0), -12.34 °C, lo
+  const f = buildAlarmReport(base, 1, [alarmEvent(3, 0, 0, 1, 5, -1234, 2, 2)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
-  assert.equal(d.alarms[0].source, "s3");
-  assert.equal(d.alarms[0].quantity, "temperature");
+  assert.equal(d.alarms[0].slot, "s3");
+  assert.equal(d.alarms[0].channel, "temperature");
+  assert.equal(d.alarms[0].rule, 2);
   assert.equal(d.alarms[0].type, "low");
   assert.equal(d.alarms[0].value, -12.34);
 });
 
 test("fPort-3 batch: accel motion state activate", () => {
   const base = 1780652851;
-  // accel (source=10) state (quantity=6) activate, type trigger, value=1
-  const f = buildAlarmReport(base, 1, [alarmEvent(10, 6, 0, 3, 0, 1)]);
+  // mb accel-motion (channel 17) activate, type trigger, value=1
+  const f = buildAlarmReport(base, 1, [alarmEvent(0, 17, 0, 3, 0, 1)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.total, 1);
   assert.equal(d.base_time, base);
   assert.equal(d.truncated, false);
   assert.equal(d.alarms.length, 1);
-  assert.equal(d.alarms[0].source, "accel");
-  assert.equal(d.alarms[0].quantity, "state");
+  assert.equal(d.alarms[0].slot, "mb");
+  assert.equal(d.alarms[0].channel, "accel-motion");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].type, "trigger");
   assert.equal(d.alarms[0].value, 1);
   assert.equal(d.alarms[0].time, base);
 });
 
-test("fPort-3 batch: low-battery watchdog event (battery/voltage, type=low, slot 0xFE)", () => {
+test("fPort-3 batch: low-battery watchdog event (battery-voltage, type=low, rule 0xFE)", () => {
   const base = 1780000000;
-  // battery (source=11) voltage (quantity=8), activate, type low (1), 2.15 V (×100=215), slot 254
-  const f = buildAlarmReport(base, 1, [alarmEvent(11, 8, 0, 1, 0, 215, 254)]);
+  // mb battery-voltage (channel 20, x1000), activate, type low (1), 2.15 V, rule 254
+  const f = buildAlarmReport(base, 1, [alarmEvent(0, 20, 0, 1, 0, 2150, 254)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.alarms.length, 1);
-  assert.equal(d.alarms[0].slot, 254);
-  assert.equal(d.alarms[0].source, "battery");
-  assert.equal(d.alarms[0].quantity, "voltage");
+  assert.equal(d.alarms[0].rule, null);
+  assert.equal(d.alarms[0].slot, "mb");
+  assert.equal(d.alarms[0].channel, "battery-voltage");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].type, "low");
-  assert.equal(d.alarms[0].value, 2.15); // V×100 unscaled
+  assert.equal(d.alarms[0].value, 2.15); // mV unscaled to V
 });
 
-test("fPort-3 batch: no-data watchdog event (type=no_data, slot 0xFF)", () => {
+test("fPort-3 batch: no-data watchdog event (type=no_data, rule 0xFF)", () => {
   const base = 1780000000;
-  // s1 temperature (source=1, quantity=0) stopped reporting: activate, type
-  // no_data (4), no value, slot 0xFF (255)
-  const f = buildAlarmReport(base, 1, [alarmEvent(1, 0, 0, 4, 0, null, 255)]);
+  // s1 dallas temperature stopped reporting: activate, type no_data (4), no
+  // value, rule 0xFF (255)
+  const f = buildAlarmReport(base, 1, [alarmEvent(1, 0, 0, 4, 0, null, 255, 2)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.alarms.length, 1);
-  assert.equal(d.alarms[0].slot, 255);
-  assert.equal(d.alarms[0].source, "s1");
-  assert.equal(d.alarms[0].quantity, "temperature");
+  assert.equal(d.alarms[0].rule, null);
+  assert.equal(d.alarms[0].slot, "s1");
+  assert.equal(d.alarms[0].channel, "temperature");
+  assert.equal(d.alarms[0].sensor_type, "dallas");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].type, "no_data");
   assert.equal(d.alarms[0].value, null);
+});
+
+test("fPort-3 batch: 1-Wire no_data per part and per device", () => {
+  const base = 1780000000;
+  // s2 machine probe: the LIS2DH12 failed (alarm on its first channel, tilt =
+  // ch 5), then the whole probe was unplugged (channel 255).
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(2, 5, 0, 4, 0, null, 255, 3),
+    alarmEvent(2, 255, 0, 4, 10, null, 255, 3),
+  ]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.alarms.length, 2);
+  assert.equal(d.alarms[0].channel, "tilt");
+  assert.equal(d.alarms[0].part, "lis2dh12");
+  assert.equal(d.alarms[0].sensor_type, "machine-probe");
+  assert.equal(d.alarms[1].channel, "device");
+  assert.equal(d.alarms[1].part, undefined);
+  assert.equal(d.alarms[1].type, "no_data");
 });
 
 test("fPort-3 batch: version prefix is stripped, body decodes after byte 0", () => {
@@ -935,12 +1097,13 @@ test("a truncated buffer is handled without throwing", () => {
 });
 
 test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () => {
-  // Packed 17-byte rule: flags present|enabled, onboard temperature, lo=5 hi=30 dwell=1.
-  const rule = "03000000000000a0400000f0410000803f";
+  // Packed 18-byte rule: flags present|enabled, slot mb, channel temperature,
+  // sensor_type motherboard, lo=5 hi=30 dwell=1.
+  const rule = "0300000100000000a0400000f0410000803f";
   const enc = codec.encodeDownlink({ data: { command: "set_param", seq: 1, set_param: { alarms: { alarm_0: rule } } } });
   assert.equal(enc.errors.length, 0, "encode errors");
   assert.equal(enc.fPort, 85);
-  // The rule must appear raw on the wire (native bytes, 17 B), not as 34 hex chars.
+  // The rule must appear raw on the wire (native bytes, 18 B), not as 36 hex chars.
   assert.ok(Buffer.from(enc.bytes).toString("hex").includes(rule));
   const dec = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
   assert.equal(dec.set_param.alarms.alarm_0, rule);
@@ -948,7 +1111,7 @@ test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () =>
   // ConfigDump (uplink) presents an alarm slot as hex too. Wire: ver 01, seq 1,
   // config_dump{ page_count=1, alarms{ alarm_0 } }. alarm_0 = alarms field 3
   // (the *_counter slots moved to the sensors group), tag 0x1a.
-  const dump = hex("0108012217100132131a11" + rule);
+  const dump = hex("0108012218100132141a12" + rule);
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.alarms.alarm_0, rule);
 });
@@ -964,16 +1127,16 @@ test("fPort-2 telemetry: not-available sentinels decode to null", () => {
 });
 
 // #205 follow-up / #212: no_data watchdog event (sensor stopped reporting).
-// slot 0xFF, type=no_data (field 9 = 4), value absent.
+// rule 0xFF, type=no_data (field 9 = 4), value absent.
 test("fPort-3 alarm: no_data type decodes (sensor stopped reporting)", () => {
   const base = 1780000000;
-  const ev = pbTV(7, 255).concat(pbTV(9, 4)); // slot=255, type=no_data (source/quantity default onboard/temperature)
+  const ev = pbTV(7, 255).concat(pbTV(9, 4)); // rule=255, type=no_data (slot/channel default mb/temperature)
   const f = buildAlarmReport(base, 1, [ev]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
-  assert.equal(d.alarms[0].slot, 255);
+  assert.equal(d.alarms[0].rule, null);
   assert.equal(d.alarms[0].type, "no_data");
-  assert.equal(d.alarms[0].source, "onboard");
-  assert.equal(d.alarms[0].quantity, "temperature");
+  assert.equal(d.alarms[0].slot, "mb");
+  assert.equal(d.alarms[0].channel, "temperature");
   assert.equal(d.alarms[0].value, null);
 });
 
@@ -1220,7 +1383,7 @@ test("decodeUplink (fPort 3, AlarmEvent) terminates on an over-length declared f
   // len=0x7f (127) -- no bytes follow, so the AlarmEvent decodes to defaults.
   const got = codec.decodeUplink({ bytes: hex("011a7f"), fPort: 3 });
   assert.equal(got.data.alarms.length, 1);
-  assert.equal(got.data.alarms[0].source, "onboard");
+  assert.equal(got.data.alarms[0].slot, "mb");
   assert.equal(got.data.alarms[0].type, "none");
 });
 

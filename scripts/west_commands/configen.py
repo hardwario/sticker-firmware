@@ -313,6 +313,10 @@ def filter_default_value(param, module_name):
         return f"{module_name.upper()}_{filter_c_name(enum_name).upper()}_{str(default).upper()}"
     elif ptype == "string":
         return f'"{default}"'
+    elif ptype == "bytes":
+        # List of byte values; the tail up to `size` is padded with `fill` (0).
+        vals = list(default) + [param.get("fill", 0)] * (int(param["size"]) - len(default))
+        return "{" + ", ".join(f"0x{v:02x}" for v in vals) + "}"
     else:
         return str(default)
 
@@ -1415,6 +1419,16 @@ class Configen(WestCommand):
 
         if ptype == "bytes" and not param.get("size"):
             log.die(f"Parameter '{name}' of type 'bytes' must have a 'size' field")
+
+        if ptype == "bytes" and ("default" in param or "fill" in param):
+            default = param.get("default", [])
+            fill = param.get("fill", 0)
+            if (not isinstance(default, list) or len(default) > int(param["size"])
+                    or not all(isinstance(v, int) and 0 <= v <= 0xFF for v in default + [fill])):
+                log.die(f"Parameter '{name}' bytes 'default' must be a list of at most "
+                        f"{param['size']} byte values (0..255), 'fill' a byte value")
+        elif "fill" in param:
+            log.die(f"Parameter '{name}' 'fill' only applies to type 'bytes'")
 
         if ptype == "string" and not param.get("maxlen"):
             log.die(f"Parameter '{name}' of type 'string' must have a 'maxlen' field")

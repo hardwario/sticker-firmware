@@ -6,7 +6,7 @@
 
 #include "app_sht4x.h"
 #include "app_log.h"
-#include "app_sensor_read.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>

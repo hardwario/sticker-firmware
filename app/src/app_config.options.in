@@ -1,4 +1,5 @@
 # BEGIN GENERATED CONFIG
+AppConfigMessage.Application.history_channels max_size:24 fixed_length:true
 AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true
 AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true
 AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true
@@ -6,22 +7,22 @@ AppConfigMessage.Lorawan.appkey max_size:16 fixed_length:true
 AppConfigMessage.Lorawan.devaddr max_size:4 fixed_length:true
 AppConfigMessage.Lorawan.nwkskey max_size:16 fixed_length:true
 AppConfigMessage.Lorawan.appskey max_size:16 fixed_length:true
-AppConfigMessage.Alarms.alarm_0 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_1 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_2 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_3 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_4 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_5 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_6 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_7 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_8 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_9 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_10 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_11 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_12 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_13 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_14 max_size:17 fixed_length:true
-AppConfigMessage.Alarms.alarm_15 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_0 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_1 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_2 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_3 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_4 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_5 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_6 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_7 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_8 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_9 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_10 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_11 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_12 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_13 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_14 max_size:18 fixed_length:true
+AppConfigMessage.Alarms.alarm_15 max_size:18 fixed_length:true
 AppConfigMessage.Sensors.sensor1_rom max_size:8 fixed_length:true
 AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true
 AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true
@@ -39,6 +40,9 @@ Response.Error.detail       max_size:32
 # APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B) so it never fills this. RAM-free: the Response oneof is dominated by
 # ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
 Response.HistoryFrame.samples max_size:440
+# #430 record layout: one entry per column (APP_HISTORY_MAX_CH) / per 1-Wire slot.
+Response.HistoryFrame.channels max_size:24
+Response.HistoryFrame.w1_types max_size:4 fixed_length:true
 Response.Info.claim_token   max_size:16 fixed_length:true
 Response.Info.dev_eui       max_size:8 fixed_length:true
 
@@ -59,6 +63,8 @@ AlarmReport.events max_count:8
 # 1-Wire telemetry: one SensorReading per ROM-bound slot (APP_W1_SLOT_COUNT).
 # Static array; the composer splits readings across frames to fit the budget.
 Telemetry.w1_sensors max_count:4
+# One value per present channel of a 1-Wire type (APP_SENSOR_W1_CH_MAX, D6).
+SensorReading.value max_count:10
 
 # GetParam field-id lists as static arrays (no nanopb callback). A batch is
 # bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
@@ -75,6 +81,7 @@ Response.W1Scan.rom max_count:4 max_size:8
 # Boot settings-info (#412): detected 1-Wire slot type per slot, one entry per
 # logical slot (APP_W1_SLOT_COUNT). Static array, packed varint on the wire.
 Response.ConfigDump.w1_slot_type max_count:4
+Response.Info.w1_slot_state max_count:4
 
 # Alarm-rules read-back: up to 5 RuleEntry per AlarmRulesDump page (paged like
 # ConfigDump; the handler further caps a page by a per-transport byte budget).

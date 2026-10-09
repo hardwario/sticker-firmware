@@ -1513,7 +1513,7 @@ static uint32_t m_hist_frame_bound = UINT32_MAX;
  * captured after the start are left for the next replay. */
 static uint32_t m_hist_cursor;
 static uint32_t m_hist_end;
-static uint32_t m_hist_present; /* sensor mask, snapshot at the start */
+static struct app_history_layout m_hist_layout; /* record layout, snapshot at the start */
 static uint32_t m_hist_interval;
 static uint8_t m_hist_retries; /* failed sends of the current frame (#89) */
 /* The frame built last: its length, record count and the cursor after it. A
@@ -1534,7 +1534,7 @@ static uint8_t m_hist_samples[APP_CMD_HISTORY_FRAME_BUF_SIZE];
 static size_t hist_frame_cap(uint8_t budget)
 {
 	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
-					       UINT32_MAX, m_hist_present, m_hist_interval,
+					       UINT32_MAX, &m_hist_layout, m_hist_interval,
 					       MIN((size_t)budget, sizeof(m_hist_buf)));
 }
 
@@ -1617,7 +1617,7 @@ static uint16_t hist_build(uint8_t budget, size_t *len, uint32_t *next)
 	/* time_synced is per frame: a frame never spans two history segments,
 	 * and each segment (flash page) knows whether its base is unix or uptime. */
 	int ret = app_cmd_build_history_frame(
-		m_hist_seq, m_hist_idx, m_hist_count, t0, m_hist_present, m_hist_interval, synced,
+		m_hist_seq, m_hist_idx, m_hist_count, t0, &m_hist_layout, m_hist_interval, synced,
 		m_hist_samples, slen, m_hist_buf, sizeof(m_hist_buf), len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
@@ -1746,7 +1746,7 @@ int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_
 	m_hist_from = from_unix;
 	m_hist_to = to_unix;
 	m_hist_seq = seq;
-	m_hist_present = app_history_get_mask();
+	app_history_get_layout(&m_hist_layout);
 	m_hist_interval = app_history_get_interval();
 
 	/* #409 3f: count with the worst-case bound, then tighten the bound to that

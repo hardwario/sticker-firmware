@@ -147,6 +147,7 @@ proto:
       message: Application
       field: application
       proto_id: 6
+      reserved: [5]  # was history_sensors (uint32 bitmask), replaced by history_channels (#430)
     - key: sensors
       message: Sensors
       field: sensors
@@ -412,12 +413,18 @@ parameters:
     default: false
     help: "Get/Set sensor history store-and-forward (true/false)."
 
-  - name: history_sensors
+  # Recorded channels (#430): up to 24 entries `slot << 5 | ch` in record order
+  # (slot 0 = motherboard, 1..4 = 1-Wire sensorN; ch = app_sensor_types.yaml
+  # channel of that slot's type), 0xff = unused. Replaces the v1.4 uint32
+  # `history_sensors` bitmask (proto_id 5, reserved).
+  - name: history_channels
     proto_group: application
-    proto_id: 5
-    type: uint32
-    default: 3
-    help: "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity."
+    proto_id: 9
+    type: bytes
+    size: 24
+    default: [0x00, 0x01]
+    fill: 0xff
+    help: "Get/Set recorded history channels (24 bytes, slot<<5|ch each, ff = unused). Default 0001ff.. = temperature + humidity."
 
   - name: battery_level
     proto_group: application
@@ -720,174 +727,175 @@ parameters:
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
-  # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
-  # rule's stable identity). 17 bytes little-endian:
-  #   [0] flags  bit0=present (slot occupied), bit1=enabled
-  #   [1] source (enum app_alarm_source)
-  #   [2] quantity (enum app_alarm_quantity)
-  #   [3] from_state, [4] to_state (STATE only)
-  #   [5..8] lo, [9..12] hi, [13..16] dwell (IEEE-754 float LE)
-  # An empty slot is 34 zero hex chars (present=0). The rule cache in
+  # Dynamic alarm rules (#430). One packed-hex rule per entry (the index is the
+  # rule's stable identity). 18 bytes little-endian:
+  #   [0] flags  bit0=present (rule occupied), bit1=enabled
+  #   [1] slot (0 = motherboard, 1..4 = s1..s4)
+  #   [2] channel (type-local, app_sensor_types.yaml)
+  #   [3] sensor_type (registry type id the rule was written for)
+  #   [4] from_state, [5] to_state (STATE only)
+  #   [6..9] lo, [10..13] hi, [14..17] dwell (IEEE-754 float LE)
+  # An empty rule is 36 zero hex chars (present=0). The rule cache in
   # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
   - name: alarm_0
     proto_group: alarms
     proto_id: 3
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 0 (packed hex, see app_config.yml)."
 
   - name: alarm_1
     proto_group: alarms
     proto_id: 4
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 1 (packed hex, see app_config.yml)."
 
   - name: alarm_2
     proto_group: alarms
     proto_id: 5
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 2 (packed hex, see app_config.yml)."
 
   - name: alarm_3
     proto_group: alarms
     proto_id: 6
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 3 (packed hex, see app_config.yml)."
 
   - name: alarm_4
     proto_group: alarms
     proto_id: 7
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 4 (packed hex, see app_config.yml)."
 
   - name: alarm_5
     proto_group: alarms
     proto_id: 8
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 5 (packed hex, see app_config.yml)."
 
   - name: alarm_6
     proto_group: alarms
     proto_id: 9
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 6 (packed hex, see app_config.yml)."
 
   - name: alarm_7
     proto_group: alarms
     proto_id: 10
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 7 (packed hex, see app_config.yml)."
 
   - name: alarm_8
     proto_group: alarms
     proto_id: 11
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 8 (packed hex, see app_config.yml)."
 
   - name: alarm_9
     proto_group: alarms
     proto_id: 12
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 9 (packed hex, see app_config.yml)."
 
   - name: alarm_10
     proto_group: alarms
     proto_id: 13
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 10 (packed hex, see app_config.yml)."
 
   - name: alarm_11
     proto_group: alarms
     proto_id: 14
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 11 (packed hex, see app_config.yml)."
 
   - name: alarm_12
     proto_group: alarms
     proto_id: 15
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 12 (packed hex, see app_config.yml)."
 
   - name: alarm_13
     proto_group: alarms
     proto_id: 16
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 13 (packed hex, see app_config.yml)."
 
   - name: alarm_14
     proto_group: alarms
     proto_id: 17
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 14 (packed hex, see app_config.yml)."
 
   - name: alarm_15
     proto_group: alarms
     proto_id: 18
     type: bytes
     dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
-    size: 17
+    size: 18
     readable: [nfc, radio]
     writable: [nfc, radio]
-    help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+    help: "Get/Set alarm rule 15 (packed hex, see app_config.yml)."
 
   - name: alarm_buzzer_mode
     proto_group: alarms
@@ -929,6 +937,11 @@ parameters:
     # use for the ROM). get_param / NFC / shell still read it.
     dump_radio: false
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor1_type
+    proto_group: sensors
+    proto_id: 23
+    type: uint8
+    help: "Get/Set 1-Wire slot 1 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor2_rom
     proto_group: sensors
     proto_id: 12
@@ -936,6 +949,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_type
+    proto_group: sensors
+    proto_id: 24
+    type: uint8
+    help: "Get/Set 1-Wire slot 2 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor3_rom
     proto_group: sensors
     proto_id: 13
@@ -943,6 +961,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_type
+    proto_group: sensors
+    proto_id: 25
+    type: uint8
+    help: "Get/Set 1-Wire slot 3 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
   - name: sensor4_rom
     proto_group: sensors
     proto_id: 14
@@ -950,6 +973,11 @@ parameters:
     size: 8
     dump_radio: false
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_type
+    proto_group: sensors
+    proto_id: 26
+    type: uint8
+    help: "Get/Set 1-Wire slot 4 sensor type (app_sensor_types.yaml id; 0 = none, set by w1 teach/assign)."
 
   # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
   # the sensors they belong to (moved out of `alarms`).

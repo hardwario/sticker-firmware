@@ -67,13 +67,33 @@ int app_input_get_data(struct app_input_data *data)
 	return 0;
 }
 
-/* ---- 1-Wire slots (no-data sweep gate; short-circuited by
- * g_app_config.cap_w1_sensors == false, but must exist to link). ---- */
+/* ---- 1-Wire slots: no-data sweep gate + sensor-mismatch watchdog (#430).
+ * Short-circuited by g_app_config.cap_w1_sensors == false; cases set these. */
+
+bool test_w1_configured[APP_W1_SLOT_COUNT];
+enum app_w1_slot_state test_w1_state[APP_W1_SLOT_COUNT];
+uint8_t test_w1_expected[APP_W1_SLOT_COUNT];
+uint8_t test_w1_detected[APP_W1_SLOT_COUNT];
 
 bool app_w1_slot_is_configured(int slot)
 {
-	(void)slot;
-	return false;
+	return slot >= 0 && slot < APP_W1_SLOT_COUNT && test_w1_configured[slot];
+}
+
+enum app_w1_slot_state app_w1_slot_get_state(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_state[slot]
+						       : APP_W1_SLOT_STATE_NONE;
+}
+
+uint8_t app_w1_slot_get_expected_type(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_expected[slot] : 0;
+}
+
+uint8_t app_w1_slot_get_detected_type(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_detected[slot] : 0;
 }
 
 /* ---- clock: report "not synced" so alarm timestamps stay uptime-relative,

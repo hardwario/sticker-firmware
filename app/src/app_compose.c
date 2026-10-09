@@ -48,7 +48,6 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
  * alarm state rides here. Bits 1..6 are in use today (varint stays 1 B). */
 #define SYSTEM_FLAG_ALARM_SHIFT 1
 #define SYSTEM_FLAG_ALARM_MASK  0xFFu
-/* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
 /* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
  * migration — notify is now an alarm rule, not a per-counter telemetry flag.
  * ACTIVE stays at bit 2 to keep the wire bit position stable. */
@@ -153,6 +152,32 @@ static bool m_active;
  * compose state-machine side effects, so it backs both the LoRaWAN snapshot
  * (fill_snapshot) and the synchronous Sample response (app_compose_snapshot).
  * `boot` sets the one-shot system boot flag. */
+#if defined(CONFIG_W1)
+BUILD_ASSERT(ARRAY_SIZE(((SensorReading *)0)->value) >= APP_SENSOR_W1_CH_MAX,
+	     "SensorReading.value max_count must cover APP_SENSOR_W1_CH_MAX");
+
+/* A slot's reading as the channel model on the wire (#430, D2 = c): bit ch of
+ * `valid` per channel holding a value, and the values of those channels in
+ * ascending ch order, each scaled by its registry wire scale. */
+static void encode_sensor_reading(SensorReading *sr, const struct app_sensor_w1 *r)
+{
+	const struct app_sensor_type *type = app_sensor_type_get(sr->type);
+
+	if (type == NULL || r->type != sr->type) {
+		return;
+	}
+	for (uint8_t ch = 0; ch < type->channel_count && ch < ARRAY_SIZE(sr->value); ch++) {
+		const struct app_sensor_channel *c = &type->channels[ch];
+
+		if (!(r->valid & BIT(ch)) || (c->flags & APP_SENSOR_F_RETIRED)) {
+			continue;
+		}
+		sr->valid |= BIT(ch);
+		sr->value[sr->value_count++] = app_sensor_wire_value(c, r->v[ch]);
+	}
+}
+#endif /* defined(CONFIG_W1) */
+
 static void fill_telemetry(Telemetry *t, bool boot)
 {
 	memset(t, 0, sizeof(*t));
@@ -170,10 +195,18 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
+	const float voltage = APP_SENSOR_MB_F(&d, BATTERY_VOLTAGE);
+	const float temperature = APP_SENSOR_MB_F(&d, TEMPERATURE);
+	const float humidity = APP_SENSOR_MB_F(&d, HUMIDITY);
+	const float pressure = APP_SENSOR_MB_F(&d, PRESSURE); /* hPa */
+	const float altitude = APP_SENSOR_MB_F(&d, ALTITUDE);
+	const float illuminance = APP_SENSOR_MB_F(&d, ILLUMINANCE);
+	const float orientation = APP_SENSOR_MB_F(&d, ACCEL_ORIENTATION);
+
 	/* system — always sent as one group; boot=false is encoded explicitly.
 	 * voltage uses 0 as a "no sample" sentinel (only the pre-sample case). */
 	t->has_voltage = true;
-	t->voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+	t->voltage = isnan(voltage) ? 0 : (uint32_t)CLAMP(voltage * 50.0f, 0.0f, 255.0f);
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
@@ -182,67 +215,64 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	 * of dropping the field. */
 	if (g_app_config.cap_sht) {
 		t->has_temperature = true;
-		t->temperature =
-			isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
+		t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
 		t->has_humidity = true;
 		/* Clamp before the unsigned cast: the SHT4x formula can yield a
 		 * slightly negative %RH, and a negative float->uint cast is UB. */
-		t->humidity = isnan(d.humidity) ? TM_U32_NA
-						: (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
+		t->humidity = isnan(humidity) ? TM_U32_NA
+					      : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
 	}
 
 	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
 		t->has_pressure = true;
-		/* d.pressure is kPa from the driver; the wire unit is hPa x10
-		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
-		t->pressure = isnan(d.pressure)
-				      ? TM_U32_NA
-				      : (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
+		/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
+		t->pressure = isnan(pressure) ? TM_U32_NA
+					      : (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
 		t->has_altitude = true;
-		t->altitude = isnan(d.altitude)
-				      ? TM_S32_NA
-				      : (int32_t)CLAMP(d.altitude * 10.0f, (float)INT16_MIN,
-						       (float)INT16_MAX);
+		t->altitude = isnan(altitude) ? TM_S32_NA
+					      : (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
+							       (float)INT16_MAX);
 	}
 
 	/* light — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_light_sensor) {
 		t->has_illuminance = true;
-		t->illuminance = isnan(d.illuminance)
+		t->illuminance = isnan(illuminance)
 					 ? TM_U32_NA
-					 : (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
+					 : (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */
-	if (g_app_config.cap_accelerometer && d.orientation != INT_MAX) {
+	if (g_app_config.cap_accelerometer && !isnan(orientation)) {
 		t->has_orientation = true;
-		t->orientation = (uint32_t)(d.orientation & 0xf);
+		t->orientation = (uint32_t)((int)orientation & 0xf);
 	}
 	/* Always send the count when the accelerometer is enabled (0 included) —
 	 * the #78/#80 "whole group every report" policy that the other digital
 	 * counters already follow; this was the lone holdout. */
 	if (g_app_config.cap_accelerometer) {
 		t->has_accel_motion_count = true;
-		t->accel_motion_count = d.accel_motion_count;
+		t->accel_motion_count = APP_SENSOR_MB_U(&d, ACCEL_COUNT);
 	}
 
 	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
 	if (g_app_config.cap_pir_detector) {
 		t->has_motion_count = true;
-		t->motion_count = d.motion_count;
+		t->motion_count = APP_SENSOR_MB_U(&d, PIR_COUNT);
 	}
 
-	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
-	 * The composer owns the slot index, type and the repeated array; the
-	 * per-type value fields are filled by the slot's driver via the registry
-	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
-	 * type travels with the reading; the composer may split the list across
-	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+	/* 1-wire ROM-bound slots → one repeated SensorReading per slot with an
+	 * expected type (sensorN_type, #430): the valid mask plus the values of the
+	 * present channels, scaled by the registry (encode_sensor_reading), so
+	 * adding a sensor type needs no change here. A slot whose probe is absent
+	 * or mismatched is still sent with valid = 0, so the decoder emits null.
+	 * The composer may split the list across frames (each reading is
+	 * indivisible). */
 #if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
-			enum app_w1_slot_type type = app_w1_slot_get_type(i);
+			uint8_t type = app_w1_slot_get_expected_type(i);
 			if (type == APP_W1_SLOT_EMPTY) {
 				continue; /* unconfigured slot → no reading */
 			}
@@ -253,7 +283,9 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			 * stays 0-based internally. */
 			sr->slot = i + 1;
 			sr->type = type;
-			app_w1_slot_encode(i, &d.w1[i], sr);
+			if (app_w1_slot_get_state(i) == APP_W1_SLOT_STATE_OK) {
+				encode_sensor_reading(sr, &d.w1[i]);
+			}
 			t->w1_sensors_count++;
 		}
 	}

@@ -25,11 +25,36 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 extern bool test_clock_has;
 extern uint32_t test_clock_unix;
 
-/* NOTE (#311): `present` is uint32_t — this used to narrow to uint16_t, which
- * silently truncated to 0 for any channel index >= 16 (e.g. ILLUMINANCE, enum
- * value 16: `(uint16_t)(1u << 16)` wraps to 0). Widened when adding the first
- * channels past index 15. */
+/* `present` bit of record column n. */
 #define BIT16(n) ((uint32_t)(1u << (n)))
+
+/* history_channels entry (#430) and the motherboard / machine-probe channels. */
+#define E(slot, ch) ((uint8_t)((slot) << 5 | (ch)))
+#define MB(NAME)    E(0, APP_SENSOR_CH_MOTHERBOARD_##NAME)
+
+/* Columns of the default layout (temperature, humidity). */
+#define COL_TEMP 0
+#define COL_HUM  1
+
+static void set_channels(const uint8_t *list, size_t n)
+{
+	memset(g_app_config.history_channels, APP_HISTORY_ENTRY_UNUSED,
+	       sizeof(g_app_config.history_channels));
+	memcpy(g_app_config.history_channels, list, n);
+}
+
+/* Motherboard channel value as app_sensor stores it (value + valid bit). */
+static void mb_f(uint8_t ch, float v)
+{
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, g_app_sensor_data.mb.v,
+			 &g_app_sensor_data.mb.valid, ch, v);
+}
+
+static void mb_u(uint8_t ch, uint32_t v)
+{
+	g_app_sensor_data.mb.v[ch].u = v;
+	g_app_sensor_data.mb.valid |= BIT(ch);
+}
 
 /* Fresh start: temperature+humidity only (cap_sht on), other caps off, clock
  * unsynced. */
@@ -38,7 +63,7 @@ static void setup(void)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	g_app_config.cap_sht = true; /* #465: the yml default */
 	g_app_config.history_enable = true;
-	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
+	set_channels((const uint8_t[]){MB(TEMPERATURE), MB(HUMIDITY)}, 2);
 
 	g_app_sensor_data = (struct app_sensor_data){0};
 	test_clock_has = false;
@@ -50,8 +75,8 @@ static void setup(void)
 static void set_th(float t, float h)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = t;
-	g_app_sensor_data.humidity = h;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, t);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, h);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 
@@ -67,15 +92,15 @@ ZTEST(history, test_capture_and_get)
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get(0)");
-	zassert_true(r.present & BIT16(APP_HISTORY_TEMPERATURE), "temp not present");
-	zassert_true(r.present & BIT16(APP_HISTORY_HUMIDITY), "hum not present");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 22.5, 0.01, "temp %g",
-		       r.value[APP_HISTORY_TEMPERATURE]);
-	zassert_within(r.value[APP_HISTORY_HUMIDITY], 44.0, 0.5, "hum %g",
-		       r.value[APP_HISTORY_HUMIDITY]);
+	zassert_true(r.present & BIT16(COL_TEMP), "temp not present");
+	zassert_true(r.present & BIT16(COL_HUM), "hum not present");
+	zassert_within(r.value[COL_TEMP], 22.5, 0.01, "temp %g",
+		       r.value[COL_TEMP]);
+	zassert_within(r.value[COL_HUM], 44.0, 0.5, "hum %g",
+		       r.value[COL_HUM]);
 
 	zassert_equal(app_history_get(1, &r), 0, "get(1)");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 23.0, 0.01, "temp1");
+	zassert_within(r.value[COL_TEMP], 23.0, 0.01, "temp1");
 
 	zassert_equal(app_history_get(2, &r), -ENOENT, "get past end");
 }
@@ -99,12 +124,12 @@ ZTEST(history, test_ring_wrap_evicts_oldest)
 	/* Oldest surviving record is index (m - cap). */
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get oldest");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], (double)(m - cap), 0.01,
-		       "oldest temp %g (want %zu)", r.value[APP_HISTORY_TEMPERATURE], m - cap);
+	zassert_within(r.value[COL_TEMP], (double)(m - cap), 0.01,
+		       "oldest temp %g (want %zu)", r.value[COL_TEMP], m - cap);
 
 	zassert_equal(app_history_get(cap - 1, &r), 0, "get newest");
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], (double)(m - 1), 0.01, "newest temp %g",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+	zassert_within(r.value[COL_TEMP], (double)(m - 1), 0.01, "newest temp %g",
+		       r.value[COL_TEMP]);
 }
 
 ZTEST(history, test_clock_sync_base_fixup)
@@ -181,7 +206,7 @@ ZTEST(history, test_export)
 }
 
 /* #465: with cap_sht off the onboard temperature/humidity channels are not
- * available, so they drop out of the active mask and are not stored (instead of
+ * available, so they drop out of the layout and are not stored (instead of
  * recording NaN). */
 ZTEST(history, test_cap_sht_off_drops_onboard_channels)
 {
@@ -190,103 +215,209 @@ ZTEST(history, test_cap_sht_off_drops_onboard_channels)
 	zassert_equal(app_history_init(), 0, "re-init with cap_sht off");
 	app_history_clear();
 
-	zassert_false(app_history_sensor_available(APP_HISTORY_TEMPERATURE), "temp available");
-	zassert_false(app_history_sensor_available(APP_HISTORY_HUMIDITY), "hum available");
-	zassert_equal(app_history_available_mask() &
-			      (BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY)),
-		      0, "onboard channels in the available mask");
-	zassert_equal(app_history_get_mask() &
-			      (BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY)),
-		      0, "onboard channels still recorded");
+	zassert_false(app_history_entry_available(MB(TEMPERATURE)), "temp available");
+	zassert_false(app_history_entry_available(MB(HUMIDITY)), "hum available");
+
+	struct app_history_layout l;
+
+	app_history_get_layout(&l);
+	zassert_equal(l.count, 0, "onboard channels still recorded");
 }
 
-/* Per-slot 1-Wire channels (s1..s4 temp/hum) become available when cap_w1_sensors
- * is on; a Dallas-like slot with NaN humidity stores the sentinel → absent. */
+/* #430: a 1-Wire column is a channel of the slot's configured sensorN_type. A
+ * dallas slot has no humidity channel, so `s3-humidity` is skipped; a slot that
+ * holds another type than configured records nothing. */
 ZTEST(history, test_per_slot_w1_channels)
 {
 	setup();
 	g_app_config.cap_w1_sensors = true;
-	g_app_config.history_sensors |= BIT(APP_HISTORY_S1_TEMP) | BIT(APP_HISTORY_S1_HUM) |
-					BIT(APP_HISTORY_S3_TEMP) | BIT(APP_HISTORY_S3_HUM);
+	g_app_config.sensor1_type = APP_SENSOR_TYPE_MACHINE_PROBE;
+	g_app_config.sensor3_type = APP_SENSOR_TYPE_DALLAS;
+	set_channels((const uint8_t[]){MB(TEMPERATURE), MB(HUMIDITY),
+				       E(1, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE),
+				       E(1, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY),
+				       E(3, APP_SENSOR_CH_DALLAS_TEMPERATURE),
+				       E(3, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY)},
+		     6);
 	zassert_equal(app_history_init(), 0, "re-init with cap_w1_sensors");
 	app_history_clear();
 
+	struct app_history_layout l;
+
+	app_history_get_layout(&l);
+	zassert_equal(l.count, 5, "dallas has no humidity: %u columns", l.count);
+	zassert_true(l.has_w1);
+	zassert_equal(l.w1_types[0], APP_SENSOR_TYPE_MACHINE_PROBE);
+	zassert_equal(l.w1_types[2], APP_SENSOR_TYPE_DALLAS);
+	zassert_equal(l.channels[4], E(3, APP_SENSOR_CH_DALLAS_TEMPERATURE));
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
-	g_app_sensor_data.w1[0].temperature = 24.5f; /* s1: temp + hum (machine-probe) */
-	g_app_sensor_data.w1[0].humidity = 55.0f;
-	g_app_sensor_data.w1[2].temperature = 30.0f; /* s3: temp only (Dallas-like) */
-	g_app_sensor_data.w1[2].humidity = NAN;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, 20.0f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 40.0f);
+	struct app_sensor_w1 *s1 = &g_app_sensor_data.w1[0];
+	struct app_sensor_w1 *s3 = &g_app_sensor_data.w1[2];
+
+	app_sensor_w1_clear(s1, APP_SENSOR_TYPE_MACHINE_PROBE);
+	s1->present = true;
+	app_sensor_put_f(s1->type, s1->v, &s1->valid, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE,
+			 24.5f);
+	app_sensor_put_f(s1->type, s1->v, &s1->valid, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, 55.0f);
+	app_sensor_w1_clear(s3, APP_SENSOR_TYPE_DALLAS);
+	s3->present = true;
+	app_sensor_put_f(s3->type, s3->v, &s3->valid, APP_SENSOR_CH_DALLAS_TEMPERATURE, 30.0f);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get");
-	zassert_true(r.present & BIT16(APP_HISTORY_S1_TEMP), "s1-temp present");
-	zassert_within(r.value[APP_HISTORY_S1_TEMP], 24.5, 0.01, "s1-temp %g",
-		       r.value[APP_HISTORY_S1_TEMP]);
-	zassert_true(r.present & BIT16(APP_HISTORY_S1_HUM), "s1-hum present");
-	zassert_within(r.value[APP_HISTORY_S1_HUM], 55.0, 0.5, "s1-hum %g",
-		       r.value[APP_HISTORY_S1_HUM]);
-	zassert_true(r.present & BIT16(APP_HISTORY_S3_TEMP), "s3-temp present");
-	zassert_within(r.value[APP_HISTORY_S3_TEMP], 30.0, 0.01, "s3-temp %g",
-		       r.value[APP_HISTORY_S3_TEMP]);
-	zassert_false(r.present & BIT16(APP_HISTORY_S3_HUM), "s3-hum absent (NaN sentinel)");
+	zassert_equal(r.present, 0x1f, "present 0x%x", r.present);
+	zassert_within(r.value[2], 24.5, 0.01, "s1-temp %g", r.value[2]);
+	zassert_within(r.value[3], 55.0, 0.5, "s1-hum %g", r.value[3]);
+	zassert_within(r.value[4], 30.0, 0.01, "s3-temp %g", r.value[4]);
+
+	/* Slot 3 now reports a machine probe (re-typed bus, not yet re-taught). */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	s3->type = APP_SENSOR_TYPE_MACHINE_PROBE;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+	zassert_equal(app_history_get(1, &r), 0, "get1");
+	zassert_false(r.present & BIT16(4), "type mismatch must be absent");
+
+	/* Teaching the slot as machine-probe changes the layout: buffer restarts. */
+	g_app_config.sensor3_type = APP_SENSOR_TYPE_MACHINE_PROBE;
+	app_history_capture();
+	zassert_equal(app_history_count(), 1, "layout change restarts the buffer");
+	app_history_get_layout(&l);
+	zassert_equal(l.count, 6, "machine-probe has humidity: %u", l.count);
 }
 
-/* #311: pressure/illuminance/orientation/accel-motion — same fixed-width
- * present/absent pattern as the other channels, gated on their own caps. */
+/* #311 + #430: pressure/illuminance/orientation/accel channels — same
+ * fixed-width present/absent pattern, gated on their own caps. A momentary
+ * channel (accel-motion) records whether its counter moved since the previous
+ * record; the first record has no base. */
 ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 {
 	setup();
 	g_app_config.cap_barometer = true;
 	g_app_config.cap_light_sensor = true;
 	g_app_config.cap_accelerometer = true;
-	g_app_config.history_sensors |= BIT(APP_HISTORY_PRESSURE) | BIT(APP_HISTORY_ILLUMINANCE) |
-					BIT(APP_HISTORY_ORIENTATION) |
-					BIT(APP_HISTORY_ACCEL_MOTION);
+	set_channels((const uint8_t[]){MB(TEMPERATURE), MB(HUMIDITY), MB(PRESSURE),
+				       MB(ILLUMINANCE), MB(ACCEL_ORIENTATION), MB(ACCEL_COUNT),
+				       MB(ACCEL_MOTION)},
+		     7);
 	zassert_equal(app_history_init(), 0, "re-init with new caps");
 	app_history_clear();
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.pressure = 101.32f; /* kPa -> 1013.2 hPa on the wire */
-	g_app_sensor_data.illuminance = 450.0f;
-	g_app_sensor_data.orientation = 3;
-	g_app_sensor_data.accel_motion_count = 7;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_PRESSURE, 1013.2f); /* hPa */
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE, 450.0f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION, 3.0f);
+	mb_u(APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT, 7);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
 	struct app_history_record r;
 	zassert_equal(app_history_get(0, &r), 0, "get");
-	zassert_true(r.present & BIT16(APP_HISTORY_PRESSURE), "pressure present");
-	zassert_within(r.value[APP_HISTORY_PRESSURE], 1013.2, 0.1, "pressure %g",
-		       r.value[APP_HISTORY_PRESSURE]);
-	zassert_true(r.present & BIT16(APP_HISTORY_ILLUMINANCE), "illuminance present");
-	zassert_within(r.value[APP_HISTORY_ILLUMINANCE], 450.0, 2.0, "illuminance %g",
-		       r.value[APP_HISTORY_ILLUMINANCE]);
-	zassert_true(r.present & BIT16(APP_HISTORY_ORIENTATION), "orientation present");
-	zassert_within(r.value[APP_HISTORY_ORIENTATION], 3.0, 0.01, "orientation %g",
-		       r.value[APP_HISTORY_ORIENTATION]);
-	zassert_true(r.present & BIT16(APP_HISTORY_ACCEL_MOTION), "accel-motion present");
-	zassert_within(r.value[APP_HISTORY_ACCEL_MOTION], 7.0, 0.01, "accel-motion %g",
-		       r.value[APP_HISTORY_ACCEL_MOTION]);
+	zassert_true(r.present & BIT16(2), "pressure present");
+	zassert_within(r.value[2], 1013.2, 0.1, "pressure %g", r.value[2]);
+	zassert_true(r.present & BIT16(3), "illuminance present");
+	zassert_within(r.value[3], 450.0, 2.0, "illuminance %g", r.value[3]);
+	zassert_true(r.present & BIT16(4), "orientation present");
+	zassert_within(r.value[4], 3.0, 0.01, "orientation %g", r.value[4]);
+	zassert_true(r.present & BIT16(5), "accel-count present");
+	zassert_within(r.value[5], 7.0, 0.01, "accel-count %g", r.value[5]);
+	zassert_false(r.present & BIT16(6), "accel-motion: no base on the first record");
 
-	/* Absent sentinels: NaN pressure/illuminance, INT_MAX orientation (the
-	 * app_sensor_data default when the capability is off). */
+	/* Absent sentinels: NaN pressure/illuminance/orientation (the channel
+	 * default when the capability is off); the counter moved → motion = 1. */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.pressure = NAN;
-	g_app_sensor_data.illuminance = NAN;
-	g_app_sensor_data.orientation = INT_MAX;
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_PRESSURE, NAN);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE, NAN);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION, NAN);
+	mb_u(APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT, 9);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
 	zassert_equal(app_history_get(1, &r), 0, "get1");
-	zassert_false(r.present & BIT16(APP_HISTORY_PRESSURE), "pressure absent (NaN sentinel)");
-	zassert_false(r.present & BIT16(APP_HISTORY_ILLUMINANCE),
-		      "illuminance absent (NaN sentinel)");
-	zassert_false(r.present & BIT16(APP_HISTORY_ORIENTATION),
-		      "orientation absent (INT_MAX sentinel)");
+	zassert_false(r.present & BIT16(2), "pressure absent (NaN sentinel)");
+	zassert_false(r.present & BIT16(3), "illuminance absent (NaN sentinel)");
+	zassert_false(r.present & BIT16(4), "orientation absent (NaN sentinel)");
+	zassert_true(r.present & BIT16(6), "accel-motion present");
+	zassert_within(r.value[6], 1.0, 0.01, "accel-motion %g", r.value[6]);
+
+	app_history_capture(); /* counter unchanged → no motion */
+	zassert_equal(app_history_get(2, &r), 0, "get2");
+	zassert_within(r.value[6], 0.0, 0.01, "accel-motion %g", r.value[6]);
+}
+
+/* #430: any registry channel is recordable — states as u8, a negative altitude
+ * as i16 — and the shell names round-trip. */
+ZTEST(history, test_any_channel_recordable)
+{
+	setup();
+	g_app_config.cap_barometer = true;
+	g_app_config.cap_hall_left = true;
+	set_channels((const uint8_t[]){MB(HALL_LEFT_STATE), MB(ALTITUDE), MB(BATTERY_VOLTAGE)},
+		     3);
+	zassert_equal(app_history_init(), 0);
+	app_history_clear();
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE, 1.0f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_ALTITUDE, -123.4f);
+	mb_f(APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE, 3.012f);
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.present, 0x7);
+	zassert_within(r.value[0], 1.0, 0.01);
+	zassert_within(r.value[1], -123.0, 0.01, "altitude %g", r.value[1]);
+	zassert_within(r.value[2], 3.012, 0.001, "battery %g", r.value[2]);
+
+	char name[32];
+	uint8_t e;
+
+	zassert_equal(app_history_entry_name(MB(ALTITUDE), name, sizeof(name)), 0);
+	zassert_str_equal(name, "altitude");
+	zassert_equal(app_history_entry_by_name("altitude", &e), 0);
+	zassert_equal(e, MB(ALTITUDE));
+	g_app_config.sensor2_type = APP_SENSOR_TYPE_DALLAS;
+	zassert_equal(app_history_entry_name(E(2, 0), name, sizeof(name)), 0);
+	zassert_str_equal(name, "s2-temperature");
+	zassert_equal(app_history_entry_by_name("s2-temperature", &e), 0);
+	zassert_equal(e, E(2, 0));
+	zassert_equal(app_history_entry_by_name("s4-temperature", &e), -EINVAL, "untyped slot");
+	zassert_equal(app_history_entry_by_name("nope", &e), -EINVAL);
+}
+
+/* #430: a new selection that changes the layout clears the buffer; the same
+ * selection keeps it. */
+ZTEST(history, test_set_channels)
+{
+	setup();
+	set_th(20.0f, 40.0f);
+	app_history_capture();
+	zassert_equal(app_history_count(), 1);
+
+	app_history_set_channels((const uint8_t[]){MB(TEMPERATURE), MB(HUMIDITY)}, 2);
+	zassert_equal(app_history_count(), 1, "same layout keeps the buffer");
+
+	app_history_set_channels((const uint8_t[]){MB(HUMIDITY)}, 1);
+	zassert_equal(app_history_count(), 0, "new layout clears the buffer");
+
+	uint8_t list[APP_HISTORY_MAX_CH];
+
+	app_history_get_channels(list);
+	zassert_equal(list[0], MB(HUMIDITY));
+	zassert_equal(list[1], APP_HISTORY_ENTRY_UNUSED);
+
+	app_history_capture();
+	struct app_history_record r;
+
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_within(r.value[0], 40.0, 0.5, "humidity is column 0 now");
 }
 
 /* Temperature of the i-th record in an absolute-cursor export buffer (3 B
@@ -339,8 +470,8 @@ ZTEST(history, test_capture_during_replay_absolute_cursor)
 	zassert_equal(app_history_count(), cap, "captures must not be skipped");
 	struct app_history_record r;
 	zassert_equal(app_history_get(cap - 1, &r), 0);
-	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 102.0, 0.01, "newest %g",
-		       r.value[APP_HISTORY_TEMPERATURE]);
+	zassert_within(r.value[COL_TEMP], 102.0, 0.01, "newest %g",
+		       r.value[COL_TEMP]);
 
 	/* Frame 2 continues exactly after record 4 despite the eviction. */
 	uint32_t cur = next;

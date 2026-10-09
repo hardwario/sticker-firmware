@@ -73,10 +73,11 @@ def workdir(tmp_path):
 def test_build_options_lines_matches_committed():
     cfg = _load_config()
     lines = configen.build_options_lines(cfg)
-    # The 7 LoRaWAN keys + the 4 per-slot 1-Wire ROM keys + the 16 packed alarm
+    # history_channels + the 7 LoRaWAN keys + the 4 per-slot 1-Wire ROM keys + the 16 packed alarm
     # slots are native bytes with nanopb fixed_length (plain pb_byte_t[size], half
     # the old hex wire size); secret_key is a callback. Order-independent.
     assert sorted(lines) == sorted([
+        "AppConfigMessage.Application.history_channels max_size:24 fixed_length:true",
         "AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true",
         "AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true",
         "AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true",
@@ -89,7 +90,7 @@ def test_build_options_lines_matches_committed():
         "AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true",
         "AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true",
     ] + [
-        f"AppConfigMessage.Alarms.alarm_{i} max_size:17 fixed_length:true" for i in range(16)
+        f"AppConfigMessage.Alarms.alarm_{i} max_size:18 fixed_length:true" for i in range(16)
     ])
     assert not any("secret_key" in ln for ln in lines)
 
@@ -196,13 +197,13 @@ def test_build_proto_model_structure():
     subs = {s["name"]: s for s in model["submessages"]}
     assert subs["Lorawan"]["fields"][0]["name"] == "region"
     app = subs["Application"]
-    assert app["reserved"] == []  # #166 dropped the leftover gaps
+    assert app["reserved"] == [5]  # history_sensors, replaced by history_channels (#430)
     ids = {f["name"]: f["id"] for f in app["fields"]}
-    assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
+    assert ids["history_enable"] == 4 and ids["history_channels"] == 9
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
     assert ids["vendor_reset_allow"] == 7  # NFC vendor_reset gate (#299)
     assert ids["interval_announce"] == 8  # periodic announce (#445)
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7, 8]  # contiguous
+    assert sorted(ids.values()) == [1, 2, 3, 4, 6, 7, 8, 9]
 
 
 # #340 M23: a float/double param with no explicit min/max must NOT take the
@@ -720,3 +721,16 @@ def test_dump_radio_false_marks_lrw_skip_rows():
     assert skip == {("DUMP_SECTION_SENSORS", t) for t in (11, 12, 13, 14)}
     # the flag is independent of nfc_only (the ROMs stay readable over LoRaWAN)
     assert all(not r["nfc_only"] for r in rows if r["lrw_skip"])
+
+
+def test_bytes_default_is_padded_with_fill():
+    p = {"name": "x", "type": "bytes", "size": 4, "default": [0x00, 0x01], "fill": 0xFF}
+    assert configen.filter_default_value(p, "app_config") == "{0x00, 0x01, 0xff, 0xff}"
+    p = {"name": "x", "type": "bytes", "size": 3, "default": [7]}
+    assert configen.filter_default_value(p, "app_config") == "{0x07, 0x00, 0x00}"
+
+
+def test_history_channels_default_is_onboard_temperature_and_humidity():
+    cfg = _load_config()
+    p = next(q for q in cfg["parameters"] if q["name"] == "history_channels")
+    assert p["size"] == 24 and p["default"] == [0x00, 0x01] and p["fill"] == 0xFF
