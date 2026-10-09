@@ -24,7 +24,7 @@ extern "C" {
 
 /* One channel value (#430). Counter channels (APP_SENSOR_F_COUNTER) use `u` —
  * an exact uint32 that a float would round above 2^24 — every other channel
- * uses `f` in the channel's physical unit (app_w1_slots.yaml), NaN when absent,
+ * uses `f` in the channel's physical unit (app_sensor_types.yaml), NaN when absent,
  * state channels as 0.0f / 1.0f. */
 union app_sensor_value {
 	float f;

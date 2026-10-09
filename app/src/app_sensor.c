@@ -626,7 +626,7 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_W1) */
 
 	/* The motherboard channel vector for this sweep (#430). Physical units per
-	 * app_w1_slots.yaml: the MPL3115A2 reports kPa, the channel is hPa. */
+	 * app_sensor_types.yaml: the MPL3115A2 reports kPa, the channel is hPa. */
 	struct app_sensor_mb mb = {.valid = 0};
 
 	for (size_t ch = 0; ch < ARRAY_SIZE(mb.v); ch++) {

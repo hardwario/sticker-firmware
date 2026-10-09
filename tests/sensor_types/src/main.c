@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Host tests for the generated sensor type registry (app_sensor_types.c,
- * `west sensorgen` from app_w1_slots.yaml, #430): lookups by id / family /
+ * `west sensorgen` from app_sensor_types.yaml, #430): lookups by id / family /
  * name, channel descriptors and the capability gates.
  */
 

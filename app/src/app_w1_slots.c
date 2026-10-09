@@ -55,7 +55,7 @@ typedef void (*w1_encode_fn)(const struct app_sensor_w1 *r, SensorReading *sr);
 
 struct app_w1_sensor_type {
 	enum app_w1_slot_type type;
-	uint8_t sensor_type; /* registry type id (app_w1_slots.yaml) */
+	uint8_t sensor_type; /* registry type id (app_sensor_types.yaml) */
 	uint8_t family;      /* 1-Wire family code (informational) */
 	const char *name;    /* shell / log label */
 	int (*scan)(void);   /* re-enumerate this transport's devices */

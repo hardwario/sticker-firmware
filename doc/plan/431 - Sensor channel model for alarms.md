@@ -4,7 +4,7 @@ Issue: #430 · PR: #431 · Target: the next **non-migratable** release. The conf
 and the alarm, telemetry and history wire formats break, and devices are re-provisioned.
 There is no config migration. The release is not decided yet.
 
-Registry draft: [`app/src/app_w1_slots.yaml`](../../app/src/app_w1_slots.yaml).
+Registry draft: [`app/src/app_sensor_types.yaml`](../../app/src/app_sensor_types.yaml).
 
 ## Why
 
@@ -32,7 +32,7 @@ the decoder and the Manager-App then address a value as `(slot, channel)`.
 
 ```
 slot 0     ──► motherboard (type 1, fixed)        ─┐
-slot 1..4  ──► 1-Wire type from sensorN_type       ├─► channel table (app_w1_slots.yaml)
+slot 1..4  ──► 1-Wire type from sensorN_type       ├─► channel table (app_sensor_types.yaml)
                                                     ┘   ch → {name, label, quantity, unit, kind,
                                                           momentary, counter, cap, wire, history,
                                                           range, liveness}
@@ -95,12 +95,12 @@ enc = `u8 | i16 | u16 | i32 | u32`). `i32` is new, for high-resolution channels 
 - Only the channels per type are bounded, because they size the valid masks and the
   reading arrays.
 
-## Registry: `app_w1_slots.yaml`, generated everywhere
+## Registry: `app_sensor_types.yaml`, generated everywhere
 
-The channel tables are written once, in **`app/src/app_w1_slots.yaml`**. That file is the
+The channel tables are written once, in **`app/src/app_sensor_types.yaml`**. That file is the
 only place they are edited.
 
-The west command `west sensorgen app/src/app_w1_slots.yaml`
+The west command `west sensorgen app/src/app_sensor_types.yaml`
 (`scripts/west_commands/sensorgen.py`, alongside `configen`) validates the YAML and
 generates two things. Both are committed, like the configen output.
 
@@ -132,7 +132,7 @@ generates two things. Both are committed, like the configen output.
 checkout, so in a worktree the command is driven directly from Python, as the pytest
 suite does (`sensorgen.Sensorgen().do_run(...)`).
 
-The **Manager-App reads `app_w1_slots.yaml` directly** (D5), pinned to the firmware
+The **Manager-App reads `app_sensor_types.yaml` directly** (D5), pinned to the firmware
 release tag it targets. It uses the file for labels, units, scales, valid rule kinds,
 capability gating and the history-capable channel list. Nothing extra is generated for
 it, and the device only ever sends ids.
@@ -397,7 +397,7 @@ History becomes selectable per `(slot, channel)`. It replaces the fixed
   - The decoder resolves each entry to `(type, channel)` → name, encoding and scale from
     its generated table.
 - **Manager-App:** it offers the `history`-capable, enabled channels of each slot, from
-  `app_w1_slots.yaml` plus the device's caps and `sensorN_type`, and writes
+  `app_sensor_types.yaml` plus the device's caps and `sensorN_type`, and writes
   `history_channels`.
 - **Budget:**
   - The worst case record is 24 × 4 B = 96 B (all counters), against today's
@@ -439,7 +439,7 @@ replaced by a valid mask plus packed values:
 message SensorReading {
     reserved 3 to 10;                         // typed fields, replaced by the channel model (#430)
     uint32 slot            = 1;               // 1..4 = s1..s4
-    uint32 type            = 2;               // sensor type id (app_w1_slots.yaml)
+    uint32 type            = 2;               // sensor type id (app_sensor_types.yaml)
     uint32 valid           = 11;              // bit ch = channel ch has a value
     repeated sint32 value  = 12 [packed = true]; // values of the set bits only, ascending ch,
                                               // each round(phys * wire.scale)
@@ -528,7 +528,7 @@ Each step is its own commit series with its own tests, and CI must be green at t
 of every step.
 
 1. ✅ **Registry + generator.**
-   - `app_w1_slots.yaml`, `west sensorgen`, the generated `app_sensor_types.{c,h}` and
+   - `app_sensor_types.yaml`, `west sensorgen`, the generated `app_sensor_types.{c,h}` and
      `ttn.js` region.
    - `test_sensorgen.py` (sync, validation, append-only guard) and the
      `tests/sensor_types` ztest.
@@ -552,7 +552,7 @@ of every step.
 
 Parallel work outside this repo:
 
-- Manager-App MR (rule editor + history selection from `app_w1_slots.yaml`) after step 4;
+- Manager-App MR (rule editor + history selection from `app_sensor_types.yaml`) after step 4;
 - the ProXimos/Hub decoder with the same table.
 
 Each step lands with its own tests. The `doc/` updates (release notes, `doc/` guides) are
@@ -609,7 +609,7 @@ the last commit before the PR leaves draft.
 | D2 | Telemetry `SensorReading` encoding | **Decided:** (c) valid mask + packed present values; unit and scale per channel in the YAML, decoder outputs units, `i32` history encoding, CI range check |
 | D3 | History per channel | **Decided:** yes, `history_channels` (see *History per channel*) |
 | D4 | Mismatch reporting | **Decided:** `TYPE_SENSOR_MISMATCH` alarm on the slot + values `null` in telemetry (and history) |
-| D5 | Where the Manager-App gets the registry | **Decided:** reads `app_w1_slots.yaml` directly |
+| D5 | Where the Manager-App gets the registry | **Decided:** reads `app_sensor_types.yaml` directly |
 | D6 | Max channels per type | **Decided:** 10 per 1-Wire type; the motherboard has its own limit of 32 (21 used), because it now carries every on-board sensor |
 | D7 | Alarm rule identity | **Decided:** `(rule, slot, channel)`; `AlarmEvent` fields renamed `source` → `slot`, `slot` → `rule` (numbers kept) |
 | D8 | Store the sensor type in the rule | **Decided:** yes, blob 17 → 18 B; a rule with a type that differs from `sensorN_type` is stale (inert, reported) |

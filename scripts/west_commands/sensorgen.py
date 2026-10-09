@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""West command generating the sensor type registry from app_w1_slots.yaml (#430).
+"""West command generating the sensor type registry from app_sensor_types.yaml (#430).
 
 Each sensor type (the motherboard on slot 0, 1-Wire types on slots 1..4)
 publishes a channel table. This command validates the YAML and generates:
@@ -300,7 +300,7 @@ class Sensorgen(WestCommand):
     def __init__(self):
         super().__init__(
             "sensorgen",
-            "generate the sensor type registry from app_w1_slots.yaml",
+            "generate the sensor type registry from app_sensor_types.yaml",
             __doc__,
             accepts_unknown_args=False,
             requires_workspace=False,
@@ -310,7 +310,7 @@ class Sensorgen(WestCommand):
         parser = parser_adder.add_parser(
             self.name, help=self.help, description=self.description,
             formatter_class=argparse.RawDescriptionHelpFormatter)
-        parser.add_argument("yaml_file", type=Path, help="path to app_w1_slots.yaml")
+        parser.add_argument("yaml_file", type=Path, help="path to app_sensor_types.yaml")
         parser.add_argument("-o", "--output-dir", type=Path, default=None,
                             help="output directory (default: same as the YAML)")
         parser.add_argument("--app-config", type=Path, default=None,

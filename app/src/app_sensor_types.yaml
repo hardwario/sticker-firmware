@@ -1,7 +1,7 @@
 # Sensor type registry — channel model for alarms, telemetry and history (#430).
 #
 # Regenerate after every edit (from the repo root):
-#   west sensorgen app/src/app_w1_slots.yaml
+#   west sensorgen app/src/app_sensor_types.yaml
 # which validates this file and generates:
 #   - app_sensor_types.c/.h  (channel descriptor tables + lookups)
 #   - the `// BEGIN GENERATED SENSOR_TYPES` region in decoder/ttn.js

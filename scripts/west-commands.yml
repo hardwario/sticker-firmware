@@ -8,4 +8,4 @@ west-commands:
     commands:
       - name: sensorgen
         class: Sensorgen
-        help: generate the sensor type registry from app_w1_slots.yaml
+        help: generate the sensor type registry from app_sensor_types.yaml

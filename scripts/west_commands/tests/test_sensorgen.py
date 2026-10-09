@@ -1,5 +1,5 @@
 """Tests for the sensorgen west command (#430): the sensor type registry
-app_w1_slots.yaml, its validation, the append-only numbering guard, and that the
+app_sensor_types.yaml, its validation, the append-only numbering guard, and that the
 committed generated files (app_sensor_types.{c,h}, the ttn.js SENSOR_TYPES
 region) are in sync with the YAML.
 
@@ -17,7 +17,7 @@ import sensorgen
 
 REPO = Path(__file__).resolve().parents[3]
 APP_SRC = REPO / "app" / "src"
-REGISTRY = APP_SRC / "app_w1_slots.yaml"
+REGISTRY = APP_SRC / "app_sensor_types.yaml"
 APP_CONFIG = APP_SRC / "app_config.yml"
 DECODER = REPO / "app" / "decoder" / "ttn.js"
 
@@ -36,7 +36,7 @@ def _errors(reg):
 
 def _run(workdir):
     sensorgen.Sensorgen().do_run(argparse.Namespace(
-        yaml_file=workdir / "app_w1_slots.yaml",
+        yaml_file=workdir / "app_sensor_types.yaml",
         output_dir=workdir,
         app_config=workdir / "app_config.yml",
         decoder=workdir / "ttn.js",
@@ -46,7 +46,7 @@ def _run(workdir):
 
 @pytest.fixture
 def workdir(tmp_path):
-    for name in ["app_w1_slots.yaml", "app_config.yml", "app_sensor_types.h", "app_sensor_types.c"]:
+    for name in ["app_sensor_types.yaml", "app_config.yml", "app_sensor_types.h", "app_sensor_types.c"]:
         shutil.copy(APP_SRC / name, tmp_path / name)
     shutil.copy(DECODER, tmp_path / "ttn.js")
     if (REPO / ".clang-format").exists():
@@ -80,13 +80,13 @@ def test_generated_c_matches_committed(workdir):
     _run(workdir)
     for name in ["app_sensor_types.h", "app_sensor_types.c"]:
         assert (workdir / name).read_text() == (APP_SRC / name).read_text(), \
-            f"{name} is stale — run `west sensorgen app/src/app_w1_slots.yaml`"
+            f"{name} is stale — run `west sensorgen app/src/app_sensor_types.yaml`"
 
 
 def test_generated_decoder_region_matches_committed(workdir):
     _run(workdir)
     assert (workdir / "ttn.js").read_text() == DECODER.read_text(), \
-        "ttn.js SENSOR_TYPES region is stale — run `west sensorgen app/src/app_w1_slots.yaml`"
+        "ttn.js SENSOR_TYPES region is stale — run `west sensorgen app/src/app_sensor_types.yaml`"
 
 
 def test_generation_is_idempotent(workdir):
