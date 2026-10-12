@@ -69,6 +69,23 @@ Hub follow-up: the central's GetParam does not cap the keys per group at the nod
 A 60-key GetParam made the node fail `pb_decode` with an array overflow; the node answered
 with an error.
 
+### Backoff yield to an alarm (review fix `a4a7731a`)
+
+STICKER 5722 on J-Link 822005108, debug P2P bench image of `b3922e93` with a temporary
+HIL hook (not committed). The hook sets a 120 s network backoff when an Ack is missed, so
+the backoff starts while a confirmed retry is waiting. Afterwards the node went back to
+the clean `b3922e93` image.
+
+| Step | Result |
+|---|---|
+| `ats radio ack_drop 1`, `send` | Telemetry counter 517 got no Ack; the retry (kind 2) was pending and the backoff held it for 118 s |
+| Alarm rule triggered 21 s into the backoff | PASS: `Alarm past the network backoff: the held retry (kind 2) goes afresh after it`; the alarm went at once (counter 518), the backoff kept holding everything else |
+| Backoff expired | PASS: the released telemetry went as a fresh frame (counter 519, Ack on the second try after the debug drop), then the report the alarm itself had requested (counter 520) |
+| Cleanup | The alarm rule was cleared; the node is paired with 0 rules |
+
+Not run on HW: an answer caught as the current frame (`k_msgq_put_front`). It needs a
+downlink command to arrive during a backoff; `tests/radio_common` covers it.
+
 ## Source
 
 Gap analysis 2026-10-12 against `v1.5.0` 73c0b802, proximos-v2 `main` 2d1e90ed
