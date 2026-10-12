@@ -394,6 +394,19 @@ test("decodeUplink decodes get_info last fault (fPort 85)", () => {
   assert.equal(got.info.fault_lr, "0x08001235");
 });
 
+// A Cortex-M fault reports the finer K_ERR_ARM_* code: 27 = instruction bus
+// fault, as seen on HW after a jump to an unmapped address (fw 1.5.0).
+test("decodeUplink names a Cortex-M fault reason (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a16080110055802a0011ba8018080848002b001d3bc8a40"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.fault_reason, 27);
+  assert.equal(got.info.fault_reason_name, "bus_instruction");
+  assert.equal(got.info.fault_pc, "0x20010000");
+  assert.equal(got.info.fault_lr, "0x08029e53");
+});
+
 // Info carries dev_eui (field 13, 8 bytes), emitted over NFC only. The radio
 // link state is not part of Info (#446: get_radio_state). Inner Info: fw 1.4.2,
 // dev_eui=0102030405060708.

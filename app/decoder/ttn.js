@@ -106,9 +106,19 @@ var _RESET_CAUSES = [
 
 // fault_reason (Info field 20, #485 B2): Zephyr K_ERR_* code of the fatal error
 // that ended the previous boot.
+// Zephyr K_ERR_* (0-4) and, on Cortex-M, the finer K_ERR_ARM_* (16+) that the
+// fault handler reports instead of cpu_exception. Pinned by a BUILD_ASSERT in
+// main.c.
 var _FAULT_REASONS = {
   0: "cpu_exception", 1: "spurious_irq", 2: "stack_check_fail", 3: "kernel_oops",
-  4: "kernel_panic"
+  4: "kernel_panic",
+  16: "mem_fault", 17: "mem_stacking", 18: "mem_unstacking", 19: "mem_data_access",
+  20: "mem_instruction_access", 21: "mem_fp_lazy_state",
+  22: "bus_fault", 23: "bus_stacking", 24: "bus_unstacking", 25: "bus_precise_data",
+  26: "bus_imprecise_data", 27: "bus_instruction", 28: "bus_fp_lazy_state",
+  29: "usage_fault", 30: "div_0", 31: "unaligned_access", 32: "stack_overflow",
+  33: "no_coprocessor", 34: "illegal_exc_return", 35: "illegal_epsr",
+  36: "undefined_instruction"
 };
 
 // Config submessage maps: proto field tag -> name. The flat C struct is split

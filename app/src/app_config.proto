@@ -463,7 +463,9 @@ message Response {
         // the first boot after a CPU fault or a kernel panic/oops, which now
         // reboots (sys_reboot, so reset_cause reads software) instead of
         // spinning until the watchdog. reason = Zephyr K_ERR_* code (0 = CPU
-        // exception, 2 = stack check fail, 3 = kernel oops, 4 = kernel panic);
+        // exception, 2 = stack check fail, 3 = kernel oops, 4 = kernel panic;
+        // a Cortex-M fault reports K_ERR_ARM_* 16..36 instead, e.g. 27 =
+        // instruction bus fault, 32 = stack overflow -- see the TTN decoder);
         // pc / lr = faulting instruction and return address (0 if unknown).
         optional uint32 fault_reason = 20;
         optional uint32 fault_pc     = 21;

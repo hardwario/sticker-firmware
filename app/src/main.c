@@ -282,6 +282,14 @@ struct fault_record {
 
 static __noinit struct fault_record m_fault;
 
+/* Info.fault_reason carries the raw code; the TTN decoder names the Cortex-M
+ * ones (K_ERR_ARM_*, 16..36). Moving them breaks those names. */
+#if defined(CONFIG_CPU_CORTEX_M)
+BUILD_ASSERT(K_ERR_ARM_MEM_GENERIC == 16 && K_ERR_ARM_BUS_INSTRUCTION_BUS == 27 &&
+		     K_ERR_ARM_USAGE_UNDEFINED_INSTRUCTION == 36,
+	     "K_ERR_ARM_* moved: update _FAULT_REASONS in app/decoder/ttn.js");
+#endif
+
 static uint32_t fault_check(const struct fault_record *f)
 {
 	return ~(f->magic ^ f->reason ^ f->pc ^ f->lr);
