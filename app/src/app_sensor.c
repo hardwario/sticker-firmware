@@ -21,6 +21,7 @@
 #include "app_sensor.h"
 #include "app_sensor_types.h"
 #include "app_sht4x.h"
+#include "app_w1.h"
 #include "app_w1_slots.h"
 
 /* Zephyr includes */
@@ -164,12 +165,71 @@ static void sensor_work_handler(struct k_work *work)
 static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);
 
 #if defined(CONFIG_W1)
+/* #485 S4: the boot scan was the only automatic rebind, so a probe plugged in
+ * after boot (or one that missed the boot scan) stayed no_data until a reboot.
+ *
+ * While a taught slot is unbound, a rescan runs on a backoff of 2, 5, 10 and
+ * 15 min, then every 15 min. Each one is a bare ROM search (a few ms, no device
+ * init or read). The full scan + rebind (~1 s: probe re-init plus a throwaway
+ * read per device) runs only when the set of ROMs on the bus differs from the
+ * one the last rebind saw, and a fresh sample follows only when that rebind
+ * bound more slots. A fully bound bus is never touched. Everything runs on the
+ * sensor work queue, so a scan never reshuffles driver indices under a sample. */
+static const uint16_t W1_RESCAN_BACKOFF_S[] = {120, 300, 600, 900};
+
+struct w1_bus_sig {
+	uint64_t sum; /* order-independent sum of the full ROM codes */
+	uint16_t count;
+};
+
+static struct w1_bus_sig m_w1_sig; /* bus seen by the last rebind */
+static int m_w1_present;           /* slots bound by the last rebind */
+static uint8_t m_w1_rescan_step;
+static bool m_w1_rescan_force;
+
+static int w1_sig_callback(struct w1_rom rom, void *user_data)
+{
+	struct w1_bus_sig *sig = user_data;
+
+	sig->sum += w1_rom_to_uint64(&rom);
+	sig->count++;
+	return 0;
+}
+
+/* Bare ROM search of the DS2484 bus, nothing else on the bus is touched. */
+static int w1_bus_sig_read(struct w1_bus_sig *sig)
+{
+	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+	static struct app_w1 w1;
+	int ret;
+	int res;
+
+	*sig = (struct w1_bus_sig){0};
+
+	ret = app_w1_acquire(&w1, dev);
+	if (ret) {
+		(void)app_w1_release(&w1, dev);
+		return ret;
+	}
+
+	res = app_w1_scan(&w1, dev, w1_sig_callback, sig);
+
+	ret = app_w1_release(&w1, dev);
+	return res ? res : ret;
+}
+
 /* Scan every 1-Wire driver and rebind the slots by ROM. Returns the first scan
  * error; the rebind still runs on what was found. */
 static int w1_scan_rebind(void)
 {
 	int ret;
 	int res = 0;
+
+	/* Remember the bus this rebind sees; a failed search forces the next
+	 * rescan to do the full scan again. */
+	if (w1_bus_sig_read(&m_w1_sig)) {
+		m_w1_sig.count = UINT16_MAX;
+	}
 
 	ret = app_ds18b20_scan();
 	if (ret) {
@@ -185,18 +245,33 @@ static int w1_scan_rebind(void)
 	}
 #endif /* defined(CONFIG_DS28E17) */
 
-	int present = app_w1_slots_rebind();
+	m_w1_present = app_w1_slots_rebind();
 
-	LOG_INF("1-Wire slots: %d sensor(s) bound", present);
+	LOG_INF("1-Wire slots: %d sensor(s) bound", m_w1_present);
 	return res;
 }
 
-static bool m_w1_rescan_force;
+static void w1_rescan_work_handler(struct k_work *work);
 
-/* #485 S4: the boot scan was the only automatic rebind, so a probe plugged in
- * after boot (or one that missed the boot scan) stayed no_data until a reboot.
- * Runs on the sensor work queue, so a rescan never reshuffles driver indices
- * under a running sample. */
+static K_WORK_DELAYABLE_DEFINE(m_w1_rescan_work, w1_rescan_work_handler);
+
+/* Arm the next backoff step while a taught slot is unbound, else end the
+ * episode. */
+static void w1_rescan_arm_next(void)
+{
+	if (!app_w1_slots_need_rescan()) {
+		m_w1_rescan_step = 0;
+		return;
+	}
+
+	uint16_t delay = W1_RESCAN_BACKOFF_S[m_w1_rescan_step];
+
+	if (m_w1_rescan_step < ARRAY_SIZE(W1_RESCAN_BACKOFF_S) - 1) {
+		m_w1_rescan_step++;
+	}
+	(void)k_work_schedule_for_queue(&m_sensor_work_q, &m_w1_rescan_work, K_SECONDS(delay));
+}
+
 static void w1_rescan_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -206,19 +281,29 @@ static void w1_rescan_work_handler(struct k_work *work)
 	m_w1_rescan_force = false;
 
 	if (!g_app_config.cap_w1_sensors || !app_w1_slots_any_taught()) {
-		return;
-	}
-	if (!force && !app_w1_slots_need_rescan()) {
+		m_w1_rescan_step = 0;
 		return;
 	}
 
-	(void)w1_scan_rebind();
+	if (force || app_w1_slots_need_rescan()) {
+		struct w1_bus_sig sig;
+		bool changed = w1_bus_sig_read(&sig) != 0 || sig.count != m_w1_sig.count ||
+			       sig.sum != m_w1_sig.sum;
 
-	/* Fresh readings for the new binding before the next report. */
-	app_sensor_sample();
+		if (force || changed) {
+			int before = m_w1_present;
+
+			(void)w1_scan_rebind();
+
+			/* Fresh readings only for a newly bound sensor. */
+			if (m_w1_present > before) {
+				app_sensor_sample();
+			}
+		}
+	}
+
+	w1_rescan_arm_next();
 }
-
-static K_WORK_DEFINE(m_w1_rescan_work, w1_rescan_work_handler);
 #endif /* defined(CONFIG_W1) */
 
 void app_sensor_w1_rescan(bool force)
@@ -226,8 +311,9 @@ void app_sensor_w1_rescan(bool force)
 #if defined(CONFIG_W1)
 	if (force) {
 		m_w1_rescan_force = true;
+		m_w1_rescan_step = 0;
 	}
-	(void)k_work_submit_to_queue(&m_sensor_work_q, &m_w1_rescan_work);
+	(void)k_work_reschedule_for_queue(&m_sensor_work_q, &m_w1_rescan_work, K_NO_WAIT);
 #else
 	ARG_UNUSED(force);
 #endif
@@ -557,6 +643,13 @@ int app_sensor_init(void)
 	k_work_queue_start(&m_sensor_work_q, m_sensor_work_stack,
 			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+
+#if defined(CONFIG_W1)
+	/* #485 S4: start the rescan backoff if the boot rebind left a slot unbound. */
+	if (g_app_config.cap_w1_sensors && app_w1_slots_any_taught()) {
+		w1_rescan_arm_next();
+	}
+#endif /* defined(CONFIG_W1) */
 
 	if (g_app_config.interval_sample) {
 		k_timer_start(&m_sensor_timer, K_SECONDS(1),

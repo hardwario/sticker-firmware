@@ -115,11 +115,11 @@ void app_sensor_sample(void);
  * of the empty value left until the next sample tick. */
 void app_sensor_sample_async(void);
 
-/* Rescan the 1-Wire bus and rebind the slots on the sensor work queue (#485
- * S4), serialized with sampling. Without `force` it only runs while a taught
- * slot is unbound (app_w1_slots_need_rescan), so a healthy bus is never
- * touched. `force` (a host W1Scan) rebinds whenever a slot is taught. No-op
- * without cap-w1-sensors or a 1-Wire build. */
+/* Rescan the 1-Wire bus on the sensor work queue (#485 S4), serialized with
+ * sampling. Without `force` it is a bare ROM search, and the full scan + rebind
+ * runs only if the bus changed since the last rebind; `force` (a host W1Scan)
+ * always rebinds and restarts the 2/5/10/15 min backoff that runs while a
+ * taught slot is unbound. No-op without cap-w1-sensors or a 1-Wire build. */
 void app_sensor_w1_rescan(bool force);
 
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */

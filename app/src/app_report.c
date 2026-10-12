@@ -113,11 +113,6 @@ static uint32_t schedule_next_report(bool periodic, bool *slot_synced)
  * the cadence, so the history inter-record interval stays exactly
  * interval_report regardless of how many alarms / force_sends / samples fire in
  * between (#H1). */
-/* #485 S4: every this many periodic reports, rescan the 1-Wire bus while a
- * taught slot is unbound (a probe plugged in after boot). ~1 s of bus activity
- * per rescan; a fully bound bus is never touched. */
-#define W1_RESCAN_EVERY_REPORTS 5
-
 static void run_report(bool periodic, bool now)
 {
 	/* Re-arm the cadence up front (periodic path only) so a skipped cycle still
@@ -127,14 +122,7 @@ static void run_report(bool periodic, bool now)
 	bool slot_synced = false;
 
 	if (periodic) {
-		static uint8_t w1_rescan_tick;
-
 		slot = schedule_next_report(true, &slot_synced);
-
-		if (++w1_rescan_tick >= W1_RESCAN_EVERY_REPORTS) {
-			w1_rescan_tick = 0;
-			app_sensor_w1_rescan(false);
-		}
 	}
 
 	/* Persist the pulse totalizers at the report cadence (dirty-flagged, no-op
