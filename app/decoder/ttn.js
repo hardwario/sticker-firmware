@@ -877,9 +877,9 @@ function _decodeSensorReading(bytes, start, end) {
 // firmware always sends the system group and every enabled-sensor group whole,
 // so boolean fields (boot, *_is_active, *_notify_*, tilt) are surfaced as
 // explicit true/false rather than set-only-when-true.
-// "Value not available" sentinels (mirror app_compose.c): an enabled analog
-// sensor is always on the wire so the configured-sensor list is stable; a NaN
-// reading arrives as the sentinel and decodes to null.
+// "Value not available" sentinels sent by firmware before #483 for a NaN
+// onboard analog reading; they still decode to null. Since #483 the firmware
+// omits the field instead, so an absent key means "not measured".
 var _TM_S32_NA = -2147483648; // INT32_MIN (sint32: temperature, altitude)
 var _TM_U32_NA = 4294967295;  // UINT32_MAX (uint32: humidity, pressure, illuminance)
 

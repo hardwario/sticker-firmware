@@ -1140,6 +1140,17 @@ test("fPort-2 telemetry: not-available sentinels decode to null", () => {
   assert.equal(got.humidity, null);
 });
 
+// #483: firmware now omits a NaN analog reading; only the system group is on
+// the wire and the absent sensor keys are simply not in the decoded object.
+test("fPort-2 telemetry: omitted analog readings stay absent", () => {
+  // 01 version, voltage (field 1, tag 0x08) = 150 (3.0 V), system_flags (tag 0x10) = 0
+  const got = codec.decodeUplink({ bytes: hex("01089601" + "1000"), fPort: 2 }).data;
+  assert.equal(got.temperature, undefined);
+  assert.equal(got.pressure, undefined);
+  assert.equal(got.altitude, undefined);
+  assert.equal(got.illuminance, undefined);
+});
+
 // #205 follow-up / #212: no_data watchdog event (sensor stopped reporting).
 // rule 0xFF, type=no_data (field 9 = 4), value absent.
 test("fPort-3 alarm: no_data type decodes (sensor stopped reporting)", () => {

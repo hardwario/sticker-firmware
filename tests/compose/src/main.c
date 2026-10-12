@@ -245,6 +245,29 @@ ZTEST(compose, test_capability_gating)
 	zassert_true(seen, "pressure missing with cap on");
 }
 
+/* #483: an enabled but absent/failed barometer or light sensor (NaN) sends no
+ * field at all instead of the former 5-byte NA sentinels (10 B for the
+ * barometer alone). */
+ZTEST(compose, test_omit_absent_analog)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = NAN;
+	g_app_config.cap_barometer = true;
+	g_app_config.cap_light_sensor = true;
+	run_report(fr, 8, &n);
+
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_false(fr[0].has_pressure, "absent pressure must be omitted");
+	zassert_false(fr[0].has_altitude, "absent altitude must be omitted");
+	zassert_false(fr[0].has_illuminance, "absent illuminance must be omitted");
+	zassert_false(fr[0].has_temperature, "absent temperature must be omitted");
+	zassert_false(fr[0].has_humidity, "absent humidity must be omitted");
+}
+
 /* #465: cap_sht off drops the onboard temperature/humidity from the wire, even
  * with a valid reading; the system group still goes out. */
 ZTEST(compose, test_cap_sht_gating)
@@ -608,16 +631,10 @@ ZTEST(compose, test_system_always_present)
 	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
 	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u",
 		      fr[0].system_flags);
-	/* The onboard SHT4x temperature/humidity are always on the wire so the
-	 * configured-sensor list stays stable across reports; an absent (NaN)
-	 * reading goes out as the sentinel (decoder -> null) rather than dropping
-	 * the field (no-data watchdog). */
-	zassert_true(fr[0].has_temperature, "onboard temperature must always be present");
-	zassert_equal(fr[0].temperature, INT32_MIN, "absent temperature -> sentinel, got %d",
-		      fr[0].temperature);
-	zassert_true(fr[0].has_humidity, "onboard humidity must always be present");
-	zassert_equal(fr[0].humidity, UINT32_MAX, "absent humidity -> sentinel, got %u",
-		      fr[0].humidity);
+	/* #483: an absent (NaN) onboard analog reading is omitted, not sent as a
+	 * 5-byte sentinel; the fault surfaces via device_status / no_data. */
+	zassert_false(fr[0].has_temperature, "absent temperature must be omitted");
+	zassert_false(fr[0].has_humidity, "absent humidity must be omitted");
 	/* Capability-gated / external groups still don't leak in when absent. */
 	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");
 }
@@ -632,8 +649,7 @@ ZTEST(compose, test_system_flags_carry_alarm_bits)
 	size_t n;
 
 	set_clean();
-	/* Real readings: NaN sentinels (INT32_MIN / UINT32_MAX) would make the
-	 * internal group alone exceed 11 B (pre-existing M-10 oversize path). */
+	/* Real readings keep the internal group in the frame next to the flags. */
 	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
 	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 	test_alarm_flags = 0x03; /* ALARM_ANY | ALARM_THRESHOLD */
