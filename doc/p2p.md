@@ -676,6 +676,11 @@ node    JOIN_CONFIRM type 6, src = node, dest = gw,   payload node(4 LE) | chall
   as the TOWER joiner does.
 - The counters come from the persisted `dev_nonce` lane, two per attempt.
 - The pairing persists like a JoinAccept: after a reboot the node comes up PAIRED.
+- The data counter keeps running across a TOWER pairing, unlike after a
+  JoinAccept. A stock gateway restores the replay lane of an address it paired
+  before (`add_peer()` binds the persisted lane by address, and
+  `tower nodes remove` leaves it), so a node re-paired from 1 is dropped as a
+  replay, with no ACK. A stock TOWER node never resets its counter either.
 
 The retries follow the join policy of §5.2: every ~2 s inside the 120 s boot
 window, then the slow backoff. Pairing succeeds only while the operator holds the
@@ -713,11 +718,21 @@ Setup: STICKER 2162165722 (debug p2p bench image) and TOWER Core r2 with the sto
 | Check | Result |
 |---|---|
 | OTA pairing | first JOIN_REQ → paired, RSSI −50 dBm |
-| confirmed uplinks | 29/29 ACKed on the first try with gateway `stats-period 0` |
+| confirmed uplinks | all ACKed, at most 3 attempts (retry rate below) |
 | downlink after PENDING | 24 B received, node ACK → gateway `delivered` |
 | reboot | comes up PAIRED, counter reserve honoured, ACKed |
+| re-pair after `tower nodes remove` | counter continues, ACKed on the first try (§15.2) |
 
-With the gateway default `stats-period 500`, about 20 % of uplinks needed a
-second attempt. The stock gateway samples the ambient RSSI every 500 ms and does
-not receive meanwhile. The node's repetitions cover this. It is a gateway setting,
-not a node fault.
+Retry rate, A/B on the gateway `stats-period` (ABAB blocks, 158 confirmed
+uplinks, gateway rebooted per block):
+
+| Gateway `stats-period` | Uplinks needing a repetition |
+|---|---|
+| 500 ms (default) | 16/75 (21 %) |
+| 0 (off) | 6/83 (7 %) |
+
+The difference is significant (Fisher exact, p = 0.012). The stock gateway samples
+the ambient RSSI every `stats-period` and does not receive meanwhile. The 7 % left
+with sampling off is consistent with its 250 ms receive slice, which aborts a reception still in progress at the
+slice boundary. Neither is a node fault. The node's repetitions cover both, and no
+uplink was lost.
