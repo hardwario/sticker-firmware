@@ -1695,6 +1695,44 @@ static void action_waits_for_the_answer_ack(void)
 }
 BOTH_PROFILES(action_waits_for_the_answer_ack)
 
+/* #485 R4: a second command in the first one's receive window adds its action
+ * instead of replacing it. The one without a reboot runs first, the save (and
+ * its reboot) last, both at the first check: the merge restarts no timer. */
+static void second_action_merges_with_the_first(void)
+{
+	int64_t t0 = k_uptime_get();
+
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(4));
+	g_cmd_action = APP_CMD_ACTION_COUNTERS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(5));
+	zassert_equal(g_run_action_calls, 2, "both actions ran");
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_SETTINGS_SAVE, "the reboot last");
+	zassert_within(g_run_action_at_ms - t0, 8000, 500, "at the first check (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(second_action_merges_with_the_first)
+
+/* #485 R4: of two reboot-class actions only the stronger one runs, and a
+ * forced rejoin before a reboot is dropped. */
+static void merged_reboots_run_once(void)
+{
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_LRW_JOIN;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	g_cmd_action = APP_CMD_ACTION_REBOOT;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(9));
+	zassert_equal(g_run_action_calls, 1, "one reboot");
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_SETTINGS_SAVE, "save covers the reboot");
+}
+BOTH_PROFILES(merged_reboots_run_once)
+
 /* #462: the action (mostly a reboot) also waits for the alarm frames still
  * queued. Held by the duty cycle for 10 s, the alarm misses the first check. */
 static void action_waits_for_queued_alarms(void)
