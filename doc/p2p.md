@@ -288,7 +288,8 @@ JoinAccept (38 B)   Data, src = net_id, dest = low32(DevEUI), counter = the Join
    power. 0 means none, and a value out of range is ignored; either way the node
    still pairs.
 5. **Derive and persist.** The node derives `session_key`, then persists `net_id`,
-   `session_key`, `rx_delay` and the TX power as the 22 B `p2pjoin/state` record.
+   `session_key`, `rx_delay`, the TX power and the modulation as the 23 B
+   `p2pjoin/state` record.
    It resets the TX counter to 1 and the gateway replay lane to 0.
 6. **Announce.** The node announces through `app_radio` (Info → settings → first
    telemetry). It queues Capabilities + Hello (+ TimeReq when app_radio wants the
@@ -493,7 +494,8 @@ authenticated downlink is a success.
 | `ats radio unjoin` | clears `p2pjoin/state`, reboot required. Simulates a never-paired boot |
 | Mute station (M-2) | paired but no telemetry for 4 × `interval_report` → self-heal re-join (`app_radio_stale_check()`, shared with LoRaWAN). Telemetry that went on air counts even when its ACK never came (given up after 3 retries), so an RF outage is left to the link-check supervision |
 | Detach / RejoinReq | §5.4 |
-| Firmware changing the pairing record | a record of another length does not load: `UNPAIRED`, one automatic re-join (the old wire's 24 B record → TOWER's 22 B) |
+| Firmware changing the pairing record | a record of another length does not load: `UNPAIRED`, one automatic re-join (the old wire's 24 B record → TOWER's 22 B). The 22 B record without the modulation byte (#490) still loads, as a LoRa pairing |
+| `p2p-modulation` changed | a pairing made under the other modulation does not load: `UNPAIRED`, the node pairs afresh (a Hub pairing cannot reach a TOWER, and fsk never re-pairs on its own, §15.2). The record is overwritten by the next pairing |
 
 ---
 
@@ -681,6 +683,13 @@ node    JOIN_CONFIRM type 6, src = node, dest = gw,   payload node(4 LE) | chall
   before (`add_peer()` binds the persisted lane by address, and
   `tower nodes remove` leaves it), so a node re-paired from 1 is dropped as a
   replay, with no ACK. A stock TOWER node never resets its counter either.
+  A new pairing of a peer the gateway still has resets its lane, so only the
+  path through `tower nodes remove` needs this. One case it does not cover:
+  `tower nodes remove`, a LoRa join in between (a JoinAccept restarts the
+  counter), then a new TOWER pairing. Frames are then dropped until the counter
+  passes the restored lane; `/system eeprom wipe` on the gateway clears it.
+- The pairing is kept only under the modulation it was made with (§7). After
+  `p2p-modulation` lora → fsk the node pairs with the TOWER afresh.
 
 The retries follow the join policy of §5.2: every ~2 s inside the 120 s boot
 window, then the slow backoff. Pairing succeeds only while the operator holds the
@@ -712,7 +721,7 @@ envelope, because it does not speak the TOWER remote shell.
 
 ### 15.4 HW verification (2026-10-12)
 
-Setup: STICKER 2162165722 (debug p2p bench image) and TOWER Core r2 with the stock
+Setup: STICKER 2162165722 (debug p2p bench image unless noted) and TOWER Core r2 with the stock
 `radio_dongle_gateway` (tower-firmware b7f3f4a), on channel 2.
 
 | Check | Result |
@@ -722,6 +731,8 @@ Setup: STICKER 2162165722 (debug p2p bench image) and TOWER Core r2 with the sto
 | downlink after PENDING | 24 B received, node ACK → gateway `delivered` |
 | reboot | comes up PAIRED, counter reserve honoured, ACKed |
 | re-pair after `tower nodes remove` | counter continues, ACKed on the first try (§15.2) |
+| release image (prj.conf) | pairs on its own, 18 uplinks in 12 min at `interval-report 60`, downlink `delivered` |
+| `p2p-modulation` fsk → lora → fsk | the other modulation's pairing ignored each way: Hub join in 1 s, then TOWER pairing in the window |
 
 Retry rate, A/B on the gateway `stats-period` (ABAB blocks, 158 confirmed
 uplinks, gateway rebooted per block):
