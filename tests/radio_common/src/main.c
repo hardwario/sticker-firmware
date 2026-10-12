@@ -928,25 +928,46 @@ static void telemetry_error_abandons_the_report(void)
 }
 BOTH_PROFILES(telemetry_error_abandons_the_report)
 
-/* Unlike a queued frame, a duty-held telemetry frame counts: it is resent
- * after res->wait_ms, 8 times at most. */
-static void telemetry_duty_hold_counts(void)
+/* #485 R3: like a queued frame, a duty-held telemetry frame is no failure: it
+ * is resent after res->wait_ms, past the 8 retries of a failing one, and the
+ * report goes out late instead of being dropped. */
+static void telemetry_duty_hold_is_not_a_retry(void)
 {
 	const size_t lens[] = {20};
 	uint32_t base = retries();
 
 	frames(lens, 1);
-	script_fill(-EAGAIN, 9);
+	script_fill(-EAGAIN, 12);
 	fk.wait_ms = 1000;
 	app_radio_send_telemetry_now();
 	k_sleep(K_SECONDS(20));
-	zassert_equal(fk.n, 9);
-	assert_spacing(0, 8, 1000);
-	zassert_equal(retries(), base + 8);
+	zassert_equal(fk.n, 13);
+	assert_spacing(0, 12, 1000);
+	zassert_ok(fk.log[12].ret);
+	zassert_equal(retries(), base, "a wait is not a retry");
+	zassert_equal(g_compose_reset_calls, 0);
+	zassert_equal(reports_done(), 1);
+}
+BOTH_PROFILES(telemetry_duty_hold_is_not_a_retry)
+
+/* #485 R3: ... but only for one interval_report (60 s here): by then the next
+ * report is due, so the held one is dropped and its snapshot reset. */
+static void telemetry_held_for_an_interval_is_dropped(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	script_fill(-EAGAIN, LOG_MAX);
+	fk.wait_ms = 15000;
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(55));
+	zassert_equal(g_compose_reset_calls, 0, "still held");
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.n, 5, "sent at 0, 15, 30, 45 and 60 s");
 	zassert_equal(g_compose_reset_calls, 1);
 	zassert_equal(reports_done(), 0);
 }
-BOTH_PROFILES(telemetry_duty_hold_counts)
+BOTH_PROFILES(telemetry_held_for_an_interval_is_dropped)
 
 /* M-10: a frame over the budget on its own is dropped, the report goes on. */
 static void telemetry_over_budget_frame_is_skipped(void)
@@ -1694,6 +1715,44 @@ static void action_waits_for_the_answer_ack(void)
 	zassert_true(g_run_action_at_ms > fk.log[fk.n - 1].at_ms, "after the answer left");
 }
 BOTH_PROFILES(action_waits_for_the_answer_ack)
+
+/* #485 R4: a second command in the first one's receive window adds its action
+ * instead of replacing it. The one without a reboot runs first, the save (and
+ * its reboot) last, both at the first check: the merge restarts no timer. */
+static void second_action_merges_with_the_first(void)
+{
+	int64_t t0 = k_uptime_get();
+
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(4));
+	g_cmd_action = APP_CMD_ACTION_COUNTERS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(5));
+	zassert_equal(g_run_action_calls, 2, "both actions ran");
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_SETTINGS_SAVE, "the reboot last");
+	zassert_within(g_run_action_at_ms - t0, 8000, 500, "at the first check (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(second_action_merges_with_the_first)
+
+/* #485 R4: of two reboot-class actions only the stronger one runs, and a
+ * forced rejoin before a reboot is dropped. */
+static void merged_reboots_run_once(void)
+{
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_LRW_JOIN;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	g_cmd_action = APP_CMD_ACTION_REBOOT;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(9));
+	zassert_equal(g_run_action_calls, 1, "one reboot");
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_SETTINGS_SAVE, "save covers the reboot");
+}
+BOTH_PROFILES(merged_reboots_run_once)
 
 /* #462: the action (mostly a reboot) also waits for the alarm frames still
  * queued. Held by the duty cycle for 10 s, the alarm misses the first check. */

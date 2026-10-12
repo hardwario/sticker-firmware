@@ -203,6 +203,56 @@ ZTEST(sensor_types, test_put_f_valid_and_range)
 	zassert_true(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION));
 }
 
+/* #485 S2: one failed read keeps the previous value, the next one in a row
+ * goes absent, and a good read clears the streak. */
+ZTEST(sensor_types, test_miss_hold_streak)
+{
+	const uint32_t mask = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE);
+	uint8_t miss = 0;
+
+	zassert_equal(app_sensor_miss_hold(&miss, false, mask), 0, "good read keeps nothing");
+	zassert_equal(app_sensor_miss_hold(&miss, true, mask), mask, "1st miss holds");
+	zassert_equal(app_sensor_miss_hold(&miss, true, mask), 0, "2nd miss in a row goes NaN");
+	zassert_equal(app_sensor_miss_hold(&miss, true, mask), 0, "and stays NaN");
+	zassert_equal(app_sensor_miss_hold(&miss, false, mask), 0, "recovery");
+	zassert_equal(miss, 0, "a good read clears the streak");
+	zassert_equal(app_sensor_miss_hold(&miss, true, mask), mask, "a new single miss holds");
+
+	/* The streak saturates instead of wrapping back into the hold window. */
+	miss = UINT8_MAX;
+	zassert_equal(app_sensor_miss_hold(&miss, true, mask), 0, "saturated streak");
+	zassert_equal(miss, UINT8_MAX);
+}
+
+ZTEST(sensor_types, test_mb_keep_copies_only_kept_channels)
+{
+	struct app_sensor_mb prev = {.valid = 0};
+	struct app_sensor_mb mb = {.valid = 0};
+
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, prev.v, &prev.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, 21.5f);
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, prev.v, &prev.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 40.0f);
+	/* This sweep: temperature failed (NaN), humidity read fine. */
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, NAN);
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 45.0f);
+
+	app_sensor_mb_keep(&mb, &prev, BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE));
+	zassert_equal(mb.v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE].f, 21.5f, "kept value");
+	zassert_true(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE), "kept valid bit");
+	zassert_equal(mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY].f, 45.0f, "fresh value untouched");
+
+	/* Keeping a channel that was absent before keeps it absent. */
+	struct app_sensor_mb empty = {.valid = 0};
+
+	empty.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY].f = NAN;
+	app_sensor_mb_keep(&mb, &empty, BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY));
+	zassert_false(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY));
+	zassert_true(isnan(mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY].f));
+}
+
 ZTEST(sensor_types, test_put_f_unknown_channel_is_ignored)
 {
 	struct app_sensor_w1 w;

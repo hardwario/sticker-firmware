@@ -257,3 +257,26 @@ ZTEST(w1_slots, test_any_taught_counts_provisioned_type)
 	cfg_slot(1, DS_A, 0);
 	zassert_true(app_w1_slots_any_taught(), "ROM-only slot");
 }
+
+/* #485 S4: the periodic rescan touches the bus only while a taught slot is
+ * unbound. A probe taught but missing at boot needs it; once it is plugged in
+ * and bound, it does not. An untaught unit never needs it. */
+ZTEST(w1_slots, test_need_rescan_only_while_a_taught_slot_is_unbound)
+{
+	const uint64_t mp[] = {MP_X};
+
+	bus(NULL, 0, NULL, 0);
+	zassert_equal(app_w1_slots_rebind(), 0);
+	zassert_false(app_w1_slots_need_rescan(), "nothing taught");
+
+	cfg_slot(0, MP_X, MP);
+	zassert_equal(app_w1_slots_rebind(), 0);
+	zassert_true(app_w1_slots_need_rescan(), "taught probe missing at boot");
+
+	bus(NULL, 0, mp, 1);
+	zassert_equal(app_w1_slots_rebind(), 1);
+	zassert_false(app_w1_slots_need_rescan(), "plugged in and bound");
+
+	cfg_slot(1, 0, DALLAS);
+	zassert_true(app_w1_slots_need_rescan(), "provisioned type, no probe yet");
+}

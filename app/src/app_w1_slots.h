@@ -56,6 +56,11 @@ struct app_sensor_w1;
  * configured. */
 bool app_w1_slots_any_taught(void);
 
+/* True if a taught slot (ROM or expected type set) has no bound device after
+ * the last rebind: a probe plugged in after boot, or one that missed the boot
+ * scan. The periodic rescan (app_sensor_w1_rescan) only touches the bus then. */
+bool app_w1_slots_need_rescan(void);
+
 /* Re-bind logical slots to discovered driver indices by ROM-serial match.
  * Call once at init AFTER app_ds18b20_scan() / app_machine_probe_scan() have
  * run, and after every rescan (shell scan / teach / clear).

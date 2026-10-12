@@ -98,6 +98,10 @@ static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; r
  * is absolute, see app_history_export_abs()); only the flash backend's page
  * rollover (a ~20 ms erase that stalls the CPU) is held off until it ends. */
 static bool m_replay_active;
+/* Set by app_history_init(): the first capture re-checks the layout and, when it
+ * differs from the one mounted at init, mounts again (#485 S1). Cleared once
+ * that check ran or the ring was reset by other means. */
+static bool m_remount_pending;
 
 /* Record time is implicit and periodic, but only within a SEGMENT: a run of
  * consecutive records stamped from one base (flash: one page; RAM: an entry of
@@ -551,22 +555,32 @@ static bool backend_mount(void)
 	m_stage_len = 0;
 	m_head_full = false;
 
-	if (!m_ready || m_sample_size == 0) {
+	if (!m_ready) {
 		return false;
 	}
 
 	/* Find the head = valid page with the highest sequence number whose layout
-	 * (layout CRC + sample size) matches the current selection. */
+	 * (layout CRC + sample size) matches the current selection. Track the
+	 * newest valid page of ANY layout as well: a ring that is not restored
+	 * must still continue past it (#485 S1). */
 	bool have_head = false;
 	uint16_t head_phys = 0;
 	struct hist_page_hdr head_hdr = {0};
+	bool have_any = false;
+	uint16_t any_phys = 0;
+	uint32_t any_seq = 0;
 
 	for (uint16_t p = 0; p < HIST_NPAGES; p++) {
 		struct hist_page_hdr h;
 		if (read_hdr(p, &h) != 0 || !hdr_valid(&h)) {
 			continue;
 		}
-		if (h.layout != m_layout || h.sample_size != m_sample_size) {
+		if (!have_any || (int32_t)(h.seq - any_seq) > 0) {
+			have_any = true;
+			any_phys = p;
+			any_seq = h.seq;
+		}
+		if (m_sample_size == 0 || h.layout != m_layout || h.sample_size != m_sample_size) {
 			continue;
 		}
 		if (!have_head || (int32_t)(h.seq - head_hdr.seq) > 0) {
@@ -576,6 +590,15 @@ static bool backend_mount(void)
 		}
 	}
 	if (!have_head) {
+		/* #485 S1: nothing to restore, but the flash still holds pages. The
+		 * next page goes physically after the newest one and its seq skips one
+		 * value (as backend_reset_logical() does, #340 L7). Restarting at
+		 * phys 0 / seq 1 instead overwrote the newest pages and let a later
+		 * mount chain a stale page of the same layout onto the new run. */
+		if (have_any) {
+			m_next_seq = any_seq + 2;
+			m_last_phys = any_phys;
+		}
 		return false;
 	}
 
@@ -1363,6 +1386,28 @@ static void capture(bool have_slot, uint32_t slot, bool slot_synced)
 	 * still queued): this runs on the report work queue, a safe context. */
 	backend_flush_fixups();
 
+	/* #485 S1: app_history_init() runs before app_sensor_init(), which may still
+	 * change the layout inputs at boot (a 1-Wire slot typed by the rebind, an
+	 * input capability dropped on a PIR/buzzer pin conflict). The mount then
+	 * looked for the wrong layout and the first capture restarted the ring over
+	 * the stored records, on every boot. Until this boot appends, mount again
+	 * against the layout the capture actually uses. */
+	if (m_remount_pending) {
+		m_remount_pending = false;
+		if (layout_build()) {
+			if (IS_ENABLED(CONFIG_APP_HISTORY_FLASH) && !m_replay_active &&
+			    backend_mount()) {
+				m_count = backend_stored();
+				LOG_INF("history: remounted on the boot layout, stored=%u",
+					m_count);
+			} else {
+				LOG_INF("history layout changed: %u channels, %u B/record", m_ncols,
+					m_sample_size);
+				layout_reset();
+			}
+		}
+	}
+
 	/* Records are periodic at interval_report, so per-record time is implicit
 	 * (base + ord*interval). If the interval changed, that timebase no longer
 	 * holds — drop the history and restart at the new rate. Logical reset only:
@@ -1497,6 +1542,7 @@ void app_history_clear(void)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	backend_erase();
 	m_count = 0;
+	m_remount_pending = false;
 	k_mutex_unlock(&m_lock);
 }
 
@@ -1825,6 +1871,7 @@ void app_history_set_channels(const uint8_t *list, size_t n)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	memset(m_list, APP_HISTORY_ENTRY_UNUSED, sizeof(m_list));
 	memcpy(m_list, list, MIN(n, sizeof(m_list)));
+	m_remount_pending = false;
 	if (layout_build()) {
 		layout_reset();
 	}
@@ -1909,6 +1956,7 @@ int app_history_init(void)
 		m_count = 0;
 		m_interval = 0;
 	}
+	m_remount_pending = true;
 
 	LOG_INF("history: enabled=%d, %u channels, sample=%uB, capacity=%u, stored=%u", m_enabled,
 		m_ncols, m_sample_size, m_capacity, m_count);

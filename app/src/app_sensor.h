@@ -72,6 +72,19 @@ void app_sensor_w1_clear(struct app_sensor_w1 *s, uint8_t type);
 void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, uint8_t ch,
 		      float value);
 
+/* #485 S2: a failed onboard read keeps the previous value for this many sweeps
+ * before its channels go NaN, so one transient I2C error neither raises a
+ * no_data alarm nor flaps the threshold rules for a whole sample interval. */
+#define APP_SENSOR_MISS_HOLD 1
+
+/* Track one onboard sensor's consecutive failed reads in `*miss`. Returns
+ * `mask` (its channels, to keep from the previous sweep) while the streak is
+ * within APP_SENSOR_MISS_HOLD, else 0. A successful read clears the streak. */
+uint32_t app_sensor_miss_hold(uint8_t *miss, bool failed, uint32_t mask);
+
+/* Copy the channels in `keep` (value and valid bit) from `prev` into `mb`. */
+void app_sensor_mb_keep(struct app_sensor_mb *mb, const struct app_sensor_mb *prev, uint32_t keep);
+
 /* Value of channel `c` as sent on the wire (telemetry SensorReading.value):
  * round(phys * wire scale), or the raw integer of a counter channel. */
 int32_t app_sensor_wire_value(const struct app_sensor_channel *c, union app_sensor_value v);
@@ -101,6 +114,13 @@ void app_sensor_sample(void);
  * slot change, so the no-data watchdog sees the new binding's reading instead
  * of the empty value left until the next sample tick. */
 void app_sensor_sample_async(void);
+
+/* Rescan the 1-Wire bus on the sensor work queue (#485 S4), serialized with
+ * sampling. Without `force` it is a bare ROM search, and the full scan + rebind
+ * runs only if the bus changed since the last rebind; `force` (a host W1Scan)
+ * always rebinds and restarts the 2/5/10/15 min backoff that runs while a
+ * taught slot is unbound. No-op without cap-w1-sensors or a 1-Wire build. */
+void app_sensor_w1_rescan(bool force);
 
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
 void app_sensor_suspend(void);

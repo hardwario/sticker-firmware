@@ -710,7 +710,9 @@ uint8_t app_radio_get_max_payload(void)
  * at most (LoRaWAN #219): then it is dropped, and the report's snapshot is
  * reset (#340 M6) so the next report takes a fresh reading instead of packing
  * the abandoned one's data. A queued answer or alarm held by the duty cycle
- * (-EAGAIN) is not failing: it waits as long as the hold lasts. */
+ * (-EAGAIN) is not failing: it waits as long as the hold lasts. So does a
+ * held report (#485 R3), but only until it is one interval_report old: the
+ * next report, with fresher data, is due by then. */
 #define TX_RETRY_MS    15000
 #define TX_MAX_RETRIES 8
 
@@ -746,6 +748,7 @@ static bool m_tlm_first; /* ... the report's first */
 static bool m_tlm_more;
 static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
 static uint8_t m_tlm_retries;
+static int64_t m_tlm_open_ms; /* uptime the report opened (#485 R3) */
 static size_t m_tlm_len;
 static uint8_t m_tlm_buf[TLM_BUF_SIZE];
 static bool m_tlm_done_valid;
@@ -1375,6 +1378,7 @@ static void tlm_step(void)
 		}
 		atomic_clear(&m_tlm_requested);
 		m_tlm_open = true;
+		m_tlm_open_ms = k_uptime_get();
 		m_tlm_first = true;
 		m_tlm_frame = false;
 	}
@@ -1456,6 +1460,18 @@ static void tlm_step(void)
 	case TX_ACK_RETRY:
 		tx_schedule(res.wait_ms);
 		return;
+	case -EAGAIN:
+		/* #485 R3: a duty-cycle hold (the app ledger, the LoRaWAN MAC's
+		 * hourly credits) is no failure. Counted as a retry, it dropped the
+		 * report after ~2 min at DR0 instead of sending it late. */
+		if (k_uptime_get() - m_tlm_open_ms >=
+		    (int64_t)g_app_config.interval_report * MSEC_PER_SEC) {
+			LOG_WRN("Report held for a whole interval; dropped, snapshot reset");
+			tlm_close(true);
+			return;
+		}
+		tx_schedule(res.wait_ms ? res.wait_ms : TX_RETRY_MS);
+		return;
 	default:
 		if (++m_tlm_retries > TX_MAX_RETRIES) {
 			LOG_ERR("Telemetry frame abandoned after %d retries; snapshot reset",
@@ -1464,7 +1480,7 @@ static void tlm_step(void)
 			return;
 		}
 		app_radio_count(APP_RADIO_CNT_RETRY);
-		tx_schedule((ret == -EAGAIN && res.wait_ms) ? res.wait_ms : TX_RETRY_MS);
+		tx_schedule(TX_RETRY_MS);
 		return;
 	}
 
@@ -2177,8 +2193,64 @@ static void page_stream_kick(void)
 #define POST_CMD_DRAIN_WAIT_SEC      8
 #define POST_CMD_DRAIN_MAX_DEFERRALS 6
 
-static enum app_cmd_action m_post_cmd_action;
+/* Pending actions, one bit per enum app_cmd_action (#485 R4). Class A lets a
+ * second command ride the receive window of the first one's answer, so a
+ * second action used to overwrite the first: a settings_save followed by a
+ * reset_counters lost the save and its reboot after the host got its ack. */
+static uint32_t m_post_cmd_pending;
 static uint8_t m_post_cmd_deferrals;
+
+/* Reboot-class actions, strongest first: a reset discards the staged config
+ * anyway, every *_SAVE persists all of it, a plain reboot is in all of them.
+ * LRW_RESET is not listed: its link reset runs before whichever of these
+ * wins (or alone, with its own reboot). */
+static const enum app_cmd_action POST_CMD_REBOOT_ORDER[] = {
+	APP_CMD_ACTION_VENDOR_RESET,      APP_CMD_ACTION_FACTORY_RESET,
+	APP_CMD_ACTION_DEVICE_RESET,      APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
+	APP_CMD_ACTION_ENTER_CALIBRATION, APP_CMD_ACTION_SECRET_KEY_SAVE,
+	APP_CMD_ACTION_SETTINGS_SAVE,     APP_CMD_ACTION_REBOOT,
+};
+
+BUILD_ASSERT(APP_CMD_ACTION_PAGE_STREAM < 32, "m_post_cmd_pending holds one bit per action");
+
+/* Run every pending action once, in a fixed order: the ones without a reboot
+ * first, then a single reboot. A forced rejoin is pointless right before a
+ * reboot, so it only runs without one. */
+static void post_cmd_run(uint32_t pending)
+{
+	enum app_cmd_action reboot = APP_CMD_ACTION_NONE;
+
+	if (pending & BIT(APP_CMD_ACTION_COUNTERS_SAVE)) {
+		app_cmd_run_action(APP_CMD_ACTION_COUNTERS_SAVE);
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(POST_CMD_REBOOT_ORDER); i++) {
+		if (pending & BIT(POST_CMD_REBOOT_ORDER[i])) {
+			reboot = POST_CMD_REBOOT_ORDER[i];
+			break;
+		}
+	}
+
+	if (pending & BIT(APP_CMD_ACTION_LRW_RESET)) {
+		if (reboot == APP_CMD_ACTION_NONE) {
+			app_cmd_run_action(APP_CMD_ACTION_LRW_RESET);
+			return;
+		}
+		app_radio_reset_link();
+	}
+
+	if (reboot != APP_CMD_ACTION_NONE) {
+		if (pending & BIT(APP_CMD_ACTION_LRW_JOIN)) {
+			LOG_INF("Post-command rejoin dropped: action %d reboots", (int)reboot);
+		}
+		app_cmd_run_action(reboot);
+		return;
+	}
+
+	if (pending & BIT(APP_CMD_ACTION_LRW_JOIN)) {
+		app_cmd_run_action(APP_CMD_ACTION_LRW_JOIN);
+	}
+}
 
 static bool tx_undelivered(void)
 {
@@ -2195,14 +2267,19 @@ static void post_cmd_work_handler(struct k_work *work)
 	if ((alarm_batch || tx_undelivered()) &&
 	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
 		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command action %d deferred: frames still undelivered (%u/%u)",
-			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
+		LOG_WRN("Post-command actions 0x%x deferred: frames still undelivered (%u/%u)",
+			(unsigned)m_post_cmd_pending, (unsigned)m_post_cmd_deferrals,
 			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
 		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
 					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
 		return;
 	}
-	app_cmd_run_action(m_post_cmd_action);
+
+	uint32_t pending = m_post_cmd_pending;
+
+	m_post_cmd_pending = 0;
+	m_post_cmd_deferrals = 0;
+	post_cmd_run(pending);
 }
 
 void app_radio_downlink(const uint8_t *buf, size_t len)
@@ -2240,12 +2317,20 @@ void app_radio_downlink(const uint8_t *buf, size_t len)
 		/* #409/#425: the remaining pages follow page 0 by themselves. */
 		page_stream_kick();
 	} else if (action != APP_CMD_ACTION_NONE) {
-		m_post_cmd_action = action;
-		m_post_cmd_deferrals = 0;
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
-			POST_CMD_DRAIN_WAIT_SEC);
+		/* Merge into what is already pending. Neither the deferral count nor
+		 * the timer restarts, so a stream of commands cannot postpone the
+		 * first one's action; the new answer is waited for by the drain
+		 * check like any other frame. */
+		bool first = m_post_cmd_pending == 0;
+
+		m_post_cmd_pending |= BIT(action);
+		if (first) {
+			m_post_cmd_deferrals = 0;
+			k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
+						  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		}
+		LOG_INF("Post-command action %d %s (pending 0x%x)", (int)action,
+			first ? "scheduled" : "merged", (unsigned)m_post_cmd_pending);
 	}
 
 #if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
@@ -2444,7 +2529,7 @@ void app_radio_test_cmd_reset(void)
 	(void)k_work_cancel_delayable_sync(&m_seq_deadline_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_periodic_announce_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_jitter_work, &sync);
-	m_post_cmd_action = APP_CMD_ACTION_NONE;
+	m_post_cmd_pending = 0;
 	m_post_cmd_deferrals = 0;
 	atomic_clear(&m_announce);
 	atomic_clear(&m_announce_spreading);
