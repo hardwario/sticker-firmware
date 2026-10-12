@@ -135,7 +135,7 @@ enum p2p_port {
 /* JoinAccept tx_power: 0 = no assignment (the node keeps p2p_tx_power), else
  * within the config parameter's own range. */
 #define P2P_TX_POWER_MIN_DBM 2  /* mirrors app_config.yml::p2p_tx_power min */
-#define P2P_TX_POWER_MAX_DBM 22 /* ... and its max */
+#define P2P_TX_POWER_MAX_DBM 14 /* ... and its max (the RFO_LP limit) */
 
 /* A parsed, validated JoinAccept (p2p_parse_join_accept()). */
 struct p2p_join_accept {

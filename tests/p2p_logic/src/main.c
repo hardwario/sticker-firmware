@@ -667,7 +667,8 @@ ZTEST(p2p_logic, test_join_accept_parse)
 		      {P2P_TX_POWER_MIN_DBM, true},
 		      {8, true},
 		      {P2P_TX_POWER_MAX_DBM, true},
-		      {23, false},
+		      {P2P_TX_POWER_MAX_DBM + 1, false},
+		      {22, false},
 		      {0xff, false}};
 
 	for (size_t i = 0; i < ARRAY_SIZE(powers); i++) {

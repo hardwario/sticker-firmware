@@ -966,7 +966,7 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 	} else if (src->has_tx_power) {
 		int val = src->tx_power;
 
-		if ((val >= 2 && val <= 22)) {
+		if ((val >= 2 && val <= 14)) {
 			config->p2p_tx_power = val;
 		} else {
 			FAULT(3);

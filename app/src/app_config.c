@@ -394,8 +394,8 @@ static int h_commit(void)
 	if (m_app_config.p2p_tx_power < 2) {
 		m_app_config.p2p_tx_power = 2;
 	}
-	if (m_app_config.p2p_tx_power > 22) {
-		m_app_config.p2p_tx_power = 22;
+	if (m_app_config.p2p_tx_power > 14) {
+		m_app_config.p2p_tx_power = 14;
 	}
 	if ((int)m_app_config.p2p_modulation < 0 || (int)m_app_config.p2p_modulation > 1) {
 		m_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA;
@@ -2017,7 +2017,7 @@ static int cmd_p2p_spreading_factor(const struct shell *shell, size_t argc, char
 
 static int cmd_p2p_tx_power(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 2, 22, print_p2p_tx_power);
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 2, 14, print_p2p_tx_power);
 }
 
 static int cmd_p2p_modulation(const struct shell *shell, size_t argc, char **argv)
@@ -2306,7 +2306,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_p2p_spreading_factor, 1, 1),
 
 	SHELL_CMD_ARG(p2p-tx-power, NULL,
-	              "Get/Set P2P TX power in dBm.",
+	              "Get/Set P2P TX power in dBm (2-14: the board wires the RFO_LP path only).",
 	              cmd_p2p_tx_power, 1, 1),
 
 	SHELL_CMD_ARG(p2p-modulation, NULL,
