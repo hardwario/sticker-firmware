@@ -59,7 +59,10 @@ struct twr_ack {
 
 /* The answers a gateway puts in the ACK of a request (plan §13.5): LinkCheckAns
  * (2 + 4 B) and TimeAns (2 + 9 B). The request's ACK window grows by these. */
-#define TWR_ACK_TAIL_MAX 17
+#define TWR_ACK_TAIL_MAX         17
+/* What a gateway may put in the tail of any ACK, asked or not: Backoff (2 + 2 B)
+ * and PendingInfo (2 + 1 B). Every ACK window has room for them. */
+#define P2P_ACK_TAIL_UNSOLICITED 7
 
 /* The TOWER MTU (D14, revised 2026-10-12): a frame of at most 96 B on every PHY
  * profile -- fsk and lora differ in the PHY only, the frames and their data are
@@ -83,22 +86,33 @@ enum p2p_port {
 	P2P_PORT_COMMAND = 86,  /* downlink */
 };
 
-/* 0x91 command IDs (plan §8.2, final). P1 sends Capabilities, Hello, JoinReq,
- * LinkCheckReq and TimeReq, and handles Capabilities, Detach, RejoinReq,
- * JoinAccept, LinkCheckAns and TimeAns; any other ID is skipped by its length. */
+/* 0x91 command IDs (plan §8.2, final). The node sends Capabilities, Hello,
+ * JoinReq, LinkCheckReq, TimeReq and DevStatusAns, and handles Capabilities,
+ * Detach, RejoinReq, HomeGateway, JoinAccept, LinkCheckAns, Backoff,
+ * TimeAns, PendingInfo and DevStatusReq; any other ID is skipped by its
+ * length. */
 #define P2P_CTRL_CAPABILITIES 0x01
 #define P2P_CTRL_HELLO        0x02
 #define P2P_CTRL_DETACH       0x03
 #define P2P_CTRL_REJOIN_REQ   0x04
+#define P2P_CTRL_HOME_GATEWAY 0x06
 #define P2P_CTRL_JOIN_REQ     0x07
 #define P2P_CTRL_JOIN_ACCEPT  0x08
 #define P2P_CTRL_LINK_CHECK   0x10
+#define P2P_CTRL_BACKOFF      0x15
 #define P2P_CTRL_TIME         0x20
+#define P2P_CTRL_PENDING_INFO 0x22
+#define P2P_CTRL_DEV_STATUS   0x30
 
 #define P2P_CAPS_LEN           12 /* proto(1) mtu(1) profiles(1) cmds(8) power_class(1) */
 #define P2P_HELLO_LEN          9  /* session_id(4) reset_reason(1) fw(4) */
+#define P2P_HOME_GATEWAY_LEN   5  /* gw_addr(4) flags(1) */
 #define P2P_LINK_CHECK_ANS_LEN 4  /* rssi(i8) snr(i8) margin(i8) gw_count(1) */
+#define P2P_BACKOFF_LEN        2  /* seconds(2), 0 = end it */
 #define P2P_TIME_ANS_LEN       9  /* unix(4) frac(1, 1/256 s) req_counter(4) */
+#define P2P_PENDING_INFO_LEN   1  /* downlinks queued after the one PENDING announced */
+/* battery_mv(2) dl_rssi(i8) dl_snr(i8) tx_power(i8) uptime_s(4); DevStatusReq is empty */
+#define P2P_DEV_STATUS_ANS_LEN 9
 
 /* Join frames (plan §6.3): TOWER Data frames under join_key, 0x91 payloads.
  *
@@ -249,6 +263,11 @@ struct app_radio_p2p_info {
 	int8_t lc_snr;
 	int8_t lc_margin;
 	uint8_t lc_gw_count;
+	/* The last HomeGateway (0x06) this session: the gateway the central made
+	 * this node's home. Recorded, not acted on (multi-gateway is plan P7). */
+	bool home_gw_valid;
+	uint32_t home_gw_addr;
+	uint8_t home_gw_flags;
 	/* False means radio_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is

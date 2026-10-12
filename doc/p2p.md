@@ -127,17 +127,22 @@ fields. With CTRL the bytes after the flags are a `0x91` TLV list, the **ACK tai
 |---|---|---|---|
 | `0x01` | Capabilities | ↑ | `proto(1)=1 \| mtu(1)=96 \| profiles(1) \| cmds(8) \| power_class(1)=1` |
 | `0x02` | Hello | ↑ | `session_id(4 LE) \| reset_reason(1) \| fw(4: major, minor, patch, 0)` |
-| `0x03` | Detach | ↓ | ignored |
-| `0x04` | RejoinReq | ↓ | ignored |
+| `0x03` | Detach | ↓ | `reason(1)`, §5.4 |
+| `0x04` | RejoinReq | ↓ | `kind(1)`, §5.4 |
+| `0x06` | HomeGateway | ↓ | `gw_addr(4 LE) \| flags(1)`, §6.5 |
 | `0x07` | JoinReq | ↑ | §5.3 |
 | `0x08` | JoinAccept | ↓ | §5.3 |
 | `0x10` | LinkCheckReq / Ans | ↑ empty / ↓ | Ans: `rssi(i8) \| snr(i8) \| margin(i8) \| gw_count(1)` |
+| `0x15` | Backoff | ↓ | `seconds(2 LE)`, 0 ends it, §6.5 |
 | `0x20` | TimeReq / TimeAns | ↑ empty / ↓ | Ans: `unix(4 LE) \| frac(1, 1/256 s) \| req_counter(4 LE)` |
+| `0x22` | PendingInfo | ↓ | `more(1)`, §6.2 |
+| `0x30` | DevStatusReq / Ans | ↓ empty / ↑ | Ans: `battery_mv(2 LE) \| dl_rssi(i8) \| dl_snr(i8) \| tx_power(i8) \| uptime_s(4 LE)`, §6.5 |
 
 Capabilities fields:
 
 - `profiles`: bit 0 = fsk, bit 1 = lora. The node sends lora.
-- `cmds`: a 64-bit bitmap of the IDs this node implements (`01 02 03 04 07 08 10 20`).
+- `cmds`: a 64-bit bitmap of the IDs this node implements (`01 02 03 04 06 07 08 10 15 20
+  22 30`, i.e. `de 01 21 00 05 00 01 00`).
 - `reset_reason`: the hwinfo `RESET_*` bits 0..7.
 - `session_id`: random per boot.
 
@@ -146,7 +151,9 @@ TLV list rules:
 - An unknown ID is skipped by its length.
 - A TLV whose value runs past the list stops the walk; TLVs already applied stay applied.
 - The node sends every pending TLV in one confirmed frame. Capabilities, Hello,
-  LinkCheckReq and TimeReq together are 30 B.
+  LinkCheckReq, TimeReq and DevStatusAns together are 41 B.
+- IDs 0x05, 0x11 and 0x21 (Rekey, RadioParamReq, Poll) are dropped; 0x12–0x14, 0x23,
+  0x31 and 0x32 are reserved (plan §8.2).
 
 ### 3.3 Radio parameters (plan §3.3)
 
@@ -342,7 +349,11 @@ Frames are spaced ≥ 200 ms apart.
 | `0x91` control | always | up to 3 tries, 30 s apart, then dropped |
 
 There is no Poll (plan H3.8): whatever the central queued for the node rides the
-PENDING of the next confirmed uplink. A LinkCheckAns and a TimeAns come sooner: the
+PENDING of the next confirmed uplink. When more than one downlink waits, the gateway says
+so with a PendingInfo (`0x22`, `more`), in the ACK tail or the downlink. The node then
+fetches the next one with an empty confirmed `0x91` frame (the envelope byte, 23 B on
+air). It sends at most 8 such frames in a row; an app_radio frame that leaves starts
+the count again. A LinkCheckAns and a TimeAns come sooner: the
 gateway answers them in the ACK of the request itself (§6.5). Only an older gateway
 leaves them to the central's queue. With every
 report confirmed, a downlink waits **at most one report interval**. With the
@@ -357,7 +368,8 @@ downlink window, §3.4).
 
 - **`0x81` port 86:** handed to `app_radio_downlink()`, the common command path,
   once the radio is released.
-- **`0x91`:** its TLVs are applied (LinkCheckAns, TimeAns, Detach, RejoinReq).
+- **`0x91`:** its TLVs are applied (LinkCheckAns, TimeAns, Detach, RejoinReq,
+  HomeGateway, Backoff, PendingInfo, DevStatusReq).
   An ACK tail is applied first, then the downlink: one exchange can carry both
   answers and a command.
 - **Anything else:** dropped.
@@ -384,9 +396,11 @@ downlink window, §3.4).
 
 **Answers in the ACK (plan §13.5).** The gateway answers a LinkCheckReq and a
 TimeReq in the ACK of the request, as a CTRL tail: LinkCheckAns first, then TimeAns.
-The node reads the tail with the `0x91` downlink handlers. A tail answers requests
-only, so any other TLV in it (Detach, RejoinReq, unknown) is skipped. A `0x91`
-downlink after PENDING still carries any answer, for an older gateway.
+The node reads the tail with the `0x91` downlink handlers. Besides the answers, any
+ACK may carry a Backoff and a PendingInfo (PR #487); every ACK window has room for
+these 7 B. Any other TLV in a tail (Detach, RejoinReq, DevStatusReq, unknown) is
+skipped. A `0x91` downlink after PENDING still carries any answer, for an older
+gateway.
 
 - **TimeReq** (`time_request` backend op, when app_radio wants the time). The TimeAns
   carries the time at the end of the received TimeReq and its counter. The node
@@ -403,6 +417,15 @@ downlink after PENDING still carries any answer, for an older gateway.
   - is a passed link check (`app_radio_link_result(true)`).
 
   An ACK to a confirmed frame is a passed link check too.
+- **DevStatusReq** (downlink only) queues a DevStatusAns in the next `0x91` uplink:
+  the last battery sample in mV (0 = none), the RSSI/SNR of the downlink that carried
+  the request, the session TX power and the uptime in seconds.
+- **Backoff** (downlink or any ACK tail): every uplink but alarms waits that many
+  seconds. app_radio holds it like a duty-cycle wait, M-2 included, so the node is not
+  rejoined. Answers stay queued, so an alarm is never stuck behind one. Cut to 3600 s;
+  0 ends it (a frame already waiting keeps its wait); RAM only, a new session ends it.
+- **HomeGateway** (downlink): recorded for the session and shown in `ats radio status`.
+  The node does not re-address its uplinks (multi-gateway, plan P7).
 
 ### 6.6 Duty cycle
 
@@ -421,6 +444,10 @@ per-frame ring with two-oldest folding (F-P2P-1) piled all air into one entry ab
 
 The ledger is RAM-only, so a reboot forgets the hour just transmitted. This is
 accepted; persisting it would cost an NVS write per frame.
+
+A network **Backoff** (`0x15`, §6.5) uses the same hold path: `tx_send()` takes the
+longer of the duty wait and the backoff (alarms ignore the backoff), returns `-EAGAIN`
+and notes the hold for M-2.
 
 ---
 
