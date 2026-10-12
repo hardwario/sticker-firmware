@@ -97,7 +97,8 @@ ver_type(1) | flags(1) | src(4 LE) | dest(4 LE) | counter(4 LE) | ciphertext | t
 | `counter` | the sender's TX counter, strictly increasing per session. **0 is reserved** |
 | crypto | AES-128-CCM, 8 B tag. AAD = the 14 B header. Nonce (13 B) = `src(4 LE) ‖ counter(4 LE) ‖ 0*5` |
 
-Frame MTU is **100 B**, which leaves 78 B of payload and a **76 B body** after the
+Frame MTU is the TOWER **96 B** on every PHY profile (`fsk` and `lora` differ in the
+PHY only, PR #486), which leaves 74 B of payload and a **72 B body** after the
 envelope (`P2P_MAX_BODY`, the budget `app_compose` bin-packs against). An ACK
 frame is 28 B:
 
@@ -171,7 +172,7 @@ alike):
 | empty Data (22 B) | 57 ms | 371 ms | — |
 | ACK (28 B) | 67 ms | 412 ms | 1647 ms |
 | JoinReq / JoinAccept (39 / 38 B) | 83 ms | 494 ms | 1975 ms |
-| MTU (100 B) | 175 ms | 1027 ms | 3941 ms |
+| MTU (96 B) | 165 ms | 986 ms | 3941 ms |
 
 Windows, measured from TX-done (`p2p_twr_window_ms()`):
 
@@ -181,8 +182,8 @@ Windows, measured from TX-done (`p2p_twr_window_ms()`):
   same formula for the ACK plus the 17 B the answers can add (`TWR_ACK_TAIL_MAX`,
   LinkCheckAns 2 + 4 B, TimeAns 2 + 9 B). That is SF7 200 ms, SF10 643 ms, SF12
   2278 ms.
-- **Downlink window** after PENDING: the same formula for a 100 B frame. That is
-  SF7 221 ms, SF12 4080 ms.
+- **Downlink window** after PENDING: the same formula for a 96 B frame. That is
+  SF7 211 ms, SF12 4080 ms.
 - **JoinAccept window** (`p2p_rx1_timeout_ms()`) opens `rx_delay` (1 s) after the
   JoinRequest, 25 ms early. `lora_recv()`'s timeout aborts a reception in flight, so
   the window covers 12 symbols of preamble catch, the whole JoinAccept and a 120 ms
@@ -526,7 +527,7 @@ Limitations:
 - **One channel**, both directions: `p2p-frequency`, default 869.525 MHz (h1.6,
   10 %, plan §3.3). Reception uses the boosted LNA gain (`CONFIG_LORA_RX_BOOSTED_GAIN`).
 - **No large transfers.** TOWER bulk for history is plan P6. History replays through
-  the ordinary 76 B frames.
+  the ordinary 72 B bodies.
 - **The ACK carries no SNR** (TOWER). The node learns its SNR only through a
   LinkCheckAns.
 

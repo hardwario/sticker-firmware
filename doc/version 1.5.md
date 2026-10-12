@@ -195,7 +195,7 @@ technical detail.
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
-| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 100 B MTU), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
+| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
 
 ---
 
@@ -2269,8 +2269,8 @@ is abandoned, with no rollback. Design: `doc/plan/470 - TOWER protocol as the P2
 transport.md`; node behaviour: `doc/p2p.md`.
 
 - **Frames:** `ver_type | flags | src(4 LE) | dest(4 LE) | counter(4 LE)`, all 14 B as
-  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 100 B,
-  which leaves a 76 B body. The node's address is low32(DevEUI), the gateway's the
+  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 96 B
+  (the TOWER MTU on every PHY profile, #486), which leaves a 72 B body. The node's address is low32(DevEUI), the gateway's the
   `net_id`.
 - **Confirmed send:** up to 3 byte-identical transmissions, each with a 200 ms (SF7)
   ACK window armed at TX-done. An ACK with PENDING keeps the receiver on for one

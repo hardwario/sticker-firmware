@@ -444,12 +444,13 @@ port: 2 telemetry · 3 alarm · 85 response/announce · 86 command (downlink) �
 
 - The body after `port` is **byte-identical to the LoRaWAN fPort payload**, version byte
   included (P1 decision D-a), so the central reuses its decoder and `app_cmd_handle()` is
-  unchanged. Budget: `fsk` 96 B frame → 70 B body; `lora` ≤ 100 B frame → 76 B body (D14).
+  unchanged. Budget on every profile: 96 B frame → 74 B payload → 72 B body (D14, revised
+  2026-10-12 in PR #486).
   The `first_uplink` vector in `tower_frame_kat.json` predates this and carries no version
   byte; it tests the frame layer only and stays as is (sha pinned).
 
 - 72 B per frame: responses are already paged for 64 B (#425); `app_compose` splits
-  telemetry against a budget, which becomes 72 B for P2P (larger in `lora` if D14).
+  telemetry against a budget, which becomes 72 B for P2P on both profiles (D14).
 - Optional nicety (later): also emit a TOWER `NodeMsg::Info` (postcard) at boot so
   `tower-cli nodes` names a STICKER natively.
 - `NodeCmd::Shell` is **not** supported — STICKER keeps typed commands with the M-3 field
@@ -794,7 +795,7 @@ the message tables live only there. The address collision check runs at `node-ad
 | H3.6 | NB `boot` → re-send every `NodeAdd` with the exact `last_seen` + a new counter block |
 | H3.7 | `0x81` → the existing decoder by port (2/3/85); uplink event shape unchanged plus the transport |
 | H3.8 | `0x91`: `Capabilities` / `Hello` (store FW + caps), `LinkCheckAns` (margin from RSSI/SNR, gateway count), `TimeAns` (§8.2 format, time = the Northbridge `t_rx` of the TimeReq frame) — queued as DL; the answer rides `PENDING` on the node's next confirmed uplink (P1 forces up to 3 confirmed reports after a TimeReq/LinkCheckReq, no `Poll`) |
-| H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ the `lora` MTU (D14), longer → the existing paging |
+| H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ 74 B, the TOWER MTU on both profiles (D14), longer → the existing paging |
 | H3.10 | `P2pRadio` config: add `modulation` (`lora`), `sync_word`, `tx_power`; drop what only the old wire needed |
 | H3.11 (P3) | `node-remove` → `Detach` (`0x91 03`) then `NodeRemove`; `RejoinReq` (`0x91 04`); `DevStatus` |
 
@@ -1023,7 +1024,7 @@ Findings:
 | D11 | Legacy public-key pairing on the Hub for stock TOWER nodes | allowed, user-initiated, short window, documented as insecure |
 | D12 | TOWER-side owner for the upstream work | **Decided 2026-09-28:** we first verify each proposal on our side (P0–P3), then prepare the PRs to `hardwario/tower` ourselves |
 | D13 | PR: reuse #410 or a new PR | **Decided: new PR #470**; #410 closed as superseded |
-| D14 | MTU per profile | **Decided 2026-09-28:** `fsk` 96 B frame (TOWER); `lora` ≤ ~100 B frame (SF12 fits the SX12xx 4 s TX timeout, §17) |
+| D14 | MTU per profile | **Revised 2026-10-12 (Hynek, PR #486): one MTU, the TOWER 96 B frame / 74 B payload / 72 B body, on both profiles.** `fsk` and `lora` differ in the PHY only; the frames and their data are the same. A larger `lora`-only MTU was rejected: the data would depend on the PHY, the gain is one header + ACK on long telemetry only, and 96 B is already the SF12 ceiling of the 4 s TX timeout (3941 ms). The Capabilities MTU field could negotiate a larger one later without a wire change. *Superseded 2026-09-28 decision: `fsk` 96 B, `lora` ≤ ~100 B.* |
 | D15 | Key ownership and gateway power loss | **Decided 2026-09-28:** keys only on the Hub (§6.6); the Northbridge holds derived keys in RAM, no flash copy |
 | D17 | Which gateway ACKs in a multi-Hub network | **Decided 2026-09-28: A** — the server assigns a home gateway per node from the reported RSSI/SNR history; the home ACKs locally. B (per-frame server arbitration, ~100–200 ms turnaround) documented as not chosen (§6.3.1) |
 | D16 | Fast TX→RX fork call (hardwario/sticker-zephyr#2) | **Decided 2026-09-28:** merge |
@@ -1043,8 +1044,8 @@ Findings:
 
 - **Zephyr SX12xx 4 s TX timeout** (found in P0 by the Northbridge build): `sx12xx_lora_config()`
   hard-codes 4000 ms; a longer frame is cut mid-air and `lora_send()` blocks forever. Caps the
-  `lora` MTU at ~100 B frame on SF12 and ~198 B on SF11 until the fork driver derives the
-  timeout from ToA (input to D14; same fork change as #408 B7).
+  `lora` frame at ~100 B on SF12 and ~198 B on SF11 until the fork driver derives the
+  timeout from ToA (same fork change as #408 B7). The 96 B MTU (D14) fits it at every SF.
 - **Gateway TX counter across power cycles**: the P0 Northbridge restarts it at 1 (nonce
   reuse with a static key). P2 needs a reserved-block counter on the Northbridge, persisted
   by the central (§9.4).
