@@ -68,7 +68,7 @@ Manager-App release and a matching Hub change.
 | `p2p-modulation` | `lora` | `lora` / `fsk` | `fsk` = plan P5, **refuses to start** today |
 | `p2p-frequency` | 868100000 | 863–870 MHz | |
 | `p2p-spreading-factor` | 7 | 6..12 | a fixed network constant: no sweep, no ADR |
-| `p2p-tx-power` | 14 | 2..22 dBm | unless the JoinAccept assigns one (§5.3) |
+| `p2p-tx-power` | 14 | 2..14 dBm | unless the JoinAccept assigns one (§5.3); 14 = the RFO_LP limit, the board has no RFO_HP path |
 
 On boot the firmware brings up **only** the selected stack. LoRaMac and raw LoRa
 share the SX126x, so the stack cannot be switched live. The join, the session and

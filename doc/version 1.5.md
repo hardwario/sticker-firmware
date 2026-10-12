@@ -501,7 +501,7 @@ The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
 | Downlink commands | `0x56` carries the same protobuf `Command` as LoRaWAN fPort 85, dispatched through the shared handler and answered with a `0x55`. Deferred actions (`settings_save`, `reboot`) execute only **after** that answer has been acknowledged, so a commanded reboot cannot swallow its own response. |
 | RX window | The announcing Ack states the pending command's exact on-air length, so the receiver stays on for that frame instead of a 255 B worst case — 548 ms instead of 2514 ms for a short command at SF10. The window keeps a fixed 120 ms after the expected frame (F-P2P-2), so a central's constant Ack lateness cannot cut off an Ack at SF7. |
 | Pairing control | The central can end a pairing (`Detach`) or ask for a rekey (`RejoinRequest`); both are authenticated and empty-bodied. A detached node goes quiet and stays quiet — no automatic re-join — until a reboot or an explicit `join`. |
-| Radio assignment | JoinAccept can assign this node's TX power (2..22 dBm), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
+| Radio assignment | JoinAccept can assign this node's TX power (2..14 dBm since #486; 15–22 is ignored), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
 | Duty cycle | Raw LoRa bypasses LoRaMac's enforcement, so the node keeps its own exact sliding-hour ledger: **every** rolling hour stays within EU868's 1 %, not merely the long-run average. |
 | History replay | A central-requested history replay works over P2P too (B8): a device-driven stream of history frames, each acknowledged, with telemetry paused for the duration. |
 | Self-healing | Eight consecutive fully-failed uplink cycles start a re-join with exponential backoff (60 s → 1 h), so a node survives a central DB restore or a long outage without a site visit. |
@@ -2305,6 +2305,7 @@ transport.md`; node behaviour: `doc/p2p.md`.
   by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only, plus
   Backoff / PendingInfo in any ACK (#487); any other TLV there is skipped. Clock sync no longer waits a report interval for the next
   PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
+  Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `tower-net-core` (#486 W9).
 - **Confirmed uplinks:** every telemetry report is confirmed, like answers and
   history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
   downlink rides the next report's PENDING, so it waits at most one report interval.
@@ -2319,7 +2320,9 @@ transport.md`; node behaviour: `doc/p2p.md`.
   check; LoRaWAN's link check itself is the LinkCheckAns, as before.
 - **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
   rung; the SF sweep and adoption are gone.
-- **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
+- **Config:** `p2p-tx-power` 2..14 dBm (#486; was 2..22, but the board wires only the
+  RFO_LP path and the driver capped at 14 anyway; a stored 15–22 loads as 14).
+  `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
   P5: P2P refuses to start with it.
 - **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
   `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`.

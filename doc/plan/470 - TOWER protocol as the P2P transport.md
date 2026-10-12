@@ -155,7 +155,7 @@ building type is measured in M9 / P2 HIL.
 (bench, range tests), with the values above as defaults; production never changes them.
 Proposed for P1 commit C:
 - `p2p-frequency` default 869.525 MHz: **done 2026-10-08** (`3e08006c`); bench cut over 11:02–11:09Z (both nodes set by shell + save, rel `3e08006c` with RX boost; NB 0.3.2 `7ee6cbc2`, Hub config `frequency_hz` 869525000); 5625 and 5722 resumed without a join, LC/TimeReq answered; central defaults MR !124 (draft); `fsk` sets 868.1 MHz (TOWER ch0) explicitly, D9;
-- `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit);
+- `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit): **done** in PR #486 (W8);
 - the `p2p-spreading-factor` help text without the SF sweep.
 
 ## 4. Frame layer — adopted verbatim
@@ -598,7 +598,7 @@ refused, we keep it **off by default** behind a flag bit so the core stays compa
 | `p2p-modulation` | `fsk` / `lora` | shell | new; reboot |
 | `p2p-frequency` | 863–870 MHz | shell | `fsk` default 868.1 (TOWER ch0) |
 | `p2p-spreading-factor` | 7..12 | shell | `lora` only; fixed SF7 (§3.3) |
-| `p2p-tx-power` | 2..22 dBm (→ 2..14, §3.3) | shell | fixed 14 dBm (RFO_LP max) |
+| `p2p-tx-power` | 2..14 dBm (§3.3, PR #486) | shell | fixed 14 dBm (RFO_LP max) |
 | gateway address | `net_id` from the JoinAccept | read-only, `ats radio status` | persisted with the session |
 | address | derived from DevEUI | read-only, `ats radio status` | |
 
@@ -928,7 +928,7 @@ Still open in P3: central H3.11 (Detach, RejoinReq, DevStatus, Backoff, PendingI
 
 **Wire (flag day, no capability gate).**
 - ACK plaintext: `acked_counter(4) ‖ rssi(i8) ‖ flags(1) [‖ TLV…]`. Flags bit 1 `CTRL` = a TLV tail follows up to the end of the plaintext, in the `0x91` codec (`id(1) ‖ len(1) ‖ body`, §8.2 IDs). Bit 0 `PENDING` is unchanged; both bits may be set.
-- Receivers that do not know `CTRL` ignore the tail (the ≥ 4 B ACK rule), so upstream TOWER parsers stay compatible.
+- Receivers that do not know `CTRL` ignore the tail (the ≥ 4 B ACK rule), so upstream TOWER parsers stay compatible. Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `crates/tower-net-core/src/ack.rs` (hardwario/tower-firmware branch `hynek/ack-flag-ctrl-reserved` (865f509), PR #486 W9).
 - An ACK without a request carries no tail: **a normal uplink's ACK and window are unchanged.**
   *Extended by PR #487 (2026-10-12):* any ACK may carry a `Backoff` (0x15, 2 + 2 B) and/or
   a `PendingInfo` (0x22, 2 + 1 B) tail, after the answers; every node ACK window has room
