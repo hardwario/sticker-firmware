@@ -24,9 +24,11 @@
 
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/fatal.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/reboot.h>
 
@@ -261,6 +263,58 @@ static void event_led_handler(uint8_t channel, bool active, void *user_data)
 	last_blink_ms = now;
 }
 
+/* #485 B2: fault record. The default fatal handler spins with interrupts off:
+ * after app_wdog_init() the IWDG resets the unit 10 s later (reset cause
+ * WATCHDOG, nothing says it was a fault), and before it -- any SYS_INIT, the
+ * settings load -- the unit hangs at full current until a power cycle. Release
+ * builds print nothing (CONFIG_PRINTK=n, FAULT_DUMP=0). Store what happened in
+ * RAM that the reboot does not clear and reboot at once; main() reports it on
+ * the next boot. A power loss clears the record (the check word fails). */
+#define FAULT_MAGIC 0xFA017EC0U
+
+struct fault_record {
+	uint32_t magic;
+	uint32_t reason;
+	uint32_t pc;
+	uint32_t lr;
+	uint32_t check;
+};
+
+static __noinit struct fault_record m_fault;
+
+static uint32_t fault_check(const struct fault_record *f)
+{
+	return ~(f->magic ^ f->reason ^ f->pc ^ f->lr);
+}
+
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
+{
+	m_fault.magic = FAULT_MAGIC;
+	m_fault.reason = reason;
+	m_fault.pc = esf ? esf->basic.pc : 0;
+	m_fault.lr = esf ? esf->basic.lr : 0;
+	m_fault.check = fault_check(&m_fault);
+
+	LOG_PANIC();
+
+	/* Always reboot: CoreDebug C_DEBUGEN stays set after a J-Link session until
+	 * a power cycle (see app_power.c), so it cannot tell a live debugger. To stop
+	 * at the fault under GDB, break on k_sys_fatal_error_handler. */
+	sys_reboot(SYS_REBOOT_COLD);
+	CODE_UNREACHABLE;
+}
+
+/* Hand the fault record of the previous boot (if any) to GetInfo and clear it. */
+static void fault_record_take(void)
+{
+	if (m_fault.magic == FAULT_MAGIC && m_fault.check == fault_check(&m_fault)) {
+		LOG_WRN("Previous boot ended in a fatal error: reason %u, pc 0x%08x, lr 0x%08x",
+			m_fault.reason, m_fault.pc, m_fault.lr);
+		app_cmd_set_last_fault(m_fault.reason, m_fault.pc, m_fault.lr);
+	}
+	m_fault.magic = 0;
+}
+
 static int init(void)
 {
 	k_sleep(K_MSEC(500));
@@ -292,6 +346,7 @@ int main(void)
 	}
 	app_cmd_set_reset_cause(reset_cause);
 #endif /* defined(CONFIG_HWINFO) */
+	fault_record_take();
 
 	/* Shared HW init */
 #if defined(CONFIG_WATCHDOG)

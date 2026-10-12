@@ -458,6 +458,16 @@ message Response {
         // (app_w1_slots.h) 0=none 1=ok 2=absent 3=replaced 4=mismatch. Omitted
         // when every slot is unused.
         repeated uint32 w1_slot_state = 19 [packed = true];
+
+        // Fatal error that ended the previous boot (#485 B2): present only on
+        // the first boot after a CPU fault or a kernel panic/oops, which now
+        // reboots (sys_reboot, so reset_cause reads software) instead of
+        // spinning until the watchdog. reason = Zephyr K_ERR_* code (0 = CPU
+        // exception, 2 = stack check fail, 3 = kernel oops, 4 = kernel panic);
+        // pc / lr = faulting instruction and return address (0 if unknown).
+        optional uint32 fault_reason = 20;
+        optional uint32 fault_pc     = 21;
+        optional uint32 fault_lr     = 22;
     }
 
     // Link state and diagnostics of the active radio, the same message and the

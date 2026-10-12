@@ -104,6 +104,13 @@ var _RESET_CAUSES = [
   [1 << 7, "low_power_wake"],
 ];
 
+// fault_reason (Info field 20, #485 B2): Zephyr K_ERR_* code of the fatal error
+// that ended the previous boot.
+var _FAULT_REASONS = {
+  0: "cpu_exception", 1: "spurious_irq", 2: "stack_check_fail", 3: "kernel_oops",
+  4: "kernel_panic"
+};
+
 // Config submessage maps: proto field tag -> name. The flat C struct is split
 // across submessages lorawan/application/sensors/alarms/p2p; device identity
 // stays at the AppConfigMessage root (not addressable via SetParam/GetConfig).
@@ -392,6 +399,10 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
+      // 20-22: fatal error that ended the previous boot (#485 B2); absent otherwise.
+      else if (field === 20) info.fault_reason = v.value;
+      else if (field === 21) info.fault_pc = "0x" + ("0000000" + (v.value >>> 0).toString(16)).slice(-8);
+      else if (field === 22) info.fault_lr = "0x" + ("0000000" + (v.value >>> 0).toString(16)).slice(-8);
       // field 19 = w1_slot_state, non-packed fallback (one varint per entry).
       else if (field === 19) (info.w1_slot_state = info.w1_slot_state || []).push(_W1_SLOT_STATES[v.value] || ("state" + v.value));
       // 12 (lrw_state) and 16-18 (last_dl_*) are retired: the link state and
@@ -435,6 +446,9 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
+  if (info.fault_reason !== undefined) {
+    info.fault_reason_name = _FAULT_REASONS[info.fault_reason] || ("reason" + info.fault_reason);
+  }
   // Internal: read by _pruneInfoPage(), removed again before the result leaves
   // the decoder (see the paging block in the Response decoder).
   Object.defineProperty(info, "_seen", { value: seen, enumerable: false, configurable: true });
@@ -448,6 +462,7 @@ var _INFO_FIELD_KEYS = {
   5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
   10: ["battery"], 11: ["reset_cause", "reset_cause_flags"],
   13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  20: ["fault_reason", "fault_reason_name"], 21: ["fault_pc"], 22: ["fault_lr"],
   19: ["w1_slot_state"]
 };
 function _pruneInfoPage(info) {

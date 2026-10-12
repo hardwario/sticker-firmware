@@ -380,6 +380,20 @@ test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
   assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
 });
 
+// The last fatal error (fields 20-22, #485 B2) tells the backend a reboot came
+// from a CPU fault, not a plain watchdog. Inner Info: fw 1.5.0, reset_cause=0x02,
+// fault_reason=0 (CPU exception), pc=0x0800abcd, lr=0x08001235.
+test("decodeUplink decodes get_info last fault (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a15080110055802a00100a801cdd78240b001b5a48040"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.fault_reason, 0);
+  assert.equal(got.info.fault_reason_name, "cpu_exception");
+  assert.equal(got.info.fault_pc, "0x0800abcd");
+  assert.equal(got.info.fault_lr, "0x08001235");
+});
+
 // Info carries dev_eui (field 13, 8 bytes), emitted over NFC only. The radio
 // link state is not part of Info (#446: get_radio_state). Inner Info: fw 1.4.2,
 // dev_eui=0102030405060708.

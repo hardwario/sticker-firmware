@@ -91,6 +91,20 @@ uint32_t app_cmd_get_reset_cause(void)
 	return m_reset_cause;
 }
 
+/* Fatal error that ended the previous boot, cached by main() (#485 B2). */
+static bool m_has_fault;
+static uint32_t m_fault_reason;
+static uint32_t m_fault_pc;
+static uint32_t m_fault_lr;
+
+void app_cmd_set_last_fault(uint32_t reason, uint32_t pc, uint32_t lr)
+{
+	m_has_fault = true;
+	m_fault_reason = reason;
+	m_fault_pc = pc;
+	m_fault_lr = lr;
+}
+
 /* F-1: SetParam mutates the staging config (m_app_config); the running copy
  * (g_app_config) — which lrw_join/lrw_reset build the join from — is only
  * re-synced from staging at boot (h_commit) or factory reset, both of which
@@ -129,6 +143,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		.serial_number = g_app_config.serial_number,
 		.uptime_s = (uint32_t)(k_uptime_get() / 1000),
 		.reset_cause = m_reset_cause,
+		.has_fault = m_has_fault,
+		.fault_reason = m_fault_reason,
+		.fault_pc = m_fault_pc,
+		.fault_lr = m_fault_lr,
 	};
 
 	BUILD_ASSERT(sizeof(info->claim_token) == sizeof(g_app_config.claim_token),
@@ -328,6 +346,12 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	info->debug = i.debug;
 	info->battery = i.battery_mv;
 	info->reset_cause = i.reset_cause;
+	info->has_fault_reason = i.has_fault;
+	info->fault_reason = i.fault_reason;
+	info->has_fault_pc = i.has_fault;
+	info->fault_pc = i.fault_pc;
+	info->has_fault_lr = i.has_fault;
+	info->fault_lr = i.fault_lr;
 	info->device_status = i.device_status;
 	/* Itemized active alarms (field 15), emitted on both transports via a
 	 * callback that snapshots the live alarm state at encode time. */
@@ -2271,6 +2295,9 @@ enum {
 	INFO_U_UNIX_TIME,
 	INFO_U_BATTERY,
 	INFO_U_RESET_CAUSE,
+	INFO_U_FAULT_REASON,
+	INFO_U_FAULT_PC,
+	INFO_U_FAULT_LR,
 	INFO_U_DEVICE_STATUS,
 	INFO_U_W1_SLOT_STATE,
 	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
@@ -2327,6 +2354,18 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->unix_time = (mask & BIT(INFO_U_UNIX_TIME)) ? all->unix_time : 0;
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
+	if (mask & BIT(INFO_U_FAULT_REASON)) {
+		pi->has_fault_reason = all->has_fault_reason;
+		pi->fault_reason = all->fault_reason;
+	}
+	if (mask & BIT(INFO_U_FAULT_PC)) {
+		pi->has_fault_pc = all->has_fault_pc;
+		pi->fault_pc = all->fault_pc;
+	}
+	if (mask & BIT(INFO_U_FAULT_LR)) {
+		pi->has_fault_lr = all->has_fault_lr;
+		pi->fault_lr = all->fault_lr;
+	}
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
 	if (mask & BIT(INFO_U_W1_SLOT_STATE)) {
 		pi->w1_slot_state_count = all->w1_slot_state_count;
@@ -2371,6 +2410,12 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->battery == 0;
 	case INFO_U_RESET_CAUSE:
 		return in->reset_cause == 0;
+	case INFO_U_FAULT_REASON:
+		return !in->has_fault_reason;
+	case INFO_U_FAULT_PC:
+		return !in->has_fault_pc;
+	case INFO_U_FAULT_LR:
+		return !in->has_fault_lr;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
 	case INFO_U_W1_SLOT_STATE:
