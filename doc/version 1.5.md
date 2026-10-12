@@ -2305,7 +2305,7 @@ transport.md`; node behaviour: `doc/p2p.md`.
   by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only, plus
   Backoff / PendingInfo in any ACK (#487); any other TLV there is skipped. Clock sync no longer waits a report interval for the next
   PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
-  Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `tower-net-core` (#486 W9).
+  Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `tower-net-core` (hardwario/tower-firmware#1, #486 W9).
 - **Confirmed uplinks:** every telemetry report is confirmed, like answers and
   history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
   downlink rides the next report's PENDING, so it waits at most one report interval.
