@@ -102,6 +102,12 @@ update_mode(timeout):
   `MB_CTRL` register, which needs no I2C password.
 - GPO is on PB12, which is not a WKUP pin, so Standby cannot be used and STOP2 + EXTI is used
   instead. Expected current is in the low µA range plus the ST25DV. Measure it on HIL.
+- **IWDG:** the application starts the IWDG (10 s, `app_wdog.c`). It keeps running
+  through the reboot into the bootloader and cannot be stopped. The bootloader feeds it in
+  every loop and delay, and LPTIM1 (LSI/128) wakes Stop2 every 8 s to feed it. The same
+  tick counts the idle timeout.
+- While the RF field is present (`EH_CTRL_Dyn` FIELD_ON), the bootloader polls the mailbox
+  instead of sleeping, so the transfer does not depend on the GPO event mask.
 - The clock stays at MSI 4 MHz after reset (flash latency 0, no clock setup). I2C runs at
   100 kHz, which adds ~25 ms per 256 B frame. If transfer time matters, switch to MSI 48 MHz
   (flash latency 2) and I2C 400 kHz.
@@ -189,3 +195,24 @@ Simplified MR !26 flow (no CCM, no `.sfu`):
 | 8 | current in update-mode wait (PPK2) | low µA + ST25DV |
 | 9 | bootloader size | ≤ 4096 B |
 | 10 | transfer time for ~170 KB | measured, documented |
+
+## 12. Spike results (2026-10-12)
+
+Code: `boot/` (`make` → `boot/build/boot.{elf,hex,bin}`), `arm-zephyr-eabi-gcc` 12.2 from
+Zephyr SDK 0.16.8, `-Os`. The build fails above 4 KB (linker region).
+
+| Item | Result |
+|---|---|
+| **bootloader flash** | **2148 B / 4096 B (52 %)**, 1948 B free |
+| bootloader RAM | 2328 B (2 KB page buffer + 256 B mailbox buffer), stack in an 8 KB window |
+| `-flto` | −36 B, not worth it |
+| largest symbols | `main` (inlined protocol, init, flash) 1364 B, `st25_xfer` 240 B, `reset_handler` 68 B, vectors 64 B |
+| app release @ `0x1000`, 204K (v1.5.0 72ef088b) | **183 004 B, 87.6 %**, 25 892 B free (flat 208K today: 29 988 B free) |
+| app debug @ `0x1000`, 236K | **232 984 B, 96.4 %**, 8 680 B free |
+
+The app was measured with an overlay (`code_partition` → `0x1000`/204K) plus
+`CONFIG_FLASH_LOAD_OFFSET=0x1000`, with `CONFIG_FLASH_LOAD_SIZE=0x33000` for release and
+`0x3B000` for debug. `rom_start` links at `0x08001000`.
+
+**Not verified yet (no HW run):** the I2C timing, the ST25DV mailbox exchange, the HW CRC
+configuration against zlib `crc32`, Stop2 wake on PB12 and LPTIM1, and the jump to the app.
