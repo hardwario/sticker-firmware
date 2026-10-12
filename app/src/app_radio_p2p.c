@@ -24,6 +24,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -142,6 +143,31 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_TOA_MAX_MS       3950U
 /* Between an exchange and the next TX, so the gateway is back in RX. */
 #define P2P_TX_GAP_MS        200
+
+/* fsk profile (#490): the TOWER Core Module's SPIRIT1 basic packet, bit-exact
+ * (HW capture 2026-10-12): GFSK 19.2 kbit/s, deviation 20 kHz, 4 B preamble,
+ * sync word 0xDB624715 (sent SYNC1 first, 15 47 62 DB on air), then
+ *
+ *   len(1) | frame(len) | CRC-16 (0x1021, seed 0xFFFF, over len and frame)
+ *
+ * all whitened with the CC1101-style PN9 (seed 0x1FF). The SX126x whitening
+ * runs the same LFSR with the bits of each byte reversed, so the radio sends
+ * the bytes as given, its whitening and CRC off, and the node frames them
+ * (p2p_fsk_wrap()); the driver reads the length byte as it arrives
+ * (lora_fsk_config.sw_length). Same TOWER timing as lora. */
+#define P2P_FSK_BITRATE      19200U
+#define P2P_FSK_FDEV         20000U
+#define P2P_FSK_RX_BW        234300U /* the SX126x step above SPIRIT1's ~216 kHz */
+#define P2P_FSK_PREAMBLE     4U
+#define P2P_FSK_SYNC_LEN     4U
+#define P2P_FSK_PN9_SEED     0x1FFU
+#define P2P_FSK_CRC_POLY     0x1021U
+#define P2P_FSK_CRC_SEED     0xFFFFU
+#define P2P_FSK_OVERHEAD     3U /* length byte + CRC */
+#define P2P_FSK_AIR_MAX      (P2P_FRAME_MAX + P2P_FSK_OVERHEAD)
+/* JoinAccept window on fsk: preamble and sync take 3.3 ms; the rest is the
+ * open-timing slop the lora window counts in symbols. */
+#define P2P_FSK_RX1_CATCH_MS 20U
 
 /* Control envelope (plan §8.2): the uplinks this node sends on its own, one
  * confirmed 0x91 frame carrying every TLV pending (ctrl_work_handler()). */
@@ -756,20 +782,104 @@ static int sf_from_cfg(void)
 	return CLAMP(g_app_config.p2p_spreading_factor, SF_6, SF_12);
 }
 
+/* The fsk PHY profile is configured, and the driver has it. */
+static bool phy_fsk(void)
+{
+	return IS_ENABLED(CONFIG_LORA_FSK) &&
+	       g_app_config.p2p_modulation == APP_CONFIG_P2P_MODULATION_FSK;
+}
+
+/* XOR `buf` with the PN9 sequence from its start -- its own inverse. */
+static void fsk_pn9(uint8_t *buf, size_t len)
+{
+	uint16_t lfsr = P2P_FSK_PN9_SEED;
+
+	for (size_t i = 0; i < len; i++) {
+		buf[i] ^= (uint8_t)lfsr;
+		for (int b = 0; b < 8; b++) {
+			lfsr = (lfsr >> 1) | (((lfsr ^ (lfsr >> 5)) & 1U) << 8);
+		}
+	}
+}
+
+/* The fsk packet of the `len`-byte `frame` (<= P2P_FRAME_MAX) into `air`
+ * (P2P_FSK_AIR_MAX): length byte, frame, CRC, whitened. Returns its length.
+ * Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE size_t p2p_fsk_wrap(const uint8_t *frame, size_t len, uint8_t *air)
+{
+	air[0] = (uint8_t)len;
+	memcpy(&air[1], frame, len);
+	sys_put_be16(crc16(P2P_FSK_CRC_POLY, P2P_FSK_CRC_SEED, air, len + 1U), &air[len + 1U]);
+	fsk_pn9(air, len + P2P_FSK_OVERHEAD);
+	return len + P2P_FSK_OVERHEAD;
+}
+
+/* p2p_fsk_wrap() undone in place: the frame is at `air` + 1, `*len` long.
+ * -EBADMSG for a short packet or a CRC mismatch. Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE int p2p_fsk_unwrap(uint8_t *air, size_t air_len, size_t *len)
+{
+	if (air_len < P2P_FSK_OVERHEAD) {
+		return -EBADMSG;
+	}
+	fsk_pn9(air, air_len);
+
+	size_t n = air[0];
+
+	if (n + P2P_FSK_OVERHEAD > air_len ||
+	    crc16(P2P_FSK_CRC_POLY, P2P_FSK_CRC_SEED, air, n + 1U) != sys_get_be16(&air[n + 1U])) {
+		return -EBADMSG;
+	}
+	*len = n;
+	return 0;
+}
+
+/* The bytes the radio sends for `frame`: the frame on lora, its fsk packet on
+ * fsk (`*len` updated). Radio work queue only: one static packet buffer. */
+static uint8_t *phy_tx_buf(uint8_t *frame, size_t *len)
+{
+	static uint8_t air[P2P_FSK_AIR_MAX];
+
+	if (!phy_fsk()) {
+		return frame;
+	}
+	*len = p2p_fsk_wrap(frame, *len, air);
+	return air;
+}
+
 static void build_modem_config(struct lora_modem_config *c, bool tx)
 {
 	memset(c, 0, sizeof(*c));
 	c->frequency = g_app_config.p2p_frequency;
-	c->bandwidth = P2P_BANDWIDTH;
-	c->datarate = (enum lora_datarate)m_sf;
-	c->coding_rate = P2P_CODING_RATE;
-	c->preamble_len = 8;
 	/* An assigned session power overrides the local config: the central owns
 	 * the link budget across the whole network, the node only its own
 	 * default (D3). */
 	c->tx_power = m_session_tx_power_assigned ? m_session_tx_power_dbm
 						  : (int8_t)g_app_config.p2p_tx_power;
 	c->tx = tx;
+#if defined(CONFIG_LORA_FSK)
+	if (phy_fsk()) {
+		c->modem = LORA_MODEM_FSK;
+		c->fsk = (struct lora_fsk_config){
+			.bitrate = P2P_FSK_BITRATE,
+			.fdev = P2P_FSK_FDEV,
+			.bandwidth = P2P_FSK_RX_BW,
+			.preamble_len = P2P_FSK_PREAMBLE,
+			.sync_word = {0x15, 0x47, 0x62, 0xDB},
+			.sync_word_len = P2P_FSK_SYNC_LEN,
+			.crc = LORA_FSK_CRC_OFF,
+			.whitening = false,
+			.sw_length = true,
+			.len_xor = (uint8_t)P2P_FSK_PN9_SEED, /* the first PN9 byte */
+			.len_extra = P2P_FSK_OVERHEAD - 1U,   /* the CRC */
+		};
+		return;
+	}
+#endif
+	c->bandwidth = P2P_BANDWIDTH;
+	c->datarate = (enum lora_datarate)m_sf;
+	c->coding_rate = P2P_CODING_RATE;
+	c->preamble_len = 8;
 	c->iq_inverted = false;
 	c->public_network = false;
 }
@@ -796,9 +906,22 @@ P2P_TESTABLE uint32_t p2p_toa_ms(int sf, uint8_t payload_len)
 	return app_radio_lora_toa_ms((uint32_t)sf, P2P_BANDWIDTH_HZ, payload_len);
 }
 
-/* Time-on-air at the SF the radio is currently tuned to. */
+/* fsk time-on-air in ms of a `frame_len`-byte frame: preamble, sync word,
+ * length byte, frame and CRC at 19.2 kbit/s. Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_fsk_toa_ms(size_t frame_len)
+{
+	uint32_t bytes = P2P_FSK_PREAMBLE + P2P_FSK_SYNC_LEN + P2P_FSK_OVERHEAD + frame_len;
+
+	return DIV_ROUND_UP(bytes * 8U * 1000U, P2P_FSK_BITRATE);
+}
+
+/* Time-on-air on the PHY profile, at the SF the radio is tuned to on lora. */
 static uint32_t frame_toa_ms(size_t frame_len)
 {
+	if (phy_fsk()) {
+		return p2p_fsk_toa_ms(frame_len);
+	}
 	return p2p_toa_ms(m_sf, (uint8_t)MIN(frame_len, (size_t)UINT8_MAX));
 }
 
@@ -837,6 +960,30 @@ P2P_TESTABLE uint32_t p2p_twr_window_ms(int sf, uint8_t frame_len)
 							P2P_WINDOW_MARGIN_MS);
 }
 
+/* p2p_twr_window_ms() on fsk: no symbols, the RxDone latency is in the margin.
+ * Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_fsk_window_ms(uint8_t frame_len)
+{
+	return MAX((uint32_t)P2P_WINDOW_MIN_MS,
+		   P2P_TURNAROUND_MS + p2p_fsk_toa_ms(frame_len) + P2P_WINDOW_MARGIN_MS);
+}
+
+/* The TOWER receive window on the PHY profile. */
+static uint32_t twr_window_ms(uint8_t frame_len)
+{
+	return phy_fsk() ? p2p_fsk_window_ms(frame_len) : p2p_twr_window_ms(m_sf, frame_len);
+}
+
+/* The JoinAccept window's lora_recv() timeout on the PHY profile. */
+static uint32_t rx1_timeout_ms(uint8_t expected_frame_len)
+{
+	if (phy_fsk()) {
+		return P2P_FSK_RX1_CATCH_MS + p2p_fsk_toa_ms(expected_frame_len) +
+		       P2P_RX1_TRAILING_MARGIN_MS;
+	}
+	return p2p_rx1_timeout_ms(m_sf, expected_frame_len);
+}
+
 /* Open a bounded RX window `rx1_delay_s - open_margin_ms` after `tx_end_ms`
  * (uptime ms), sleeping until it opens then blocking on lora_recv() for
  * p2p_rx1_timeout_ms(expected_frame_len) -- the JoinAccept's. Runs on the
@@ -865,10 +1012,20 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 	}
 
 	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
-			K_MSEC(p2p_rx1_timeout_ms(m_sf, expected_frame_len)), rssi, snr);
+			K_MSEC(rx1_timeout_ms(expected_frame_len)), rssi, snr);
 
 	(void)radio_configure(true);
 	app_radio_air_end(); /* the exchange send_join_request() began */
+
+	size_t n;
+
+	if (ret > 0 && phy_fsk()) {
+		if (p2p_fsk_unwrap(buf, (size_t)ret, &n)) {
+			return -EBADMSG;
+		}
+		memmove(buf, &buf[1], n);
+		ret = (int)n;
+	}
 
 	return ret;
 }
@@ -963,12 +1120,12 @@ static bool p2p_warning_step(void)
 /* struct app_radio_backend.rejoin: the self-healing re-join (§7) on the slow
  * policy. Refused while unprovisioned: no JoinRequest can succeed under an
  * all-zero app_key (§4) or without a valid address. */
-/* Only the lora PHY profile exists so far; fsk (TOWER-native GFSK) is plan
- * #470 P5. Every path that would transmit refuses rather than send LoRa to an
- * fsk network. */
+/* The fsk profile needs the driver's (G)FSK (CONFIG_LORA_FSK): without it
+ * every path that would transmit refuses rather than send LoRa to an fsk
+ * network. */
 static bool phy_is_supported(void)
 {
-	return g_app_config.p2p_modulation == APP_CONFIG_P2P_MODULATION_LORA;
+	return g_app_config.p2p_modulation == APP_CONFIG_P2P_MODULATION_LORA || phy_fsk();
 }
 
 static int p2p_tx_rejoin(bool forced)
@@ -984,7 +1141,15 @@ static int p2p_tx_rejoin(bool forced)
 		return -ENOTSUP;
 	}
 	if (!phy_is_supported()) {
-		LOG_ERR("P2P self-heal refused: p2p-modulation fsk is not supported yet");
+		LOG_ERR("P2P self-heal refused: p2p-modulation fsk is not in this image");
+		return -ENOTSUP;
+	}
+	if (phy_fsk()) {
+		/* A stock TOWER gateway never rekeys and pairs only inside a window
+		 * an operator opens: a self-heal would trade a working pairing for
+		 * one that cannot happen unattended. The pairing is kept; a lost
+		 * link there is a gateway that is off. (#490) */
+		LOG_WRN("P2P self-heal skipped on fsk: the TOWER pairing is kept");
 		return -ENOTSUP;
 	}
 	LOG_WRN("P2P: self-healing re-join (§7)");
@@ -1224,6 +1389,15 @@ static void p2p_recv_cb(const struct device *dev, uint8_t *data, uint16_t size, 
 
 	struct p2p_rx *rx = &m_rx_scratch;
 
+	if (phy_fsk()) {
+		size_t n;
+
+		if (p2p_fsk_unwrap(data, size, &n)) {
+			return; /* noise or a broken packet: the radio has no CRC on */
+		}
+		data++;
+		size = (uint16_t)n;
+	}
 	if (size > sizeof(rx->buf)) {
 		return;
 	}
@@ -1269,8 +1443,11 @@ static int p2p_send_recv(uint8_t *frame, size_t flen, uint32_t air, uint32_t *do
 		return ret;
 	}
 
+	size_t alen = flen;
+	uint8_t *abuf = phy_tx_buf(frame, &alen);
+
 	k_poll_signal_init(&sig);
-	ret = lora_send_recv_async(m_lora_dev, frame, (uint32_t)flen, p2p_recv_cb, NULL, &sig, &tm);
+	ret = lora_send_recv_async(m_lora_dev, abuf, (uint32_t)alen, p2p_recv_cb, NULL, &sig, &tm);
 	if (ret == -ENOSYS) {
 		return ret;
 	}
@@ -1312,7 +1489,11 @@ static int p2p_tx_once(uint8_t *frame, size_t flen, uint32_t air, bool rx, uint3
 	if (ret) {
 		return ret;
 	}
-	ret = lora_send(m_lora_dev, frame, (uint32_t)flen);
+
+	size_t alen = flen;
+	uint8_t *abuf = phy_tx_buf(frame, &alen);
+
+	ret = lora_send(m_lora_dev, abuf, (uint32_t)alen);
 	*done_cyc = k_cycle_get_32();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
@@ -1382,8 +1563,7 @@ static bool p2p_wait_ack(uint32_t counter, uint32_t arm_cyc, uint8_t tail, struc
 	static uint8_t pt[TWR_PAYLOAD_MAX];
 	/* Room for a Backoff / PendingInfo the gateway may add to any ACK. */
 	k_timepoint_t end = window_end(
-		p2p_twr_window_ms(m_sf, TWR_ACK_FRAME_LEN + tail + P2P_ACK_TAIL_UNSOLICITED),
-		arm_cyc);
+		twr_window_ms(TWR_ACK_FRAME_LEN + tail + P2P_ACK_TAIL_UNSOLICITED), arm_cyc);
 	struct twr_hdr h;
 	size_t len;
 	int v;
@@ -1412,7 +1592,7 @@ static bool p2p_wait_ack(uint32_t counter, uint32_t arm_cyc, uint8_t tail, struc
  * confirmed one -- fresh or a retransmission -- is owed an ACK. */
 static void p2p_wait_dl(struct p2p_rx *rx, struct p2p_xfer *x)
 {
-	k_timepoint_t end = window_end(p2p_twr_window_ms(m_sf, P2P_FRAME_MAX), rx->cyc);
+	k_timepoint_t end = window_end(twr_window_ms(P2P_FRAME_MAX), rx->cyc);
 	struct twr_hdr h;
 	size_t len;
 	int v;
@@ -1482,7 +1662,11 @@ static void p2p_auto_ack(const struct p2p_xfer *x)
 	if (since_ms < P2P_TURNAROUND_MS) {
 		k_sleep(K_MSEC(P2P_TURNAROUND_MS - since_ms));
 	}
-	if (lora_send(m_lora_dev, frame, (uint32_t)flen)) {
+
+	size_t alen = flen;
+	uint8_t *abuf = phy_tx_buf(frame, &alen);
+
+	if (lora_send(m_lora_dev, abuf, (uint32_t)alen)) {
 		(void)tx_send_failed(flen);
 		return;
 	}
@@ -1668,8 +1852,9 @@ static size_t ctrl_build(uint32_t bits, uint8_t *pt)
 		pt[n++] = P2P_CTRL_CAPABILITIES;
 		pt[n++] = P2P_CAPS_LEN;
 		pt[n++] = P2P_CAPS_PROTO_VERSION;
-		pt[n++] = P2P_FRAME_MAX;    /* MTU: the largest frame this node receives */
-		pt[n++] = P2P_PROFILE_LORA; /* fsk refuses to start (P5) */
+		pt[n++] = P2P_FRAME_MAX; /* MTU: the largest frame this node receives */
+		pt[n++] = IS_ENABLED(CONFIG_LORA_FSK) ? (P2P_PROFILE_LORA | P2P_PROFILE_FSK)
+						      : P2P_PROFILE_LORA;
 		memcpy(&pt[n], m_caps_cmds, sizeof(m_caps_cmds));
 		n += sizeof(m_caps_cmds);
 		pt[n++] = P2P_POWER_CLASS_BATTERY;
@@ -2384,8 +2569,11 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 		return ret;
 	}
 
+	size_t alen = sizeof(frame);
+	uint8_t *abuf = phy_tx_buf(frame, &alen);
+
 	app_radio_air_begin(); /* until the JoinAccept window closed */
-	ret = lora_send(m_lora_dev, frame, sizeof(frame));
+	ret = lora_send(m_lora_dev, abuf, (uint32_t)alen);
 	if (ret) {
 		app_radio_air_end();
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
@@ -2414,7 +2602,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
  * all just mean "no accept this attempt", not a hard error). */
 static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 {
-	uint8_t buf[P2P_FRAME_MAX];
+	uint8_t buf[P2P_FSK_AIR_MAX];
 	struct p2p_join_accept ja;
 	int16_t rssi;
 	int8_t snr;
@@ -2448,6 +2636,215 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	return 0;
 }
 
+/* One keyed join attempt (plan §6.3): JoinRequest, then the JoinAccept
+ * window. Returns 0 when paired, -EAGAIN only when the duty ledger refused the
+ * JoinRequest (nothing on the air), another errno otherwise. */
+static int keyed_join_attempt(void)
+{
+	uint32_t used_nonce;
+	int64_t tx_end;
+	int ret = send_join_request(&used_nonce, &tx_end);
+
+	if (ret == -EAGAIN) {
+		return ret;
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
+		return ret;
+	}
+	ret = recv_join_accept(used_nonce, tx_end);
+	if (ret) {
+		LOG_INF("JoinAccept not received/invalid (%d); retrying", ret);
+		return ret == -EAGAIN ? -ETIMEDOUT : ret;
+	}
+	return 0;
+}
+
+/* TOWER OTA pairing (fsk profile, issue #490): the joiner side of the 3-way
+ * JOIN in tower-firmware src/radio/net/pairing.rs, so a stock TOWER gateway
+ * (radio_dongle_gateway, `tower nodes add --ota`) pairs this node without any
+ * change on its side. The node keeps its own address; the gateway hands out
+ * the per-node key, which becomes the session key as-is (no derivation: the
+ * gateway uses the key it minted). The key travels under the PUBLIC pairing
+ * key -- integrity and in-window replay protection only, no confidentiality --
+ * which is TOWER's model: pair in proximity, while the operator holds the
+ * gateway's pairing window open. The frame counters are dev_nonce values, the
+ * same monotonic lane the keyed JoinRequest uses. */
+static const uint8_t m_twr_pairing_key[P2P_KEY_LEN] = TWR_PAIRING_KEY;
+
+static int twr_pair_req_build(uint32_t counter, uint8_t frame[TWR_PAIR_REQ_LEN])
+{
+	uint8_t pt[TWR_PAIR_REQ_PT_LEN];
+	size_t len;
+	const struct twr_hdr h = {
+		.type = TWR_TYPE_JOIN_REQ,
+		.src = node_addr(),
+		.dest = TWR_ADDR_NONE, /* the gateway is not known yet */
+		.counter = counter,
+	};
+
+	sys_put_le32(node_addr(), pt);
+	return twr_seal(m_twr_pairing_key, &h, pt, sizeof(pt), frame, TWR_PAIR_REQ_LEN, &len);
+}
+
+/* Open a JOIN_RESP for this node: `*gw` (its src), `key` and `*challenge`. */
+static int twr_pair_resp_open(const uint8_t *frame, size_t len, uint32_t *gw,
+			      uint8_t key[P2P_KEY_LEN], uint32_t *challenge)
+{
+	uint8_t pt[TWR_PAYLOAD_MAX];
+	struct twr_hdr h;
+	size_t pt_len;
+
+	if (twr_hdr_get(frame, len, &h) || h.type != TWR_TYPE_JOIN_RESP || h.dest != node_addr()) {
+		return -EBADMSG;
+	}
+	if (twr_open(m_twr_pairing_key, frame, len, &h, pt, sizeof(pt), &pt_len) ||
+	    pt_len < TWR_PAIR_RESP_PT_LEN) {
+		return -EBADMSG;
+	}
+	*gw = h.src;
+	memcpy(key, pt, P2P_KEY_LEN);
+	*challenge = sys_get_le32(&pt[P2P_KEY_LEN]);
+	memset(pt, 0, sizeof(pt));
+	return 0;
+}
+
+static int twr_pair_conf_build(uint32_t counter, uint32_t gw, uint32_t challenge,
+			       uint8_t frame[TWR_PAIR_CONF_LEN])
+{
+	uint8_t pt[TWR_PAIR_CONF_PT_LEN];
+	size_t len;
+	const struct twr_hdr h = {
+		.type = TWR_TYPE_JOIN_CONF,
+		.src = node_addr(),
+		.dest = gw,
+		.counter = counter,
+	};
+
+	sys_put_le32(node_addr(), &pt[0]);
+	sys_put_le32(challenge, &pt[4]);
+	return twr_seal(m_twr_pairing_key, &h, pt, sizeof(pt), frame, TWR_PAIR_CONF_LEN, &len);
+}
+
+#if defined(CONFIG_ZTEST)
+int p2p_test_twr_pair_req(uint32_t counter, uint8_t out[TWR_PAIR_REQ_LEN])
+{
+	return twr_pair_req_build(counter, out);
+}
+
+int p2p_test_twr_pair_resp(const uint8_t *frame, size_t len, uint32_t *gw, uint8_t key[P2P_KEY_LEN],
+			   uint32_t *challenge)
+{
+	return twr_pair_resp_open(frame, len, gw, key, challenge);
+}
+
+int p2p_test_twr_pair_conf(uint32_t counter, uint32_t gw, uint32_t challenge,
+			   uint8_t out[TWR_PAIR_CONF_LEN])
+{
+	return twr_pair_conf_build(counter, gw, challenge, out);
+}
+#endif /* defined(CONFIG_ZTEST) */
+
+/* One pairing attempt: JOIN_REQ, the JOIN_RESP window, and on a response the
+ * JOIN_CONFIRM, after which the pairing is persisted. Like the TOWER joiner,
+ * the node commits once the confirm is sent; a confirm the gateway missed
+ * leaves it paired to a gateway that never installed it -- the operator pairs
+ * again. Returns 0 when paired, -EAGAIN (duty-cycle blocked), -ETIMEDOUT (no
+ * response) or an errno. */
+static int twr_pair_attempt(void)
+{
+	if (duty_wait_ms_for(TWR_PAIR_REQ_LEN + TWR_PAIR_CONF_LEN) > 0) {
+		return -EAGAIN;
+	}
+
+	/* Two counters per attempt (REQ, CONFIRM), persisted before either can
+	 * reach the air -- see send_join_request(). */
+	uint32_t ctr = MAX(m_dev_nonce, 1U);
+
+	if (dnonce_persist(ctr + 2) != 0) {
+		return -EIO;
+	}
+
+	uint8_t frame[TWR_PAIR_REQ_LEN];
+	uint32_t air = frame_toa_ms(sizeof(frame));
+	uint32_t done_cyc = 0;
+	uint32_t arm_cyc = 0;
+	int ret = twr_pair_req_build(ctr, frame);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("twr_pair_req_build", ret);
+		return ret;
+	}
+
+	k_msgq_purge(&m_rxq);
+	app_radio_air_begin();
+	ret = p2p_tx_once(frame, sizeof(frame), air, true, &done_cyc, &arm_cyc);
+	if (ret) {
+		(void)lora_recv_async(m_lora_dev, NULL, NULL);
+		app_radio_air_end();
+		return ret;
+	}
+	app_radio_count(APP_RADIO_CNT_JOIN);
+	publish_link();
+	LOG_INF("TOWER JOIN_REQ sent (addr %08x, counter %u, %u ms air)", node_addr(), ctr, air);
+
+	k_timepoint_t end = window_end(TWR_PAIR_RESP_WINDOW_MS, done_cyc);
+	uint8_t key[P2P_KEY_LEN];
+	uint32_t challenge = 0;
+	uint32_t gw = 0;
+	struct p2p_rx rx;
+
+	ret = -ETIMEDOUT;
+	while (k_msgq_get(&m_rxq, &rx, sys_timepoint_timeout(end)) == 0) {
+		if (twr_pair_resp_open(rx.buf, rx.len, &gw, key, &challenge) == 0) {
+			ret = 0;
+			break;
+		}
+	}
+	(void)lora_recv_async(m_lora_dev, NULL, NULL);
+	if (ret) {
+		app_radio_air_end();
+		(void)radio_configure(true);
+		LOG_INF("TOWER pairing: no JOIN_RESP (is the gateway's pairing window open?)");
+		return ret;
+	}
+
+	/* The gateway turns its radio around for the confirm (pairing.rs). */
+	uint32_t since_ms = k_cyc_to_ms_floor32(k_cycle_get_32() - rx.cyc);
+
+	if (since_ms < TWR_PAIR_TURNAROUND_MS) {
+		k_sleep(K_MSEC(TWR_PAIR_TURNAROUND_MS - since_ms));
+	}
+
+	uint8_t conf[TWR_PAIR_CONF_LEN];
+
+	ret = twr_pair_conf_build(ctr + 1, gw, challenge, conf);
+	if (ret == 0) {
+		ret = p2p_tx_once(conf, sizeof(conf), frame_toa_ms(sizeof(conf)), false, &done_cyc,
+				  &arm_cyc);
+	}
+	app_radio_air_end();
+	(void)radio_configure(true);
+	if (ret) {
+		memset(key, 0, sizeof(key));
+		return ret;
+	}
+
+	const struct p2p_join_accept ja = {
+		.net_id = gw,
+		.rx_delay_s = P2P_RX1_DELAY_DEFAULT_S,
+	};
+
+	ret = pairing_persist(&ja, key);
+	memset(key, 0, sizeof(key));
+	if (ret) {
+		return ret;
+	}
+	LOG_INF("Paired with TOWER gateway %08x (addr %08x, RSSI %d dBm)", gw, node_addr(),
+		rx.rssi);
+	return 0;
+}
+
 /* §5.2: the never-paired boot join's 120 s window is over. It ends the FAST
  * retry policy, not the episode -- the node keeps looking, on the same
  * exponential curve a self-heal uses (§7), converging to one JoinRequest an
@@ -2474,23 +2871,14 @@ static void join_work_handler(struct k_work *work)
 		return; /* paired (or reverted) while a retry was already in flight */
 	}
 
-	uint32_t used_nonce;
-	int64_t tx_end;
-	int ret = send_join_request(&used_nonce, &tx_end);
-	/* Captured before recv_join_accept() overwrites `ret`: only the SEND can
-	 * report the duty ledger's refusal, and that refusal is the one outcome
-	 * that put nothing on the air. */
+	int ret = phy_fsk() ? twr_pair_attempt() : keyed_join_attempt();
+	/* The duty ledger's refusal is the one outcome that put nothing on the
+	 * air. */
 	bool duty_blocked = (ret == -EAGAIN);
 
 	if (ret == 0) {
-		ret = recv_join_accept(used_nonce, tx_end);
-		if (ret == 0) {
-			mark_ready();
-			return; /* paired; no more retries */
-		}
-		LOG_INF("JoinAccept not received/invalid (%d); retrying", ret);
-	} else if (!duty_blocked) {
-		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
+		mark_ready();
+		return; /* paired; no more retries */
 	}
 
 	/* A JoinRequest that reached the air ends a round of the slow policy. So
@@ -2853,7 +3241,7 @@ void app_radio_p2p_start(void)
 	}
 
 	if (!phy_is_supported()) {
-		LOG_ERR("P2P not started: p2p-modulation fsk is not supported yet. Set "
+		LOG_ERR("P2P not started: p2p-modulation fsk is not in this image. Set "
 			"p2p-modulation lora, then reboot.");
 		m_disabled = true;
 		return;
@@ -2970,7 +3358,7 @@ void app_radio_p2p_rejoin(void)
 		return;
 	}
 	if (!phy_is_supported()) {
-		LOG_ERR("P2P rejoin refused: p2p-modulation fsk is not supported yet");
+		LOG_ERR("P2P rejoin refused: p2p-modulation fsk is not in this image");
 		return;
 	}
 

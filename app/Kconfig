@@ -40,6 +40,11 @@ config RADIO_P2P
 	# Boosted LNA gain on every lora_* reception, ~+2 dB for ~+0.1 uA at a
 	# 900 s report (doc/plan/470 §3.3, Hynek 2026-10-08).
 	imply LORA_RX_BOOSTED_GAIN
+	# The fsk PHY profile, TOWER-native GFSK (#490); without it
+	# p2p-modulation fsk refuses to start.
+	imply LORA_FSK
+	# The fsk packet's CRC16 is computed in software (p2p_fsk_wrap()).
+	select CRC
 	help
 	  App-level name for the raw-LoRa point-to-point transport
 	  (app_radio_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two

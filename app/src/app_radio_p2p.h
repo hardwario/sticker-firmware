@@ -33,6 +33,9 @@ extern "C" {
 #define TWR_NONCE_LEN       13
 #define TWR_TYPE_DATA       0
 #define TWR_TYPE_ACK        1
+#define TWR_TYPE_JOIN_REQ   4 /* TOWER OTA pairing (fsk profile, issue #490) */
+#define TWR_TYPE_JOIN_RESP  5
+#define TWR_TYPE_JOIN_CONF  6
 #define TWR_FLAG_CONFIRMED  0x01
 #define TWR_ACK_PENDING     0x01 /* ACK payload flags: a downlink follows */
 #define TWR_ACK_CTRL        0x02 /* a 0x91 TLV tail follows the flags (plan §13.5) */
@@ -123,6 +126,21 @@ enum p2p_port {
 #define P2P_JOIN_ACCEPT_VALUE_LEN 13
 #define P2P_JOIN_REQ_LEN          (TWR_HDR_LEN + 3 + P2P_JOIN_REQ_VALUE_LEN + TWR_TAG_LEN) /* 39 */
 #define P2P_JOIN_ACCEPT_LEN (TWR_HDR_LEN + 3 + P2P_JOIN_ACCEPT_VALUE_LEN + TWR_TAG_LEN)    /* 38 */
+
+/* TOWER OTA pairing (fsk profile toward a stock TOWER gateway, issue #490):
+ * the 3-way JOIN of tower-firmware src/radio/net/pairing.rs, all three frames
+ * under the public TWR_PAIRING_KEY. JOIN_REQ carries the node address (LE),
+ * JOIN_RESP the per-node key(16) | challenge(4, LE), JOIN_CONFIRM the node
+ * address | challenge. */
+#define TWR_PAIRING_KEY         "TOWER-PAIR-KEY!" /* + its NUL = 16 B */
+#define TWR_PAIR_REQ_PT_LEN     4
+#define TWR_PAIR_RESP_PT_LEN    20
+#define TWR_PAIR_CONF_PT_LEN    8
+#define TWR_PAIR_REQ_LEN        (TWR_HDR_LEN + TWR_PAIR_REQ_PT_LEN + TWR_TAG_LEN)  /* 26 */
+#define TWR_PAIR_RESP_LEN       (TWR_HDR_LEN + TWR_PAIR_RESP_PT_LEN + TWR_TAG_LEN) /* 42 */
+#define TWR_PAIR_CONF_LEN       (TWR_HDR_LEN + TWR_PAIR_CONF_PT_LEN + TWR_TAG_LEN) /* 30 */
+#define TWR_PAIR_RESP_WINDOW_MS 300 /* JOIN_RESP_WINDOW */
+#define TWR_PAIR_TURNAROUND_MS  20  /* ACK_TURNAROUND before the JOIN_CONFIRM */
 
 /* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
  *
@@ -334,6 +352,10 @@ uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
 uint32_t rx1_preamble_catch_ms(int sf);
 uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
 uint32_t p2p_twr_window_ms(int sf, uint8_t frame_len);
+size_t p2p_fsk_wrap(const uint8_t *frame, size_t len, uint8_t *air);
+int p2p_fsk_unwrap(uint8_t *air, size_t air_len, size_t *len);
+uint32_t p2p_fsk_toa_ms(size_t frame_len);
+uint32_t p2p_fsk_window_ms(uint8_t frame_len);
 int p2p_replay_check(uint32_t last, uint32_t counter);
 int p2p_tlv_next(const uint8_t *buf, size_t len, size_t *off, struct p2p_tlv *tlv);
 int p2p_parse_join_accept(const uint8_t *val, size_t len, uint32_t hdr_src,
@@ -369,6 +391,11 @@ void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);
 int p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 int p2p_test_open_join_accept(uint32_t dev_nonce, const uint8_t *frame, size_t len);
+int p2p_test_twr_pair_req(uint32_t counter, uint8_t out[TWR_PAIR_REQ_LEN]);
+int p2p_test_twr_pair_resp(const uint8_t *frame, size_t len, uint32_t *gw, uint8_t key[P2P_KEY_LEN],
+			   uint32_t *challenge);
+int p2p_test_twr_pair_conf(uint32_t counter, uint32_t gw, uint32_t challenge,
+			   uint8_t out[TWR_PAIR_CONF_LEN]);
 void p2p_test_set_dev_nonce(uint32_t v);
 uint32_t p2p_test_get_dev_nonce(void);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
