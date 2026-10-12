@@ -666,6 +666,12 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 		} else {
 			shell_print(shell, "link check: n/a");
 		}
+		if (info.home_gw_valid) {
+			shell_print(shell, "home gateway: %08x (flags 0x%02x)", info.home_gw_addr,
+				    info.home_gw_flags);
+		} else {
+			shell_print(shell, "home gateway: n/a");
+		}
 		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
 		return 0;
 	}
@@ -1540,8 +1546,9 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Radio params:  SF%u, TX %d dBm", rs.sf,
 			    rs.has_tx_power ? rs.tx_power_dbm : 0);
 	}
-	shell_print(sh, "Radio link:    fail streak %u, join attempts %u, duty hold %u s",
-		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s);
+	shell_print(sh,
+		    "Radio link:    fail streak %u, join attempts %u, duty hold %u s, backoff %u s",
+		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s, rs.backoff_s);
 	shell_print(sh, "Radio counts:  tx %u rx %u retry %u fail %u tx_err %u join %u",
 		    rs.cnt[APP_RADIO_CNT_TX], rs.cnt[APP_RADIO_CNT_RX], rs.cnt[APP_RADIO_CNT_RETRY],
 		    rs.cnt[APP_RADIO_CNT_FAIL], rs.cnt[APP_RADIO_CNT_TX_ERR],

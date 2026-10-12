@@ -1473,6 +1473,77 @@ static void stale_ledger_hold_keeps_m2_quiet(void)
 }
 BOTH_PROFILES(stale_ledger_hold_keeps_m2_quiet)
 
+/* ---- Network backoff (P2P 0x15) ------------------------------------------ */
+
+/* A backoff holds an answer until it ends -- no failure, no retry -- while an
+ * alarm queued meanwhile goes at once. */
+ZTEST(radio_common, test_backoff_holds_answers_not_alarms)
+{
+	uint32_t base = retries();
+
+	use_profile(&PROFILE_P2P);
+	app_radio_backoff_set(10);
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb1);
+	k_sleep(K_SECONDS(1));
+	zassert_equal(fk.n, 0, "the answer is held");
+
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_SECONDS(1));
+	zassert_equal(fk.n, 1, "the alarm skips the backoff");
+	zassert_equal(fk.log[0].head[0], 0xa1);
+
+	k_sleep(K_SECONDS(7));
+	zassert_equal(fk.n, 1, "the answer still held");
+	k_sleep(K_SECONDS(2));
+	zassert_equal(fk.n, 2, "the answer once the backoff ended");
+	zassert_equal(fk.log[1].head[0], 0xb1);
+	zassert_equal(retries(), base);
+}
+
+/* A report frame waits out a backoff too; 0 ends it, a long one is cut. */
+ZTEST(radio_common, test_backoff_holds_telemetry_and_is_capped)
+{
+	const size_t lens[] = {20};
+
+	use_profile(&PROFILE_P2P);
+	app_radio_backoff_set(UINT32_MAX);
+	zassert_between_inclusive(app_radio_backoff_wait_ms(),
+				  (int64_t)APP_RADIO_BACKOFF_MAX_S * 1000 - 100,
+				  (int64_t)APP_RADIO_BACKOFF_MAX_S * 1000, "cut to the cap");
+	app_radio_backoff_set(0);
+	zassert_equal(app_radio_backoff_wait_ms(), 0, "0 ends it");
+
+	app_radio_backoff_set(5);
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(4));
+	zassert_equal(fk.n, 0, "held");
+	k_sleep(K_SECONDS(2));
+	zassert_equal(fk.n, 1, "sent once it ended");
+	zassert_equal(reports_done(), 1);
+}
+
+/* A backoff of up to the cap keeps M-2 quiet: a held node is not rejoined. */
+ZTEST(radio_common, test_backoff_keeps_m2_quiet)
+{
+	const int64_t hold = (int64_t)APP_RADIO_BACKOFF_MAX_S * 1000;
+
+	use_profile(&PROFILE_P2P);
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_backoff_set(APP_RADIO_BACKOFF_MAX_S);
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xd2);
+	k_sleep(K_MSEC(500));
+	zassert_equal(fk.n, 0, "held by the backoff");
+
+	app_radio_test_stale_tick(t0 + hold - 1000);
+	zassert_equal(fk.rejoin_calls, 0, "held: no rejoin up to its end");
+	app_radio_test_stale_tick(t0 + hold + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS +
+				  5000);
+	zassert_equal(fk.rejoin_calls, 1, "mute after the backoff: rejoin");
+}
+
 /* A telemetry report that left, or a history frame, refreshes the clock. */
 static void uplinks_refresh_the_stale_clock(void)
 {

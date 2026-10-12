@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_battery.h"
 #include "app_ccm.h"
 #include "app_clock.h"
 #include "app_cmd.h"
@@ -27,6 +28,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -147,6 +149,10 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_CTRL_BIT_HELLO       BIT(1)
 #define P2P_CTRL_BIT_LINK_CHECK  BIT(2)
 #define P2P_CTRL_BIT_TIME        BIT(3)
+#define P2P_CTRL_BIT_DEV_STATUS  BIT(4)
+/* No TLV: an empty 0x91 frame, confirmed, so that its ACK announces the next
+ * downlink the central queued (PendingInfo, there is no Poll). */
+#define P2P_CTRL_BIT_DRAIN       BIT(5)
 /* Capabilities + Hello leave this long after a link-up, at random: nodes that
  * all rebooted with the Hub do not answer it at once. */
 #define P2P_CTRL_START_JITTER_MS 2000
@@ -167,6 +173,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 /* A TimeAns applies to the TX-done of its TimeReq; one older than this is a
  * stale answer and dropped. */
 #define P2P_TIME_ANS_MAX_AGE_MS  (2LL * 60 * 60 * 1000)
+/* Drain uplinks in a row a PendingInfo may ask for; an app_radio frame that
+ * leaves starts the count again. Bounds a central that keeps announcing more. */
+#define P2P_DRAIN_MAX            8
+/* A control frame held by the network backoff tries again this long after it. */
+#define P2P_BACKOFF_MARGIN_MS    50
 
 /* Capabilities value (plan §8.2). */
 #define P2P_CAPS_PROTO_VERSION  1
@@ -274,6 +285,21 @@ static int64_t m_time_req_done_ms;
 static bool m_time_req_valid;
 static bool m_lc_outstanding;     /* a LinkCheckReq was acknowledged, no answer yet */
 static atomic_t m_answer_reports; /* confirmed reports sent for the outstanding answer */
+/* The node's RSSI/SNR of the last gateway Data frame: the DevStatusAns reports
+ * those of the downlink that carried its DevStatusReq. */
+static int16_t m_dl_rssi;
+static int8_t m_dl_snr;
+static struct {
+	int8_t rssi;
+	int8_t snr;
+} m_ds;                  /* the DevStatusReq's downlink, kept for the DevStatusAns */
+static uint8_t m_drains; /* drain uplinks since the last app_radio frame left */
+/* HomeGateway (0x06), this session. */
+static struct {
+	bool valid;
+	uint32_t addr;
+	uint8_t flags;
+} m_home_gw;
 
 /* The last confirmed app_radio frame (plan §7.3): an app_radio retry of it goes
  * again under the same counter, so a frame the gateway heard but whose ACKs
@@ -629,6 +655,9 @@ static void session_reset(void)
 	atomic_clear(&m_ctrl_pending);
 	m_ctrl_tries = 0;
 	m_retx.valid = false;
+	m_drains = 0;
+	m_home_gw.valid = false;
+	app_radio_backoff_set(0); /* a backoff is the old gateway's */
 }
 
 /* Persist a successful JoinAccept's pairing state and switch the module to
@@ -1351,7 +1380,10 @@ static bool p2p_wait_ack(uint32_t counter, uint32_t arm_cyc, uint8_t tail, struc
 			 struct twr_ack *ack)
 {
 	static uint8_t pt[TWR_PAYLOAD_MAX];
-	k_timepoint_t end = window_end(p2p_twr_window_ms(m_sf, TWR_ACK_FRAME_LEN + tail), arm_cyc);
+	/* Room for a Backoff / PendingInfo the gateway may add to any ACK. */
+	k_timepoint_t end = window_end(
+		p2p_twr_window_ms(m_sf, TWR_ACK_FRAME_LEN + tail + P2P_ACK_TAIL_UNSOLICITED),
+		arm_cyc);
 	struct twr_hdr h;
 	size_t len;
 	int v;
@@ -1393,6 +1425,8 @@ static void p2p_wait_dl(struct p2p_rx *rx, struct p2p_xfer *x)
 		if (v == P2P_RX_FRESH) {
 			m_gw_last = h.counter;
 			x->dl_len = (uint8_t)len;
+			m_dl_rssi = rx->rssi;
+			m_dl_snr = rx->snr;
 		} else {
 			LOG_INF("Downlink (counter %u) repeated: ACK only", h.counter);
 		}
@@ -1618,12 +1652,13 @@ static int p2p_exchange(const uint8_t *pt, size_t pt_len, bool confirmed, uint8_
 /* ======================================================================== */
 
 /* Capabilities cmd bitmap: bit (id % 8) of byte (id / 8) for every core ID
- * this node implements, either direction -- 0x01..0x04, 0x07, 0x08, 0x10,
- * 0x20. */
-static const uint8_t m_caps_cmds[8] = {0x9e, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00};
+ * this node implements, either direction -- 0x01..0x04, 0x06..0x08, 0x10,
+ * 0x15, 0x20, 0x22, 0x30. */
+static const uint8_t m_caps_cmds[8] = {0xde, 0x01, 0x21, 0x00, 0x05, 0x00, 0x01, 0x00};
 
 /* The 0x91 payload for the P2P_CTRL_BIT_* set `bits` into `pt`
- * (TWR_PAYLOAD_MAX); returns its length. The full set is 30 B. */
+ * (TWR_PAYLOAD_MAX); returns its length. The full set is 41 B; a drain alone
+ * is the envelope byte. */
 static size_t ctrl_build(uint32_t bits, uint8_t *pt)
 {
 	size_t n = 0;
@@ -1660,6 +1695,22 @@ static size_t ctrl_build(uint32_t bits, uint8_t *pt)
 		pt[n++] = P2P_CTRL_TIME; /* TimeReq: empty */
 		pt[n++] = 0;
 	}
+	if (bits & P2P_CTRL_BIT_DEV_STATUS) {
+		float v = app_battery_last_sample();
+
+		pt[n++] = P2P_CTRL_DEV_STATUS;
+		pt[n++] = P2P_DEV_STATUS_ANS_LEN;
+		/* 0 = no measurement yet, or the last one failed. */
+		sys_put_le16(isfinite(v) && v > 0.0f ? (uint16_t)(v * 1000.0f + 0.5f) : 0, &pt[n]);
+		n += 2;
+		pt[n++] = (uint8_t)m_ds.rssi;
+		pt[n++] = (uint8_t)m_ds.snr;
+		pt[n++] =
+			(uint8_t)(m_session_tx_power_assigned ? m_session_tx_power_dbm
+							      : (int8_t)g_app_config.p2p_tx_power);
+		sys_put_le32((uint32_t)(k_uptime_get() / MSEC_PER_SEC), &pt[n]);
+		n += 4;
+	}
 	return n;
 }
 
@@ -1677,6 +1728,9 @@ static void ctrl_sent(uint32_t bits, const struct p2p_xfer *x)
 	if (bits & P2P_CTRL_BIT_LINK_CHECK) {
 		m_lc_outstanding = true;
 		atomic_clear(&m_answer_reports);
+	}
+	if (bits & P2P_CTRL_BIT_DRAIN) {
+		m_drains++;
 	}
 }
 
@@ -1710,6 +1764,14 @@ static void ctrl_work_handler(struct k_work *work)
 	}
 	if (app_radio_ack_pending()) {
 		k_work_reschedule_for_queue(app_radio_work_q(), dwork, K_MSEC(P2P_CTRL_HOLD_MS));
+		return;
+	}
+
+	int64_t backoff = app_radio_backoff_wait_ms();
+
+	if (backoff > 0) {
+		k_work_reschedule_for_queue(app_radio_work_q(), dwork,
+					    K_MSEC(backoff + P2P_BACKOFF_MARGIN_MS));
 		return;
 	}
 
@@ -1798,9 +1860,55 @@ static void link_check_ans(const uint8_t *val)
 		m_lc.gw_count);
 }
 
+/* Backoff: hold every uplink but alarms for `s` seconds (0 ends it). */
+static void backoff(uint16_t s)
+{
+	if (s > APP_RADIO_BACKOFF_MAX_S) {
+		LOG_WRN("Backoff %u s cut to %u s", s, APP_RADIO_BACKOFF_MAX_S);
+	} else if (s) {
+		LOG_WRN("Backoff %u s: uplinks but alarms held", s);
+	} else {
+		LOG_INF("Backoff ended");
+	}
+	app_radio_backoff_set(s);
+}
+
+/* PendingInfo: `more` downlinks wait at the central after the one the ACK
+ * announced. An empty confirmed 0x91 frame fetches the next, its ACK carrying
+ * PENDING -- at most P2P_DRAIN_MAX in a row, then the next report does. */
+static void pending_info(uint8_t more)
+{
+	if (more == 0) {
+		return;
+	}
+	if (m_drains >= P2P_DRAIN_MAX) {
+		LOG_WRN("PendingInfo %u after %u drain uplinks: left to the next report", more,
+			m_drains);
+		return;
+	}
+	LOG_INF("PendingInfo: %u more downlink(s) queued, fetching", more);
+	ctrl_request(P2P_CTRL_BIT_DRAIN, 0);
+}
+
+/* What an ACK's CTRL tail may carry (plan §13.5): the answers to this node's
+ * requests, and the gateway's Backoff and PendingInfo. A command stays a
+ * downlink's. */
+static bool ctrl_in_ack_ok(uint8_t cmd)
+{
+	switch (cmd) {
+	case P2P_CTRL_LINK_CHECK:
+	case P2P_CTRL_TIME:
+	case P2P_CTRL_BACKOFF:
+	case P2P_CTRL_PENDING_INFO:
+		return true;
+	default:
+		return false;
+	}
+}
+
 /* A 0x91 downlink: the TLV list after the envelope byte -- or, `in_ack`, an
- * ACK's CTRL tail (plan §13.5), which answers requests only: anything but a
- * LinkCheckAns or TimeAns there is skipped, a command stays a downlink's. */
+ * ACK's CTRL tail, where only ctrl_in_ack_ok() entries apply and anything else
+ * is skipped. */
 static void ctrl_downlink(const uint8_t *buf, size_t len, bool in_ack)
 {
 	struct p2p_tlv t;
@@ -1808,8 +1916,8 @@ static void ctrl_downlink(const uint8_t *buf, size_t len, bool in_ack)
 	int ret;
 
 	while ((ret = p2p_tlv_next(buf, len, &off, &t)) > 0) {
-		if (in_ack && t.cmd != P2P_CTRL_LINK_CHECK && t.cmd != P2P_CTRL_TIME) {
-			LOG_INF("ACK control 0x%02x (%u B): not an answer, skipped", t.cmd, t.len);
+		if (in_ack && !ctrl_in_ack_ok(t.cmd)) {
+			LOG_INF("ACK control 0x%02x (%u B): not for an ACK, skipped", t.cmd, t.len);
 			continue;
 		}
 		switch (t.cmd) {
@@ -1839,15 +1947,41 @@ static void ctrl_downlink(const uint8_t *buf, size_t len, bool in_ack)
 			 * trying past the 120 s cap, with backoff. */
 			start_join_episode(true);
 			return;
+		case P2P_CTRL_HOME_GATEWAY:
+			if (t.len >= P2P_HOME_GATEWAY_LEN) {
+				m_home_gw.addr = sys_get_le32(t.val);
+				m_home_gw.flags = t.val[4];
+				m_home_gw.valid = true;
+				LOG_INF("Home gateway %08x (flags 0x%02x)", m_home_gw.addr,
+					m_home_gw.flags);
+			}
+			break;
 		case P2P_CTRL_LINK_CHECK:
 			if (t.len >= P2P_LINK_CHECK_ANS_LEN) {
 				link_check_ans(t.val);
+			}
+			break;
+		case P2P_CTRL_BACKOFF:
+			if (t.len >= P2P_BACKOFF_LEN) {
+				backoff(sys_get_le16(t.val));
 			}
 			break;
 		case P2P_CTRL_TIME:
 			if (t.len >= P2P_TIME_ANS_LEN) {
 				time_ans(t.val);
 			}
+			break;
+		case P2P_CTRL_PENDING_INFO:
+			if (t.len >= P2P_PENDING_INFO_LEN) {
+				pending_info(t.val[0]);
+			}
+			break;
+		case P2P_CTRL_DEV_STATUS:
+			/* DevStatusReq: the answer reports the downlink that carried it. */
+			m_ds.rssi = (int8_t)CLAMP(m_dl_rssi, INT8_MIN, INT8_MAX);
+			m_ds.snr = m_dl_snr;
+			LOG_INF("DevStatusReq: answering");
+			ctrl_request(P2P_CTRL_BIT_DEV_STATUS, 0);
 			break;
 		default:
 			LOG_INF("Control 0x%02x (%u B): not handled, skipped", t.cmd, t.len);
@@ -1961,6 +2095,7 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 		 * session (kicked at the next JoinAccept); other: a radio fault. */
 		return ret;
 	}
+	m_drains = 0;
 	if (!confirmed) {
 		return 0;
 	}
@@ -2806,6 +2941,9 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info)
 	info->lc_snr = m_lc.snr;
 	info->lc_margin = m_lc.margin;
 	info->lc_gw_count = m_lc.gw_count;
+	info->home_gw_valid = m_home_gw.valid;
+	info->home_gw_addr = m_home_gw.addr;
+	info->home_gw_flags = m_home_gw.flags;
 	info->app_key_set = app_key_is_set();
 }
 

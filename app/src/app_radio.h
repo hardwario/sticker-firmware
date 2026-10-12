@@ -150,6 +150,7 @@ struct app_radio_status {
 	uint32_t fail_streak;
 	uint32_t join_attempts;
 	uint32_t duty_blocked_s;  /* 0 = not held by the duty cycle */
+	uint32_t backoff_s;       /* network backoff left (P2P 0x15), 0 = none */
 	bool has_airtime;         /* the ledger runs (T2d: both radios) */
 	uint32_t airtime_hour_ms; /* air of the trailing hour */
 	/* Counters since boot (enum app_radio_counter) and their time base. */
@@ -446,6 +447,19 @@ int64_t app_radio_duty_wait_ms(uint32_t air_ms);
  * that keyed the PA). Charged to the ledger; the duty cycle holds nothing
  * now. */
 void app_radio_duty_charge(uint32_t air_ms);
+
+/* A network backoff longer than this is cut to it: it stays inside the M-2
+ * excuse (APP_RADIO_STALE_DC_HOLD_MAX_MS), so a held node is never rejoined. */
+#define APP_RADIO_BACKOFF_MAX_S 3600U
+
+/* Network backoff (P2P Backoff 0x15, TOWER plan §8.2): every uplink but an alarm
+ * waits `s` seconds from now, held like a duty-cycle hold (M-2 included); 0
+ * ends it, a value over APP_RADIO_BACKOFF_MAX_S is cut to it. RAM only: a
+ * reboot or a new session ends it. Any thread. */
+void app_radio_backoff_set(uint32_t s);
+
+/* How long the network backoff still holds, 0 = none. Any thread. */
+int64_t app_radio_backoff_wait_ms(void);
 
 /* ---- Uplink frames, queues and scheduler (doc/plan/460 §2.2, F4) ----------
  * One TX path for both radios. Answers (command responses, Info,

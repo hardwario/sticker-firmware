@@ -25,6 +25,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include <errno.h>
+#include <math.h>
 #include <string.h>
 
 /* src/stubs.c */
@@ -51,6 +52,10 @@ extern uint8_t p2p_test_ul_gw_count;
 extern int p2p_test_downlinks;
 extern uint8_t p2p_test_downlink_buf[80];
 extern size_t p2p_test_downlink_len;
+extern uint32_t test_backoff_s;
+extern int test_backoff_calls;
+extern int64_t test_backoff_wait_ms;
+extern float test_battery_v;
 
 /* The tower_frame_kat.json session key; the join KAT's app_key is the same. */
 static const uint8_t tower_kat_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -201,6 +206,10 @@ static void before(void *fixture)
 	test_lora_reset();
 	test_duty_wait_ms = 0;
 	test_settings_save_ret = 0;
+	test_backoff_s = 0;
+	test_backoff_calls = 0;
+	test_backoff_wait_ms = 0;
+	test_battery_v = NAN;
 	p2p_test_time_wanted = false;
 
 	p2p_test_join_setup(7);
@@ -1634,13 +1643,13 @@ ZTEST(p2p_logic, test_ctrl_caps_hello_layout)
 				       0x01,
 				       96,
 				       0x02,
-				       0x9e,
+				       0xde,
 				       0x01,
-				       0x01,
+				       0x21,
+				       0x00,
+				       0x05,
 				       0x00,
 				       0x01,
-				       0x00,
-				       0x00,
 				       0x00,
 				       0x01};
 
@@ -1668,28 +1677,34 @@ ZTEST(p2p_logic, test_ctrl_caps_hello_layout)
 	zassert_equal(hello[10], 0);
 }
 
-/* Every TLV the node sends fits one frame: Capabilities, Hello, LinkCheckReq
- * and TimeReq are 30 B, in that order. The cmd bitmap names the IDs this node
- * implements. */
-ZTEST(p2p_logic, test_ctrl_full_set_is_30_bytes)
+/* Every TLV the node sends fits one frame: Capabilities, Hello, LinkCheckReq,
+ * TimeReq and DevStatusAns are 41 B, in that order. The cmd bitmap names the
+ * IDs this node implements. */
+ZTEST(p2p_logic, test_ctrl_full_set_is_41_bytes)
 {
+	static const uint8_t req[] = {P2P_CTRL_DEV_STATUS, 0};
+
 	paired();
 	gw.ack = true;
 	p2p_test_time_wanted = true;
 	p2p_test_set_paired();
 	app_radio_p2p_start();
 	(void)app_radio_p2p_backend.report_flags(true); /* a link check: LinkCheckReq */
-	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1) | BIT(2) | BIT(3));
+	p2p_test_ctrl_downlink(req, sizeof(req));
+	zassert_equal(p2p_test_ctrl_pending(), BIT(0) | BIT(1) | BIT(2) | BIT(3) | BIT(4));
 	p2p_test_ctrl_run();
 
-	zassert_equal(gw.up_len, 30);
+	zassert_equal(gw.up_len, 41);
 	zassert_equal(gw.up_pt[1], P2P_CTRL_CAPABILITIES);
 	zassert_equal(gw.up_pt[15], P2P_CTRL_HELLO);
 	zassert_mem_equal(&gw.up_pt[26], ((uint8_t[]){P2P_CTRL_LINK_CHECK, 0, P2P_CTRL_TIME, 0}), 4,
 			  "LinkCheckReq, then TimeReq, both empty");
+	zassert_equal(gw.up_pt[30], P2P_CTRL_DEV_STATUS);
+	zassert_equal(gw.up_pt[31], P2P_DEV_STATUS_ANS_LEN);
 
 	const uint8_t *bitmap = &gw.up_pt[1 + 2 + 3];
-	const uint8_t want[] = {0x01, 0x02, 0x03, 0x04, 0x07, 0x08, 0x10, 0x20};
+	const uint8_t want[] = {0x01, 0x02, 0x03, 0x04, 0x06, 0x07,
+				0x08, 0x10, 0x15, 0x20, 0x22, 0x30};
 	size_t n = 0;
 
 	for (unsigned int id = 0; id < 64; id++) {
@@ -2010,12 +2025,14 @@ ZTEST(p2p_logic, test_ack_ctrl_kat_answers_apply)
 
 /* The ACK of a request may carry the answers, so its window is longer by
  * their airtime: at SF10 an ACK arriving between the plain and the longer
- * window's end is missed by a data frame's wait, caught by a request's. */
+ * window's end is missed by a data frame's wait, caught by a request's. Every
+ * window has room for a Backoff and a PendingInfo. */
 ZTEST(p2p_logic, test_ack_ctrl_window_waits_for_the_tail)
 {
 	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
-	uint32_t plain = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN);
-	uint32_t longer = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + TWR_ACK_TAIL_MAX);
+	uint32_t plain = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + P2P_ACK_TAIL_UNSOLICITED);
+	uint32_t longer = p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN + P2P_ACK_TAIL_UNSOLICITED +
+							TWR_ACK_TAIL_MAX);
 	uint32_t sends;
 
 	zassert_true(longer >= plain + 100, "SF10: %u vs %u ms", longer, plain);
@@ -2137,6 +2154,156 @@ ZTEST(p2p_logic, test_ack_tail_skips_all_but_answers)
 	app_radio_p2p_get_info(&info);
 	zassert_true(info.lc_valid);
 	zassert_equal(info.lc_rssi, -66);
+}
+
+/* ---- DevStatus, Backoff, HomeGateway, PendingInfo (plan §8.2) ------------ */
+
+/* A DevStatusReq in a PENDING downlink: the DevStatusAns reports the battery,
+ * the RSSI/SNR of that downlink, the TX power and the uptime. */
+ZTEST(p2p_logic, test_dev_status_answers_the_request)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t dl[] = {P2P_ENV_CTRL, P2P_CTRL_DEV_STATUS, 0};
+
+	paired();
+	gw.ack = true;
+	gw.dl = dl;
+	gw.dl_len = sizeof(dl);
+	test_battery_v = 3.012f;
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_ctrl_pending(), BIT(4), "DevStatusAns queued");
+
+	gw.dl_len = 0;
+	uint32_t up_s = (uint32_t)(k_uptime_get() / 1000);
+
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), 0);
+	zassert_true(gw.up_hdr.flags & TWR_FLAG_CONFIRMED);
+	zassert_equal(gw.up_len, 1 + 2 + P2P_DEV_STATUS_ANS_LEN);
+	zassert_mem_equal(gw.up_pt,
+			  ((uint8_t[]){P2P_ENV_CTRL, P2P_CTRL_DEV_STATUS, P2P_DEV_STATUS_ANS_LEN,
+				       0xc4, 0x0b, (uint8_t)-61, 7, 14}),
+			  8, "3012 mV, the downlink's -61 dBm / 7 dB, 14 dBm");
+	zassert_between_inclusive(sys_get_le32(&gw.up_pt[8]), up_s, up_s + 1, "uptime");
+}
+
+/* No battery sample yet: 0 mV. A DevStatusReq in an ACK tail is skipped. */
+ZTEST(p2p_logic, test_dev_status_no_battery_and_not_from_an_ack)
+{
+	static const uint8_t up[] = {P2P_ENV_CTRL, P2P_CTRL_LINK_CHECK, 0};
+	static const uint8_t req[] = {P2P_CTRL_DEV_STATUS, 0};
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = req;
+	gw.ack_tail_len = sizeof(req);
+	zassert_ok(p2p_test_uplink_tail(up, sizeof(up), true, TWR_ACK_TAIL_MAX));
+	zassert_equal(p2p_test_ctrl_pending(), 0, "not for an ACK");
+
+	gw.ack_tail_len = 0;
+	p2p_test_ctrl_downlink(req, sizeof(req));
+	p2p_test_ctrl_run();
+	zassert_equal(sys_get_le16(&gw.up_pt[3]), 0, "no sample: 0 mV");
+}
+
+/* Backoff, from a downlink or any ACK: the seconds go to app_radio's hold; a
+ * 0x91 uplink waits it out. */
+ZTEST(p2p_logic, test_backoff_from_a_downlink_or_an_ack)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t tail[] = {P2P_CTRL_BACKOFF, 2, 0x2c, 0x01};
+	static const uint8_t dl[] = {P2P_CTRL_BACKOFF, 2, 0x10, 0x27};
+	static const uint8_t end[] = {P2P_CTRL_BACKOFF, 2, 0, 0};
+	uint32_t sends;
+
+	paired();
+	int calls = test_backoff_calls; /* the new session ended any backoff */
+
+	zassert_equal(test_backoff_s, 0);
+	gw.ack = true;
+	gw.ack_tail = tail;
+	gw.ack_tail_len = sizeof(tail);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true), "unasked, in a plain ACK");
+	zassert_equal(test_backoff_calls, calls + 1);
+	zassert_equal(test_backoff_s, 300);
+
+	p2p_test_ctrl_downlink(dl, sizeof(dl));
+	zassert_equal(test_backoff_s, 10000, "app_radio cuts it");
+	p2p_test_ctrl_downlink(end, sizeof(end));
+	zassert_equal(test_backoff_s, 0, "0 ends it");
+
+	gw.ack_tail_len = 0;
+	test_backoff_wait_ms = 5000;
+	app_radio_p2p_backend.time_request();
+	sends = test_lora_send_count;
+	p2p_test_ctrl_run();
+	zassert_equal(test_lora_send_count, sends, "held by the backoff");
+	zassert_equal(p2p_test_ctrl_pending(), BIT(3), "kept");
+
+	test_backoff_wait_ms = 0;
+	p2p_test_ctrl_run();
+	zassert_equal(p2p_test_ctrl_pending(), 0, "sent once it ended");
+}
+
+/* HomeGateway is recorded for the session; a new session forgets it. */
+ZTEST(p2p_logic, test_home_gateway_recorded_per_session)
+{
+	static const uint8_t dl[] = {P2P_CTRL_HOME_GATEWAY, 5, 0x78, 0x56, 0x34, 0x12, 0x01};
+	static const uint8_t short_dl[] = {P2P_CTRL_HOME_GATEWAY, 4, 1, 2, 3, 4};
+	struct app_radio_p2p_info info;
+
+	paired();
+	p2p_test_ctrl_downlink(short_dl, sizeof(short_dl));
+	app_radio_p2p_get_info(&info);
+	zassert_false(info.home_gw_valid, "too short: ignored");
+
+	p2p_test_ctrl_downlink(dl, sizeof(dl));
+	app_radio_p2p_get_info(&info);
+	zassert_true(info.home_gw_valid);
+	zassert_equal(info.home_gw_addr, 0x12345678);
+	zassert_equal(info.home_gw_flags, 0x01);
+
+	paired();
+	app_radio_p2p_get_info(&info);
+	zassert_false(info.home_gw_valid, "a new session");
+}
+
+/* PendingInfo in an ACK: an empty confirmed 0x91 frame fetches the next
+ * downlink; at most P2P_DRAIN_MAX in a row, until an app_radio frame leaves. */
+ZTEST(p2p_logic, test_pending_info_drains_with_a_cap)
+{
+	static const uint8_t up[] = {P2P_ENV_DATA, P2P_PORT_TELEMETRY, 0x08};
+	static const uint8_t more[] = {P2P_CTRL_PENDING_INFO, 1, 3};
+	static const uint8_t none[] = {P2P_CTRL_PENDING_INFO, 1, 0};
+	static const uint8_t body[] = {0x08};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_TELEMETRY,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .buf = body,
+				    .len = sizeof(body)};
+	struct app_radio_tx_result res = {0};
+
+	paired();
+	gw.ack = true;
+	gw.ack_tail = none;
+	gw.ack_tail_len = sizeof(none);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_ctrl_pending(), 0, "nothing more queued");
+
+	gw.ack_tail = more;
+	gw.ack_tail_len = sizeof(more);
+	zassert_ok(p2p_test_uplink(up, sizeof(up), true));
+	zassert_equal(p2p_test_ctrl_pending(), BIT(5), "a drain queued");
+
+	for (int i = 0; i < 8; i++) {
+		p2p_test_ctrl_run();
+		zassert_equal(gw.up_len, 1, "drain %d: the envelope byte only", i);
+		zassert_equal(gw.up_pt[0], P2P_ENV_CTRL);
+		zassert_true(gw.up_hdr.flags & TWR_FLAG_CONFIRMED);
+		zassert_equal(p2p_test_ctrl_pending(), i < 7 ? BIT(5) : 0, "drain %d", i);
+	}
+
+	zassert_ok(app_radio_p2p_backend.send(&f, &res), "an app_radio frame leaves");
+	zassert_equal(p2p_test_ctrl_pending(), BIT(5), "the count starts again");
 }
 
 /* ---- frame counter (B9) --------------------------------------------------------- */
