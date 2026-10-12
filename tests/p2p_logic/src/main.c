@@ -39,6 +39,8 @@ extern int64_t test_duty_wait_ms;
 extern uint32_t test_duty_charges;
 extern uint64_t test_duty_charged_ms;
 extern int test_settings_save_ret;
+extern uint8_t test_join_state[32];
+extern size_t test_join_state_len;
 extern int p2p_test_announce_calls;
 extern int p2p_test_tx_kick_calls;
 extern bool p2p_test_ack_pending;
@@ -854,6 +856,59 @@ ZTEST(p2p_logic, test_twr_pair_commit_keeps_the_counter)
 	zassert_equal(info.link_state, P2P_LINK_PAIRED);
 	zassert_equal(info.net_id, 0x2d9b924e);
 	zassert_equal(info.gw_last, 0, "a fresh lane for the gateway's counter");
+}
+
+/* A pairing is kept only under the modulation it was made with: a Hub pairing
+ * (lora) read back on fsk would never reach a TOWER, and fsk never re-pairs on
+ * its own (HIL 2026-10-12). */
+ZTEST(p2p_logic, test_pairing_of_the_other_modulation_is_ignored)
+{
+	struct app_radio_p2p_info info;
+	uint8_t key[P2P_KEY_LEN];
+	uint8_t rec[32];
+	size_t len;
+
+	memset(key, 0xa5, sizeof(key));
+	g_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_FSK;
+	zassert_ok(p2p_test_twr_pair_commit(0x2d9b924e, key));
+	len = test_join_state_len;
+	zassert_equal(len, 4 + P2P_KEY_LEN + 3, "the record carries the modulation");
+	memcpy(rec, test_join_state, len);
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	p2p_test_join_state_load(rec, len);
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_PAIRED, "same modulation: paired");
+	zassert_equal(info.net_id, 0x2d9b924e);
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	g_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_LORA;
+	p2p_test_join_state_load(rec, len);
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_UNPAIRED, "other modulation: pair afresh");
+}
+
+/* The record written before the modulation byte existed is a LoRa pairing:
+ * kept on lora, so devices stay paired across the update, ignored on fsk. */
+ZTEST(p2p_logic, test_pairing_record_without_modulation_is_lora)
+{
+	struct app_radio_p2p_info info;
+	uint8_t rec[4 + P2P_KEY_LEN + 2] = {0};
+
+	sys_put_le32(0x00c0ffee, rec);
+	rec[4 + P2P_KEY_LEN] = 1;
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	p2p_test_join_state_load(rec, sizeof(rec));
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_PAIRED, "lora keeps the old record");
+	zassert_equal(info.net_id, 0x00c0ffee);
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
+	g_app_config.p2p_modulation = APP_CONFIG_P2P_MODULATION_FSK;
+	p2p_test_join_state_load(rec, sizeof(rec));
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_UNPAIRED, "fsk ignores it");
 }
 
 ZTEST(p2p_logic, test_fsk_packet_matches_the_kat)

@@ -90,14 +90,16 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 
 /* ---- Join/session persistence (plan §6.3) ---- */
 
-#define P2P_JOIN_SUBTREE    "p2pjoin"
-#define P2P_JOIN_DNONCE_KEY "p2pjoin/dnonce"
-#define P2P_JOIN_STATE_KEY  "p2pjoin/state"
-/* net_id(4 LE) | session_key(16) | rx_delay_s(1) | tx_power_dbm(1, 0 = none).
- * join_settings_set() accepts only records of exactly this length, so the 24 B
+#define P2P_JOIN_SUBTREE      "p2pjoin"
+#define P2P_JOIN_DNONCE_KEY   "p2pjoin/dnonce"
+#define P2P_JOIN_STATE_KEY    "p2pjoin/state"
+/* net_id(4 LE) | session_key(16) | rx_delay_s(1) | tx_power_dbm(1, 0 = none) |
+ * p2p_modulation(1). join_settings_set() accepts only this length and the
+ * 22 B record without the modulation (written before fsk, so LoRa); the 24 B
  * record of the old P2P wire reads as invalid: the node boots UNPAIRED and
  * joins afresh, which is the flag day plan §10 asks for. */
-#define P2P_JOIN_STATE_LEN  (4 + P2P_KEY_LEN + 1 + 1)
+#define P2P_JOIN_STATE_LEN    (4 + P2P_KEY_LEN + 1 + 1 + 1)
+#define P2P_JOIN_STATE_LEN_V1 (P2P_JOIN_STATE_LEN - 1)
 
 /* JoinRequest value byte 0. No product registry exists yet: 1 = STICKER. */
 #define P2P_PRODUCT_TYPE_STICKER 1
@@ -619,13 +621,24 @@ static int join_settings_set(const char *name, size_t len, settings_read_cb read
 	if (settings_name_steq(name, "state", &next) && !next) {
 		uint8_t buf[P2P_JOIN_STATE_LEN];
 
-		if (len == sizeof(buf) &&
-		    read_cb(cb_arg, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+		if ((len == P2P_JOIN_STATE_LEN || len == P2P_JOIN_STATE_LEN_V1) &&
+		    read_cb(cb_arg, buf, len) == (ssize_t)len) {
 			uint32_t net_id = sys_get_le32(&buf[0]);
 			uint8_t tx_power = buf[5 + P2P_KEY_LEN];
+			uint8_t modulation = len == P2P_JOIN_STATE_LEN
+						     ? buf[6 + P2P_KEY_LEN]
+						     : APP_CONFIG_P2P_MODULATION_LORA;
 
 			if (net_id == TWR_ADDR_NONE || net_id == TWR_ADDR_BROADCAST) {
 				return 0; /* corrupt: boot UNPAIRED and join */
+			}
+			/* A pairing made under the other modulation names a network
+			 * this PHY cannot reach, and fsk never re-pairs on its own
+			 * (§15.2): boot UNPAIRED and pair afresh. The next pairing
+			 * overwrites the record. */
+			if (modulation != g_app_config.p2p_modulation) {
+				LOG_INF("P2P pairing of the other modulation ignored");
+				return 0;
 			}
 			m_net_id = net_id;
 			memcpy(m_session_key, &buf[4], P2P_KEY_LEN);
@@ -704,6 +717,7 @@ static int pairing_persist(const struct p2p_join_accept *ja, const uint8_t sessi
 	memcpy(&buf[4], session_key, P2P_KEY_LEN);
 	buf[4 + P2P_KEY_LEN] = ja->rx_delay_s;
 	buf[5 + P2P_KEY_LEN] = ja->tx_power_assigned ? (uint8_t)ja->tx_power_dbm : 0;
+	buf[6 + P2P_KEY_LEN] = (uint8_t)g_app_config.p2p_modulation;
 
 	int ret = settings_save_one(P2P_JOIN_STATE_KEY, buf, sizeof(buf));
 
@@ -3046,6 +3060,17 @@ void p2p_test_set_paired(void)
 
 /* A live session under `net_id` / `key`, as a JoinAccept leaves it (without the
  * flash write the test backend refuses). */
+static ssize_t test_buf_read(void *cb_arg, void *data, size_t len)
+{
+	memcpy(data, cb_arg, len);
+	return (ssize_t)len;
+}
+
+void p2p_test_join_state_load(const uint8_t *rec, size_t len)
+{
+	(void)join_settings_set("state", len, test_buf_read, (void *)rec);
+}
+
 void p2p_test_set_session(uint32_t net_id, const uint8_t key[P2P_KEY_LEN])
 {
 	test_queue_start_once();

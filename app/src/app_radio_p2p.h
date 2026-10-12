@@ -379,6 +379,7 @@ void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
 void p2p_test_set_session(uint32_t net_id, const uint8_t key[P2P_KEY_LEN]);
+void p2p_test_join_state_load(const uint8_t *rec, size_t len);
 void p2p_test_tx_reset(void);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);
