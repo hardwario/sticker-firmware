@@ -64,7 +64,7 @@ the central's to compute (LoRaWAN maps 2.4–3.6 V linearly).
 - The node cuts it to `APP_RADIO_BACKOFF_MAX_S` = 3600 s, inside the 75 min M-2 cap. 0 ends
   it, but a frame already waiting keeps its wait. RAM only: a reboot or a new session
   (join, Detach) ends it.
-- `ats radio status`: `backoff N s`.
+- `ats device info`, line "Radio link": `backoff N s`.
 
 **HomeGateway 0x06.** The node records `gw_addr` and `flags` for the session and shows them
 in `ats radio status`. It does not re-address its uplinks: `dest` stays the `net_id`.
