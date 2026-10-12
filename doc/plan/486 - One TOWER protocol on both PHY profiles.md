@@ -29,7 +29,7 @@ plan §5). Timing is not on the wire.
 | W4 | Central `MAX_FRAME` / `MAX_PAYLOAD` / `MAX_COMMAND_BODY` 100/78/76 → 96/74/72, Capabilities MTU 96; check that no command body needs more than 72 B (e.g. a large `SetParam`) | proximos-v2 central | open |
 | W5 | TOWER interop target: (a) stock TOWER nodes on the Hub and/or (b) a STICKER on a stock TOWER Radio Dongle. (b) needs a static-key mode or upstream E4, plus E3 for the `0x81`/`0x91` envelopes | decision | open |
 | W6 | `fsk` profile on the node (TOWER plan P5): SX126x GFSK 19.2 kbps, dev 20 kHz, sync `0xDB624715`, CRC-16 `0x1021`, PN9, TOWER timing (ACK window 200 ms, DL 20 ms after the ACK) | node + fork driver | open |
-| W7 | Control commands: implement or drop DevStatus `0x30`, Poll `0x21`, LinkPolicy `0x14`, Backoff `0x15` and RadioParamReq `0x11`. The TOWER plan §8.2 lists `0x11`, the Hub spec drops it | node + central | open |
+| W7 | Control commands: DevStatus `0x30`, Backoff `0x15`, HomeGateway `0x06`, PendingInfo `0x22` implemented; Poll `0x21`, RadioParamReq `0x11`, Rekey `0x05` dropped; LinkPolicy `0x14` and others reserved (Hynek 2026-10-12) | node + central | **node done** in PR #487 (`doc/plan/487 - P2P control commands.md`); central open |
 | W8 | `p2p_tx_power` max 22 → 14 dBm (the RFO_LP limit) | node | open |
 | W9 | Reserve ACK flag bit 1 (`CTRL` tail, TOWER plan §13.5) upstream | tower-protocol | open |
 

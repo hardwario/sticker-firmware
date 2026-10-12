@@ -2281,7 +2281,17 @@ transport.md`; node behaviour: `doc/p2p.md`.
   - Capabilities `0x01`, Hello `0x02`;
   - Detach `0x03`, RejoinReq `0x04`;
   - JoinReq `0x07`, JoinAccept `0x08`;
-  - LinkCheck `0x10`, Time `0x20`.
+  - LinkCheck `0x10`, Time `0x20`;
+  - HomeGateway `0x06`, Backoff `0x15`, PendingInfo `0x22`, DevStatus `0x30` (#487).
+- **Control commands (#487, Hynek 2026-10-12):** DevStatusReq queues a DevStatusAns
+  (battery mV, DL RSSI/SNR, TX power, uptime). Backoff holds every uplink but alarms
+  for up to 3600 s through the duty-cycle hold path (no rejoin). HomeGateway is recorded
+  for the session. PendingInfo makes the node fetch further queued downlinks with empty
+  confirmed `0x91` frames, at most 8 in a row (no Poll). Any ACK may carry Backoff and
+  PendingInfo; the ACK window has room for their 7 B. Rekey `0x05`, RadioParamReq
+  `0x11` and Poll `0x21` are dropped; `0x12`–`0x14`, `0x23`, `0x31`, `0x32` reserved.
+  The Capabilities bitmap stays 64 bits. Release +776 B flash. See
+  `doc/plan/487 - P2P control commands.md`.
 - **Join:** a JoinReq under `join_key = CMAC(app_key, "HIO-TWR-JOIN" ‖ 1 ‖ DevEUI)`,
   counter = the dev_nonce. The JoinAccept arrives in a 1 s RX window and carries
   `net_id`, `central_nonce`, `rx_delay` and `tx_power`. `session_key = CMAC(app_key,
@@ -2292,8 +2302,8 @@ transport.md`; node behaviour: `doc/p2p.md`.
 - **Answers in the ACK** (plan §13.5, Hynek 2026-10-06): the gateway answers a
   LinkCheckReq / TimeReq in the request's own ACK. ACK flags bit 1 (CTRL) marks a `0x91`
   TLV tail after the flags: LinkCheckAns, then TimeAns. The request's ACK window grows
-  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only; any other
-  TLV there is skipped. Clock sync no longer waits a report interval for the next
+  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only, plus
+  Backoff / PendingInfo in any ACK (#487); any other TLV there is skipped. Clock sync no longer waits a report interval for the next
   PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
 - **Confirmed uplinks:** every telemetry report is confirmed, like answers and
   history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
