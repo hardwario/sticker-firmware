@@ -40,8 +40,11 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 /* No-data watchdog: a motherboard liveness channel (app_sensor_types.yaml) of an
  * enabled sensor, a 1-Wire part or a whole 1-Wire device that reads NaN
  * continuously for this long is reported as stopped (a no_data AlarmEvent).
- * Drivers already retry transient I2C/1-Wire errors, so a NaN here is a
- * confirmed read failure; the window only rejects a single missed sample. The watchdogs are
+ * Drivers already retry transient I2C/1-Wire errors, and app_sensor keeps the
+ * previous onboard value over one failed sweep (APP_SENSOR_MISS_HOLD, #485 S2),
+ * so a NaN here is a confirmed read failure. A NaN lasts at least one sample
+ * interval (>= 5 s), so this window does not filter a missed sample by itself;
+ * it only spaces the alarm from the failing sweep. The watchdogs are
  * independent of the 16 alarm rules, so their events carry rule = APP_ALARM_WATCHDOG_RULE. */
 #define APP_ALARM_NO_DATA_MS    5000
 #define APP_ALARM_WATCHDOG_RULE 0xFF

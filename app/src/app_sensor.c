@@ -50,6 +50,17 @@ LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 static const struct device *const m_i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static int m_i2c_fail_streak;
 
+/* #485 S2: consecutive failed reads per onboard I2C sensor (app_sensor_miss_hold).
+ * Guarded by g_app_sensor_data_lock, like m_i2c_fail_streak. */
+enum mb_src {
+	MB_SRC_ACCEL,
+	MB_SRC_SHT,
+	MB_SRC_LIGHT,
+	MB_SRC_BARO,
+	MB_SRC_COUNT
+};
+static uint8_t m_mb_miss[MB_SRC_COUNT];
+
 BUILD_ASSERT(APP_SENSOR_CH_MOTHERBOARD_COUNT <= 32, "motherboard valid mask is a uint32");
 BUILD_ASSERT(APP_SENSOR_W1_CH_MAX <= 32, "1-Wire valid mask is a uint32");
 
@@ -546,6 +557,9 @@ void app_sensor_sample(void)
 	 * true (write-through, same as today) whenever CONFIG_SHT4X is off. */
 	bool sht4x_valid = true;
 
+	/* #485 S2: which onboard sensor's read failed this sweep (comm error). */
+	bool failed[MB_SRC_COUNT] = {false};
+
 	struct app_sensor_w1 w1[APP_W1_SLOT_COUNT];
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		app_sensor_w1_clear(&w1[s], APP_SENSOR_TYPE_NONE);
@@ -564,6 +578,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_ACCEL] = true;
 			LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
 		}
 	}
@@ -591,6 +606,7 @@ void app_sensor_sample(void)
 			i2c_tried++;
 			if (ret) {
 				i2c_failed++;
+				failed[MB_SRC_SHT] = true;
 				LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
 			}
 		}
@@ -603,6 +619,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_LIGHT] = true;
 			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
@@ -613,6 +630,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_BARO] = true;
 			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
 		}
 	}
@@ -730,17 +748,28 @@ void app_sensor_sample(void)
 
 	struct app_sensor_mb *g = &g_app_sensor_data.mb;
 
-	/* #340 M18: keep the last known-good reading on a plausibility reject
-	 * instead of overwriting it with this sweep's NaN locals. */
-	if (!sht4x_valid) {
-		const uint32_t keep = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE) |
-				      BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY);
+	/* Keep the last known-good reading instead of this sweep's NaN locals:
+	 * - #340 M18: on an SHT4x plausibility reject (always);
+	 * - #485 S2: on a failed read, for APP_SENSOR_MISS_HOLD sweeps. A single
+	 *   transient I2C error would otherwise leave NaN for a whole sample
+	 *   interval (900 s by default), long past the no-data window, and raise
+	 *   no_data plus a DEACTIVATE/ACTIVATE pair on every threshold rule of the
+	 *   channel. A second failure in a row goes NaN, as before. */
+	static const uint32_t src_mask[MB_SRC_COUNT] = {
+		[MB_SRC_ACCEL] = BIT(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION),
+		[MB_SRC_SHT] = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE) |
+			       BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY),
+		[MB_SRC_LIGHT] = BIT(APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE),
+		[MB_SRC_BARO] = BIT(APP_SENSOR_CH_MOTHERBOARD_PRESSURE) |
+				BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE_BARO) |
+				BIT(APP_SENSOR_CH_MOTHERBOARD_ALTITUDE),
+	};
+	uint32_t keep = sht4x_valid ? 0 : src_mask[MB_SRC_SHT];
 
-		mb.v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE] =
-			g->v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE];
-		mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY] = g->v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY];
-		mb.valid = (mb.valid & ~keep) | (g->valid & keep);
+	for (int i = 0; i < MB_SRC_COUNT; i++) {
+		keep |= app_sensor_miss_hold(&m_mb_miss[i], failed[i], src_mask[i]);
 	}
+	app_sensor_mb_keep(&mb, g, keep);
 
 	/* The PIR / accel event counters are owned by their event handlers, not by
 	 * this sweep — carry them over. */

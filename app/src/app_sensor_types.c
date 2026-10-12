@@ -637,6 +637,28 @@ void app_sensor_put_f(uint8_t type, union app_sensor_value *v, uint32_t *valid, 
 	*valid |= BIT(ch);
 }
 
+uint32_t app_sensor_miss_hold(uint8_t *miss, bool failed, uint32_t mask)
+{
+	if (!failed) {
+		*miss = 0;
+		return 0;
+	}
+	if (*miss < UINT8_MAX) {
+		(*miss)++;
+	}
+	return *miss <= APP_SENSOR_MISS_HOLD ? mask : 0;
+}
+
+void app_sensor_mb_keep(struct app_sensor_mb *mb, const struct app_sensor_mb *prev, uint32_t keep)
+{
+	for (size_t ch = 0; ch < ARRAY_SIZE(mb->v); ch++) {
+		if (keep & BIT(ch)) {
+			mb->v[ch] = prev->v[ch];
+		}
+	}
+	mb->valid = (mb->valid & ~keep) | (prev->valid & keep);
+}
+
 int32_t app_sensor_wire_value(const struct app_sensor_channel *c, union app_sensor_value v)
 {
 	if (c->flags & APP_SENSOR_F_COUNTER) {
