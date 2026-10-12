@@ -651,8 +651,15 @@ int64_t app_radio_backoff_wait_ms(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
 	int64_t left = m_backoff_until_ms ? m_backoff_until_ms - k_uptime_get() : 0;
+	bool expired = m_backoff_until_ms && left <= 0;
 
+	if (expired) {
+		m_backoff_until_ms = 0;
+	}
 	k_spin_unlock(&m_duty_lock, key);
+	if (expired) {
+		LOG_INF("Network backoff expired");
+	}
 	return MAX(left, 0);
 }
 

@@ -1866,7 +1866,7 @@ static void backoff(uint16_t s)
 	if (s > APP_RADIO_BACKOFF_MAX_S) {
 		LOG_WRN("Backoff %u s cut to %u s", s, APP_RADIO_BACKOFF_MAX_S);
 	} else if (s) {
-		LOG_WRN("Backoff %u s: uplinks but alarms held", s);
+		LOG_WRN("Backoff %u s: all uplinks except alarms held", s);
 	} else {
 		LOG_INF("Backoff ended");
 	}
