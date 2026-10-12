@@ -1,5 +1,7 @@
 # NFC firmware update — minimal 4 KB bootloader
 
+PR: #492.
+
 Issue: #491. Previous design: #139 (removed in #239), #237.
 
 ## 1. Goal and non-goals

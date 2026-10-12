@@ -24,4 +24,5 @@ A plan is renamed if its PR is renamed, so the two stay in step.
 | `460 - One implementation per function in app_radio.md` — decision #23: queues, link supervision, post-command, confirmed alarms, duty ledger common | [#460](https://github.com/hardwario/sticker-firmware/pull/460) |
 | `470 - TOWER protocol as the P2P transport.md` — TOWER wire-compatible net layer replaces P2P, `fsk`/`lora` PHY; supersedes the #410 plan | #470 |
 | `470 - Northbridge-Hub link protocol.md` — our Northbridge ↔ Hub link v2 for the TOWER gateway (framing, messages, recovery, event delivery) | #470 |
+| `492 - NFC firmware update - minimal 4 KB bootloader.md` — bare-metal 4 KB bootloader, upload over the ST25DV FTM mailbox (#491) | [#492](https://github.com/hardwario/sticker-firmware/pull/492) |
 | `P2P control-radio completion.md` | *(PR not yet opened — rename to `<PR number> - P2P control-radio completion.md` when it is)* |
