@@ -20,6 +20,7 @@
 #include "tower_ack_ctrl_kat.h"
 #include "tower_join_kat.h"
 #include "tower_kat.h"
+#include "tower_pair_kat.h"
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
@@ -788,6 +789,83 @@ ZTEST(p2p_logic, test_join_accept_kat_opens)
 	g_app_config.radio_deveui[7] ^= 0x01;
 	zassert_not_ok(p2p_test_open_join_accept(TOWER_JOIN_KAT_DEV_NONCE,
 						 tower_join_kat_join_accept, P2P_JOIN_ACCEPT_LEN));
+}
+
+/* ---- TOWER OTA pairing + fsk packet (tower_pair_kat.json, #490) ---------- */
+
+ZTEST(p2p_logic, test_twr_pair_frames_match_the_kat)
+{
+	uint8_t req[TWR_PAIR_REQ_LEN];
+	uint8_t conf[TWR_PAIR_CONF_LEN];
+
+	zassert_equal(sizeof(tower_pair_kat_join_req), TWR_PAIR_REQ_LEN);
+	zassert_equal(sizeof(tower_pair_kat_join_resp), TWR_PAIR_RESP_LEN);
+	zassert_equal(sizeof(tower_pair_kat_join_confirm), TWR_PAIR_CONF_LEN);
+
+	zassert_ok(p2p_test_twr_pair_req(TOWER_PAIR_KAT_COUNTER, req));
+	zassert_mem_equal(req, tower_pair_kat_join_req, sizeof(req), "JOIN_REQ differs");
+	zassert_ok(p2p_test_twr_pair_conf(TOWER_PAIR_KAT_COUNTER + 1, TOWER_PAIR_KAT_GW,
+					  TOWER_PAIR_KAT_CHALLENGE, conf));
+	zassert_mem_equal(conf, tower_pair_kat_join_confirm, sizeof(conf), "JOIN_CONFIRM differs");
+}
+
+ZTEST(p2p_logic, test_twr_pair_resp_opens_and_rejects)
+{
+	uint8_t frame[TWR_PAIR_RESP_LEN];
+	uint8_t key[P2P_KEY_LEN];
+	uint32_t challenge = 0;
+	uint32_t gw = 0;
+
+	zassert_ok(p2p_test_twr_pair_resp(tower_pair_kat_join_resp, TWR_PAIR_RESP_LEN, &gw, key,
+					  &challenge));
+	zassert_equal(gw, TOWER_PAIR_KAT_GW, "the gateway is the RESP's src");
+	zassert_equal(challenge, TOWER_PAIR_KAT_CHALLENGE);
+	zassert_mem_equal(key, tower_pair_kat_node_key, P2P_KEY_LEN);
+
+	/* Tampered. */
+	memcpy(frame, tower_pair_kat_join_resp, sizeof(frame));
+	frame[TWR_HDR_LEN + 3] ^= 0x01;
+	zassert_not_ok(p2p_test_twr_pair_resp(frame, sizeof(frame), &gw, key, &challenge));
+
+	/* Not a JOIN_RESP: our own JOIN_REQ heard back. */
+	zassert_not_ok(p2p_test_twr_pair_resp(tower_pair_kat_join_req, TWR_PAIR_REQ_LEN, &gw, key,
+					      &challenge));
+
+	/* Addressed to another node. */
+	g_app_config.radio_deveui[7] ^= 0x01;
+	zassert_not_ok(p2p_test_twr_pair_resp(tower_pair_kat_join_resp, TWR_PAIR_RESP_LEN, &gw, key,
+					      &challenge));
+}
+
+ZTEST(p2p_logic, test_fsk_packet_matches_the_kat)
+{
+	uint8_t air[P2P_FRAME_MAX + 3];
+	size_t len = 0;
+
+	zassert_equal(p2p_fsk_wrap(tower_pair_kat_join_req, TWR_PAIR_REQ_LEN, air),
+		      sizeof(tower_pair_kat_join_req_fsk), "len | frame | CRC16");
+	zassert_mem_equal(air, tower_pair_kat_join_req_fsk, sizeof(tower_pair_kat_join_req_fsk));
+
+	zassert_ok(p2p_fsk_unwrap(air, sizeof(tower_pair_kat_join_req_fsk), &len));
+	zassert_equal(len, TWR_PAIR_REQ_LEN);
+	zassert_mem_equal(&air[1], tower_pair_kat_join_req, len, "the frame follows the length");
+
+	/* A flipped bit fails the CRC; so does a packet shorter than its length. */
+	memcpy(air, tower_pair_kat_join_req_fsk, sizeof(tower_pair_kat_join_req_fsk));
+	air[5] ^= 0x04;
+	zassert_equal(p2p_fsk_unwrap(air, sizeof(tower_pair_kat_join_req_fsk), &len), -EBADMSG);
+	memcpy(air, tower_pair_kat_join_req_fsk, sizeof(tower_pair_kat_join_req_fsk));
+	zassert_equal(p2p_fsk_unwrap(air, sizeof(tower_pair_kat_join_req_fsk) - 1, &len), -EBADMSG);
+	zassert_equal(p2p_fsk_unwrap(air, 2, &len), -EBADMSG);
+}
+
+/* 19.2 kbit/s: preamble 4 + sync 4 + length 1 + frame + CRC 2 bytes. */
+ZTEST(p2p_logic, test_fsk_airtime_and_window)
+{
+	zassert_equal(p2p_fsk_toa_ms(TWR_ACK_FRAME_LEN), 17, "39 B");
+	zassert_equal(p2p_fsk_toa_ms(P2P_FRAME_MAX), 45, "107 B");
+	zassert_equal(p2p_fsk_window_ms(TWR_ACK_FRAME_LEN), 200, "the floor");
+	zassert_true(p2p_fsk_window_ms(P2P_FRAME_MAX) >= 20 + 45, "turnaround + the frame");
 }
 
 static void kat_central(const uint8_t *frame, uint32_t len)
