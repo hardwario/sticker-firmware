@@ -111,9 +111,21 @@ downlink. This replaces Poll.
   - the 3600 s cap and 0 ends it;
   - M-2 stays quiet through a 3600 s backoff and rejoins after it.
 - `app/decoder/p2p.test.js`: the four commands, the 41 B control set, the bitmap.
-- HIL (with the Hub side): DevStatus round trip in the Portal; Backoff 120 s via the
-  central (telemetry held, an alarm passes, no rejoin); PendingInfo with 3 queued
-  commands (all delivered within one report interval).
+- HIL 2026-10-12 against Hub proximos-v2 MR !153 (10.0.0.182), FW `ee0dde2c`, debug
+  P2P bench image. All PASS:
+
+  | Step | Node | Result |
+  |---|---|---|
+  | DevStatus | 5723, 5722 | answered on the next uplink; 3254 / 2917 mV, DL RSSI/SNR, 14 dBm, uptime; device_status published |
+  | Backoff 600 s | 5722 | the next report held 301 s (`TX held by the network backoff`), sent at the backoff end; no rejoin, fail streak 0 |
+  | PendingInfo, 3 queued | 5723 | more=2 → drain → more=1 → drain → RejoinReq, all three in 2 s |
+  | RejoinReq rediscover / rekey | 5723 | fresh join with a new dev_nonce, then Hello + Capabilities |
+  | Detach | 5723 | pairing cleared, radio idle; re-add and reset → joined |
+  | Capabilities gate | Hub | a v1.5.0 node, a LoRaWAN node and Backoff > 3600 s refused by the CLI |
+
+  Not shown on HW: an alarm passing a running backoff (no local alarm trigger on the
+  bench; covered by `tests/radio_common`) and the node-side 3600 s cut (the Hub never
+  sends more). HomeGateway has no Hub sender yet (P7).
 
 ## Size
 
