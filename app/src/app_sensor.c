@@ -290,6 +290,9 @@ static void w1_rescan_work_handler(struct k_work *work)
 		bool changed = w1_bus_sig_read(&sig) != 0 || sig.count != m_w1_sig.count ||
 			       sig.sum != m_w1_sig.sum;
 
+		LOG_INF("1-Wire rescan: %u device(s) on the bus, %s", sig.count,
+			force || changed ? "rebind" : "unchanged");
+
 		if (force || changed) {
 			int before = m_w1_present;
 
