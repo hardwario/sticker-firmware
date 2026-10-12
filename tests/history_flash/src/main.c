@@ -354,6 +354,84 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 		       r.value[COL_TEMP]);
 }
 
+/* #485 S1: app_history_init() runs before app_sensor_init(), which can still
+ * change a layout input at boot (a 1-Wire slot typed by the rebind, cap_input_*
+ * dropped on a PIR/buzzer pin conflict). Model it with cap_sht: off while init
+ * mounts, on again before the first capture. The capture must remount against
+ * its own layout instead of restarting the ring over the stored records, and
+ * must keep doing so on every such boot. */
+static void boot_with_layout_changed_before_capture(void)
+{
+	g_app_config.cap_sht = false;
+	reboot();
+	g_app_config.cap_sht = true;
+}
+
+ZTEST(history_flash, test_boot_layout_change_before_capture_keeps_records)
+{
+	set_temp(20.0f);
+	capture_n(7); /* 21 B = 3 double words -> fully durable */
+
+	boot_with_layout_changed_before_capture();
+	set_temp(30.0f);
+	capture_n(7);
+	zassert_equal(app_history_count(), 14, "records stored before the reboot were dropped");
+
+	boot_with_layout_changed_before_capture();
+	set_temp(40.0f);
+	capture_n(7);
+	zassert_equal(app_history_count(), 21, "second such boot dropped the records");
+
+	reboot();
+	zassert_equal(app_history_count(), 21, "count after a plain reboot");
+
+	static const float expect[] = {20.0f, 30.0f, 40.0f};
+
+	for (int i = 0; i < 21; i++) {
+		struct app_history_record r;
+
+		zassert_equal(app_history_get(i, &r), 0, "get(%d)", i);
+		zassert_within(r.value[COL_TEMP], (double)expect[i / 7], 0.01,
+			       "record %d holds %g (order or content broken)", i, r.value[COL_TEMP]);
+	}
+}
+
+/* #485 S1: a mount that restores nothing (here: the selection changed and was
+ * saved, so the stored pages carry another layout) restarted the ring at phys 0
+ * with seq 1 and overwrote the newest stored page. It must continue after the
+ * newest page instead: the A records are still on flash when A comes back. */
+ZTEST(history_flash, test_failed_mount_continues_after_newest_page)
+{
+	const uint8_t temp_hum[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+				    APP_SENSOR_CH_MOTHERBOARD_HUMIDITY};
+	const uint8_t temp_only[] = {APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE};
+
+	set_temp(20.0f);
+	capture_n(7);
+
+	set_channels(temp_only, sizeof(temp_only));
+	reboot();
+	zassert_equal(app_history_count(), 0, "layout B starts empty");
+	set_temp(30.0f);
+	capture_n(7); /* 7 x 2 B = 2 double words */
+
+	set_channels(temp_hum, sizeof(temp_hum));
+	reboot();
+	zassert_equal(app_history_count(), 7, "layout B's first page overwrote layout A's page");
+
+	set_temp(40.0f);
+	capture_n(7);
+	reboot();
+	zassert_equal(app_history_count(), 14, "count after continuing layout A");
+
+	struct app_history_record r;
+
+	zassert_equal(app_history_get(0, &r), 0, "get(0)");
+	zassert_within(r.value[COL_TEMP], 20.0, 0.01, "oldest record %g", r.value[COL_TEMP]);
+	zassert_equal(app_history_get(13, &r), 0, "get(13)");
+	zassert_within(r.value[COL_TEMP], 40.0, 0.01, "newest record %g", r.value[COL_TEMP]);
+}
+
 /* ---- F28: post-reboot record timestamps --------------------------------- */
 
 #define F28_T0     1750000000u  /* first record, RTC synced */
