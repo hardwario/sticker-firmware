@@ -85,6 +85,11 @@ technical detail.
   `channel` (`source` is now `slot`, the old `slot` is `rule`). A 1-Wire `SensorReading` is a
   valid mask + packed channel values, decoded as `values` / `units` by channel name. 1-Wire
   no-data is reported per chip and per device (§40).
+- **A missing onboard reading is omitted (#483).** A NaN temperature, humidity,
+  pressure, altitude or illuminance is no longer sent as a 5-byte "not available"
+  sentinel; the field is left out. An enabled barometer on a board without one saved
+  10 B per uplink. The fault is still reported by `device_status` and the `no_data`
+  alarm (§42).
 - **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
   retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
   `p2p-frequency` (§31).
@@ -2325,6 +2330,32 @@ transport.md`; node behaviour: `doc/p2p.md`.
     the fake radio: codec, join and ACK-tail KATs byte for byte, repetitions, ACK /
     PENDING / node ACK, ACK tails and their window, replay, control TLVs.
   - All 14 native suites pass.
+
+## 42. Omit missing onboard readings (#483)
+
+An enabled onboard analog sensor whose reading is NaN (sensor absent or failed) used to
+go out as a "not available" sentinel: `INT32_MIN` for `temperature` / `altitude`,
+`UINT32_MAX` for `humidity` / `pressure` / `illuminance`. Each one is a 5-byte varint
+plus its tag. With `cap-barometer true` on a board that has no barometer, every uplink
+carried 10 B of `pressure` + `altitude` that decoded to `null`. At EU868 DR0 (51 B) that
+is a fifth of the frame and can push a report onto a second page (§13).
+
+- **Firmware:** `fill_telemetry()` sets `has_<field>` only for a real reading. A valid
+  reading is encoded as before; the wire format is unchanged.
+- **What the host sees:** an absent key means "not measured in this report". It no longer
+  tells "enabled but failed" from "disabled" by the field alone. That information comes
+  from `device_status` / the `no_data` alarm (the failure) and from settings-info /
+  `GetConfig` (the enabled capabilities). This reverses the v1.4.0 sentinel rule for the
+  onboard analog fields only.
+- **Unchanged:** `voltage` keeps its 0 "no sample" value (system group, always sent). The
+  1-Wire `SensorReading` valid mask is unchanged.
+- **Decoder:** `ttn.js` still maps the old sentinels to `null`, so frames from older
+  firmware decode as before. Hub decoder: proximos/proximos-v2#119.
+- **Cost:** release 183 004 B flash / 48 636 B RAM (−56 B flash, 0 RAM vs v1.5.0
+  `73c0b802`).
+- **Tests:** `tests/compose` `test_omit_absent_analog` (cap-barometer + light on, all
+  NaN → no field), `test_system_always_present` updated; `ttn.test.js` "omitted analog
+  readings stay absent".
 
 ---
 

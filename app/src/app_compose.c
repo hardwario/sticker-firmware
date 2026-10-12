@@ -33,12 +33,10 @@
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
-/* "Value not available" sentinels (mirrored in ttn.js → null). An enabled analog
- * sensor is always present on the wire so the configured-sensor list is stable
- * across reports; a missing/NaN reading is sent as the sentinel rather than
- * dropping the field (which would be indistinguishable from a disabled sensor). */
-#define TM_S32_NA INT32_MIN  /* sint32 fields: temperature, altitude */
-#define TM_U32_NA UINT32_MAX /* uint32 fields: humidity, pressure, illuminance */
+/* A NaN onboard analog reading (sensor absent or failed) is omitted from the
+ * wire (#483). The former 5-byte NA sentinels cost 10 B per uplink for a
+ * missing barometer; the failure is still reported by device_status / the
+ * no_data alarm, and the enabled capability by settings-info / GetConfig. */
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
 #define SYSTEM_FLAG_BOOT        BIT(0)
@@ -223,37 +221,38 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal — onboard SHT4x, sent whenever enabled (#465 cap_sht); a NaN
-	 * reading (sensor fault) goes out as the sentinel (decoder → null) instead
-	 * of dropping the field. */
+	/* internal — onboard SHT4x, sent when enabled (#465 cap_sht) and read. */
 	if (g_app_config.cap_sht) {
-		t->has_temperature = true;
-		t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
-		t->has_humidity = true;
-		/* Clamp before the unsigned cast: the SHT4x formula can yield a
-		 * slightly negative %RH, and a negative float->uint cast is UB. */
-		t->humidity = isnan(humidity) ? TM_U32_NA
-					      : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
+		if (!isnan(temperature)) {
+			t->has_temperature = true;
+			t->temperature = (int32_t)(temperature * 100.0f);
+		}
+		if (!isnan(humidity)) {
+			t->has_humidity = true;
+			/* Clamp before the unsigned cast: the SHT4x formula can yield a
+			 * slightly negative %RH, and a negative float->uint cast is UB. */
+			t->humidity = (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
+		}
 	}
 
-	/* barometer — sent whenever enabled (sentinel on NaN). */
+	/* barometer — sent when enabled and read. */
 	if (g_app_config.cap_barometer) {
-		t->has_pressure = true;
-		/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
-		t->pressure = isnan(pressure) ? TM_U32_NA
-					      : (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
-		t->has_altitude = true;
-		t->altitude = isnan(altitude) ? TM_S32_NA
-					      : (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
-							       (float)INT16_MAX);
+		if (!isnan(pressure)) {
+			t->has_pressure = true;
+			/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
+			t->pressure = (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
+		}
+		if (!isnan(altitude)) {
+			t->has_altitude = true;
+			t->altitude = (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
+						     (float)INT16_MAX);
+		}
 	}
 
-	/* light — sent whenever enabled (sentinel on NaN). */
-	if (g_app_config.cap_light_sensor) {
+	/* light — sent when enabled and read. */
+	if (g_app_config.cap_light_sensor && !isnan(illuminance)) {
 		t->has_illuminance = true;
-		t->illuminance = isnan(illuminance)
-					 ? TM_U32_NA
-					 : (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
+		t->illuminance = (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */
