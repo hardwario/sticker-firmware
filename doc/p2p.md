@@ -125,7 +125,7 @@ fields. With CTRL the bytes after the flags are a `0x91` TLV list, the **ACK tai
 
 | ID | Name | Direction | Value |
 |---|---|---|---|
-| `0x01` | Capabilities | ↑ | `proto(1)=1 \| mtu(1)=100 \| profiles(1) \| cmds(8) \| power_class(1)=1` |
+| `0x01` | Capabilities | ↑ | `proto(1)=1 \| mtu(1)=96 \| profiles(1) \| cmds(8) \| power_class(1)=1` |
 | `0x02` | Hello | ↑ | `session_id(4 LE) \| reset_reason(1) \| fw(4: major, minor, patch, 0)` |
 | `0x03` | Detach | ↓ | ignored |
 | `0x04` | RejoinReq | ↓ | ignored |
