@@ -1500,6 +1500,63 @@ ZTEST(radio_common, test_backoff_holds_answers_not_alarms)
 	zassert_equal(retries(), base);
 }
 
+/* An answer waiting for its Ack retry when a backoff comes does not keep an
+ * alarm queued meanwhile: the alarm goes at once, the answer afresh after the
+ * backoff. */
+ZTEST(radio_common, test_backoff_retried_answer_yields_to_alarm)
+{
+	const int r[] = {-ETIMEDOUT};
+
+	use_profile(&PROFILE_P2P);
+	script(r, ARRAY_SIZE(r));
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb1);
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1);
+	zassert_true(app_radio_ack_pending(), "the answer waits for its retry");
+
+	app_radio_backoff_set(10);
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_MSEC(500));
+	zassert_equal(fk.n, 2, "the alarm goes at once");
+	zassert_equal(fk.log[1].head[0], 0xa1);
+
+	k_sleep(K_SECONDS(8));
+	zassert_equal(fk.n, 2, "the answer is held");
+	k_sleep(K_SECONDS(3));
+	zassert_equal(fk.n, 3, "the answer once the backoff ended");
+	zassert_equal(fk.log[2].head[0], 0xb1);
+	zassert_equal(fk.log[2].attempt, 0, "a fresh frame");
+	zassert_false(app_radio_ack_pending());
+}
+
+/* The same for a report frame waiting for its Ack retry. */
+ZTEST(radio_common, test_backoff_retried_report_yields_to_alarm)
+{
+	const int r[] = {-ETIMEDOUT};
+	const size_t lens[] = {20};
+
+	use_profile(&PROFILE_P2P);
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	frames(lens, 1);
+	script(r, ARRAY_SIZE(r));
+	app_radio_send_telemetry_now();
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1);
+	zassert_true(app_radio_ack_pending(), "the report frame waits for its retry");
+
+	app_radio_backoff_set(10);
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_MSEC(500));
+	zassert_equal(fk.n, 2, "the alarm goes at once");
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ALARM);
+
+	k_sleep(K_SECONDS(11));
+	zassert_equal(fk.n, 3, "the report frame once the backoff ended");
+	zassert_equal(fk.log[2].kind, APP_RADIO_FRAME_TELEMETRY);
+	zassert_equal(fk.log[2].attempt, 0, "a fresh frame");
+	zassert_equal(reports_done(), 1);
+}
+
 /* A report frame waits out a backoff too; 0 ends it, a long one is cut. */
 ZTEST(radio_common, test_backoff_holds_telemetry_and_is_capped)
 {

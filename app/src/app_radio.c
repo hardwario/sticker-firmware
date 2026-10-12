@@ -1075,15 +1075,43 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
 
 /* Send the queued frame in progress, or the next one. Returns false when both
  * queues are empty (the run goes on to telemetry). */
+/* A network backoff (P2P 0x15) holds every frame but an alarm, so a held frame
+ * must not keep a queued alarm waiting. The confirmed slot of a frame that waits
+ * for its Ack retry is given up, and an answer caught as the current frame goes
+ * back to the head of its queue (a full queue keeps it: the alarm waits). Either
+ * goes again as a fresh frame after the backoff; the gateway may then get it
+ * twice, as after a lost Ack. */
+static void backoff_yield_to_alarm(void)
+{
+	if (k_msgq_num_used_get(&m_alarm_q) == 0 || app_radio_backoff_wait_ms() == 0) {
+		return;
+	}
+	if (m_cur_valid && m_cur_kind == APP_RADIO_FRAME_ANSWER) {
+		if (k_msgq_put_front(&m_answer_q, &m_cur) != 0) {
+			return;
+		}
+		m_cur_valid = false;
+	}
+	if (m_ack_pending && m_ack_kind != APP_RADIO_FRAME_ALARM) {
+		LOG_INF("Alarm past the network backoff: the held retry (kind %u) goes afresh "
+			"after it",
+			m_ack_kind);
+		ack_release(m_ack_kind);
+	}
+}
+
 static bool tx_queued_step(void)
 {
+	backoff_yield_to_alarm();
+
 	/* A report frame waits for its Ack retry: it goes before any queued one. */
 	if (m_ack_pending && m_ack_kind == APP_RADIO_FRAME_TELEMETRY) {
 		return false;
 	}
 	if (!m_cur_valid) {
 		/* A network backoff (P2P 0x15) holds the answers in their queue, so
-		 * that an alarm, which it does not hold, is never stuck behind one. */
+		 * that an alarm, which it does not hold, is not stuck behind one
+		 * (backoff_yield_to_alarm() covers one already taken). */
 		int64_t backoff = app_radio_backoff_wait_ms();
 
 		if (backoff == 0 && k_msgq_get(&m_answer_q, &m_cur, K_NO_WAIT) == 0) {
