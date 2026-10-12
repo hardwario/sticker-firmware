@@ -37,7 +37,7 @@ technical detail.
 | `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
 | `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
 | `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
-| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora`; `fsk` not supported yet) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
+| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora` / `fsk`, the latter toward a stock TOWER gateway, #490) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
 | `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
 | `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
@@ -195,7 +195,7 @@ technical detail.
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
-| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
+| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` = TOWER GFSK with TOWER OTA pairing toward a stock TOWER gateway, #490). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
 
 ---
 
@@ -2323,8 +2323,8 @@ transport.md`; node behaviour: `doc/p2p.md`.
   rung; the SF sweep and adoption are gone.
 - **Config:** `p2p-tx-power` 2..14 dBm (#486; was 2..22, but the board wires only the
   RFO_LP path and the driver capped at 14 anyway; a stored 15–22 loads as 14).
-  `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
-  P5: P2P refuses to start with it.
+  `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` (#490) is
+  the TOWER GFSK PHY and joins through TOWER's OTA pairing (`doc/p2p.md` §15).
 - **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
   `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`.
   `tests/ccm/p2p_tower_ack_ctrl_kat.txt` (ACK tails) is the Northbridge's file, copied
