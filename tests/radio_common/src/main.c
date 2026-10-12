@@ -928,25 +928,46 @@ static void telemetry_error_abandons_the_report(void)
 }
 BOTH_PROFILES(telemetry_error_abandons_the_report)
 
-/* Unlike a queued frame, a duty-held telemetry frame counts: it is resent
- * after res->wait_ms, 8 times at most. */
-static void telemetry_duty_hold_counts(void)
+/* #485 R3: like a queued frame, a duty-held telemetry frame is no failure: it
+ * is resent after res->wait_ms, past the 8 retries of a failing one, and the
+ * report goes out late instead of being dropped. */
+static void telemetry_duty_hold_is_not_a_retry(void)
 {
 	const size_t lens[] = {20};
 	uint32_t base = retries();
 
 	frames(lens, 1);
-	script_fill(-EAGAIN, 9);
+	script_fill(-EAGAIN, 12);
 	fk.wait_ms = 1000;
 	app_radio_send_telemetry_now();
 	k_sleep(K_SECONDS(20));
-	zassert_equal(fk.n, 9);
-	assert_spacing(0, 8, 1000);
-	zassert_equal(retries(), base + 8);
+	zassert_equal(fk.n, 13);
+	assert_spacing(0, 12, 1000);
+	zassert_ok(fk.log[12].ret);
+	zassert_equal(retries(), base, "a wait is not a retry");
+	zassert_equal(g_compose_reset_calls, 0);
+	zassert_equal(reports_done(), 1);
+}
+BOTH_PROFILES(telemetry_duty_hold_is_not_a_retry)
+
+/* #485 R3: ... but only for one interval_report (60 s here): by then the next
+ * report is due, so the held one is dropped and its snapshot reset. */
+static void telemetry_held_for_an_interval_is_dropped(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	script_fill(-EAGAIN, LOG_MAX);
+	fk.wait_ms = 15000;
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(55));
+	zassert_equal(g_compose_reset_calls, 0, "still held");
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.n, 5, "sent at 0, 15, 30, 45 and 60 s");
 	zassert_equal(g_compose_reset_calls, 1);
 	zassert_equal(reports_done(), 0);
 }
-BOTH_PROFILES(telemetry_duty_hold_counts)
+BOTH_PROFILES(telemetry_held_for_an_interval_is_dropped)
 
 /* M-10: a frame over the budget on its own is dropped, the report goes on. */
 static void telemetry_over_budget_frame_is_skipped(void)

@@ -710,7 +710,9 @@ uint8_t app_radio_get_max_payload(void)
  * at most (LoRaWAN #219): then it is dropped, and the report's snapshot is
  * reset (#340 M6) so the next report takes a fresh reading instead of packing
  * the abandoned one's data. A queued answer or alarm held by the duty cycle
- * (-EAGAIN) is not failing: it waits as long as the hold lasts. */
+ * (-EAGAIN) is not failing: it waits as long as the hold lasts. So does a
+ * held report (#485 R3), but only until it is one interval_report old: the
+ * next report, with fresher data, is due by then. */
 #define TX_RETRY_MS    15000
 #define TX_MAX_RETRIES 8
 
@@ -746,6 +748,7 @@ static bool m_tlm_first; /* ... the report's first */
 static bool m_tlm_more;
 static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
 static uint8_t m_tlm_retries;
+static int64_t m_tlm_open_ms; /* uptime the report opened (#485 R3) */
 static size_t m_tlm_len;
 static uint8_t m_tlm_buf[TLM_BUF_SIZE];
 static bool m_tlm_done_valid;
@@ -1375,6 +1378,7 @@ static void tlm_step(void)
 		}
 		atomic_clear(&m_tlm_requested);
 		m_tlm_open = true;
+		m_tlm_open_ms = k_uptime_get();
 		m_tlm_first = true;
 		m_tlm_frame = false;
 	}
@@ -1456,6 +1460,18 @@ static void tlm_step(void)
 	case TX_ACK_RETRY:
 		tx_schedule(res.wait_ms);
 		return;
+	case -EAGAIN:
+		/* #485 R3: a duty-cycle hold (the app ledger, the LoRaWAN MAC's
+		 * hourly credits) is no failure. Counted as a retry, it dropped the
+		 * report after ~2 min at DR0 instead of sending it late. */
+		if (k_uptime_get() - m_tlm_open_ms >=
+		    (int64_t)g_app_config.interval_report * MSEC_PER_SEC) {
+			LOG_WRN("Report held for a whole interval; dropped, snapshot reset");
+			tlm_close(true);
+			return;
+		}
+		tx_schedule(res.wait_ms ? res.wait_ms : TX_RETRY_MS);
+		return;
 	default:
 		if (++m_tlm_retries > TX_MAX_RETRIES) {
 			LOG_ERR("Telemetry frame abandoned after %d retries; snapshot reset",
@@ -1464,7 +1480,7 @@ static void tlm_step(void)
 			return;
 		}
 		app_radio_count(APP_RADIO_CNT_RETRY);
-		tx_schedule((ret == -EAGAIN && res.wait_ms) ? res.wait_ms : TX_RETRY_MS);
+		tx_schedule(TX_RETRY_MS);
 		return;
 	}
 
