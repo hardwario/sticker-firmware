@@ -2270,7 +2270,8 @@ transport.md`; node behaviour: `doc/p2p.md`.
 
 - **Frames:** `ver_type | flags | src(4 LE) | dest(4 LE) | counter(4 LE)`, all 14 B as
   AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 96 B
-  (the TOWER MTU on every PHY profile, #486), which leaves a 72 B body. The node's address is low32(DevEUI), the gateway's the
+  (the TOWER MTU on every PHY profile, #486), which leaves a 72 B body. Nodes and every
+  NB move to 96 B together: each side drops the other's frames over 96 B. The node's address is low32(DevEUI), the gateway's the
   `net_id`.
 - **Confirmed send:** up to 3 byte-identical transmissions, each with a 200 ms (SF7)
   ACK window armed at TX-done. An ACK with PENDING keeps the receiver on for one

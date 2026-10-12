@@ -33,9 +33,17 @@ plan §5). Timing is not on the wire.
 | W8 | `p2p_tx_power` max 22 → 14 dBm (the RFO_LP limit). The board wires only RFO_LP and the driver already capped at 14, so the range is unchanged; the config now says so. A stored 15–22 loads as 14; a JoinAccept assigning 15–22 is ignored (the node keeps its config) | node | **done** |
 | W9 | Reserve ACK flag bit 1 (`CTRL` tail, TOWER plan §13.5) upstream. The ACK flags live in tower-firmware `tower-net-core` (`ack.rs`), not in tower-protocol: `ack_flags::CTRL = 1 << 1`, documented as reserved for STICKER, plus a test that a stock parser ignores the tail. No behaviour change | tower-firmware | **done** on hardwario/tower-firmware branch `hynek/ack-flag-ctrl-reserved` (865f509), hardwario/tower-firmware#1 |
 
-**Deployment order (W1 + W3/W4):** the Hub first, or the Hub and the nodes together. A
-node with W1 drops a 100 B downlink. The current central already accepts the smaller
-uplinks.
+**Deployment order (W1 + W3/W4):** the Hub and the nodes together, with every NB of the
+Hub cluster. Both directions break across the change:
+
+- A node with W1 drops a downlink over 96 B, so a node must not home at an NB without W3
+  (a 100 B downlink from an old NB is lost).
+- An NB with W3 drops a received frame over 96 B. A node built before #486 still sends
+  up to 100 B (a long telemetry page, e.g. with 1-Wire sensors), and those uplinks are
+  lost until the node is updated.
+
+Uplinks from a W1 node to an old NB and central work: they accept the smaller frames.
+No P2P node is in the field yet, so the bench was moved in one step (2026-10-12).
 
 ## HIL (2026-10-12)
 

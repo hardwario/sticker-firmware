@@ -422,7 +422,8 @@ gateway.
   the request, the session TX power and the uptime in seconds.
 - **Backoff** (downlink or any ACK tail): every uplink but alarms waits that many
   seconds. app_radio holds it like a duty-cycle wait, M-2 included, so the node is not
-  rejoined. Answers stay queued, so an alarm is never stuck behind one. Cut to 3600 s;
+  rejoined. Answers stay queued, and a frame waiting for its Ack retry gives up its
+  confirmed slot to an alarm, so an alarm is never stuck behind either. Cut to 3600 s;
   0 ends it (a frame already waiting keeps its wait); RAM only, a new session ends it.
 - **HomeGateway** (downlink): recorded for the session and shown in `ats radio status`.
   The node does not re-address its uplinks (multi-gateway, plan P7).

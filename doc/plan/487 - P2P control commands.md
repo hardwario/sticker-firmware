@@ -61,6 +61,11 @@ the central's to compute (LoRaWAN maps 2.4–3.6 V linearly).
   of its 8 retries, as for a duty hold.
 - Answers stay in their queue while it runs, so an alarm is never stuck behind one. A
   queued alarm restarts the TX run at once.
+- A frame that waits for its Ack retry holds the one confirmed slot. With an alarm
+  queued during a backoff, that retry gives the slot up, and an answer already taken as
+  the current frame goes back to the head of its queue. Both go again as fresh frames
+  after the backoff (the gateway may get one twice, as after a lost Ack). Without this an
+  alarm waited for the whole backoff (review of #486).
 - The node cuts it to `APP_RADIO_BACKOFF_MAX_S` = 3600 s, inside the 75 min M-2 cap. 0 ends
   it, but a frame already waiting keeps its wait. RAM only: a reboot or a new session
   (join, Detach) ends it.
