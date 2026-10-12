@@ -392,6 +392,7 @@ void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 int p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 int p2p_test_open_join_accept(uint32_t dev_nonce, const uint8_t *frame, size_t len);
 int p2p_test_twr_pair_req(uint32_t counter, uint8_t out[TWR_PAIR_REQ_LEN]);
+int p2p_test_twr_pair_commit(uint32_t gw, const uint8_t key[P2P_KEY_LEN]);
 int p2p_test_twr_pair_resp(const uint8_t *frame, size_t len, uint32_t *gw, uint8_t key[P2P_KEY_LEN],
 			   uint32_t *challenge);
 int p2p_test_twr_pair_conf(uint32_t counter, uint32_t gw, uint32_t challenge,

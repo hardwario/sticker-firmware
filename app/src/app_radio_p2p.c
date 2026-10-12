@@ -689,8 +689,14 @@ static void session_reset(void)
 /* Persist a successful JoinAccept's pairing state and switch the module to
  * PAIRED. Resets the data-plane frame counter to 0 -- safe because
  * session_key is fresh (see derive_session_key()) and keeps the on-air
- * counter values small. */
-static int pairing_persist(const struct p2p_join_accept *ja, const uint8_t session_key[P2P_KEY_LEN])
+ * counter values small -- unless keep_fcnt: a TOWER pairing (§15) keeps it
+ * running, because a stock gateway restores the replay lane of an address it
+ * paired before (tower-firmware add_peer() binds the persisted lane by
+ * address, and NodeRemove leaves it), so a node re-paired from 1 would be
+ * dropped as a replay without an ACK. A stock TOWER node never resets its
+ * counter either. */
+static int pairing_persist(const struct p2p_join_accept *ja, const uint8_t session_key[P2P_KEY_LEN],
+			   bool keep_fcnt)
 {
 	uint8_t buf[P2P_JOIN_STATE_LEN];
 
@@ -715,6 +721,9 @@ static int pairing_persist(const struct p2p_join_accept *ja, const uint8_t sessi
 	m_session_tx_power_dbm = ja->tx_power_dbm;
 	m_link_state = P2P_LINK_PAIRED;
 	session_reset();
+	if (keep_fcnt) {
+		return 0;
+	}
 
 	/* Fresh pairing: counter restarts at 0 under the just-rotated session_key,
 	 * so reuse vs. the old session is impossible. Best-effort reserve here --
@@ -743,7 +752,7 @@ static int pairing_persist(const struct p2p_join_accept *ja, const uint8_t sessi
  *
  * NEVER touches m_dev_nonce (see dnonce_persist()) or m_fcnt: the nonce must
  * keep advancing across pairings, and the counter is reset by the NEXT
- * pairing_persist() under a freshly derived key.
+ * pairing_persist() under a freshly derived key (a TOWER pairing keeps it).
  *
  * The RAM state is cleared even if the NVS delete fails: honouring the
  * Detach matters more than the record, and a stale record only means the
@@ -2623,7 +2632,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 
 	derive_session_key(dev_nonce, ja.central_nonce, session_key);
 
-	ret = pairing_persist(&ja, session_key);
+	ret = pairing_persist(&ja, session_key, false);
 	if (ret) {
 		return ret;
 	}
@@ -2751,6 +2760,25 @@ int p2p_test_twr_pair_conf(uint32_t counter, uint32_t gw, uint32_t challenge,
  * leaves it paired to a gateway that never installed it -- the operator pairs
  * again. Returns 0 when paired, -EAGAIN (duty-cycle blocked), -ETIMEDOUT (no
  * response) or an errno. */
+/* Commit a TOWER pairing: the gateway's address is the net_id, its key the
+ * session key as is, and the data counter keeps running (pairing_persist()). */
+static int twr_pair_commit(uint32_t gw, const uint8_t key[P2P_KEY_LEN])
+{
+	const struct p2p_join_accept ja = {
+		.net_id = gw,
+		.rx_delay_s = P2P_RX1_DELAY_DEFAULT_S,
+	};
+
+	return pairing_persist(&ja, key, true);
+}
+
+#if defined(CONFIG_ZTEST)
+int p2p_test_twr_pair_commit(uint32_t gw, const uint8_t key[P2P_KEY_LEN])
+{
+	return twr_pair_commit(gw, key);
+}
+#endif
+
 static int twr_pair_attempt(void)
 {
 	if (duty_wait_ms_for(TWR_PAIR_REQ_LEN + TWR_PAIR_CONF_LEN) > 0) {
@@ -2830,12 +2858,7 @@ static int twr_pair_attempt(void)
 		return ret;
 	}
 
-	const struct p2p_join_accept ja = {
-		.net_id = gw,
-		.rx_delay_s = P2P_RX1_DELAY_DEFAULT_S,
-	};
-
-	ret = pairing_persist(&ja, key);
+	ret = twr_pair_commit(gw, key);
 	memset(key, 0, sizeof(key));
 	if (ret) {
 		return ret;

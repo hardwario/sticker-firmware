@@ -837,6 +837,25 @@ ZTEST(p2p_logic, test_twr_pair_resp_opens_and_rejects)
 					      &challenge));
 }
 
+/* A TOWER pairing keeps the data counter running: a stock gateway restores
+ * the replay lane of an address it paired before, so a node re-paired from 1
+ * would be dropped as a replay (HIL 2026-10-12). */
+ZTEST(p2p_logic, test_twr_pair_commit_keeps_the_counter)
+{
+	struct app_radio_p2p_info info;
+	uint8_t key[P2P_KEY_LEN];
+
+	memset(key, 0xa5, sizeof(key));
+	p2p_test_set_fcnt(900, 1024);
+	zassert_ok(p2p_test_twr_pair_commit(0x2d9b924e, key));
+	zassert_equal(p2p_test_get_fcnt(), 900u, "the counter runs on");
+
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.link_state, P2P_LINK_PAIRED);
+	zassert_equal(info.net_id, 0x2d9b924e);
+	zassert_equal(info.gw_last, 0, "a fresh lane for the gateway's counter");
+}
+
 ZTEST(p2p_logic, test_fsk_packet_matches_the_kat)
 {
 	uint8_t air[P2P_FRAME_MAX + 3];
