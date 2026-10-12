@@ -1572,7 +1572,13 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 
 	if (ret < 0) {
 		make_error(resp, Response_Error_Code_NOT_READY, "1-wire scan");
+		return;
 	}
+
+	/* #485 S4: a host that sees a newly plugged probe in the list expects the
+	 * slot to pick it up -- rebind on the sensor work queue (it touches the
+	 * driver indices that sampling reads). */
+	app_sensor_w1_rescan(true);
 #else
 	/* 1-Wire is not built into this image (e.g. the lean debug.conf): NOT_SUPPORTED,
 	 * so a host can tell "not in this FW" from a bus that is not ready (NOT_READY) —

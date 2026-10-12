@@ -163,6 +163,76 @@ static void sensor_work_handler(struct k_work *work)
 
 static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);
 
+#if defined(CONFIG_W1)
+/* Scan every 1-Wire driver and rebind the slots by ROM. Returns the first scan
+ * error; the rebind still runs on what was found. */
+static int w1_scan_rebind(void)
+{
+	int ret;
+	int res = 0;
+
+	ret = app_ds18b20_scan();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
+		res = ret;
+	}
+
+#if defined(CONFIG_DS28E17)
+	ret = app_machine_probe_scan();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
+		res = res ? res : ret;
+	}
+#endif /* defined(CONFIG_DS28E17) */
+
+	int present = app_w1_slots_rebind();
+
+	LOG_INF("1-Wire slots: %d sensor(s) bound", present);
+	return res;
+}
+
+static bool m_w1_rescan_force;
+
+/* #485 S4: the boot scan was the only automatic rebind, so a probe plugged in
+ * after boot (or one that missed the boot scan) stayed no_data until a reboot.
+ * Runs on the sensor work queue, so a rescan never reshuffles driver indices
+ * under a running sample. */
+static void w1_rescan_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	bool force = m_w1_rescan_force;
+
+	m_w1_rescan_force = false;
+
+	if (!g_app_config.cap_w1_sensors || !app_w1_slots_any_taught()) {
+		return;
+	}
+	if (!force && !app_w1_slots_need_rescan()) {
+		return;
+	}
+
+	(void)w1_scan_rebind();
+
+	/* Fresh readings for the new binding before the next report. */
+	app_sensor_sample();
+}
+
+static K_WORK_DEFINE(m_w1_rescan_work, w1_rescan_work_handler);
+#endif /* defined(CONFIG_W1) */
+
+void app_sensor_w1_rescan(bool force)
+{
+#if defined(CONFIG_W1)
+	if (force) {
+		m_w1_rescan_force = true;
+	}
+	(void)k_work_submit_to_queue(&m_sensor_work_q, &m_w1_rescan_work);
+#else
+	ARG_UNUSED(force);
+#endif
+}
+
 static void sensor_timer_handler(struct k_timer *timer)
 {
 	k_work_submit_to_queue(&m_sensor_work_q, &m_sensor_work);
@@ -476,26 +546,9 @@ int app_sensor_init(void)
 	 * alert is armed per probe inside app_machine_probe_scan() (scan_callback), so
 	 * it survives on-demand re-scans/enrolls too. */
 #if defined(CONFIG_W1)
-	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
-
-	if (w1_taught) {
-		ret = app_ds18b20_scan();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
-			res = res ? res : ret;
-		}
-
-#if defined(CONFIG_DS28E17)
-		ret = app_machine_probe_scan();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
-			res = res ? res : ret;
-		}
-#endif /* defined(CONFIG_DS28E17) */
-
-		int present = app_w1_slots_rebind();
-
-		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
+	if (g_app_config.cap_w1_sensors && app_w1_slots_any_taught()) {
+		ret = w1_scan_rebind();
+		res = res ? res : ret;
 	}
 #endif /* defined(CONFIG_W1) */
 

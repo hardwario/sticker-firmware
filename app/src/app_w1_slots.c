@@ -315,6 +315,23 @@ bool app_w1_slots_any_taught(void)
 	return false;
 }
 
+bool app_w1_slots_need_rescan(void)
+{
+	bool need = false;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int slot = 0; slot < APP_W1_SLOT_COUNT; slot++) {
+		if (!m_slots[slot].present &&
+		    (cfg_rom_get(slot) != 0 ||
+		     app_w1_slot_get_expected_type(slot) != APP_W1_SLOT_EMPTY)) {
+			need = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&m_lock);
+	return need;
+}
+
 /* ---- discovery (registry-driven) --------------------------------------- */
 
 struct discovered {
