@@ -135,8 +135,8 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_WINDOW_SYMBOLS   3
 #define P2P_WINDOW_MARGIN_MS 20
 /* sx12xx_lora_config() arms the radio's TX timeout at a fixed 4000 ms: a longer
- * frame is cut mid-air and lora_send() then blocks forever (P0). A 100 B frame
- * at SF12 is 3.7 s, so P2P_FRAME_MAX always fits; the check is a guard. */
+ * frame is cut mid-air and lora_send() then blocks forever (P0). A 96 B frame
+ * at SF12 is 3.94 s, so P2P_FRAME_MAX always fits; the check is a guard. */
 #define P2P_TOA_MAX_MS       3950U
 /* Between an exchange and the next TX, so the gateway is back in RX. */
 #define P2P_TX_GAP_MS        200

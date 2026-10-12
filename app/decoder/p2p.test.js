@@ -241,12 +241,12 @@ test("control answers: LinkCheckAns and TimeAns", () => {
 });
 
 test("control uplink: Capabilities | Hello as app_radio_p2p.c ctrl_build() lays them out", () => {
-  // 0x91 | Caps(12): proto 1, MTU 100, profiles lora, cmd bitmap, power class
+  // 0x91 | Caps(12): proto 1, MTU 96, profiles lora, cmd bitmap, power class
   // battery | Hello(9): session_id, reset_reason, fw 1.5.0, reserved.
   // | LinkCheckReq | TimeReq -- the full set, 30 B.
   const pt = hex(
     "91" +
-      "010c" + "01" + "64" + "02" + "9e01010001000000" + "01" +
+      "010c" + "01" + "60" + "02" + "9e01010001000000" + "01" +
       "0209" + "78563412" + "03" + "010500" + "00" +
       "1000" +
       "2000",

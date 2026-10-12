@@ -61,13 +61,14 @@ struct twr_ack {
  * (2 + 4 B) and TimeAns (2 + 9 B). The request's ACK window grows by these. */
 #define TWR_ACK_TAIL_MAX 17
 
-/* The lora profile's MTU (D14, P1 decision D-g): a frame of at most 100 B, so a
- * 78 B payload -- the STICKER envelope (2 B) and a 76 B body, the LoRaWAN fPort
- * payload including its APP_PROTO_VERSION byte (D-a). */
-#define P2P_FRAME_MAX   100
-#define TWR_PAYLOAD_MAX (P2P_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) /* 78 */
+/* The TOWER MTU (D14, revised 2026-10-12): a frame of at most 96 B on every PHY
+ * profile -- fsk and lora differ in the PHY only, the frames and their data are
+ * the same. So a 74 B payload: the STICKER envelope (2 B) and a 72 B body, the
+ * LoRaWAN fPort payload including its APP_PROTO_VERSION byte (D-a). */
+#define P2P_FRAME_MAX   96
+#define TWR_PAYLOAD_MAX (P2P_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) /* 74 */
 #define P2P_ENV_LEN     2
-#define P2P_MAX_BODY    (TWR_PAYLOAD_MAX - P2P_ENV_LEN) /* 76 */
+#define P2P_MAX_BODY    (TWR_PAYLOAD_MAX - P2P_ENV_LEN) /* 72 */
 #define P2P_KEY_LEN     16
 
 /* STICKER application envelopes (plan §8), the payload's first byte. */

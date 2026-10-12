@@ -225,7 +225,7 @@ ZTEST(p2p_logic, test_toa_sf7_frame_airtimes)
 		uint32_t ms;
 	} cases[] = {
 		{TWR_HDR_LEN + TWR_TAG_LEN, 57}, {TWR_ACK_FRAME_LEN, 67}, {P2P_JOIN_ACCEPT_LEN, 83},
-		{P2P_JOIN_REQ_LEN, 83},          {P2P_FRAME_MAX, 175},
+		{P2P_JOIN_REQ_LEN, 83},          {P2P_FRAME_MAX, 165},
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -294,7 +294,7 @@ ZTEST(p2p_logic, test_twr_windows)
 	zassert_equal(p2p_twr_window_ms(7, TWR_ACK_FRAME_LEN), 200u, "SF7 ACK: the 200 ms floor");
 	zassert_equal(p2p_twr_window_ms(10, TWR_ACK_FRAME_LEN), 479u);
 	zassert_equal(p2p_twr_window_ms(12, TWR_ACK_FRAME_LEN), 1786u);
-	zassert_equal(p2p_twr_window_ms(7, P2P_FRAME_MAX), 221u);
+	zassert_equal(p2p_twr_window_ms(7, P2P_FRAME_MAX), 211u);
 	zassert_equal(p2p_twr_window_ms(12, P2P_FRAME_MAX), 4080u);
 
 	/* A request's ACK may carry the answers (plan §13.5). */
@@ -1530,7 +1530,7 @@ ZTEST(p2p_logic, test_backend_envelopes_and_ports)
 	}
 }
 
-/* D14: a 76 B body fills the 100 B frame; one more is the budget's to split. */
+/* D14: a 72 B body fills the 96 B TOWER frame; one more is the budget's to split. */
 ZTEST(p2p_logic, test_backend_budget_and_oversize)
 {
 	static const uint8_t body[P2P_MAX_BODY + 1];
@@ -1538,7 +1538,7 @@ ZTEST(p2p_logic, test_backend_budget_and_oversize)
 
 	paired();
 	zassert_equal(app_radio_p2p_backend.budget(), P2P_MAX_BODY);
-	zassert_equal(app_radio_p2p_get_max_payload(), 76);
+	zassert_equal(app_radio_p2p_get_max_payload(), 72);
 
 	zassert_ok(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, 0, body, P2P_MAX_BODY, &res));
 	zassert_equal(test_lora_last_len, P2P_FRAME_MAX, "the MTU");
@@ -1625,14 +1625,14 @@ ZTEST(p2p_logic, test_new_session_resets_the_replay_lane)
 
 /* ---- the control envelope --------------------------------------------------------- */
 
-/* Plan §8.2: Capabilities (proto 1, MTU 100, lora, the cmd bitmap, battery)
+/* Plan §8.2: Capabilities (proto 1, MTU 96, lora, the cmd bitmap, battery)
  * and Hello (session id, reset reason, fw 1.5.0) in one confirmed 0x91 frame. */
 ZTEST(p2p_logic, test_ctrl_caps_hello_layout)
 {
 	static const uint8_t caps[] = {P2P_CTRL_CAPABILITIES,
 				       P2P_CAPS_LEN,
 				       0x01,
-				       100,
+				       96,
 				       0x02,
 				       0x9e,
 				       0x01,

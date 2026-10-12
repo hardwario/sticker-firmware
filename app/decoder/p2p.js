@@ -41,7 +41,7 @@ const TWR_TYPE_DATA = 0;
 const TWR_TYPE_ACK = 1;
 const TWR_FLAG_CONFIRMED = 0x01;
 const TWR_ACK_PENDING = 0x01;
-const TWR_FRAME_MAX = 100; // the node's MTU (Capabilities)
+const TWR_FRAME_MAX = 96; // the TOWER MTU (Capabilities), every PHY profile
 
 const ENV_DATA = 0x81;
 const ENV_CTRL = 0x91;
