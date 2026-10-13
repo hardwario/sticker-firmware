@@ -95,16 +95,63 @@ jobs:
              ARGS=""
           fi
 
+          set -o pipefail
           west build -p always -b sticker -- $ARGS \
             -DAPP_VERSION_MAJOR=${{ steps.version.outputs.major }} \
             -DAPP_VERSION_MINOR=${{ steps.version.outputs.minor }} \
             -DAPP_VERSION_PATCH=${{ steps.version.outputs.patch }} \
-            -DAPP_BUILD_TYPE=${{ steps.version.outputs.build_type }}
+            -DAPP_BUILD_TYPE=${{ steps.version.outputs.build_type }} \
+            | tee build-${{ matrix.config }}.log
 
           mkdir -p ../artifacts
 
           cp build/zephyr/zephyr.hex \
             ../artifacts/hio-sticker-${{ steps.version.outputs.value }}-${{ matrix.config }}.hex
+
+      # #485 B3: the linker only fails at 0 B free, but the release image needs
+      # headroom: RAM for the heap / stacks that the linker does not see (a
+      # debug build crashed on HW at a ~20-170 B margin, debug.conf), flash for
+      # the next fix. Fail the release build below these floors; every build
+      # puts its memory report in the job summary.
+      - name: Check flash/RAM headroom
+        working-directory: sticker/app
+        shell: bash
+        env:
+          MIN_FREE_FLASH: ${{ matrix.config == 'release' && 8192 || 0 }}
+          MIN_FREE_RAM: ${{ matrix.config == 'release' && 8192 || 0 }}
+        run: |
+          rc=0
+          awk -v min_flash="$MIN_FREE_FLASH" -v min_ram="$MIN_FREE_RAM" '
+            function bytes(n, u) {
+              return u == "KB" ? n * 1024 : u == "MB" ? n * 1048576 : u == "GB" ? n * 1073741824 : n
+            }
+            $1 == "FLASH:" || $1 == "RAM:" {
+              name = substr($1, 1, length($1) - 1)
+              free = bytes($4, $5) - bytes($2, $3)
+              printf "| %s | %d B | %d B | %d B | %s |\n", name, bytes($2, $3), bytes($4, $5), free, $6
+              min = name == "FLASH" ? min_flash : min_ram
+              seen[name] = 1
+              if (free < min) {
+                printf "::error::%s free %d B is below the %d B floor\n", name, free, min > "/dev/stderr"
+                bad = 1
+              }
+            }
+            END {
+              if (!seen["FLASH"] || !seen["RAM"]) {
+                print "::error::linker memory report not found" > "/dev/stderr"
+                exit 1
+              }
+              exit bad
+            }
+          ' build-${{ matrix.config }}.log > size.md || rc=$?
+          {
+            echo "### Memory (${{ matrix.config }})"
+            echo "| Region | Used | Size | Free | Used % |"
+            echo "|---|---|---|---|---|"
+            cat size.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat size.md
+          exit $rc
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
