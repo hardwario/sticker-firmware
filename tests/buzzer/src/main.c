@@ -163,6 +163,40 @@ ZTEST(buzzer, test_off_during_active_repeat_does_not_replay)
 	zassert_false(buzzer_on(), "stopped melody replayed after its repeat interval elapsed");
 }
 
+/* #485 B6: a stop issued from a thread below the buzzer thread's priority (5),
+ * as the radio / NFC command paths are, while a request waits in the queue and
+ * the buzzer thread sleeps out REQUEST_MIN_DELAY_MS after a playback. The
+ * k_wakeup() inside the stop used to preempt the caller before its purge: the
+ * buzzer thread took the queued request and played it. */
+static K_THREAD_STACK_DEFINE(low_stop_stack, 1024);
+static struct k_thread low_stop_thread;
+
+static void low_stop_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	(void)app_buzzer_play_repeating(APP_BUZZER_KIND_STOP, 0);
+}
+
+ZTEST(buzzer, test_stop_from_low_priority_drops_queued_request)
+{
+	zassert_equal(app_buzzer_play(APP_BUZZER_KIND_WARNING), 0, "play(WARNING) failed");
+	k_sleep(K_MSEC(300)); /* past the 230 ms pattern: in the 500 ms cooldown */
+	zassert_false(buzzer_on(), "WARNING should have finished by now");
+
+	zassert_equal(app_buzzer_play(APP_BUZZER_KIND_ALARM), 0, "enqueue(ALARM) failed");
+	k_thread_create(&low_stop_thread, low_stop_stack, K_THREAD_STACK_SIZEOF(low_stop_stack),
+			low_stop_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+	k_thread_join(&low_stop_thread, K_FOREVER);
+
+	for (int i = 0; i < 20; i++) { /* the whole 900 ms ALARM would show here */
+		k_sleep(K_MSEC(50));
+		zassert_false(buzzer_on(), "the queued ALARM played after the stop (%d ms)",
+			      (i + 1) * 50);
+	}
+}
+
 /* ---- queue policy: newest replaces not-yet-started --------------------- */
 
 ZTEST(buzzer, test_queue_newest_replaces_not_yet_started)

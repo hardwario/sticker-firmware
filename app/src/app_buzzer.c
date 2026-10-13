@@ -375,9 +375,17 @@ int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 		 * k_wakeup() does for k_sleep(). Purging first raced the thread
 		 * loop's abort check against m_abort still being 0, so the wakeup
 		 * was read as "repeat interval elapsed" and replayed the melody —
-		 * observed live as a `buzzer off` that never stopped a repeat. */
+		 * observed live as a `buzzer off` that never stopped a repeat.
+		 *
+		 * #485 B6: and both under k_sched_lock(). The buzzer thread
+		 * (prio 5) preempted at the k_wakeup() inside app_buzzer_set(),
+		 * before the purge: woken from its post-play sleep with a request
+		 * still queued, it took and played that request. Locked, it only
+		 * runs once the abort is set and the queue is empty. */
+		k_sched_lock();
 		int ret = app_buzzer_set(false);
 		k_msgq_purge(&m_buzzer_msgq);
+		k_sched_unlock();
 		return ret;
 	}
 
