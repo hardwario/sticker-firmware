@@ -10,7 +10,6 @@
 /* Zephyr includes */
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
-#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -21,7 +20,10 @@
 LOG_MODULE_REGISTER(app_config_legacy, LOG_LEVEL_INF);
 
 /* #498: the bool GP capabilities replaced by cap_gpio_mode / cap_gpio_input_a/_b.
- * Keys are relative to the "config" settings subtree. */
+ * Full settings names, so cleanup needs no formatting (snprintk would link the
+ * whole printf into the release image); h_set gets them without the prefix. */
+#define KEY_PFX "config/"
+
 enum legacy_key {
 	LEGACY_INPUT_A,
 	LEGACY_INPUT_B,
@@ -33,9 +35,9 @@ enum legacy_key {
 };
 
 static const char *const m_keys[LEGACY_COUNT] = {
-	[LEGACY_INPUT_A] = "cap-input-a",   [LEGACY_INPUT_B] = "cap-input-b",
-	[LEGACY_ANALOG_A] = "cap-analog-a", [LEGACY_ANALOG_B] = "cap-analog-b",
-	[LEGACY_PIR] = "cap-pir-detector",  [LEGACY_BUZZER] = "cap-buzzer",
+	[LEGACY_INPUT_A] = KEY_PFX "cap-input-a",   [LEGACY_INPUT_B] = KEY_PFX "cap-input-b",
+	[LEGACY_ANALOG_A] = KEY_PFX "cap-analog-a", [LEGACY_ANALOG_B] = KEY_PFX "cap-analog-b",
+	[LEGACY_PIR] = KEY_PFX "cap-pir-detector",  [LEGACY_BUZZER] = KEY_PFX "cap-buzzer",
 };
 
 static bool m_value[LEGACY_COUNT];
@@ -46,7 +48,7 @@ int app_config_legacy_set(const char *key, size_t len, settings_read_cb read_cb,
 	const char *next;
 
 	for (int i = 0; i < LEGACY_COUNT; i++) {
-		if (!settings_name_steq(key, m_keys[i], &next) || next) {
+		if (!settings_name_steq(key, m_keys[i] + sizeof(KEY_PFX) - 1, &next) || next) {
 			continue;
 		}
 		if (len != sizeof(bool)) {
@@ -128,13 +130,10 @@ void app_config_legacy_cleanup(void)
 			continue;
 		}
 
-		char name[32];
-
-		snprintk(name, sizeof(name), "config/%s", m_keys[i]);
-		int ret = settings_delete(name);
+		int ret = settings_delete(m_keys[i]);
 
 		if (ret) {
-			LOG_ERR("Call `settings_delete` failed (%s): %d", name, ret);
+			LOG_ERR("Call `settings_delete` failed (%s): %d", m_keys[i], ret);
 			continue;
 		}
 		m_loaded &= ~BIT(i);
