@@ -50,7 +50,7 @@ int app_settings_save(bool reboot);
  *                    partition is raw-erased. Never reachable over LoRaWAN or
  *                    the secret_key hio.stck:cmd channel — only the shell
  *                    (`settings vendor-reset`) or a vendor_reset Command on the
- *                    NFC vendor-token hio.stck:vnd channel (#316) reach it. */
+ *                    NFC vendor-token mailbox channel 0x02 (#316) reach it. */
 int app_settings_device_reset(void);
 int app_settings_factory_reset(void);
 

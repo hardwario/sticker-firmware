@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/* NDEF TLV parser. Not linked into the firmware (#485 C9): the NFC path is
+ * mailbox-only since #313. Built only by the tests/ndef host suite. */
+
 #include "app_nfc_parser.h"
 
 /* Zephyr includes */

@@ -71,11 +71,6 @@ BUILD_ASSERT(SIZEOF_FIELD(struct app_config, history_channels) == APP_HISTORY_MA
 BUILD_ASSERT(APP_HISTORY_MAX_CH <= 32, "present mask is 32-bit");
 BUILD_ASSERT(APP_W1_SLOT_COUNT <= 7 && APP_SENSOR_MB_CH_MAX <= 32, "entry is slot<<5|ch");
 
-static const uint8_t m_enc_size[] = {
-	[APP_SENSOR_HIST_U8] = 1,  [APP_SENSOR_HIST_I16] = 2, [APP_SENSOR_HIST_U16] = 2,
-	[APP_SENSOR_HIST_I32] = 4, [APP_SENSOR_HIST_U32] = 4,
-};
-
 /* ---- Module state ------------------------------------------------------- */
 
 static struct k_mutex m_lock;
@@ -1092,7 +1087,7 @@ static const struct app_sensor_channel *entry_channel(uint8_t entry, uint8_t *ty
 	const struct app_sensor_channel *c = app_sensor_channel_get(*type, HIST_CH(entry));
 
 	if (c == NULL || (c->flags & APP_SENSOR_F_RETIRED) || c->hist_enc == APP_SENSOR_HIST_NONE ||
-	    c->hist_enc >= ARRAY_SIZE(m_enc_size)) {
+	    c->hist_enc >= APP_SENSOR_HIST_COUNT) {
 		return NULL;
 	}
 	if (c->cap_off != APP_SENSOR_NO_CAP &&
@@ -1127,8 +1122,10 @@ static bool layout_build(void)
 		if (c == NULL) {
 			continue;
 		}
-		cols[n] = (struct hist_col){
-			.desc = c, .entry = e, .type = type, .size = m_enc_size[c->hist_enc]};
+		cols[n] = (struct hist_col){.desc = c,
+					    .entry = e,
+					    .type = type,
+					    .size = app_sensor_hist_encs[c->hist_enc].size};
 		size += cols[n].size;
 		/* The guard covers what decoding a stored record depends on. */
 		uint8_t key[3] = {e, type, c->hist_enc};
@@ -1173,23 +1170,9 @@ static void layout_reset(void)
 
 static void enc_limits(uint8_t enc, int64_t *lo, int64_t *hi)
 {
-	switch (enc) {
-	case APP_SENSOR_HIST_U8:
-		*lo = 0, *hi = UINT8_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_I16:
-		*lo = INT16_MIN, *hi = INT16_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_U16:
-		*lo = 0, *hi = UINT16_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_I32:
-		*lo = INT32_MIN, *hi = INT32_MAX - 1;
-		break;
-	default:
-		*lo = 0, *hi = (int64_t)UINT32_MAX - 1;
-		break;
-	}
+	/* Generated with the decoder's twin tables by sensorgen (#485 S10). */
+	*lo = app_sensor_hist_encs[enc].lo;
+	*hi = app_sensor_hist_encs[enc].hi;
 }
 
 /* The "absent" sentinel: the top value of the encoding (INT16_MAX / INT32_MAX /
@@ -1246,7 +1229,12 @@ static size_t encode_value(uint8_t *p, int i)
 			uint32_t cnt = v[c->pulses_ch].u;
 
 			if (m_pulses_known & BIT(i)) {
-				x = cnt > m_pulses_prev[i] ? 1 : 0;
+				/* A counter below its base was reset (counters reset
+				 * zeroes it; a uint32 wrap is out of reach): whatever it
+				 * holds now came in this interval (#485 S8). */
+				uint32_t base = cnt < m_pulses_prev[i] ? 0 : m_pulses_prev[i];
+
+				x = cnt > base ? 1 : 0;
 				have = true;
 			}
 			m_pulses_prev[i] = cnt;
@@ -1818,12 +1806,15 @@ size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t sta
  * never crosses a segment boundary). */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap)
 {
+	/* m_sample_size changes with the layout under m_lock: read it there, so a
+	 * concurrent capture cannot change it between the check and the divide
+	 * (#485 S9). */
+	k_mutex_lock(&m_lock, K_FOREVER);
 	if (m_sample_size == 0 || cap < m_sample_size) {
+		k_mutex_unlock(&m_lock);
 		return 0;
 	}
 	uint32_t per_frame = (uint32_t)(cap / m_sample_size);
-
-	k_mutex_lock(&m_lock, K_FOREVER);
 	bool take_unsynced = window_takes_unsynced(from_unix, to_unix);
 	uint16_t nseg = backend_nseg();
 	uint32_t frames = 0;

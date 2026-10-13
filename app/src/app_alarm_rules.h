@@ -82,6 +82,14 @@ int app_alarm_rules_reload_from_config(void);
 /* Count of cached rules that are stale under the staged slot types. */
 int app_alarm_rules_stale_count(void);
 
+/* Same set as a bit mask (bit i = alarm_i), so a SetParam can tell which rule
+ * its batch made stale (#494). */
+uint32_t app_alarm_rules_stale_mask(void);
+
+/* Rules the last app_alarm_rules_reload_from_config() sanitized as invalid
+ * (bit i = alarm_i), for the SetParam fault_field (#494). */
+uint32_t app_alarm_rules_invalid_mask(void);
+
 /* Registry type of `slot`: motherboard for slot 0, the runtime sensorN_type for
  * slots 1..4 (APP_SENSOR_TYPE_NONE when not set or out of range). */
 uint8_t app_alarm_slot_type(uint8_t slot);

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Fixtures + stubs for the app_nfc_hw test. The real app_nfc.c, app_nfc_parser.c,
+ * Fixtures + stubs for the app_nfc_hw test. The real app_nfc.c,
  * app_ccm.c, and app_cmd.c (+ app_config_ingest.c) are linked; everything else
  * they reach is stubbed here — largely mirroring tests/cmd/src/stubs.c (app_cmd's
  * own dependency set), minus the app_nfc stubs it needs (real app_nfc.c is linked
@@ -233,6 +233,16 @@ bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 }
 
 int app_alarm_rules_stale_count(void)
+{
+	return 0;
+}
+
+uint32_t app_alarm_rules_stale_mask(void)
+{
+	return 0;
+}
+
+uint32_t app_alarm_rules_invalid_mask(void)
 {
 	return 0;
 }

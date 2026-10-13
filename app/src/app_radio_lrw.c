@@ -424,7 +424,7 @@ static void state_transition(enum app_radio_state new_state)
 	switch (old) {
 	case APP_RADIO_STATE_JOINING:
 		k_work_cancel_delayable(&m_join_complete_work);
-		app_radio_air_end(); /* the join exchange join_work_handler() began */
+		app_radio_air_end(); /* a join exchange lorawan_join() left open */
 		break;
 	case APP_RADIO_STATE_HEALTHY:
 		k_timer_stop(&m_lc_timeout_timer);
@@ -864,9 +864,16 @@ static void join_work_handler(struct k_work *work)
 	m_join_busy_polls = 0;
 
 	app_radio_count(APP_RADIO_CNT_JOIN);
-	/* The join exchange ends when JOINING is left (state_transition()). */
+	/* The join exchange ends when lorawan_join() returns: it blocks through
+	 * the receive windows (#485 R10: holding until JOINING was left kept flash
+	 * writers waiting through the busy-MAC polls too). Only -ETIMEDOUT (a lost
+	 * MAC confirm, #181) may leave the windows open; then the exchange ends
+	 * when JOINING is left (state_transition()). air_end is idempotent. */
 	app_radio_air_begin();
 	ret = lorawan_join(&config);
+	if (ret != -ETIMEDOUT) {
+		app_radio_air_end();
+	}
 	if (config.mode == LORAWAN_ACT_OTAA && ret != -EBUSY && ret != -ECONNREFUSED &&
 	    ret != -ENOTCONN) {
 		/* Unless the MAC refused it, the JoinRequest went out (a missing

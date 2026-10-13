@@ -894,6 +894,7 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 	if (hold > 0) {
 		stale_note_hold(hold);
 		res->wait_ms = (uint32_t)hold + TX_DUTY_MARGIN_MS;
+		res->held = true;
 		ret = -EAGAIN;
 	} else {
 		ret = m_be->send(f, res);
@@ -971,9 +972,13 @@ int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag 
 		LOG_WRN("%s queue full; dropped", alarm ? "Alarm" : "Answer");
 		return -ENOMEM;
 	}
-	if (alarm && app_radio_backoff_wait_ms() > 0) {
-		/* The run waits out a network backoff, which an alarm skips: now.
-		 * Whatever else is due is held again by tx_send(). */
+	if (alarm && (app_radio_backoff_wait_ms() > 0 || !m_ack_pending)) {
+		/* #485 R5: an alarm does not wait for a run another frame scheduled
+		 * (a network backoff, which an alarm skips; a report's duty-cycle
+		 * hold, retry or frame gap): the run goes now and takes the alarm
+		 * first. Whatever else is due is held again by tx_send(). A pending
+		 * Ack retry keeps its randomised time (it spreads colliding nodes);
+		 * the backoff case gives that slot up (backoff_yield_to_alarm()). */
 		tx_schedule(0);
 	} else {
 		app_radio_tx_kick();
@@ -1348,7 +1353,6 @@ static uint8_t report_flags(void)
  * APP_RADIO_STALE_FACTOR x interval_report is mute although the radio work
  * queue drains (sends perpetually skipped, retries exhausted): rejoin --
  * unless the duty cycle explains it (app_radio_stale_check()). */
-#if defined(CONFIG_WATCHDOG) || defined(CONFIG_ZTEST)
 static void stale_tick(int64_t now)
 {
 	if (m_be == NULL || m_be->get_state() != APP_RADIO_STATE_HEALTHY) {
@@ -1375,15 +1379,18 @@ static void stale_tick(int64_t now)
 		break;
 	}
 }
-#endif
+
+/* Heartbeat of the radio work queue: drives the M-2 stale check on every
+ * build (#485 R6: a build without CONFIG_WATCHDOG, e.g. the P2P bench, never
+ * ran it) and, with the watchdog, the liveness channel (#182): a self-rearming
+ * work item proves the queue still drains. If it wedges, the channel goes stale
+ * and app_wdog stops feeding the IWDG -> SoC reset and a fresh join. The
+ * timeout is far above the longest legitimate single send (~7 s on TTN with a
+ * 5 s RX1 delay; a P2P confirmed uplink and its RX1), so only a true wedge
+ * trips it. */
+#define HEARTBEAT_PERIOD_SEC 5
 
 #if defined(CONFIG_WATCHDOG)
-/* Liveness heartbeat (#182): a self-rearming work item proves the radio work
- * queue still drains. If it wedges, the channel goes stale and app_wdog stops
- * feeding the IWDG -> SoC reset and a fresh join. The timeout is far above
- * the longest legitimate single send (~7 s on TTN with a 5 s RX1 delay; a
- * P2P confirmed uplink and its RX1), so only a true wedge trips it. */
-#define HEARTBEAT_PERIOD_SEC 5
 #define HEARTBEAT_TIMEOUT_MS 30000
 
 /* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
@@ -1395,6 +1402,8 @@ BUILD_ASSERT(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS > 0 &&
 #endif
 
 static int m_wdog_channel = -1;
+#endif /* defined(CONFIG_WATCHDOG) */
+
 static bool m_heartbeat_started;
 
 static void heartbeat_work_handler(struct k_work *work);
@@ -1404,28 +1413,29 @@ static void heartbeat_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
+#if defined(CONFIG_WATCHDOG)
 	app_wdog_ping(m_wdog_channel);
+#endif
 	stale_tick(k_uptime_get());
 	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work,
 				  K_SECONDS(HEARTBEAT_PERIOD_SEC));
 }
-#endif /* defined(CONFIG_WATCHDOG) */
 
 void app_radio_heartbeat_start(void)
 {
-#if defined(CONFIG_WATCHDOG)
 	if (m_heartbeat_started) {
 		return;
 	}
 	m_heartbeat_started = true;
+#if defined(CONFIG_WATCHDOG)
 	/* Registered even when radio-silent: the queue still runs, and a wedge
 	 * there should still recover. */
 	m_wdog_channel = app_wdog_register(HEARTBEAT_TIMEOUT_MS);
 	if (m_wdog_channel < 0) {
 		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
 	}
-	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
 #endif
+	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
 }
 
 void app_radio_heartbeat_feed(void)
@@ -1474,10 +1484,20 @@ static void tlm_step(void)
 			 * so the MAC drains them; the budget is back for the next report. */
 			struct app_radio_frame f = {.kind = APP_RADIO_FRAME_TELEMETRY,
 						    .buf = m_tlm_buf};
-			struct app_radio_tx_result res;
+			struct app_radio_tx_result res = {0};
+			int sret = tx_send(&f, &res);
 
-			if (tx_send(&f, &res) == -EBUSY) {
+			if (sret == -EBUSY) {
 				return; /* kicked when the confirmed frame is done */
+			}
+			if (sret == -EAGAIN && res.held &&
+			    k_uptime_get() - m_tlm_open_ms <
+				    (int64_t)g_app_config.interval_report * MSEC_PER_SEC) {
+				/* #485 R16: the duty ledger held the flush, so nothing
+				 * went: the MAC answers would wait a whole report
+				 * interval. Try again when the hold ends (R3 bound). */
+				tx_schedule(res.wait_ms);
+				return;
 			}
 			tlm_close(!m_tlm_first);
 			return;
@@ -1871,6 +1891,15 @@ int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_
 	 * count stays within the bound. */
 	uint8_t budget = m_be->budget();
 
+	if (budget == 0) {
+		/* #485 R11: pending LoRaWAN MAC answers fill this frame (H-1); the
+		 * stream's first run flushes them and every frame is sized at its
+		 * send. Refusing the replay here lost it for a moment's MAC answers:
+		 * count with the largest budget instead -- frame_count is only an
+		 * estimate (#89), the replay ends at its cursor. */
+		budget = UINT8_MAX;
+	}
+
 	m_hist_frame_bound = UINT32_MAX;
 
 	size_t cap = hist_frame_cap(budget);
@@ -1945,6 +1974,11 @@ void app_radio_test_link_reset(void)
 void app_radio_test_stale_tick(int64_t now_ms)
 {
 	stale_tick(now_ms);
+}
+
+void app_radio_test_stale_note_hold(int64_t hold_ms)
+{
+	stale_note_hold(hold_ms);
 }
 
 void app_radio_test_duty_charge_at(int64_t end_ms, uint32_t air_ms)

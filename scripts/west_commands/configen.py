@@ -183,6 +183,8 @@ UNSIGNED_TYPES = {"uint8", "uint16", "uint32", "uint64", "uint"}
 INTEGER_TYPES = SIGNED_TYPES | UNSIGNED_TYPES
 FLOAT_TYPES = {"float", "double"}
 NUMERIC_TYPES = INTEGER_TYPES | FLOAT_TYPES
+# C types narrower than their protobuf wire type (uint32/int32).
+NARROW_INT_TYPES = {"int8", "int16", "uint8", "uint16"}
 
 
 def filter_c_name(name):
@@ -754,7 +756,12 @@ def build_ingest_model(config):
                 else:
                     e["kind"] = "plain"
             elif t in NUMERIC_TYPES:
-                if p.get("min") is not None or p.get("max") is not None:
+                # #485 C2: the wire type is at least 32 bits (protobuf has no
+                # 8/16-bit scalar), so a C field narrower than that is always
+                # range-checked against its own width; otherwise the copy
+                # truncates (sensor1_type 258 -> 2).
+                if (p.get("min") is not None or p.get("max") is not None
+                        or t in NARROW_INT_TYPES):
                     e["kind"] = "int_ranged"
                     e["min"] = filter_min_value(p)
                     e["max"] = filter_max_value(p)

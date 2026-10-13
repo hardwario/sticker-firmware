@@ -236,11 +236,16 @@ struct app_radio_stale_dc {
 };
 
 /* Record a send attempt: `held` = refused / deferred by the duty cycle extends the
- * streak, `sent` clears it, anything else (a radio error) leaves it. */
+ * streak, `sent` clears it, anything else (a radio error) leaves it. A send while
+ * a known hold still runs (a small frame fits the ledger before the held one)
+ * keeps the streak: the held frame is still waiting (F-HIL-10). */
 static inline void app_radio_stale_note(struct app_radio_stale_dc *dc, bool sent, bool held,
 					int64_t now_ms)
 {
 	if (sent) {
+		if (dc->until_ms > now_ms) {
+			return;
+		}
 		dc->since_ms = 0;
 		dc->last_ms = 0;
 		dc->until_ms = 0;
@@ -511,6 +516,7 @@ struct app_radio_frame {
 struct app_radio_tx_result {
 	uint32_t wait_ms; /* -EAGAIN: when to try again (0 = the default 15 s) */
 	uint8_t budget;   /* -EMSGSIZE: the budget the frame did not fit */
+	bool held;        /* -EAGAIN: the ledger / a backoff held it, nothing sent */
 };
 
 /* The part of a backend the common TX path drives. Selected once by
@@ -691,6 +697,8 @@ void app_radio_test_tx_reset(void);
 void app_radio_test_link_reset(void);
 /* One M-2 stale-uplink check at uptime `now_ms`, as the heartbeat runs it. */
 void app_radio_test_stale_tick(int64_t now_ms);
+/* The duty ledger holds a frame for `hold_ms` (as the TX path notes it). */
+void app_radio_test_stale_note_hold(int64_t hold_ms);
 /* Cancel the downlink and announce work items and clear their state. */
 void app_radio_test_cmd_reset(void);
 /* Forget any exchange and flash writer the gate still counts. */

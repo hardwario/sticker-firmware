@@ -31,10 +31,14 @@ static const struct gpio_dt_spec m_b_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user
 #define REQUEST_MIN_DELAY_MS 500
 
 /* The debug build (RTT log + shell, CONFIG_PM=n) runs close to its RAM budget
- * even without the buzzer, so this thread's stack is kept modest — well above
- * the 256 B the equivalent bench-test thread (gpio writes + k_sleep +
- * occasional LOG_ERR, no msgq/switch) ran fine at, for margin around the extra
- * k_msgq_get()/switch this version adds. */
+ * even without the buzzer, so this thread's stack is kept modest. Measured
+ * (#485 B7, -fstack-usage on the release image, LTO off so the per-function
+ * frames are visible): the deepest path is z_thread_entry 8 + thread_entry 72
+ * + execute_pattern 40 + k_sleep -> z_tick_sleep -> z_add_timeout 80, or
+ * k_msgq_get -> z_pend_curr -> add_to_waitq / z_add_timeout 112, plus the
+ * 32 B exception frame (no FPU): ~260 B, so 512 B keeps ~50 % margin. The
+ * release image logs nothing; a debug image with CONFIG_APP_BUZZER=y adds the
+ * LOG_ERR path and should be re-checked with CONFIG_THREAD_ANALYZER. */
 #define BUZZER_THREAD_STACK_SIZE 512
 #define BUZZER_THREAD_PRIORITY   K_PRIO_PREEMPT(5)
 
@@ -171,6 +175,8 @@ static void execute_pattern(const struct buzzer_cmd *commands, int repetitions)
 		length = i + 1;
 	}
 
+	bool on = false;
+
 	for (int rep = 0; rep < repetitions; rep++) {
 		for (int i = 0; i < length; i++) {
 			if (atomic_get(&m_abort)) {
@@ -180,15 +186,19 @@ static void execute_pattern(const struct buzzer_cmd *commands, int repetitions)
 
 			const struct buzzer_cmd *cmd = &commands[i];
 
-			/* Skip last delay on last repetition */
+			/* The last delay of the last repetition is only skipped when
+			 * the buzzer is already off (ALARM's trailing gap). An "on"
+			 * delay is the beep itself: skipping it made app_buzzer_on(),
+			 * INFO and WARNING's last beep a ~0 ms pulse (#494 HIL). */
 			if (rep == repetitions - 1 && i == length - 1 &&
-			    cmd->type == BUZZER_CMD_DELAY) {
+			    cmd->type == BUZZER_CMD_DELAY && !on) {
 				break;
 			}
 
 			switch (cmd->type) {
 			case BUZZER_CMD_SET:
-				set(cmd->on);
+				on = cmd->on;
+				set(on);
 				break;
 			case BUZZER_CMD_DELAY:
 				if (cmd->duration > 0) {
@@ -375,9 +385,17 @@ int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 		 * k_wakeup() does for k_sleep(). Purging first raced the thread
 		 * loop's abort check against m_abort still being 0, so the wakeup
 		 * was read as "repeat interval elapsed" and replayed the melody —
-		 * observed live as a `buzzer off` that never stopped a repeat. */
+		 * observed live as a `buzzer off` that never stopped a repeat.
+		 *
+		 * #485 B6: and both under k_sched_lock(). The buzzer thread
+		 * (prio 5) preempted at the k_wakeup() inside app_buzzer_set(),
+		 * before the purge: woken from its post-play sleep with a request
+		 * still queued, it took and played that request. Locked, it only
+		 * runs once the abort is set and the queue is empty. */
+		k_sched_lock();
 		int ret = app_buzzer_set(false);
 		k_msgq_purge(&m_buzzer_msgq);
+		k_sched_unlock();
 		return ret;
 	}
 

@@ -6,6 +6,7 @@
 
 #include "app_w1.h"
 #include "app_log.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -262,6 +263,14 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 				res = res ? res : ret;
 			}
 		}
+#if defined(CONFIG_WATCHDOG)
+		/* #485 B1: a failing machine probe costs ~3 s (DS28E17 busy timeouts
+		 * x LIS2DH12 init retries) and the scan has up to APP_W1_SCAN_MAX
+		 * devices: feed per device, so a few bad probes on a taught slot
+		 * cannot hold the boot past the 10 s IWDG into a reset loop. The
+		 * liveness layer still withholds the feed for a wedged worker. */
+		app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 	}
 
 error:

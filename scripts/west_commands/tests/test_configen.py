@@ -338,6 +338,24 @@ def test_generated_c_matches_committed(workdir):
         assert (workdir / name).read_text() == (APP_SRC / name).read_text(), name
 
 
+def test_narrow_int_params_are_range_checked(workdir):
+    """#485 C2: a uint8/uint16 C field travels as a 32-bit protobuf scalar, so
+    the ingest must range-check it against the C width instead of copying it
+    (sensor1_type 258 used to store 2 = dallas)."""
+    import re
+    import yaml
+
+    _run_configen(workdir)
+    ingest = (workdir / "app_config_ingest.c").read_text()
+    params = yaml.safe_load((APP_SRC / "app_config.yml").read_text())["parameters"]
+    narrow = [p for p in params if p.get("type") in ("uint8", "uint16", "int8", "int16")
+              and p.get("proto_id") is not None]
+    assert narrow, "expected at least one narrow integer parameter"
+    for p in narrow:
+        assert not re.search(rf"config->{p['name']} = src->{p['name']};", ingest), \
+            f"{p['name']} is copied without a range check"
+
+
 def test_migration_preserves_factory_fields(workdir):
     """Issue #87/#108: h_commit must restore every field persisting across
     `device_reset` (the broadest tier, #299) after the defaults reset, and

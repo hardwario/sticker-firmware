@@ -331,6 +331,12 @@ static void fault_record_take(void)
 	m_fault.magic = 0;
 }
 
+/* Power-up settle before the POST_KERNEL drivers (#485 B8): added with the
+ * MPL3115A2 driver (54f45c09, 2025-05), it runs at priority 0, ahead of the
+ * drivers that probe their chip at boot (e.g. the SHT40; the other on-board
+ * sensors are zephyr,deferred-init and wait for app_sensor_init()). It costs
+ * 500 ms per boot but runs before the IWDG starts. Shorten it only after a HIL
+ * cold boot (battery insert) shows every sensor probing without it. */
 static int init(void)
 {
 	k_sleep(K_MSEC(500));
@@ -482,6 +488,12 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
+
+#if defined(CONFIG_WATCHDOG)
+	/* #485 B1: app_sensor_init() can take seconds (1-Wire scans of taught slots);
+	 * feed between the init steps so their sum never meets the 10 s IWDG. */
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	/* NFC last, once every component a command can reach is up (#414): the poll
 	 * thread serves phone commands as soon as it starts, and one served before

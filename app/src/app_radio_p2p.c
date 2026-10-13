@@ -258,6 +258,11 @@ static uint32_t m_fcnt_reserved; /* persisted high-water; m_fcnt < this is durab
 static enum p2p_link_state m_link_state = P2P_LINK_UNPAIRED;
 static uint32_t m_net_id; /* the gateway address; 0 until PAIRED */
 static uint8_t m_session_key[P2P_KEY_LEN];
+/* The JoinAccept's rx_delay, persisted and reported (`ats radio info`) only:
+ * no window uses it (#485 R13). The JoinAccept window must open before any
+ * JoinAccept is known (P2P_RX1_DELAY_DEFAULT_S) and the data windows follow the
+ * TOWER turnaround (p2p_twr_window_ms()). Kept in the 23 B pairing record so its
+ * layout stays compatible. */
 static uint8_t m_rx_delay_s = P2P_RX1_DELAY_DEFAULT_S;
 /* D3: TX power the central assigned for this session in the JoinAccept. Falls
  * back to g_app_config.p2p_tx_power when unassigned. */
@@ -2336,10 +2341,13 @@ static uint32_t p2p_tx_airtime_ms(size_t len)
  * frames, unless an earlier one is still unanswered. */
 static uint8_t p2p_tx_report_flags(bool due)
 {
+	/* Count first (#485 R8): this report starts after P2P_ANSWER_REPORTS_MAX
+	 * reports had their PENDING, so a LinkCheckAns still missing is lost now
+	 * and must not hold this report's LinkCheckReq one more report. */
+	answer_fetch_count();
 	if (due && !m_lc_outstanding) {
 		ctrl_request(P2P_CTRL_BIT_LINK_CHECK, P2P_LINK_CHECK_DELAY_MS);
 	}
-	answer_fetch_count();
 	return APP_RADIO_FRAME_CONFIRMED | (due ? APP_RADIO_FRAME_LINK_CHECK : 0);
 }
 
@@ -2458,6 +2466,14 @@ static void mark_ready(void)
 		m_ready_cb();
 	}
 }
+
+static void boot_ready_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	mark_ready();
+}
+
+static K_WORK_DEFINE(m_boot_ready_work, boot_ready_work_handler);
 
 /* Build one JoinRequest into `frame` (P2P_JOIN_REQ_LEN bytes): a TOWER Data
  * frame, src = this node, dest = 0, counter = dev_nonce, sealed under join_key,
@@ -3258,6 +3274,8 @@ int app_radio_p2p_init(void)
 	return 0;
 }
 
+static bool on_radio_wq(void);
+
 void app_radio_p2p_start(void)
 {
 	/* No usable root key -- see app_key_is_set() above for why this refuses
@@ -3297,8 +3315,14 @@ void app_radio_p2p_start(void)
 
 	if (m_link_state == P2P_LINK_PAIRED) {
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
-		 * a session survives normal power cycles). */
-		mark_ready();
+		 * a session survives normal power cycles). mark_ready() runs the
+		 * link-up, announce and TX kick, which are radio work queue only
+		 * (#485 R12): run it there. A queue that is not running (the host
+		 * tests) refuses the submit; nothing can race it then. */
+		if (on_radio_wq() ||
+		    k_work_submit_to_queue(app_radio_work_q(), &m_boot_ready_work) < 0) {
+			mark_ready();
+		}
 		return;
 	}
 
@@ -3350,10 +3374,11 @@ void app_radio_p2p_register_ready_cb(void (*cb)(void))
 
 void app_radio_p2p_suspend(void)
 {
-	/* Nothing queued survives a poweroff -- the work queue itself (including
-	 * any pending m_join_work retry) is torn down with the reboot that follows
-	 * deep-sleep entry, same as app_radio_lrw_suspend() relies on for its own
-	 * timers. No-op today; kept as an explicit facade hook. */
+	/* Stop what would key the radio in the 100 ms before poweroff (#485 R7):
+	 * a JoinRequest retry and the 0x91 control uplink. Wake is a clean boot,
+	 * so nothing has to be resumed. Not _sync: the caller may be any thread. */
+	(void)k_work_cancel_delayable(&m_join_work);
+	(void)k_work_cancel_delayable(&m_ctrl_work);
 }
 
 void app_radio_p2p_get_info(struct app_radio_p2p_info *info)

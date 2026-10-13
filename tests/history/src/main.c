@@ -348,6 +348,15 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 	app_history_capture(); /* counter unchanged → no motion */
 	zassert_equal(app_history_get(2, &r), 0, "get2");
 	zassert_within(r.value[6], 0.0, 0.01, "accel-motion %g", r.value[6]);
+
+	/* #485 S8: a counters reset drops the counter below its base; the pulses
+	 * it holds now came in this interval, so motion = 1, not 0. */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	mb_u(APP_SENSOR_CH_MOTHERBOARD_ACCEL_COUNT, 2);
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+	zassert_equal(app_history_get(3, &r), 0, "get3");
+	zassert_within(r.value[6], 1.0, 0.01, "accel-motion after reset %g", r.value[6]);
 }
 
 /* #430: any registry channel is recordable — states as u8, a negative altitude

@@ -622,8 +622,9 @@ ZTEST(alarm_eval, test_alarm_batch_waits_until_all_pages_fit)
 	zassert_equal(test_alarm_event_count, 2);
 }
 
-/* #462: an empty queue takes a batch of more pages than it holds: no queued
- * frame is left whose dequeue would release it. */
+/* #462 / F-HIL-13: an empty queue takes the first report of a batch with more
+ * pages than it holds (a whole queue); the rest is the next report, released
+ * when app_radio takes a frame, so no page is dropped on a full queue. */
 ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
 {
 	struct app_alarm_rule r = {
@@ -645,11 +646,49 @@ ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
 	app_alarm_poll();
 
 	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
 	test_radio_data_hold_ms = 0;
 	app_alarm_flush_held();
 	k_sleep(K_MSEC(20));
-	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH + 1, "every page, got %zu",
+	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH, "a queue of pages, got %zu",
 		      test_alarm_frames);
+
+	test_radio_alarm_free = 1; /* app_radio took a frame */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH + 1, "then the rest, got %zu",
+		      test_alarm_frames);
+	zassert_equal(test_alarm_event_count, APP_RADIO_TX_QUEUE_DEPTH + 1, "every event once");
+}
+
+/* F-HIL-11: every rule firing in one alarm-limit window reaches the server (8
+ * of 12 did before), and a full batch closes its window at once. */
+ZTEST(alarm_eval, test_full_window_keeps_every_rule_and_flushes_early)
+{
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+	};
+
+	g_app_config.alarm_limit = 10;
+	test_alarm_max_events = 8; /* AlarmReport.events max_count */
+	for (uint8_t i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		zassert_equal(app_alarm_rules_set(i, &r), 0, "rule %u rejected", i);
+	}
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f;
+	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	k_sleep(K_MSEC(20));
+
+	zassert_equal(test_alarm_frames, 2, "two pages before the window's end, got %zu",
+		      test_alarm_frames);
+	zassert_equal(test_alarm_event_count, APP_ALARM_RULE_COUNT, "every rule, got %zu",
+		      test_alarm_event_count);
 }
 
 /* #462: before a post-command action (a reboot) app_radio asks for a batch
@@ -722,6 +761,33 @@ ZTEST(alarm_eval, test_disabling_active_rule_emits_deactivate_edge)
 	const struct app_cmd_alarm_event *ev = last_event();
 	zassert_equal(ev->edge, 1, "expected deactivate edge (1), got %u", ev->edge);
 	zassert_equal(ev->rule, 0, "deactivate edge on wrong rule %u", ev->rule);
+}
+
+/* #485 S6: a STATE latch never sets rt->type, so the rt_sync() deactivate edge
+ * of a disabled STATE rule carried type NONE; it must say TRIGGER, the same
+ * type its activate edge had. */
+ZTEST(alarm_eval, test_disabling_active_state_rule_deactivates_as_trigger)
+{
+	g_app_config.alarm_limit = 0;
+	set_hall_left_edge_rule(1, 1, 0.0f);
+	test_hall.left_is_active = true;
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE),
+		     "state rule did not activate");
+	zassert_equal(last_event()->type, 3, "activate edge type %u, want TRIGGER (3)",
+		      last_event()->type);
+
+	struct app_alarm_rule r;
+	zassert_true(app_alarm_rules_get(0, &r), "rule readback failed");
+	r.enabled = 0;
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule disable rejected");
+
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+
+	const struct app_cmd_alarm_event *ev = last_event();
+	zassert_equal(ev->edge, 1, "expected deactivate edge (1), got %u", ev->edge);
+	zassert_equal(ev->type, 3, "deactivate edge type %u, want TRIGGER (3)", ev->type);
 }
 
 ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)

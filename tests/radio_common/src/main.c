@@ -520,6 +520,33 @@ ZTEST(radio_common, test_queued_duty_hold_default_wait)
 	zassert_equal(fk.n, 2);
 }
 
+/* #485 R5: an alarm queued while a report waits out a duty-cycle hold does not
+ * wait for that run: it goes at once, and the report is tried again after it. */
+static void alarm_preempts_held_report(void)
+{
+	const int r[] = {-EAGAIN};
+	const size_t lens[] = {20};
+
+	fk.report_flags = 0;
+	frames(lens, 1);
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 60000;
+	app_radio_send_telemetry_now();
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1, "the report frame was held");
+	fk.wait_ms = 0;
+
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_SECONDS(1));
+	zassert_true(fk.n >= 2, "the alarm waited for the report's hold");
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ALARM);
+	zassert_ok(fk.log[1].ret);
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.log[fk.n - 1].kind, APP_RADIO_FRAME_TELEMETRY);
+	zassert_equal(reports_done(), 1);
+}
+BOTH_PROFILES(alarm_preempts_held_report)
+
 /* A refused frame is retried every 15 s, 8 times, then dropped; the next
  * frame goes. */
 static void queued_error_retried_then_dropped(void)
@@ -1029,6 +1056,24 @@ static void budget_zero_sends_an_empty_frame(void)
 }
 BOTH_PROFILES(budget_zero_sends_an_empty_frame)
 
+/* #485 R16: a MAC flush the duty ledger (here: a P2P network backoff) holds is
+ * sent when the hold ends, not left for the next report interval. */
+ZTEST(radio_common, test_budget_zero_flush_waits_out_a_hold)
+{
+	const size_t lens[] = {20};
+
+	use_profile(&PROFILE_P2P);
+	frames(lens, 1);
+	fk.budget = 0;
+	app_radio_backoff_set(5);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(2));
+	zassert_equal(fk.n, 0, "held by the backoff");
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 1, "the flush went once the hold ended");
+	zassert_equal(fk.log[0].len, 0);
+}
+
 /* ... mid-report: the flush ends the report and resets its snapshot. */
 ZTEST(radio_common, test_budget_zero_mid_report_resets_the_snapshot)
 {
@@ -1452,8 +1497,14 @@ ZTEST(radio_common, test_stale_known_hold_lasts_until_its_end)
 	app_radio_stale_note_hold(&dc, t0 + 60 * 1000, 1000);
 	zassert_equal(dc.until_ms, t0 + hold);
 
-	/* A send ends it. */
+	/* F-HIL-10: another frame sent while the hold runs (a 31 B announce fits the
+	 * ledger before the held 49 B history frame) keeps the excuse. */
 	app_radio_stale_note(&dc, true, false, t0 + 2 * 60 * 1000);
+	zassert_equal(app_radio_stale_check(t0 + hold, 1, &dc, 60), APP_RADIO_STALE_HOLD_DC,
+		      "a send during the hold keeps it");
+
+	/* A send once the hold is over ends it. */
+	app_radio_stale_note(&dc, true, false, t0 + hold);
 	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60), APP_RADIO_STALE_REJOIN,
 		      "the streak is gone");
 
@@ -1493,6 +1544,26 @@ static void stale_ledger_hold_keeps_m2_quiet(void)
 	zassert_equal(fk.rejoin_calls, 1, "mute after the hold: rejoin");
 }
 BOTH_PROFILES(stale_ledger_hold_keeps_m2_quiet)
+
+/* F-HIL-10 (5132, DR0): a replay frame held by the ledger, then a small answer
+ * that fits sooner goes out. The held frame still waits: M-2 must not rejoin
+ * (it would drop the replay) until the hold is past. */
+static void stale_send_during_hold_keeps_excuse(void)
+{
+	const int64_t hold = 30 * 60 * 1000;
+
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_test_stale_note_hold(hold);
+	app_radio_note_send(true, false); /* the announce that fit */
+	app_radio_test_stale_tick(t0 + STALE_MS + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS);
+	zassert_equal(fk.rejoin_calls, 0, "held frame still waiting: no rejoin");
+	app_radio_test_stale_tick(t0 + hold + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS +
+				  5000);
+	zassert_equal(fk.rejoin_calls, 1, "mute after the hold: rejoin");
+}
+BOTH_PROFILES(stale_send_during_hold_keeps_excuse)
 
 /* ---- Network backoff (P2P 0x15) ------------------------------------------ */
 
@@ -2312,6 +2383,30 @@ static void replay_refused(void)
 	zassert_equal(m_ready_calls, 0);
 }
 BOTH_PROFILES(replay_refused)
+
+/* #485 R11: a request that finds the budget at 0 (pending MAC answers) is not
+ * refused: the stream flushes them first and sizes every frame at its send. */
+static void replay_starts_at_budget_zero(void)
+{
+	uint32_t n = hist_fill(0);
+
+	fk.budget = 0;
+	fk.flush_budget = m_prof->budget;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(40));
+	zassert_true(fk.n >= 2, "only %zu sends", fk.n);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_HISTORY);
+	zassert_equal(fk.log[0].len, 0, "the MAC flush goes first");
+
+	uint32_t recs = 0;
+
+	for (size_t i = 1; i < fk.n; i++) {
+		recs += hist_recs(&fk.log[i]);
+	}
+	zassert_equal(recs, n, "records streamed %u, want %u", recs, n);
+	zassert_false(g_hist_replay_active, "the replay did not end");
+}
+BOTH_PROFILES(replay_starts_at_budget_zero)
 
 /* The replay owns the radio: the report waits for its end, alarms do not. */
 static void replay_holds_telemetry_not_alarms(void)
