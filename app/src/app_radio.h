@@ -511,6 +511,7 @@ struct app_radio_frame {
 struct app_radio_tx_result {
 	uint32_t wait_ms; /* -EAGAIN: when to try again (0 = the default 15 s) */
 	uint8_t budget;   /* -EMSGSIZE: the budget the frame did not fit */
+	bool held;        /* -EAGAIN: the ledger / a backoff held it, nothing sent */
 };
 
 /* The part of a backend the common TX path drives. Selected once by

@@ -1988,6 +1988,26 @@ ZTEST(p2p_logic, test_lost_link_check_ans_frees_the_next_request)
 	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "asked again");
 }
 
+/* #485 R8: the report that finds the LinkCheckAns lost (three reports had
+ * their PENDING) may already ask again, not one report later. */
+ZTEST(p2p_logic, test_lost_link_check_ans_asks_again_on_the_4th_report)
+{
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+
+	paired();
+	gw.ack = true;
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	p2p_test_ctrl_run(); /* acknowledged, no answer yet */
+	zassert_equal(p2p_test_ctrl_pending(), 0);
+
+	for (int i = 1; i <= 3; i++) {
+		zassert_equal(be->report_flags(true), LC_REPORT);
+		zassert_equal(p2p_test_ctrl_pending(), 0, "report %d: still outstanding", i);
+	}
+	zassert_equal(be->report_flags(true), LC_REPORT);
+	zassert_equal(p2p_test_ctrl_pending(), BIT(2), "the 4th report asks again");
+}
+
 /* §3.2: every report goes CONFIRMED, only the one the cadence made a link
  * check is flagged as one (its lost ACK alone is a failed check) and asks the
  * central for the numbers (LinkCheckReq). */

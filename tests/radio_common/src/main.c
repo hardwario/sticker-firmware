@@ -1056,6 +1056,24 @@ static void budget_zero_sends_an_empty_frame(void)
 }
 BOTH_PROFILES(budget_zero_sends_an_empty_frame)
 
+/* #485 R16: a MAC flush the duty ledger (here: a P2P network backoff) holds is
+ * sent when the hold ends, not left for the next report interval. */
+ZTEST(radio_common, test_budget_zero_flush_waits_out_a_hold)
+{
+	const size_t lens[] = {20};
+
+	use_profile(&PROFILE_P2P);
+	frames(lens, 1);
+	fk.budget = 0;
+	app_radio_backoff_set(5);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(2));
+	zassert_equal(fk.n, 0, "held by the backoff");
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 1, "the flush went once the hold ended");
+	zassert_equal(fk.log[0].len, 0);
+}
+
 /* ... mid-report: the flush ends the report and resets its snapshot. */
 ZTEST(radio_common, test_budget_zero_mid_report_resets_the_snapshot)
 {
@@ -2339,6 +2357,30 @@ static void replay_refused(void)
 	zassert_equal(m_ready_calls, 0);
 }
 BOTH_PROFILES(replay_refused)
+
+/* #485 R11: a request that finds the budget at 0 (pending MAC answers) is not
+ * refused: the stream flushes them first and sizes every frame at its send. */
+static void replay_starts_at_budget_zero(void)
+{
+	uint32_t n = hist_fill(0);
+
+	fk.budget = 0;
+	fk.flush_budget = m_prof->budget;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(40));
+	zassert_true(fk.n >= 2, "only %zu sends", fk.n);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_HISTORY);
+	zassert_equal(fk.log[0].len, 0, "the MAC flush goes first");
+
+	uint32_t recs = 0;
+
+	for (size_t i = 1; i < fk.n; i++) {
+		recs += hist_recs(&fk.log[i]);
+	}
+	zassert_equal(recs, n, "records streamed %u, want %u", recs, n);
+	zassert_false(g_hist_replay_active, "the replay did not end");
+}
+BOTH_PROFILES(replay_starts_at_budget_zero)
 
 /* The replay owns the radio: the report waits for its end, alarms do not. */
 static void replay_holds_telemetry_not_alarms(void)
