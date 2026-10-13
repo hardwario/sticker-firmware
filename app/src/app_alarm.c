@@ -970,9 +970,10 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 
 /* Motherboard: every `liveness` channel (app_sensor_types.yaml, #430) of an
  * enabled sensor is watched for "stopped reporting" — SHT4x temperature /
- * humidity, pressure and the battery monitor (L-41). Digital channels are not
- * liveness channels — a disconnected line still reads a level, it never goes
- * NaN. Latch k is the k-th liveness channel.
+ * humidity, pressure, the GP_A / GP_B analog voltage (#396) and the battery
+ * monitor (L-41). Digital channels are not liveness channels — a disconnected
+ * line still reads a level, it never goes NaN. Latch k is the k-th liveness
+ * channel.
  *
  * 1-Wire slot: latch 0 watches the whole device — no channel at all means it
  * stopped answering (unplugged, cable cut) and raises ONE no_data alarm on

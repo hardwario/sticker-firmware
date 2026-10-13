@@ -189,11 +189,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 			{
 				.name = "input-a-voltage",
 				.kind = APP_SENSOR_KIND_THRESHOLD,
-				.flags = APP_SENSOR_F_RANGE,
+				.flags = APP_SENSOR_F_LIVENESS | APP_SENSOR_F_RANGE,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U16,
-				.cap_off = APP_SENSOR_NO_CAP, /* cap_analog_a: pending (not in
-								 app_config yet) */
+				.cap_off = offsetof(struct app_config, cap_analog_a),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
 				.wire_scale = 1000.0f,
@@ -235,11 +234,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 			{
 				.name = "input-b-voltage",
 				.kind = APP_SENSOR_KIND_THRESHOLD,
-				.flags = APP_SENSOR_F_RANGE,
+				.flags = APP_SENSOR_F_LIVENESS | APP_SENSOR_F_RANGE,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U16,
-				.cap_off = APP_SENSOR_NO_CAP, /* cap_analog_b: pending (not in
-								 app_config yet) */
+				.cap_off = offsetof(struct app_config, cap_analog_b),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
 				.wire_scale = 1000.0f,

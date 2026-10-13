@@ -141,7 +141,8 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer", 22: "cap_sht",
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer",
+  20: "cap_analog_a", 21: "cap_analog_b", 22: "cap_sht",
   23: "sensor1_type", 24: "sensor2_type", 25: "sensor3_type", 26: "sensor4_type"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
@@ -990,6 +991,9 @@ function decodeTelemetry(bytes) {
       // #425 paging, as Response / AlarmReport
       case 28: d.page_index = v.value; break;
       case 29: d.page_count = v.value; break;
+      // input A / B analog voltage (#396), mV -> V
+      case 30: d.input_a_voltage = v.value / 1000; break;
+      case 31: d.input_b_voltage = v.value / 1000; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }

@@ -62,8 +62,8 @@ enum tlm_group {
 	G_PIR,          /* motion_count */
 	G_HALL_L,       /* hall_left_count, hall_left_flags */
 	G_HALL_R,       /* hall_right_count, hall_right_flags */
-	G_INPUT_A,      /* input_a_count, input_a_flags */
-	G_INPUT_B,      /* input_b_count, input_b_flags */
+	G_INPUT_A,      /* input_a_count, input_a_flags, input_a_voltage */
+	G_INPUT_B,      /* input_b_count, input_b_flags, input_b_voltage */
 	G_COUNT,
 };
 
@@ -113,10 +113,12 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 	case G_INPUT_A:
 		SEL(input_a_count);
 		SEL(input_a_flags);
+		SEL(input_a_voltage);
 		break;
 	case G_INPUT_B:
 		SEL(input_b_count);
 		SEL(input_b_flags);
+		SEL(input_b_voltage);
 		break;
 	default:
 		break;
@@ -345,6 +347,25 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->input_b_count = input.input_b_count;
 		t->has_input_b_flags = true;
 		t->input_b_flags = f;
+	}
+
+	/* input A / B analog voltage (#396) — sent when enabled and read, scaled
+	 * by the registry (mV). */
+	if (g_app_config.cap_analog_a &&
+	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE))) {
+		t->has_input_a_voltage = true;
+		t->input_a_voltage = (uint32_t)app_sensor_wire_value(
+			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
+					       APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE),
+			d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE]);
+	}
+	if (g_app_config.cap_analog_b &&
+	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE))) {
+		t->has_input_b_voltage = true;
+		t->input_b_voltage = (uint32_t)app_sensor_wire_value(
+			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
+					       APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE),
+			d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE]);
 	}
 }
 

@@ -713,8 +713,8 @@ parameters:
     type: bool
     help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
 
-  # Onboard SHT4x (#465). proto_id 22, not 20: draft PR #407 claims sensors
-  # 20/21 for cap_analog_a/_b. Default true keeps an upgraded unit (no NVS key)
+  # Onboard SHT4x (#465). proto_id 22: sensors 20/21 are cap_analog_a/_b
+  # (#396). Default true keeps an upgraded unit (no NVS key)
   # sampling the onboard sensor exactly as before.
   - name: cap_sht
     proto_group: sensors
@@ -734,6 +734,21 @@ parameters:
     proto_id: 9
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
+
+  # Analog voltage on the external inputs GP_A / GP_B (#396). Same pins as
+  # cap_input_a/_b, cap_pir_detector and cap_buzzer (#90): app_sensor_init()
+  # keeps one owner per pin — PIR/buzzer first, then the digital input.
+  - name: cap_analog_a
+    proto_group: sensors
+    proto_id: 20
+    type: bool
+    help: "Get/Set input A analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_A, ADC1_IN3). Mutually exclusive with cap_input_a / cap_pir_detector / cap_buzzer (those win)."
+
+  - name: cap_analog_b
+    proto_group: sensors
+    proto_id: 21
+    type: bool
+    help: "Get/Set input B analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_B, ADC1_IN7). Mutually exclusive with cap_input_b / cap_pir_detector / cap_buzzer (those win)."
 
   # Dynamic alarm rules (#430). One packed-hex rule per entry (the index is the
   # rule's stable identity). 18 bytes little-endian:
