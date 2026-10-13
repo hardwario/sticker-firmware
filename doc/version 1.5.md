@@ -2584,6 +2584,12 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     even when it was the beep itself, so `app_buzzer_on(ms)` (`ats buzzer beep`), INFO and
     WARNING's second beep were ~0 ms pulses (since #338). It now skips it only when the buzzer is
     already off (ALARM's trailing gap); WARNING lasts 310 ms, INFO 80 ms.
+  - *Build without the barometer.* `CONFIG_MPL3115A2=n` failed to link (barometer init/read
+    and `app_mpl3115a2.c` were unconditional); now guarded like OPT3001. A debug image with
+    `W1=y` and LoRaWAN needs `-DCONFIG_SHELL_HELP=n` to fit (`debug.conf` note).
+  - *Bench PASS:* clock window, alarm `fault_field`, injector, B1 (5 boots with a failing probe),
+    B6 (40× stop stress), buzzer pin hold, R12 (P2P paired boot, 4 boots, no JoinRequest, FCnt
+    monotonic) and R7 (P2P suspend: no uplinks, wake without join).
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
 - **Cost:** release 189 340 B flash (88.90 %), 47 880 B RAM (73.06 %); debug 238 408 B
