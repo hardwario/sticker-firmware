@@ -278,6 +278,7 @@ static void print_available_sensors(const struct shell *shell)
 	shell_print(shell, "Available sensors:");
 	shell_print(shell, "  ---Float sensors---:");
 	shell_print(shell, "    voltage, temperature, humidity, illuminance, altitude, pressure");
+	shell_print(shell, "    input-a-voltage, input-b-voltage");
 	shell_print(shell, "    sN-{temperature,humidity,illuminance,magnetic-field} (N=1..4)");
 	shell_print(shell, "  ---Integer sensors---:");
 	shell_print(shell, "    orientation");
@@ -323,6 +324,12 @@ static enum sval_kind resolve_sensor(const char *name, float *f, uint32_t *u, in
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "altitude") == 0) {
 		*f = APP_SENSOR_MB_F(d, ALTITUDE);
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "input-a-voltage") == 0) {
+		*f = APP_SENSOR_MB_F(d, INPUT_A_VOLTAGE);
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "input-b-voltage") == 0) {
+		*f = APP_SENSOR_MB_F(d, INPUT_B_VOLTAGE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "pressure") == 0) {
 		*f = APP_SENSOR_MB_F(d, PRESSURE) / 10.0f; /* hPa -> kPa */
@@ -544,6 +551,10 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "  %-16s count=%u active=%s",
 		    "input-b:", APP_SENSOR_MB_U(d, INPUT_B_COUNT),
 		    APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f ? "true" : "false");
+	/* #396: input-referred (divider-corrected); nan with cap_analog_a/b off or
+	 * the pin owned by the digital input / PIR / buzzer. */
+	print_float(shell, "input-a-voltage:", APP_SENSOR_MB_F(d, INPUT_A_VOLTAGE), "V");
+	print_float(shell, "input-b-voltage:", APP_SENSOR_MB_F(d, INPUT_B_VOLTAGE), "V");
 
 #if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor

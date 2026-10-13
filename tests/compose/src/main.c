@@ -287,6 +287,65 @@ ZTEST(compose, test_cap_sht_gating)
 	zassert_false(fr[0].has_humidity, "humidity leaked with cap_sht off");
 }
 
+/* Store a motherboard channel reading through the registry (range + valid bit). */
+static void mb_put(uint8_t ch, float v)
+{
+	struct app_sensor_mb *mb = &g_app_sensor_data.mb;
+
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb->v, &mb->valid, ch, v);
+}
+
+/* #396: input A/B analog voltage — cap-gated, mV on the wire (registry wire
+ * scale, rounded), omitted without a valid sample (#483). The test name must
+ * sort after test_boot_internal (ztest runs a suite alphabetically). */
+ZTEST(compose, test_input_analog_voltage)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	/* cap off -> dropped even with a valid reading */
+	set_clean();
+	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, 1.65f);
+	run_report(fr, 8, &n);
+	for (size_t i = 0; i < n; i++) {
+		zassert_false(fr[i].has_input_a_voltage, "input_a_voltage leaked with cap off");
+	}
+
+	/* cap on -> mV; 4.113 V must not truncate to 4112 */
+	set_clean();
+	g_app_config.cap_analog_a = true;
+	g_app_config.cap_analog_b = true;
+	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, 4.113f);
+	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, 24.0f);
+	run_report(fr, 8, &n);
+	bool seen_a = false, seen_b = false;
+	for (size_t i = 0; i < n; i++) {
+		if (fr[i].has_input_a_voltage) {
+			seen_a = true;
+			zassert_equal(fr[i].input_a_voltage, 4113, "input_a_voltage %u",
+				      fr[i].input_a_voltage);
+		}
+		if (fr[i].has_input_b_voltage) {
+			seen_b = true;
+			zassert_equal(fr[i].input_b_voltage, 24000, "input_b_voltage %u",
+				      fr[i].input_b_voltage);
+		}
+	}
+	zassert_true(seen_a, "input_a_voltage missing with cap on");
+	zassert_true(seen_b, "input_b_voltage missing with cap on");
+
+	/* cap on, no valid sample (NaN or out of the registry range) -> omitted */
+	set_clean();
+	g_app_config.cap_analog_a = true;
+	g_app_config.cap_analog_b = true;
+	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, NAN);
+	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, 100.0f);
+	run_report(fr, 8, &n);
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_false(fr[0].has_input_a_voltage, "absent input_a_voltage must be omitted");
+	zassert_false(fr[0].has_input_b_voltage, "out-of-range input_b_voltage must be omitted");
+}
+
 ZTEST(compose, test_counter_flags)
 {
 	Telemetry fr[8];

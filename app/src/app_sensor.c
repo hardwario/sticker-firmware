@@ -6,6 +6,7 @@
 
 #include "app_accel.h"
 #include "app_alarm.h"
+#include "app_analog.h"
 #include "app_battery.h"
 #include "app_buzzer.h"
 #include "app_config.h"
@@ -462,23 +463,57 @@ int app_sensor_init(void)
 		}
 	}
 
-	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
+	if ((g_app_config.cap_input_a || g_app_config.cap_input_b || g_app_config.cap_analog_a ||
+	     g_app_config.cap_analog_b) &&
 	    (g_app_config.cap_pir_detector || g_app_config.cap_buzzer)) {
-		/* PIR, the buzzer HW variant (#338), and the digital inputs all share
-		 * PB4/PA11 (#90). PIR/buzzer win; the inputs are not initialised. Clear
-		 * their runtime enables too (H-7) so telemetry and GetConfig stop
-		 * reporting a non-functional input as active — otherwise the operator
-		 * sees the input "enabled" with count 0 and never learns it is silently
-		 * dead. The persisted config is untouched (g_app_config is the runtime
-		 * copy); fixing the pin conflict is a config change. */
+		/* PIR, the buzzer HW variant (#338), the digital inputs and the analog
+		 * inputs (#396) all share PB4/PA11 (#90). PIR/buzzer win; the inputs are
+		 * not initialised. Clear their runtime enables too (H-7) so telemetry
+		 * and GetConfig stop reporting a non-functional input as active —
+		 * otherwise the operator sees the input "enabled" with count 0 and never
+		 * learns it is silently dead. The persisted config is untouched
+		 * (g_app_config is the runtime copy); fixing the pin conflict is a
+		 * config change. */
 		LOG_WRN("PIR/buzzer and input share GPIO pins — inputs disabled");
 		g_app_config.cap_input_a = false;
 		g_app_config.cap_input_b = false;
-	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
-		ret = app_input_init();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
-			res = res ? res : ret;
+		g_app_config.cap_analog_a = false;
+		g_app_config.cap_analog_b = false;
+	} else {
+		/* #396: one pin is either a digital or an analog input. The digital
+		 * input keeps a pin configured for both (the established capability,
+		 * like PIR over the buzzer below). */
+		if (g_app_config.cap_input_a && g_app_config.cap_analog_a) {
+			LOG_WRN("Input A digital and analog share GP_A — analog disabled");
+			g_app_config.cap_analog_a = false;
+		}
+		if (g_app_config.cap_input_b && g_app_config.cap_analog_b) {
+			LOG_WRN("Input B digital and analog share GP_B — analog disabled");
+			g_app_config.cap_analog_b = false;
+		}
+
+		if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+			ret = app_input_init();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
+				res = res ? res : ret;
+			}
+		}
+
+		/* After app_input_init(), which configures both pins as digital
+		 * inputs even when only one input is enabled. */
+		if (g_app_config.cap_analog_a || g_app_config.cap_analog_b) {
+#if defined(CONFIG_ADC)
+			ret = app_analog_init();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_analog_init", ret);
+				res = res ? res : ret;
+			}
+#else
+			LOG_WRN("cap_analog_a/b set but ADC not built in (CONFIG_ADC=n)");
+			g_app_config.cap_analog_a = false;
+			g_app_config.cap_analog_b = false;
+#endif /* defined(CONFIG_ADC) */
 		}
 	}
 
@@ -694,6 +729,8 @@ void app_sensor_sample(void)
 	float altitude = NAN;
 	float pressure = NAN;
 	float baro_temperature = NAN;
+	float input_a_voltage = NAN;
+	float input_b_voltage = NAN;
 
 	struct app_hall_data hall_data = {0};
 	struct app_input_data input_data = {0};
@@ -718,6 +755,21 @@ void app_sensor_sample(void)
 	ret = app_battery_measure(&voltage);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
+	}
+
+	/* #396: app_sensor_init() resolved the pin sharing, so a set cap_analog_*
+	 * means the pin is in analog mode. A failed read leaves the channel NaN. */
+	if (g_app_config.cap_analog_a) {
+		ret = app_analog_measure_a(&input_a_voltage);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_analog_measure_a", ret);
+		}
+	}
+	if (g_app_config.cap_analog_b) {
+		ret = app_analog_measure_b(&input_b_voltage);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_analog_measure_b", ret);
+		}
 	}
 #endif /* defined(CONFIG_ADC) */
 
@@ -842,6 +894,8 @@ void app_sensor_sample(void)
 	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE_BARO, baro_temperature);
 	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_ALTITUDE, altitude);
 	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE, voltage);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, input_a_voltage);
+	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, input_b_voltage);
 	mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION,
 	       orientation == INT_MAX ? NAN : (float)orientation);
 

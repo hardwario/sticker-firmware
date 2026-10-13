@@ -24,7 +24,7 @@ extern "C" {
  * (channel APP_SENSOR_CH_DEVICE) plus one per part (chip) of its type, low
  * battery and one sensor mismatch per 1-Wire slot. Sizes
  * app_alarm_active_snapshot() buffers. */
-#define APP_ALARM_NODATA_MB_MAX 4
+#define APP_ALARM_NODATA_MB_MAX 6 /* liveness channels in app_sensor_types.yaml */
 #define APP_ALARM_NODATA_W1_MAX (1 + APP_SENSOR_W1_PART_MAX)
 #define APP_ALARM_NODATA_MAX                                                                       \
 	(APP_ALARM_NODATA_MB_MAX + APP_ALARM_SLOT_MAX * APP_ALARM_NODATA_W1_MAX)

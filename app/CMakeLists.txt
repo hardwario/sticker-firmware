@@ -66,6 +66,7 @@ include(nanopb)
 # extensions, same stem — no clash.
 zephyr_nanopb_sources(app src/app_config.proto)
 
+target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_analog.c)
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_radio_p2p.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)

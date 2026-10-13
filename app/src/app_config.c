@@ -200,6 +200,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
+	SETTINGS_SET("cap-analog-a", &m_app_config.cap_analog_a, sizeof(m_app_config.cap_analog_a));
+	SETTINGS_SET("cap-analog-b", &m_app_config.cap_analog_b, sizeof(m_app_config.cap_analog_b));
 	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -472,6 +474,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
+	EXPORT_FUNC("cap-analog-a", &m_app_config.cap_analog_a, sizeof(m_app_config.cap_analog_a));
+	EXPORT_FUNC("cap-analog-b", &m_app_config.cap_analog_b, sizeof(m_app_config.cap_analog_b));
 	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -990,6 +994,18 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
+static void print_cap_analog_a(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-analog-a %s",
+		    m_app_config.cap_analog_a ? "true" : "false");
+}
+
+static void print_cap_analog_b(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-analog-b %s",
+		    m_app_config.cap_analog_b ? "true" : "false");
+}
+
 static void print_alarm_buzzer_mode(const struct shell *shell)
 {
 	const char *str;
@@ -1198,6 +1214,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_sht(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
+	print_cap_analog_a(shell);
+	print_cap_analog_b(shell);
 	print_alarm_buzzer_mode(shell);
 	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
@@ -1710,6 +1728,16 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_accelerometer,
 			print_cap_accelerometer);
+}
+
+static int cmd_cap_analog_a(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_analog_a, print_cap_analog_a);
+}
+
+static int cmd_cap_analog_b(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_analog_b, print_cap_analog_b);
 }
 
 static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **argv)
@@ -2236,6 +2264,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-accelerometer, NULL,
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
+
+	SHELL_CMD_ARG(cap-analog-a, NULL,
+	              "Get/Set input A analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_A, ADC1_IN3). Mutually exclusive with cap_input_a / cap_pir_detector / cap_buzzer (those win).",
+	              cmd_cap_analog_a, 1, 1),
+
+	SHELL_CMD_ARG(cap-analog-b, NULL,
+	              "Get/Set input B analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_B, ADC1_IN7). Mutually exclusive with cap_input_b / cap_pir_detector / cap_buzzer (those win).",
+	              cmd_cap_analog_b, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
 	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",

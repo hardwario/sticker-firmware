@@ -120,6 +120,8 @@ struct app_config {
 	bool cap_sht;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
+	bool cap_analog_a;
+	bool cap_analog_b;
 	uint8_t alarm_0[18];
 	uint8_t alarm_1[18];
 	uint8_t alarm_2[18];
