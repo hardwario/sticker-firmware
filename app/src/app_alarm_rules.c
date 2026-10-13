@@ -34,6 +34,9 @@ struct app_alarm_entry {
 };
 
 static struct app_alarm_entry m_rules[APP_ALARM_RULE_COUNT];
+/* Rules the last reload sanitized as invalid (bit i = alarm_i), under m_lock. */
+static uint32_t m_invalid_mask;
+BUILD_ASSERT(APP_ALARM_RULE_COUNT <= 32, "rule masks are uint32_t");
 static K_MUTEX_DEFINE(m_lock);
 
 /* ---- slot names ---------------------------------------------------------- */
@@ -375,19 +378,32 @@ void app_alarm_rules_clear_all(void)
 
 /* ---- persistence (app_config storage) ----------------------------------- */
 
-int app_alarm_rules_stale_count(void)
+uint32_t app_alarm_rules_stale_mask(void)
 {
 	const struct app_config *c = app_config();
-	int n = 0;
+	uint32_t mask = 0;
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
 		if (m_rules[i].used && rule_stale_in(c, &m_rules[i].rule)) {
-			n++;
+			mask |= BIT(i);
 		}
 	}
 	k_mutex_unlock(&m_lock);
-	return n;
+	return mask;
+}
+
+int app_alarm_rules_stale_count(void)
+{
+	return __builtin_popcount(app_alarm_rules_stale_mask());
+}
+
+uint32_t app_alarm_rules_invalid_mask(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint32_t mask = m_invalid_mask;
+	k_mutex_unlock(&m_lock);
+	return mask;
 }
 
 int app_alarm_rules_reload_from_config(void)
@@ -396,6 +412,7 @@ int app_alarm_rules_reload_from_config(void)
 	int faults = 0; /* invalid rules sanitized + stale rules kept */
 
 	k_mutex_lock(&m_lock, K_FOREVER);
+	m_invalid_mask = 0;
 	for (uint8_t i = 0; i < APP_ALARM_RULE_COUNT; i++) {
 		struct app_alarm_rule r;
 		uint8_t *field = rule_field(c, i);
@@ -419,6 +436,7 @@ int app_alarm_rules_reload_from_config(void)
 			 * a log (and worth reporting to the caller — H-10). */
 			if (field[0] & RULE_FLAG_PRESENT) {
 				LOG_WRN("Alarm rule %u: invalid persisted rule sanitized", i);
+				m_invalid_mask |= BIT(i);
 				faults++;
 			}
 			memset(field, 0, RULE_PACK_LEN);

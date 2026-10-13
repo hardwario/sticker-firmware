@@ -471,7 +471,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	struct app_config snapshot = *app_config();
 	/* Rules already stale before this batch (#430) do not fail it; only a
 	 * batch that makes more rules stale or invalid does. */
-	const int stale_before = app_alarm_rules_stale_count();
+	const uint32_t stale_before = app_alarm_rules_stale_mask();
 
 	/* alarms_replace: the host is the source of truth for the whole alarm table
 	 * (ProXimos Portal). Empty every rule slot in staging first, so the alarms
@@ -536,11 +536,23 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		/* A sensors-group change of sensorN_type can turn rules stale
 		 * (#430), so it reloads (and is checked) like an alarms change. */
 		if ((sp->has_alarms || sp->has_sensors || alarms_replace) &&
-		    app_alarm_rules_reload_from_config() > stale_before) {
+		    app_alarm_rules_reload_from_config() > __builtin_popcount(stale_before)) {
+			/* #494 HIL: name the rule (alarm_N tag) the batch broke: one
+			 * it made invalid, else one it made stale. */
+			const uint32_t bad = app_alarm_rules_invalid_mask() |
+					     (app_alarm_rules_stale_mask() & ~stale_before);
+
 			*app_config() = snapshot;                   /* roll back the batch */
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
-			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
+			BUILD_ASSERT(AppConfigMessage_Alarms_alarm_15_tag ==
+					     AppConfigMessage_Alarms_alarm_0_tag + 15,
+				     "alarm_N tags must be contiguous");
+			/* group 4 = alarms; tag 0 only if no slot could be named */
+			uint32_t tag =
+				bad ? AppConfigMessage_Alarms_alarm_0_tag + __builtin_ctz(bad) : 0;
+
+			resp->body.error.fault_field = 4 * 100 + tag;
 			goto out;
 		}
 		/* F-1: LoRaWAN staging changed but the running copy (used by

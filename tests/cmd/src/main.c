@@ -47,6 +47,9 @@ extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
 extern int test_buzzer_play_ret;
 extern int test_alarm_reload_dropped;
+extern uint32_t test_alarm_invalid_mask;
+extern uint32_t test_alarm_stale_mask_after;
+extern bool test_alarm_reloaded;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -118,6 +121,9 @@ static void reset_cfg(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	test_clock_has = false;
+	test_alarm_invalid_mask = 0;
+	test_alarm_stale_mask_after = 0;
+	test_alarm_reloaded = false;
 	test_set_lrw_dirty(false);
 	test_set_active_alarm_count(0);
 	g_claim_done_calls = 0;
@@ -255,6 +261,32 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 	uint8_t zero_alarm[sizeof(g_app_config.alarm_0)] = {0};
 	zassert_mem_equal(g_app_config.alarm_0, zero_alarm, sizeof(zero_alarm),
 			  "invalid alarm rule bytes leaked into config after rollback");
+}
+
+/* #494 HIL: a rejected alarm batch names the rule in fault_field (400 + the
+ * alarm_N tag, alarm_0 = 3): the one it made invalid, else the one it made
+ * stale; a rule that was stale before the batch is not blamed. */
+ZTEST(cmd, test_set_param_alarm_fault_names_the_rule)
+{
+	Response r;
+	const char *hex = "0805121b120318c8012a141a12010006"
+			  "000000000000000000000000000000";
+
+	reset_cfg();
+	test_alarm_reload_dropped = 1;
+	test_alarm_invalid_mask = BIT(2) | BIT(9);
+	handle(hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.fault_field, 405, "invalid alarm_2 -> 405, got %u",
+		      r.body.error.fault_field);
+
+	reset_cfg();
+	test_alarm_reload_dropped = 1;
+	test_alarm_stale_mask_after = BIT(15);
+	handle(hex, &r);
+	zassert_equal(r.body.error.fault_field, 418, "stale alarm_15 -> 418, got %u",
+		      r.body.error.fault_field);
+	test_alarm_reload_dropped = 0;
 }
 
 /* WP8: SetParam.alarms_replace (field 6) empties every alarm slot in staging

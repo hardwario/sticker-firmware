@@ -237,6 +237,16 @@ int app_alarm_rules_stale_count(void)
 	return 0;
 }
 
+uint32_t app_alarm_rules_stale_mask(void)
+{
+	return 0;
+}
+
+uint32_t app_alarm_rules_invalid_mask(void)
+{
+	return 0;
+}
+
 enum app_radio_state app_radio_get_state(void)
 {
 	return APP_RADIO_STATE_HEALTHY;

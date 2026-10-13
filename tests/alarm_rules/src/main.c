@@ -226,6 +226,12 @@ ZTEST(alarm_rules, test_reload_sanitizes_collapsed_band)
 
 	zassert_false(app_alarm_rules_occupied(0), "collapsed-band rule survived reload");
 	zassert_equal(field[0], 0, "sanitized rule bytes must be zeroed");
+	/* #494: the SetParam fault_field names the sanitized rule from this mask. */
+	zassert_equal(app_alarm_rules_invalid_mask(), BIT(0), "invalid mask 0x%x",
+		      app_alarm_rules_invalid_mask());
+
+	app_alarm_rules_reload_from_config();
+	zassert_equal(app_alarm_rules_invalid_mask(), 0, "mask is per reload");
 }
 
 /* ---- #430: target validation against the registry ------------------------ */
@@ -353,6 +359,9 @@ ZTEST(alarm_rules, test_stale_rule_kept_and_counted)
 	zassert_equal(app_alarm_rules_reload_from_config(), 1, "stale rule not reported");
 	zassert_true(app_alarm_rules_occupied(0), "stale rule must be kept");
 	zassert_equal(app_alarm_rules_stale_count(), 1);
+	zassert_equal(app_alarm_rules_stale_mask(), BIT(0), "stale mask 0x%x",
+		      app_alarm_rules_stale_mask());
+	zassert_equal(app_alarm_rules_invalid_mask(), 0, "stale is not invalid");
 }
 
 /* Armed = enabled, not stale under the runtime config, capability on. */
