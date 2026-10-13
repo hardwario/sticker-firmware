@@ -49,7 +49,6 @@ static void before(void *unused)
 	test_hall = (struct app_hall_data){0};
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
-	g_app_config.cap_buzzer = false;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
@@ -63,7 +62,8 @@ static void before(void *unused)
 	g_app_config.cap_sht = true;
 	g_app_config.cap_barometer = true;
 	g_app_config.cap_hall_left = true;
-	g_app_config.cap_pir_detector = true;
+	/* PIR owns the GP pins here; the buzzer cases switch them to buzzer. */
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
 	g_app_config.sensor1_type = 0;
 	g_app_config.sensor2_type = 0;
 	memset(test_w1_configured, 0, sizeof(test_w1_configured));
@@ -763,19 +763,19 @@ ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
  * than real GPIO/thread behavior — that side is covered by tests/buzzer's
  * real app_buzzer.c + gpio_emul. */
 
-ZTEST(alarm_eval, test_buzzer_suppressed_without_cap_buzzer)
+ZTEST(alarm_eval, test_buzzer_suppressed_without_gpio_buzzer)
 {
-	g_app_config.cap_buzzer = false;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
 
-	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap_buzzer");
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap-gpio-mode buzzer");
 }
 
 ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 
 	activate_threshold_slot0();
@@ -785,7 +785,7 @@ ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
 
 ZTEST(alarm_eval, test_buzzer_plays_alarm_melody_on_activation)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
@@ -813,7 +813,7 @@ ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
 		{APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7, 30},
 	};
 
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
 		g_app_config.alarm_buzzer_mode = cases[i].mode;
@@ -835,7 +835,7 @@ ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
 
 ZTEST(alarm_eval, test_buzzer_does_not_retrigger_while_still_active)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
@@ -855,7 +855,7 @@ ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
 	 * bool) — in every non-off mode, here demonstrated with `once`, whose
 	 * repeat_s=0 means the replay could not come from the engine's own
 	 * repeat cycle. */
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ONCE;
 
 	activate_threshold_slot0(); /* alarm #1: onboard temperature, slot 0 */
@@ -933,7 +933,7 @@ ZTEST(alarm_eval, test_active_mask_and_activation_seq)
 
 ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();

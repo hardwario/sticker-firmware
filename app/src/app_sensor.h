@@ -18,12 +18,32 @@
 #include <stdint.h>
 
 /* Application includes */
+#include "app_config.h"
 #include "app_sensor_types.h"
 #include "app_w1_slots.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* GP_A / GP_B pin use (#498), read from the runtime g_app_config. After
+ * app_sensor_init() a pin mode other than none implies cap_gpio_mode == inputs
+ * (the init clears both pin modes otherwise), so callers check one field. */
+static inline bool app_sensor_gpio_pir(void)
+{
+	return g_app_config.cap_gpio_mode == APP_CONFIG_GPIO_MODE_PIR;
+}
+
+static inline bool app_sensor_gpio_buzzer(void)
+{
+	return g_app_config.cap_gpio_mode == APP_CONFIG_GPIO_MODE_BUZZER;
+}
+
+/* Pin read by app_input: a digital input or an S0 pulse counter. */
+static inline bool app_sensor_gpio_is_input(enum app_config_gpio_input mode)
+{
+	return mode == APP_CONFIG_GPIO_INPUT_DIGITAL || mode == APP_CONFIG_GPIO_INPUT_S0;
+}
 
 /* One channel value (#430). Counter channels (APP_SENSOR_F_COUNTER) use `u` —
  * an exact uint32 that a float would round above 2^24 — every other channel

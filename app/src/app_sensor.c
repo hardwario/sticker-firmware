@@ -463,71 +463,65 @@ int app_sensor_init(void)
 		}
 	}
 
-	if ((g_app_config.cap_input_a || g_app_config.cap_input_b || g_app_config.cap_analog_a ||
-	     g_app_config.cap_analog_b) &&
-	    (g_app_config.cap_pir_detector || g_app_config.cap_buzzer)) {
-		/* PIR, the buzzer HW variant (#338), the digital inputs and the analog
-		 * inputs (#396) all share PB4/PA11 (#90). PIR/buzzer win; the inputs are
-		 * not initialised. Clear their runtime enables too (H-7) so telemetry
-		 * and GetConfig stop reporting a non-functional input as active —
-		 * otherwise the operator sees the input "enabled" with count 0 and never
-		 * learns it is silently dead. The persisted config is untouched
-		 * (g_app_config is the runtime copy); fixing the pin conflict is a
-		 * config change. */
-		LOG_WRN("PIR/buzzer and input share GPIO pins — inputs disabled");
-		g_app_config.cap_input_a = false;
-		g_app_config.cap_input_b = false;
-		g_app_config.cap_analog_a = false;
-		g_app_config.cap_analog_b = false;
-	} else {
-		/* #396: one pin is either a digital or an analog input. The digital
-		 * input keeps a pin configured for both (the established capability,
-		 * like PIR over the buzzer below). */
-		if (g_app_config.cap_input_a && g_app_config.cap_analog_a) {
-			LOG_WRN("Input A digital and analog share GP_A — analog disabled");
-			g_app_config.cap_analog_a = false;
+	/* #498: PIR, the buzzer HW variant (#338) and the inputs share PB4/PA11
+	 * (#90); cap_gpio_mode names the one owner, so no conflict is stored.
+	 * Normalize the runtime copy only (g_app_config; the persisted config is
+	 * untouched) to what this build and mode can actually drive, so telemetry,
+	 * the channel registry and the settings-info report the effective use. */
+	if (g_app_config.cap_gpio_mode != APP_CONFIG_GPIO_MODE_INPUTS) {
+		g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
+		g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED;
+	}
+#if !defined(CONFIG_ADC)
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG ||
+	    g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
+		LOG_WRN("Analog input set but ADC not built in (CONFIG_ADC=n)");
+		if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG) {
+			g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
 		}
-		if (g_app_config.cap_input_b && g_app_config.cap_analog_b) {
-			LOG_WRN("Input B digital and analog share GP_B — analog disabled");
-			g_app_config.cap_analog_b = false;
+		if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
+			g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED;
 		}
+	}
+#endif /* !defined(CONFIG_ADC) */
+#if !defined(CONFIG_APP_PYQ1648)
+	if (app_sensor_gpio_pir()) {
+		/* #395: don't leave a configured PIR silently dead on a lean bench
+		 * build — no motion events would look like a HW fault otherwise. */
+		LOG_WRN("cap-gpio-mode pir but PIR not built in (CONFIG_APP_PYQ1648=n)");
+		g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE;
+	}
+#endif /* !defined(CONFIG_APP_PYQ1648) */
+#if !defined(CONFIG_APP_BUZZER)
+	if (app_sensor_gpio_buzzer()) {
+		LOG_WRN("cap-gpio-mode buzzer but buzzer not built in (CONFIG_APP_BUZZER=n)");
+		g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE;
+	}
+#endif /* !defined(CONFIG_APP_BUZZER) */
 
-		if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
-			ret = app_input_init();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
-				res = res ? res : ret;
-			}
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a) ||
+	    app_sensor_gpio_is_input(g_app_config.cap_gpio_input_b)) {
+		ret = app_input_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
+			res = res ? res : ret;
 		}
+	}
 
-		/* After app_input_init(), which configures both pins as digital
-		 * inputs even when only one input is enabled. */
-		if (g_app_config.cap_analog_a || g_app_config.cap_analog_b) {
 #if defined(CONFIG_ADC)
-			ret = app_analog_init();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_analog_init", ret);
-				res = res ? res : ret;
-			}
-#else
-			LOG_WRN("cap_analog_a/b set but ADC not built in (CONFIG_ADC=n)");
-			g_app_config.cap_analog_a = false;
-			g_app_config.cap_analog_b = false;
-#endif /* defined(CONFIG_ADC) */
+	/* After app_input_init(), which configures the pins it reads. */
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG ||
+	    g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
+		ret = app_analog_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_analog_init", ret);
+			res = res ? res : ret;
 		}
 	}
+#endif /* defined(CONFIG_ADC) */
 
-	if (g_app_config.cap_buzzer && g_app_config.cap_pir_detector) {
-		/* The buzzer HW variant (#338) sits on the same PB4/PA11 pins as the
-		 * PIR sensor. PIR wins — a device fitted with a real PIR never also
-		 * carries the buzzer HW variant, so this only guards against a
-		 * misconfigured cap_buzzer write. */
-		LOG_WRN("PIR and buzzer share GPIO pins — buzzer disabled (PIR takes the pins)");
-		g_app_config.cap_buzzer = false;
-	}
-
-	if (g_app_config.cap_pir_detector) {
 #if defined(CONFIG_APP_PYQ1648)
+	if (app_sensor_gpio_pir()) {
 		ret = app_pyq1648_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_pyq1648_init", ret);
@@ -535,20 +529,17 @@ int app_sensor_init(void)
 		} else {
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
-#else
-		/* #395: don't leave a configured PIR silently dead on a lean bench
-		 * build — no motion events would look like a HW fault otherwise. */
-		LOG_WRN("cap_pir_detector set but PIR not built in (CONFIG_APP_PYQ1648=n)");
+	}
 #endif /* defined(CONFIG_APP_PYQ1648) */
-	} else if (g_app_config.cap_buzzer) {
 #if defined(CONFIG_APP_BUZZER)
+	if (app_sensor_gpio_buzzer()) {
 		ret = app_buzzer_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_buzzer_init", ret);
 			res = res ? res : ret;
 		}
-#endif /* defined(CONFIG_APP_BUZZER) */
 	}
+#endif /* defined(CONFIG_APP_BUZZER) */
 
 #if defined(CONFIG_LIS2DH)
 	k_work_init(&m_accel_classify_work, accel_classify_work_handler);
@@ -757,15 +748,15 @@ void app_sensor_sample(void)
 		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
 	}
 
-	/* #396: app_sensor_init() resolved the pin sharing, so a set cap_analog_*
-	 * means the pin is in analog mode. A failed read leaves the channel NaN. */
-	if (g_app_config.cap_analog_a) {
+	/* #396: app_sensor_init() resolved the pin use (#498), so an analog pin
+	 * mode means the pin is in analog mode. A failed read leaves the channel NaN. */
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		ret = app_analog_measure_a(&input_a_voltage);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_analog_measure_a", ret);
 		}
 	}
-	if (g_app_config.cap_analog_b) {
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		ret = app_analog_measure_b(&input_b_voltage);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_analog_measure_b", ret);
@@ -843,7 +834,8 @@ void app_sensor_sample(void)
 		}
 	}
 
-	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a) ||
+	    app_sensor_gpio_is_input(g_app_config.cap_gpio_input_b)) {
 		ret = app_input_get_data(&input_data);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_input_get_data", ret);
@@ -907,11 +899,12 @@ void app_sensor_sample(void)
 		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_STATE,
 		       hall_data.right_is_active ? 1.0f : 0.0f);
 	}
-	if (g_app_config.cap_input_a) {
+	/* An S0 pin is a pulse counter only: its level is not a state. */
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_DIGITAL) {
 		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE,
 		       input_data.input_a_is_active ? 1.0f : 0.0f);
 	}
-	if (g_app_config.cap_input_b) {
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_DIGITAL) {
 		mb_put(&mb, APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE,
 		       input_data.input_b_is_active ? 1.0f : 0.0f);
 	}

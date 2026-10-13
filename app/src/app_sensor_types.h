@@ -117,8 +117,9 @@ enum app_sensor_hist_enc {
 #define APP_SENSOR_F_RETIRED       0x10 /* kept for numbering only */
 #define APP_SENSOR_F_RANGE         0x20 /* range_min/range_max are valid */
 
-/* Capability gate of a motherboard channel: offset of its bool in struct
- * app_config, or APP_SENSOR_NO_CAP (always on / 1-Wire channel). */
+/* Capability gate of a motherboard channel: offset of its bool (or, with a
+ * cap_mask, enum) in struct app_config, or APP_SENSOR_NO_CAP (always on /
+ * 1-Wire channel). */
 #define APP_SENSOR_NO_CAP 0xFFFF
 
 /* No channel (app_sensor_channel.pulses_ch of a non-momentary channel). */
@@ -136,9 +137,11 @@ struct app_sensor_channel {
 	uint16_t cap_off;  /* offsetof(struct app_config, cap_*) or APP_SENSOR_NO_CAP */
 	uint8_t pulses_ch; /* momentary: counter channel of its pulses, else APP_SENSOR_NO_CH */
 	uint8_t part;      /* 1-Wire: index of the chip it is read from, else APP_SENSOR_NO_PART */
-	float wire_scale;  /* wire value = round(phys * wire_scale) */
-	float hist_scale;  /* history value = round(phys * hist_scale) */
-	float range_min;   /* valid physical range (APP_SENSOR_F_RANGE) */
+	uint8_t cap_mask; /* 0 = cap_off is a bool cap; else enum cap, BIT(value) per enabling value
+			   */
+	float wire_scale; /* wire value = round(phys * wire_scale) */
+	float hist_scale; /* history value = round(phys * hist_scale) */
+	float range_min;  /* valid physical range (APP_SENSOR_F_RANGE) */
 	float range_max;
 };
 
@@ -158,6 +161,11 @@ const struct app_sensor_type *app_sensor_type_by_name(const char *name);
 
 /* Channel `ch` of type `id`; NULL if the type or channel is unknown. */
 const struct app_sensor_channel *app_sensor_channel_get(uint8_t id, uint8_t ch);
+
+/* True when the channel's capability is on in g_app_config (always for a
+ * channel without one). An enum capability (#498) is on when its value is one
+ * of the channel's cap_mask values. */
+bool app_sensor_channel_cap_on(const struct app_sensor_channel *c);
 
 /* Channel number of `name` in type `id`, or -1. */
 int app_sensor_channel_by_name(uint8_t id, const char *name);

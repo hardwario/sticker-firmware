@@ -16,6 +16,9 @@
 
 #include <zephyr/ztest.h>
 
+/* app_sensor_channel_cap_on() reads the capability gates from here. */
+struct app_config g_app_config;
+
 ZTEST(sensor_types, test_type_lookup)
 {
 	const struct app_sensor_type *mb = app_sensor_type_get(APP_SENSOR_TYPE_MOTHERBOARD);
@@ -146,6 +149,58 @@ ZTEST(sensor_types, test_capability_gates)
 	zassert_equal(c->cap_off, APP_SENSOR_NO_CAP);
 	c = app_sensor_channel_get(APP_SENSOR_TYPE_DALLAS, APP_SENSOR_CH_DALLAS_TEMPERATURE);
 	zassert_equal(c->cap_off, APP_SENSOR_NO_CAP);
+}
+
+static bool mb_on(uint8_t ch)
+{
+	return app_sensor_channel_cap_on(app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD, ch));
+}
+
+/* #498: the GP channels are gated by the enum caps cap_gpio_mode /
+ * cap_gpio_input_a/_b — a channel is on for its enabling values only. */
+ZTEST(sensor_types, test_enum_capability_gates)
+{
+	g_app_config = (struct app_config){0};
+	g_app_config.cap_hall_left = true;
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE), "bool cap on");
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_STATE), "bool cap off");
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE), "no cap = always on");
+
+	/* none: nothing on either pin */
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION));
+
+	/* digital A: state + count; S0 B: count only (no state); */
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DIGITAL;
+	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_S0;
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE));
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE), "S0 has no state");
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT));
+
+	/* analog A: voltage only */
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT));
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE));
+
+	/* pir: the PIR channels (the pin modes are cleared at init, #498) */
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
+	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED;
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION));
+	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT));
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT));
+
+	/* buzzer: no sensor channel at all */
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION));
 }
 
 ZTEST(sensor_types, test_every_channel_is_consistent)

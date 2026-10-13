@@ -626,17 +626,14 @@ static const struct {
 	{DUMP_SECTION_APPLICATION, 8, 3, false, false},
 	{DUMP_SECTION_SENSORS, 1, 2, false, false},
 	{DUMP_SECTION_SENSORS, 2, 2, false, false},
-	{DUMP_SECTION_SENSORS, 3, 2, false, false},
-	{DUMP_SECTION_SENSORS, 4, 2, false, false},
 	{DUMP_SECTION_SENSORS, 5, 2, false, false},
 	{DUMP_SECTION_SENSORS, 6, 2, false, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false, false},
-	{DUMP_SECTION_SENSORS, 19, 3, false, false},
 	{DUMP_SECTION_SENSORS, 22, 3, false, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false, false},
 	{DUMP_SECTION_SENSORS, 9, 2, false, false},
-	{DUMP_SECTION_SENSORS, 20, 3, false, false},
-	{DUMP_SECTION_SENSORS, 21, 3, false, false},
+	{DUMP_SECTION_SENSORS, 27, 3, false, false},
+	{DUMP_SECTION_SENSORS, 28, 3, false, false},
+	{DUMP_SECTION_SENSORS, 29, 3, false, false},
 	{DUMP_SECTION_SENSORS, 10, 2, false, false},
 	{DUMP_SECTION_SENSORS, 11, 10, false, true},
 	{DUMP_SECTION_SENSORS, 23, 7, false, false},
@@ -2056,15 +2053,34 @@ static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *re
 
 /* application: interval_sample, interval_report, history_enable */
 static const uint32_t cs_app_ids[] = {2, 3, 4};
-/* sensors: every cap_* flag — cap_hall_left..cap_accelerometer (1..9),
- * cap_buzzer (19, effective value: app_sensor_init() clears it when
- * cap_pir_detector is also set) and cap_sht (22, #465) */
-static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 22};
+/* sensors: every cap_* flag — cap_hall_left/_right (1/2), cap_light_sensor (5),
+ * cap_barometer (6), cap_w1_sensors (8), cap_accelerometer (9), cap_sht (22,
+ * #465) and the GP pin use cap_gpio_mode / cap_gpio_input_a / _b (27..29,
+ * #498; effective values, see gpio_effective()). */
+static const uint32_t cs_sensor_ids[] = {1, 2, 5, 6, 8, 9, 22, 27, 28, 29};
 #if defined(APP_CMD_HAVE_W1)
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids) + 1)
 #else
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids))
 #endif
+
+/* #498: report the GP pin use the device actually runs (g_app_config, as
+ * normalized by app_sensor_init(): pin modes cleared unless cap_gpio_mode is
+ * inputs, functions not built in dropped) rather than the stored config. */
+static void gpio_effective(AppConfigMessage_Sensors *s)
+{
+	if (s->has_cap_gpio_mode) {
+		s->cap_gpio_mode = (AppConfigMessage_Sensors_GpioMode)g_app_config.cap_gpio_mode;
+	}
+	if (s->has_cap_gpio_input_a) {
+		s->cap_gpio_input_a =
+			(AppConfigMessage_Sensors_GpioInput)g_app_config.cap_gpio_input_a;
+	}
+	if (s->has_cap_gpio_input_b) {
+		s->cap_gpio_input_b =
+			(AppConfigMessage_Sensors_GpioInput)g_app_config.cap_gpio_input_b;
+	}
+}
 
 /* Fill a settings-info ConfigDump with the items in `mask` (bit i = item i:
  * application ids, then sensor ids, then the w1_slot_type block). `seq` is 0 for
@@ -2100,6 +2116,7 @@ static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint
 	if (n > 0) {
 		cd->has_sensors = true;
 		app_config_fill_sensors(&cd->sensors, ids, n);
+		gpio_effective(&cd->sensors);
 	}
 
 #if defined(APP_CMD_HAVE_W1)

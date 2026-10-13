@@ -23,7 +23,7 @@ LOG_MODULE_REGISTER(app_buzzer, LOG_LEVEL_INF);
 /* HW variant: a CMI-9605IC-0380T self-driven magnetic buzzer is wired directly
  * across the two GPIO pins normally reserved for the PIR sensor
  * (pir-si-gpios/pir-dl-gpios) instead of a real PIR (#338). Mutually exclusive
- * with app_pyq1648 — caller must only init this when cap_pir_detector is off. */
+ * with app_pyq1648 — caller must only init this with cap-gpio-mode buzzer (#498). */
 static const struct gpio_dt_spec m_a_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), pir_si_gpios);
 static const struct gpio_dt_spec m_b_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), pir_dl_gpios);
 

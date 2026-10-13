@@ -1095,8 +1095,7 @@ static const struct app_sensor_channel *entry_channel(uint8_t entry, uint8_t *ty
 	    c->hist_enc >= ARRAY_SIZE(m_enc_size)) {
 		return NULL;
 	}
-	if (c->cap_off != APP_SENSOR_NO_CAP &&
-	    !*(const bool *)((const char *)&g_app_config + c->cap_off)) {
+	if (!app_sensor_channel_cap_on(c)) {
 		return NULL;
 	}
 	return c;

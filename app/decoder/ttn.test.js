@@ -107,29 +107,33 @@ test("set_param cap_w1_sensors (tag 8) is reachable both ways (#92)", () => {
   assert.equal(back.set_param.sensors.cap_w1_sensors, 1);
 });
 
-// #340 M20: cap_buzzer (sensors tag 19) had no _SEN_NAMES entry, so ConfigDump
-// rendering silently dropped it and no downlink-builder could construct it either
-// (_SEN_TAGS is _SEN_NAMES inverted).
-test("set_param cap_buzzer (tag 19) is reachable both ways (#340 M20)", () => {
+// #498: the GP pin owner and the per-pin input modes (sensors tags 27..29)
+// replace the bool caps cap_input_a/_b, cap_pir_detector, cap_buzzer and
+// cap_analog_a/_b (tags 3/4/7/19/20/21, now reserved).
+test("set_param cap_gpio_* (tags 27..29) are reachable both ways (#498)", () => {
   const enc = codec.encodeDownlink({
-    data: { seq: 1, command: "set_param", set_param: { sensors: { cap_buzzer: true } } },
+    data: { seq: 1, command: "set_param",
+      set_param: { sensors: { cap_gpio_mode: "inputs", cap_gpio_input_a: "s0",
+        cap_gpio_input_b: "analog" } } },
   });
   assert.equal(enc.errors.length, 0, "encode errors");
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
-  assert.equal(back.set_param.sensors.cap_buzzer, 1);
+  assert.equal(back.set_param.sensors.cap_gpio_mode, "inputs");
+  assert.equal(back.set_param.sensors.cap_gpio_input_a, "s0");
+  assert.equal(back.set_param.sensors.cap_gpio_input_b, "analog");
 });
 
-test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
-  // Response{ seq:1, config_dump: ConfigDump{ page_count:1, sensors: Sensors{ cap_buzzer:true } } },
-  // with the 1-byte APP_PROTO_VERSION prefix (uplink framing): 01 08 01 22 07 10 01 2a 03 98 01 01
-  // (field19 tag 0x98 0x01: field numbers >= 16 need a 2-byte varint tag).
-  const dump = hex("010801220710012a03980101");
-  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
-  assert.equal(u.config_dump.sensors.cap_buzzer, 1);
+test("set_param rejects the removed bool GP caps (#498)", () => {
+  for (const name of ["cap_input_a", "cap_input_b", "cap_pir_detector", "cap_buzzer",
+    "cap_analog_a", "cap_analog_b"]) {
+    const enc = codec.encodeDownlink({
+      data: { seq: 1, command: "set_param", set_param: { sensors: { [name]: true } } },
+    });
+    assert.ok(enc.errors.length > 0, name);
+  }
 });
 
-// #465: cap_sht (sensors tag 22) — onboard SHT4x capability; the settings-info
-// carries it next to cap_buzzer.
+// #465: cap_sht (sensors tag 22) — onboard SHT4x capability.
 test("set_param cap_sht (tag 22) is reachable both ways (#465)", () => {
   const enc = codec.encodeDownlink({
     data: { seq: 1, command: "set_param", set_param: { sensors: { cap_sht: false } } },
@@ -139,36 +143,17 @@ test("set_param cap_sht (tag 22) is reachable both ways (#465)", () => {
   assert.equal(back.set_param.sensors.cap_sht, 0);
 });
 
-test("config_dump renders cap_buzzer + cap_sht (sensors tags 19, 22) (#465)", () => {
-  // Response{ seq:1, config_dump: ConfigDump{ page_count:1,
-  //   sensors: Sensors{ cap_buzzer:true, cap_sht:false } } }, version prefix 01:
-  // 01 08 01 22 0a 10 01 2a 06 98 01 01 b0 01 00 (field22 tag 0xb0 0x01).
-  const dump = hex("010801220a10012a06980101b00100");
+test("config_dump renders cap_gpio_* + cap_sht (sensors tags 27..29, 22) (#498)", () => {
+  // Response{ seq:1, config_dump: ConfigDump{ page_count:1, sensors: Sensors{
+  //   cap_gpio_mode:INPUTS, cap_gpio_input_a:S0, cap_gpio_input_b:ANALOG,
+  //   cap_sht:false } } }, version prefix 01. Tags >= 16 take 2 bytes:
+  //   27 -> d8 01, 28 -> e0 01, 29 -> e8 01, 22 -> b0 01.
+  const dump = hex("010801221010012a0cd80101e00103e80102b00100");
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
-  assert.equal(u.config_dump.sensors.cap_buzzer, 1);
+  assert.equal(u.config_dump.sensors.cap_gpio_mode, "inputs");
+  assert.equal(u.config_dump.sensors.cap_gpio_input_a, "s0");
+  assert.equal(u.config_dump.sensors.cap_gpio_input_b, "analog");
   assert.equal(u.config_dump.sensors.cap_sht, 0);
-});
-
-// #396: cap_analog_a / cap_analog_b (sensors tags 20 / 21).
-test("set_param cap_analog_a/b (tags 20/21) are reachable both ways (#396)", () => {
-  const enc = codec.encodeDownlink({
-    data: { seq: 1, command: "set_param",
-      set_param: { sensors: { cap_analog_a: true, cap_analog_b: false } } },
-  });
-  assert.equal(enc.errors.length, 0, "encode errors");
-  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
-  assert.equal(back.set_param.sensors.cap_analog_a, 1);
-  assert.equal(back.set_param.sensors.cap_analog_b, 0);
-});
-
-test("config_dump renders cap_analog_a/b (sensors tags 20, 21) (#396)", () => {
-  // Response{ seq:1, config_dump: ConfigDump{ page_count:1,
-  //   sensors: Sensors{ cap_analog_a:true, cap_analog_b:false } } }, version 01:
-  // 01 08 01 22 0a 10 01 2a 06 a0 01 01 a8 01 00 (tags 0xa0 0x01 / 0xa8 0x01).
-  const dump = hex("010801220a10012a06a00101a80100");
-  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
-  assert.equal(u.config_dump.sensors.cap_analog_a, 1);
-  assert.equal(u.config_dump.sensors.cap_analog_b, 0);
 });
 
 // #412: the boot settings-info uplink carries the detected 1-Wire slot type per

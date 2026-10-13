@@ -259,10 +259,10 @@ static uint16_t alarm_buzzer_repeat_s(enum app_config_alarm_buzzer_mode mode)
  * repeat cycle; the modes differ only in the replay interval
  * (alarm_buzzer_repeat_s above). Once the last bit clears, stop immediately.
  * new_bits is non-zero only in the one poll where an alarm actually latched,
- * so enabling cap_buzzer mid-alarm never fires a spurious start. */
+ * so enabling the buzzer mid-alarm never fires a spurious start. */
 static void alarm_buzzer_sync(uint32_t new_bits, bool all_cleared)
 {
-	if (!g_app_config.cap_buzzer) {
+	if (!app_sensor_gpio_buzzer()) {
 		return;
 	}
 
@@ -1059,8 +1059,7 @@ static uint8_t nodata_slot_type(uint8_t slot)
 /* Is liveness channel `c` of an enabled sensor expected to report now? */
 static bool nodata_channel_enabled(const struct app_sensor_channel *c)
 {
-	return c->cap_off == APP_SENSOR_NO_CAP ||
-	       *(const bool *)((const char *)&g_app_config + c->cap_off);
+	return app_sensor_channel_cap_on(c);
 }
 
 /* Drop latch `l` of `slot`, emitting the deactivate edge of a latched alarm

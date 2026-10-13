@@ -8,6 +8,7 @@
 #include "app_alarm.h"
 #include "app_config.h"
 #include "app_log.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -15,6 +16,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -30,6 +32,62 @@ static struct app_input_data m_input_data;
 
 K_MUTEX_DEFINE(m_input_data_mutex);
 
+/* #498: S0 pulse counting (IEC 62053-31: pulse >= 30 ms). The 100 ms poll would
+ * miss short pulses, so an S0 pin counts on its asserting edge in the GPIO
+ * interrupt; an edge within S0_DEBOUNCE_MS of the previous counted one is
+ * contact bounce. The ISR only bumps m_s0_pending; the poll work folds it into
+ * m_input_data under the mutex. */
+#define S0_DEBOUNCE_MS 20
+
+static struct gpio_callback m_s0_cb_a;
+static struct gpio_callback m_s0_cb_b;
+static atomic_t m_s0_pending_a;
+static atomic_t m_s0_pending_b;
+static uint32_t m_s0_last_a;
+static uint32_t m_s0_last_b;
+
+static void s0_edge(atomic_t *pending, uint32_t *last)
+{
+	uint32_t now = k_uptime_get_32();
+
+	if (now - *last < S0_DEBOUNCE_MS) {
+		return;
+	}
+	*last = now;
+	atomic_inc(pending);
+}
+
+static void s0_a_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+{
+	s0_edge(&m_s0_pending_a, &m_s0_last_a);
+}
+
+static void s0_b_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+{
+	s0_edge(&m_s0_pending_b, &m_s0_last_b);
+}
+
+static int s0_setup(const struct gpio_dt_spec *spec, struct gpio_callback *cb,
+		    gpio_callback_handler_t handler)
+{
+	int ret;
+
+	gpio_init_callback(cb, handler, BIT(spec->pin));
+	ret = gpio_add_callback_dt(spec, cb);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_add_callback_dt", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(spec, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_interrupt_configure_dt", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 /* #383: `prime` seeds m_input_data from the real GPIO level without treating it
  * as a rise/fall edge — used once at init so an input already asserted before
  * boot isn't reported as a brand-new activation on the first periodic poll
@@ -38,16 +96,10 @@ static int poll_impl(bool prime)
 {
 	bool input_a_is_active = false;
 	bool input_b_is_active = false;
+	bool s0_a = g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_S0;
+	bool s0_b = g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_S0;
 
-	if (!g_app_config.cap_input_a) {
-		input_a_is_active = false;
-	}
-
-	if (!g_app_config.cap_input_b) {
-		input_b_is_active = false;
-	}
-
-	if (g_app_config.cap_input_a) {
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a)) {
 		int val = gpio_pin_get_dt(&m_input_a);
 		if (val < 0) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
@@ -59,7 +111,7 @@ static int poll_impl(bool prime)
 		input_a_is_active = val;
 	}
 
-	if (g_app_config.cap_input_b) {
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_b)) {
 		int val = gpio_pin_get_dt(&m_input_b);
 		if (val < 0) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
@@ -70,10 +122,20 @@ static int poll_impl(bool prime)
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 
-	bool a_rise = !prime && (!m_input_data.input_a_is_active && input_a_is_active);
-	bool a_fall = !prime && (m_input_data.input_a_is_active && !input_a_is_active);
-	bool b_rise = !prime && (!m_input_data.input_b_is_active && input_b_is_active);
-	bool b_fall = !prime && (m_input_data.input_b_is_active && !input_b_is_active);
+	/* An S0 pin counts in its ISR and has no state edges (no state alarms). */
+	bool a_rise = !prime && !s0_a && (!m_input_data.input_a_is_active && input_a_is_active);
+	bool a_fall = !prime && !s0_a && (m_input_data.input_a_is_active && !input_a_is_active);
+	bool b_rise = !prime && !s0_b && (!m_input_data.input_b_is_active && input_b_is_active);
+	bool b_fall = !prime && !s0_b && (m_input_data.input_b_is_active && !input_b_is_active);
+
+	/* S0 always counts: counting is all an S0 pin is for (input_x_counter only
+	 * gates the digital pin's edge counter). */
+	if (s0_a) {
+		m_input_data.input_a_count += (uint32_t)atomic_clear(&m_s0_pending_a);
+	}
+	if (s0_b) {
+		m_input_data.input_b_count += (uint32_t)atomic_clear(&m_s0_pending_b);
+	}
 
 	m_input_data.input_a_is_active = input_a_is_active;
 	m_input_data.input_b_is_active = input_b_is_active;
@@ -121,7 +183,8 @@ static int poll(void)
 
 static void input_poll_work_handler(struct k_work *work)
 {
-	if (!g_app_config.cap_input_a && !g_app_config.cap_input_b) {
+	if (!app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a) &&
+	    !app_sensor_gpio_is_input(g_app_config.cap_gpio_input_b)) {
 		return;
 	}
 
@@ -175,6 +238,19 @@ int app_input_init(void)
 		return ret;
 	}
 
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_S0) {
+		ret = s0_setup(&m_input_a, &m_s0_cb_a, s0_a_handler);
+		if (ret) {
+			return ret;
+		}
+	}
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_S0) {
+		ret = s0_setup(&m_input_b, &m_s0_cb_b, s0_b_handler);
+		if (ret) {
+			return ret;
+		}
+	}
+
 	k_timer_start(&m_input_timer, K_MSEC(100), K_MSEC(100));
 
 	return 0;
@@ -198,9 +274,11 @@ void app_input_reset_count(bool input_a, bool input_b)
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 	if (input_a) {
 		m_input_data.input_a_count = 0;
+		atomic_clear(&m_s0_pending_a);
 	}
 	if (input_b) {
 		m_input_data.input_b_count = 0;
+		atomic_clear(&m_s0_pending_b);
 	}
 	k_mutex_unlock(&m_input_data_mutex);
 }
