@@ -2417,6 +2417,36 @@ Fixes for the bugs confirmed in the v1.5.0 code review. Every claim was checked 
   one sample; unchanged bus → ROM search only). S3, R2, R3 and R4 are covered by host
   tests only.
 
+## 44. One TOWER protocol on both PHY profiles (#486, #487, #490)
+
+`fsk` and `lora` differ only in the physical layer; the frames, the crypto, the counters
+and the data are the same on both (Hynek, 2026-10-12). Plan:
+`doc/plan/486 - One TOWER protocol on both PHY profiles.md`. The details are in §41.
+
+- **One MTU (U-1):** 96 B frame, 74 B payload, 72 B body on both profiles; Capabilities
+  advertise MTU 96. Deploy the nodes and every Northbridge of the Hub cluster together
+  (NB 0.4.1 and the central with MTU 96).
+- **Control commands (#487):** DevStatus `0x30`, Backoff `0x15`, HomeGateway `0x06`,
+  PendingInfo `0x22`; `0x05` / `0x11` / `0x21` dropped. Central side: proximos-v2 MR !153.
+- **`p2p-tx-power` 2..14 dBm (W8):** a JoinAccept assigning 15–22 is ignored.
+- **ACK flag bit 1 (`CTRL` tail)** reserved upstream in hardwario/tower-firmware#1 (W9).
+- **Backoff yields to an alarm:** a held ack retry or a current answer gives up its slot
+  to a queued alarm and goes afresh after the backoff.
+- **`fsk` toward a stock TOWER gateway (#490, PR #493):** TOWER GFSK PHY bit-exact with
+  SPIRIT1 (software CRC16 and PN9), TOWER OTA pairing, the counter keeps running across
+  a re-pairing, and the pairing record carries its modulation so a lora ↔ fsk switch pairs
+  afresh. Needs hardwario/sticker-zephyr#5 (`LORA_FSK`, merged `f21ab9d6`); run
+  `west update`. `doc/p2p.md` §15.
+- **Cost:** release 187 916 B flash (88.23 %), 49 096 B RAM (74.91 %) merged with
+  `v1.5.0` `ed577d0c` (+3 192 B / +248 B vs that head).
+- **Tests:** all 16 native suites pass (`p2p_logic` 91, `radio_common` 213), configen /
+  proto pytest 80, JS decoder 128, clang-format 22.1.5 clean.
+- **HIL (2026-10-12, STICKER 5722):** control commands and MTU 96 against Hubs 182 / 158,
+  the backoff yield, and `fsk` against a stock `radio_dongle_gateway` (pairing, confirmed
+  uplinks, downlink, re-pair, release image, modulation switch). Not on HW: a 96 B uplink,
+  range, power, several nodes per TOWER. Upstream E4 (keyed join) is a draft only
+  (hardwario/tower-firmware#2).
+
 ---
 
 *Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
