@@ -986,7 +986,7 @@ deleted in the host (or added over NFC in the meantime) stayed on the device.
 |---|---|
 | Field | `Command.SetParam.alarms_replace` = **6** (`optional bool`, next to `save`) |
 | Effect | when `true`, every rule slot `alarm_0`..`alarm_15` is emptied in staging **before** this message's `alarms` group is applied, so exactly the rules it carries remain; without an `alarms` group it clears all slots. `alarm_limit` and `alarm_buzzer_mode` are kept |
-| Atomicity | part of the batch snapshot: on any fault (e.g. an invalid rule → `OUT_OF_RANGE`, `fault_field` 400) the whole batch rolls back, cleared slots included, and the rule cache is rebuilt |
+| Atomicity | part of the batch snapshot: on any fault (e.g. an invalid rule → `OUT_OF_RANGE`, `fault_field` 400 + the `alarm_N` tag since §46) the whole batch rolls back, cleared slots included, and the rule cache is rebuilt |
 | Persistence | staged like any other key; `save` persists (+ reboot) |
 | Transports | LoRaWAN, NFC, shell (like `alarm_N`); refused over the vendor channel (`NOT_WRITABLE`, `fault_field` 400) |
 | Multi-frame table | `alarms_replace` on the **first** message only, `save` on the last |
@@ -2569,10 +2569,21 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
 - **D1–D5.** The mailbox and claiming plans match what was built (120 s hold, 4 KiB poll
   stack, `vendor_reset` → claim done); source comments no longer mention NDEF records;
   `ats cmd vnd <hex>` injects a Command over the vendor transport; motion re-arm comment fixed.
+- **HIL findings ("Test nodes" bench, 2026-10-13).**
+  - *Clock window.* `clock_sync` accepted 2099-12-31 23:59:59 and the RTC calendar then froze
+    (also across reboots). NFC `clock_sync`, network time and the shell `clock set` now share one
+    window, `[APP_CLOCK_UNIX_MIN, APP_CLOCK_UNIX_END)` = 2024-01-01 .. 2099-01-01 (`app_clock.h`),
+    a year short of the 2-digit RTC year rollover. A one-off USAGE FAULT (pc 0) on the next
+    `clock_sync` from the frozen state did not reproduce and is not root-caused.
+  - *Alarm fault_field.* A SetParam rejected for an alarm rule answers `fault_field` = 400 + the
+    `alarm_N` tag (`alarm_0` = 403 … `alarm_15` = 418): the rule the batch made invalid, else the
+    one it made stale; 400 when no slot can be named.
+  - *Shell injector.* `ats cmd nfc|vnd|plain` replies up to 255 B (was 64 B), so NFC-sized
+    answers such as `get_config` pages can be injected.
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
-- **Cost:** release 189 212 B flash (88.84 %), 47 880 B RAM (73.06 %); debug 238 248 B
-  (96.94 %), 55 112 B (84.09 %).
-- **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `history`, `nfc_hw`,
+- **Cost:** release 189 332 B flash (88.89 %), 47 880 B RAM (73.06 %); debug 238 408 B
+  (97.01 %), 55 816 B (85.17 %; +704 B for the 255 B injector reply and its hex echo).
+- **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `cmd`, `history`, `nfc_hw`,
   `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
   decoder 132, clang-format 22.1.5 clean. No HIL.
