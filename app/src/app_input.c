@@ -154,17 +154,13 @@ int app_input_init(void)
 		return -ENODEV;
 	}
 
-	/* GP_A/GP_B have no pull on the board, so an open input floats and reads
-	 * as asserted (active low). The input front-end RC is too slow for a
-	 * pulsed pull-up like app_hall.c (10 us still reads low on HW), so keep
-	 * the pull-up on. A contact held closed draws VDD / R_pu (~80 uA). */
-	ret = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT | GPIO_PULL_UP);
+	ret = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
-	ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT | GPIO_PULL_UP);
+	ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
