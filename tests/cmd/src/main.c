@@ -1913,6 +1913,27 @@ ZTEST(cmd, test_clock_sync_over_nfc)
 		      r.body.error.code);
 	zassert_false(test_clock_has, "RTC must stay unset after a rejected epoch");
 
+	/* #494 HIL: the window ends a year before the RTC's 2-digit year rolls
+	 * over. 2098-12-31 23:59:59 is the last accepted second; 2099-01-01 and
+	 * 2099-12-31 23:59:59 (which froze the calendar on HW) are rejected. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "0801620608ffc694950f", &r);
+	zassert_equal(r.which_body, Response_info_tag, "last second -> Info (which=%d)",
+		      r.which_body);
+	zassert_equal(test_clock_unix, 4070908799u, "RTC not set (%u)", test_clock_unix);
+
+	static const char *const too_late[] = {"080162060880c794950f", "0801620608ffad99a40f"};
+
+	for (size_t i = 0; i < ARRAY_SIZE(too_late); i++) {
+		reset_cfg();
+		handle_via(APP_CMD_TRANSPORT_NFC, too_late[i], &r);
+		zassert_equal(r.which_body, Response_error_tag, "[%zu] -> error (which=%d)", i,
+			      r.which_body);
+		zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "[%zu] code %d",
+			      i, r.body.error.code);
+		zassert_false(test_clock_has, "[%zu] RTC must stay unset", i);
+	}
+
 	/* Bare clock_sync over NFC (no unix_time, seq=5) just acks (no network). */
 	reset_cfg();
 	handle_via(APP_CMD_TRANSPORT_NFC, "08056200", &r);

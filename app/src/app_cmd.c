@@ -1499,12 +1499,6 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 
 #endif /* APP_CMD_HAVE_W1 */
 
-/* Sanity bounds for a wall-clock time supplied over NFC: reject obviously wrong
- * epochs. 2024-01-01 .. 2100-01-01 (UTC) comfortably brackets any real device
- * provisioning while staying well inside the uint32 range (rolls over in 2106). */
-#define APP_CMD_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
-#define APP_CMD_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
-
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -1515,7 +1509,9 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 	 * This bootstraps a device before/without a network. */
 	if (cmd->body.clock_sync.has_unix_time) {
 		uint32_t unix_s = cmd->body.clock_sync.unix_time;
-		if (unix_s < APP_CMD_CLOCK_UNIX_MIN || unix_s > APP_CMD_CLOCK_UNIX_MAX) {
+		/* Same window app_clock enforces (app_clock.h), checked here so a
+		 * bad epoch answers BAD_REQUEST, not "rtc set failed". */
+		if (unix_s < APP_CLOCK_UNIX_MIN || unix_s >= APP_CLOCK_UNIX_END) {
 			make_error(resp, Response_Error_Code_BAD_REQUEST, "bad epoch");
 			return;
 		}
