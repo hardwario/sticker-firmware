@@ -388,8 +388,12 @@ static void alarm_batch_flush(void)
 	uint8_t page_n[ALARM_BATCH_MAX];
 	uint8_t pages = 0;
 	uint8_t laid = 0;
+	bool skipped = false;
 
-	while (laid < m_batch_count) {
+	/* F-HIL-13: one report takes at most the whole alarm queue; the events left
+	 * over stay held as the next report (same base_time) and go when app_radio
+	 * frees a slot. */
+	while (laid < m_batch_count && pages < APP_RADIO_TX_QUEUE_DEPTH) {
 		size_t len = 0;
 		uint8_t n = m_batch_count - laid;
 		int ret = -EMSGSIZE;
@@ -410,6 +414,7 @@ static void alarm_batch_flush(void)
 			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
 				"in telemetry system_flags",
 				m_batch_count - laid, (unsigned)cap);
+			skipped = true;
 			break;
 		}
 		page_n[pages++] = n;
@@ -433,9 +438,14 @@ static void alarm_batch_flush(void)
 		return;
 	}
 
+	/* The report counts what it carries plus what the window dropped; the
+	 * events left over count in the next report. */
+	uint8_t left = skipped ? 0 : m_batch_count - laid;
+	uint16_t total = m_window_total - left;
+
 	for (uint8_t p = 0, first = 0; p < pages; first += page_n[p], p++) {
 		size_t len = 0;
-		int ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
+		int ret = app_cmd_build_alarm_report(m_window_base_unix, total, synced,
 						     &m_batch[first], page_n[p], p, pages, buf, cap,
 						     &len);
 		if (ret) {
@@ -444,7 +454,18 @@ static void alarm_batch_flush(void)
 		}
 		(void)app_radio_send_alarm(buf, len);
 		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u (%u B)", p + 1, pages,
-			first + 1, first + page_n[p], m_window_total, (unsigned)len);
+			first + 1, first + page_n[p], total, (unsigned)len);
+	}
+
+	if (left > 0) {
+		memmove(m_batch, &m_batch[laid], left * sizeof(m_batch[0]));
+		m_batch_count = left;
+		m_window_total = left;
+		m_window_base_synced = synced;
+		m_batch_held = true;
+		m_window_open = true;
+		LOG_INF("Alarm batch: %u event(s) held for the next report", left);
+		return;
 	}
 
 	m_batch_count = 0;

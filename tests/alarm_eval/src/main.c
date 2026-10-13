@@ -622,8 +622,9 @@ ZTEST(alarm_eval, test_alarm_batch_waits_until_all_pages_fit)
 	zassert_equal(test_alarm_event_count, 2);
 }
 
-/* #462: an empty queue takes a batch of more pages than it holds: no queued
- * frame is left whose dequeue would release it. */
+/* #462 / F-HIL-13: an empty queue takes the first report of a batch with more
+ * pages than it holds (a whole queue); the rest is the next report, released
+ * when app_radio takes a frame, so no page is dropped on a full queue. */
 ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
 {
 	struct app_alarm_rule r = {
@@ -645,11 +646,19 @@ ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
 	app_alarm_poll();
 
 	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
 	test_radio_data_hold_ms = 0;
 	app_alarm_flush_held();
 	k_sleep(K_MSEC(20));
-	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH + 1, "every page, got %zu",
+	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH, "a queue of pages, got %zu",
 		      test_alarm_frames);
+
+	test_radio_alarm_free = 1; /* app_radio took a frame */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_frames, APP_RADIO_TX_QUEUE_DEPTH + 1, "then the rest, got %zu",
+		      test_alarm_frames);
+	zassert_equal(test_alarm_event_count, APP_RADIO_TX_QUEUE_DEPTH + 1, "every event once");
 }
 
 /* F-HIL-11: every rule firing in one alarm-limit window reaches the server (8
