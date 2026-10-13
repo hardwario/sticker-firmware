@@ -118,6 +118,14 @@ K_MUTEX_DEFINE(m_lock);
 static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool active, uint8_t type,
 			  bool has_value, int32_t value);
 
+/* Type of the deactivate edge of a latched rule: a threshold latch carries the
+ * bound it latched (LOW/HIGH); STATE and RATE latches never set rt->type and
+ * fire as TRIGGER (#485 S6), so their deactivate edge must say TRIGGER too. */
+static uint8_t rt_edge_type(const struct rstate *rt)
+{
+	return rt->type != ALARM_TYPE_NONE ? rt->type : ALARM_TYPE_TRIGGER;
+}
+
 /* Return rule `idx`, syncing its runtime latch: an empty rule (or one that
  * changed at all since the latch was last reset — any field, e.g. a live edit
  * of lo/hi/dwell/enabled/from_state/to_state on the SAME channel) is reset.
@@ -137,7 +145,8 @@ static bool rt_sync(uint8_t idx, struct app_alarm_rule *out, bool *should_send)
 	if (!app_alarm_rules_get(idx, out)) {
 		if (rt->used) {
 			if (rt->active) {
-				alarm_collect(idx, &rt->last_rule, false, rt->type, false, 0);
+				alarm_collect(idx, &rt->last_rule, false, rt_edge_type(rt), false,
+					      0);
 				*should_send = true;
 			}
 			*rt = (struct rstate){0};
@@ -146,7 +155,7 @@ static bool rt_sync(uint8_t idx, struct app_alarm_rule *out, bool *should_send)
 	}
 	if (!rt->used || memcmp(&rt->last_rule, out, sizeof(*out)) != 0) {
 		if (rt->active) {
-			alarm_collect(idx, &rt->last_rule, false, rt->type, false, 0);
+			alarm_collect(idx, &rt->last_rule, false, rt_edge_type(rt), false, 0);
 			*should_send = true;
 		}
 		*rt = (struct rstate){.used = true, .last_rule = *out};
@@ -1604,7 +1613,7 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Rules. type: threshold rules latch LOW/HIGH in rt->type; state/count
-	 * rules report TRIGGER. */
+	 * rules report TRIGGER (rt_edge_type()). */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_RULE_COUNT && n < max; i++) {
 		if (!m_rt[i].used || !m_rt[i].active) {
@@ -1617,8 +1626,7 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 			.slot = r->slot,
 			.channel = r->channel,
 			.sensor_type = r->sensor_type,
-			.type = rt_kind(i) == APP_SENSOR_KIND_THRESHOLD ? m_rt[i].type
-									: ALARM_TYPE_TRIGGER,
+			.type = rt_edge_type(&m_rt[i]),
 		};
 	}
 	k_mutex_unlock(&m_lock);

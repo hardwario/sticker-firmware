@@ -724,6 +724,33 @@ ZTEST(alarm_eval, test_disabling_active_rule_emits_deactivate_edge)
 	zassert_equal(ev->rule, 0, "deactivate edge on wrong rule %u", ev->rule);
 }
 
+/* #485 S6: a STATE latch never sets rt->type, so the rt_sync() deactivate edge
+ * of a disabled STATE rule carried type NONE; it must say TRIGGER, the same
+ * type its activate edge had. */
+ZTEST(alarm_eval, test_disabling_active_state_rule_deactivates_as_trigger)
+{
+	g_app_config.alarm_limit = 0;
+	set_hall_left_edge_rule(1, 1, 0.0f);
+	test_hall.left_is_active = true;
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE),
+		     "state rule did not activate");
+	zassert_equal(last_event()->type, 3, "activate edge type %u, want TRIGGER (3)",
+		      last_event()->type);
+
+	struct app_alarm_rule r;
+	zassert_true(app_alarm_rules_get(0, &r), "rule readback failed");
+	r.enabled = 0;
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule disable rejected");
+
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+
+	const struct app_cmd_alarm_event *ev = last_event();
+	zassert_equal(ev->edge, 1, "expected deactivate edge (1), got %u", ev->edge);
+	zassert_equal(ev->type, 3, "deactivate edge type %u, want TRIGGER (3)", ev->type);
+}
+
 ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
 {
 	g_app_config.alarm_limit = 0;
