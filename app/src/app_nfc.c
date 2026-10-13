@@ -364,7 +364,7 @@ static void nfc_awake_timeout(struct k_timer *timer)
 
 /* Reply staging for the mailbox session (mb_serve_locked): [chan][encrypted
  * Response], at most one 256 B frame. */
-static uint8_t m_resp_buf[512];
+static uint8_t m_resp_buf[ST25DV_MB_RAM_SIZE];
 
 /* #247/#415 claim window, persisted in its own "clm" settings subtree (key
  * "clm/state"), not the config blob - so a device_reset/factory_reset that
@@ -1046,12 +1046,30 @@ static int decrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint8_t
 		 * lose the bump and stay replayable. Persist a single NVS key, not the
 		 * whole settings blob. If the persist fails, roll the counter back and
 		 * reject so we never accept a counter we couldn't make durable. */
+		/* #485 C5: advance under app_config_lock(). A SetParam or reset
+		 * snapshots and restores the whole config under that lock; an
+		 * advance landing between its snapshot and restore was rolled back
+		 * in RAM, so a later full save wrote the old counter back. The
+		 * re-check also covers a second advance meanwhile. The persist runs
+		 * outside the lock: it may wait up to 10 s for the radio air gate. */
+		app_config_lock();
 		uint32_t prev = app_config()->nonce_counter;
+
+		if (prev >= nonce_counter) {
+			app_config_unlock();
+			return -EACCES;
+		}
 		app_config()->nonce_counter = nonce_counter;
+		app_config_unlock();
+
 		int sret = app_settings_save_nonce_counter();
 		if (sret) {
 			LOG_ERR_CALL_FAILED_INT("app_settings_save_nonce_counter", sret);
-			app_config()->nonce_counter = prev;
+			app_config_lock();
+			if (app_config()->nonce_counter == nonce_counter) {
+				app_config()->nonce_counter = prev;
+			}
+			app_config_unlock();
 			res = sret;
 		}
 	}
@@ -1120,9 +1138,16 @@ static int encrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint32_
  * the phone resends the identical frame, so this doesn't affect the legitimate
  * case. */
 static uint32_t m_resp_cache_counter;
-static uint8_t m_resp_cache_buf[512];
+static uint8_t m_resp_cache_buf[ST25DV_MB_RAM_SIZE];
 static size_t m_resp_cache_len;
-static uint8_t m_resp_cache_req[512];
+static uint8_t m_resp_cache_req[ST25DV_MB_RAM_SIZE];
+
+/* Decrypted request and plaintext reply of the frame in progress. Sized for
+ * one mailbox frame (the 512 B of the removed NDEF path are gone, #485 C8) and
+ * wiped after every frame: they can hold keys (set_secret_key, a GetConfig
+ * dump). */
+static uint8_t m_cmd_plain[ST25DV_MB_RAM_SIZE];
+static uint8_t m_resp_plain[ST25DV_MB_RAM_SIZE];
 static size_t m_resp_cache_req_len;
 
 /* Process one encrypted command frame for a keyed NDEF channel: secret_key over
@@ -1143,9 +1168,10 @@ static size_t m_resp_cache_req_len;
  * *action (NONE on a replay — the original already ran). Sets *replayed=true on a
  * same-counter retransmission so the caller keeps a deferred action still waiting
  * for the phone's ack instead of clearing it. Returns 0 or -errno. */
-static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport transport, bool cache,
-				const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
-				size_t *out_len, enum app_cmd_action *action, bool *replayed)
+static int handle_encrypted_cmd_inner(const uint8_t *key, enum app_cmd_transport transport,
+				      bool cache, const uint8_t *in, size_t in_len,
+				      uint8_t *out_buf, size_t out_cap, size_t *out_len,
+				      enum app_cmd_action *action, bool *replayed)
 {
 	*out_len = 0;
 	*action = APP_CMD_ACTION_NONE;
@@ -1178,10 +1204,10 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 		return 0;
 	}
 
-	static uint8_t cmd_plain[512];
-	static uint8_t resp_plain[512];
+	uint8_t *cmd_plain = m_cmd_plain;
+	uint8_t *resp_plain = m_resp_plain;
 	size_t cmd_len = 0;
-	int ret = decrypt(key, in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
+	int ret = decrypt(key, in, in_len, cmd_plain, sizeof(m_cmd_plain), &cmd_len);
 	if (ret) {
 		NFC_DBG("cmd: decrypt failed=%d", ret);
 		return ret;
@@ -1196,10 +1222,10 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 	 * claim of the same serial; only the token leaks, not control). */
 
 	/* The encrypted reply must fit the caller's buffer: 8 B header + 16 B tag of
-	 * overhead. NDEF callers pass 512 (no reply gets near it); the 256 B mailbox
-	 * frame leaves 231 B of plaintext, and app_cmd_handle() already degrades an
-	 * oversize reply (drops Info alarms, then a compact Error) instead of failing. */
-	size_t plain_cap = sizeof(resp_plain);
+	 * overhead. The 256 B mailbox frame leaves 231 B of plaintext, and
+	 * app_cmd_handle() already degrades an oversize reply (drops Info alarms,
+	 * then a compact Error) instead of failing. */
+	size_t plain_cap = sizeof(m_resp_plain);
 	if (out_cap > 8 + NFC_CCM_TAG_LEN && out_cap - 8 - NFC_CCM_TAG_LEN < plain_cap) {
 		plain_cap = out_cap - 8 - NFC_CCM_TAG_LEN;
 	}
@@ -1238,6 +1264,19 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 		}
 	}
 	return 0;
+}
+
+static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport transport, bool cache,
+				const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
+				size_t *out_len, enum app_cmd_action *action, bool *replayed)
+{
+	int ret = handle_encrypted_cmd_inner(key, transport, cache, in, in_len, out_buf, out_cap,
+					     out_len, action, replayed);
+
+	/* Do not leave decrypted commands / replies (keys) in RAM (#485 C8). */
+	memset(m_cmd_plain, 0, sizeof(m_cmd_plain));
+	memset(m_resp_plain, 0, sizeof(m_resp_plain));
+	return ret;
 }
 
 #endif /* CONFIG_APP_NFC_ENCRYPTION */
@@ -1424,6 +1463,7 @@ int app_nfc_init(void)
 #define NFC_MB_HOST_PUT_WAIT_MS   1000   /* wait for the phone to read our reply */
 #define NFC_MB_ERR_BUDGET         8      /* consecutive MB_CTRL_Dyn read failures -> abort */
 #define NFC_MB_FIELD_OFF_DEBOUNCE 3      /* FIELD_ON=0 reads in a row -> phone gone */
+#define NFC_MB_REJECT_MAX         8      /* rejected frames in a row -> session over */
 #define NFC_MB_CHAN_CMD           0x01
 #define NFC_MB_CHAN_VND           0x02
 #define NFC_MB_CHAN_PLAIN         0x03
@@ -1495,9 +1535,11 @@ static int mb_wait_host_put_cleared(uint32_t timeout_ms)
 /* Serve mailbox requests until the phone leaves, disables the mailbox, goes
  * quiet, or a deferred action needs the session closed. Caller holds the access
  * lock with the tag powered (LPD low) for the whole session. Returns the number
- * of replies sent. Always leaves MB_EN cleared: with the mailbox enabled the chip
- * refuses every EEPROM write, so a stuck MB_EN would break the resting-record
- * upkeep (the June "truncated NDEF" symptom). */
+ * of authenticated (chan 0x01/0x02) replies sent: only those restart the
+ * caller's field-present hold, so a reader parked on the tag repeating the
+ * plaintext get_basic_info cannot keep the CPU out of Stop2 forever (#485 C6). Always leaves MB_EN
+ * cleared: with the mailbox enabled the chip refuses every EEPROM write, so a stuck MB_EN would
+ * break the resting-record upkeep (the June "truncated NDEF" symptom). */
 static int mb_serve_locked(void)
 {
 	int64_t t0 = k_uptime_get();
@@ -1506,6 +1548,8 @@ static int mb_serve_locked(void)
 	int err_budget = NFC_MB_ERR_BUDGET;
 	int field_off_n = 0;
 	unsigned int served = 0;
+	unsigned int served_auth = 0;
+	int rejects = 0;
 	const char *reason = "?";
 	/* LED result (see the LED block): the outcome of the latest request decides. */
 	bool any = false;
@@ -1576,7 +1620,9 @@ static int mb_serve_locked(void)
 			k_msleep(NFC_MB_POLL_MS);
 			continue;
 		}
-		t_last = k_uptime_get();
+		/* t_last (the idle timer) is refreshed only once a frame is accepted
+		 * below: frames that fail to authenticate no longer keep the session
+		 * open, and too many in a row end it (#485 C6). */
 		any = true;
 		last_ok = false; /* until its reply is written */
 
@@ -1600,6 +1646,10 @@ static int mb_serve_locked(void)
 			cache = false;
 		} else {
 			NFC_DBG("mb: rejected frame chan=0x%02x len=%u", chan, (unsigned)len);
+			if (++rejects >= NFC_MB_REJECT_MAX) {
+				reason = "too many rejected frames";
+				break;
+			}
 			continue;
 		}
 
@@ -1631,8 +1681,14 @@ static int mb_serve_locked(void)
 			 * The session keeps going (the app may resync) — the LED shows red
 			 * at the end only if nothing succeeds after this. */
 			NFC_DBG("mb: request rejected: %d", ret);
+			if (++rejects >= NFC_MB_REJECT_MAX) {
+				reason = "too many rejected frames";
+				break;
+			}
 			continue;
 		}
+		rejects = 0;
+		t_last = k_uptime_get();
 
 		if (resp_len) {
 			m_resp_buf[0] = chan;
@@ -1641,6 +1697,9 @@ static int mb_serve_locked(void)
 				continue; /* budget/idle above bound the retry */
 			}
 			served++;
+			if (tp != APP_CMD_TRANSPORT_PLAIN_TEXT) {
+				served_auth++;
+			}
 			ret = mb_wait_host_put_cleared(NFC_MB_HOST_PUT_WAIT_MS);
 			NFC_REPORT("mailbox: %u B reply, read by phone: %s", (unsigned)resp_len + 1,
 				   ret == 0 ? "yes" : "no");
@@ -1678,9 +1737,9 @@ static int mb_serve_locked(void)
 	} else {
 		nfc_led_off(); /* mailbox enabled but no request: nothing to report */
 	}
-	NFC_DBG("mb: session end (%s), %u reply(ies), result %s", reason, served,
-		io_fail || (any && !last_ok) ? "error" : (any ? "ok" : "none"));
-	return (int)served;
+	NFC_DBG("mb: session end (%s), %u reply(ies), %u authenticated, result %s", reason, served,
+		served_auth, io_fail || (any && !last_ok) ? "error" : (any ? "ok" : "none"));
+	return (int)served_auth;
 }
 
 /* NFC service pass: serve the ST25DV FTM mailbox while the phone holds its field
@@ -1736,7 +1795,8 @@ int app_nfc_poll(void)
 
 		if (mb_en && field_on && !held_too_long) {
 			if (mb_serve_locked() > 0) {
-				t_activity = k_uptime_get(); /* a live exchange: restart the hold */
+				/* An authenticated exchange: restart the hold. */
+				t_activity = k_uptime_get();
 			}
 			if (m_cmd_action != APP_CMD_ACTION_NONE) {
 				/* A command staged a deferred action (reboot/save/reset/...):
@@ -2106,7 +2166,7 @@ static int cmd_nfc_mb_serve(const struct shell *sh, size_t argc, char **argv)
 	m_report_sh = NULL;
 	nfc_access_end();
 
-	shell_print(sh, "mailbox session over: %d reply(ies)%s", served,
+	shell_print(sh, "mailbox session over: %d authenticated reply(ies)%s", served,
 		    m_cmd_action != APP_CMD_ACTION_NONE
 			    ? " (deferred action pending for the poll thread)"
 			    : "");
