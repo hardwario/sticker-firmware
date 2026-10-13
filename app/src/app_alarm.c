@@ -964,7 +964,9 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 	}
 
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
-	if (rule->hi > 0 && delta >= (uint32_t)rule->hi && !rt->active) {
+	/* Compare as float, not (uint32_t)hi: hi is validated to [0, UINT32_MAX]
+	 * (#485 S7) and a fractional hi is no longer truncated (2.5 needs 3). */
+	if (rule->hi > 0 && (float)delta >= rule->hi && !rt->active) {
 		rt->active = true;
 		rt->oneshot_expiry = now + rule_hold_ms(rule);
 		*should_send = true;

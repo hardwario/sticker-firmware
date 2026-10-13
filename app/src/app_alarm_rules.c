@@ -164,13 +164,31 @@ static bool rule_threshold_band_valid(const struct app_alarm_rule *r,
 	return c->kind != APP_SENSOR_KIND_THRESHOLD || r->hi > r->lo;
 }
 
+/* A STATE channel is digital: a level outside 0/1 never matches, so a rule
+ * with from/to = 2 would be stored and silently never fire (#485 S7). */
+static bool rule_state_levels_valid(const struct app_alarm_rule *r,
+				    const struct app_sensor_channel *c)
+{
+	return c->kind != APP_SENSOR_KIND_STATE || (r->from_state <= 1 && r->to_state <= 1);
+}
+
+/* RATE compares a uint32 counter delta against hi: hi must be a finite,
+ * non-negative value a delta can reach (0 keeps the rule off, as before).
+ * NaN fails both comparisons (#485 S7). */
+static bool rule_rate_limit_valid(const struct app_alarm_rule *r,
+				  const struct app_sensor_channel *c)
+{
+	return c->kind != APP_SENSOR_KIND_RATE || (r->hi >= 0.0f && r->hi <= (float)UINT32_MAX);
+}
+
 /* Target + shape checks a decoded rule must pass before it is stored. */
 static bool rule_valid(const struct app_alarm_rule *r)
 {
 	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
 
 	return c != NULL && rule_state_shape_valid(r, c) && rule_dwell_range_valid(r) &&
-	       rule_threshold_band_valid(r, c);
+	       rule_threshold_band_valid(r, c) && rule_state_levels_valid(r, c) &&
+	       rule_rate_limit_valid(r, c);
 }
 
 /* ---- app_config storage (per-rule bytes) -------------------------------- */

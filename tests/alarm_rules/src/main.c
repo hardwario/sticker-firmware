@@ -147,6 +147,50 @@ ZTEST(alarm_rules, test_rate_dwell_range_enforced)
 	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "out-of-range RATE dwell accepted");
 }
 
+/* #485 S7: STATE levels are digital 0/1; anything else never matches. */
+ZTEST(alarm_rules, test_state_levels_outside_0_1_rejected)
+{
+	struct app_alarm_rule r = {
+		.slot = APP_ALARM_SLOT_MB,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 0,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "valid 1->0 edge rejected");
+
+	r.from_state = 2;
+	r.to_state = 3;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "from/to 2/3 accepted");
+	r.from_state = 0;
+	r.to_state = 2;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "to 2 accepted");
+}
+
+/* #485 S7: RATE hi is compared with a uint32 delta: it must be finite and in
+ * [0, UINT32_MAX] (the old (uint32_t)hi cast was UB for inf / >= 2^32). */
+ZTEST(alarm_rules, test_rate_limit_range_enforced)
+{
+	struct app_alarm_rule r = {
+		.slot = APP_ALARM_SLOT_MB,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.hi = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "hi 0 (off) rejected");
+
+	r.hi = INFINITY;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "hi inf accepted");
+	r.hi = NAN;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "hi NaN accepted");
+	r.hi = -1.0f;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "negative hi accepted");
+	r.hi = 1e10f;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "hi >= 2^32 accepted");
+}
+
 /* ---- #319: on-board illuminance is a valid THRESHOLD source ------------- */
 
 ZTEST(alarm_rules, test_onboard_illuminance_accepted)
