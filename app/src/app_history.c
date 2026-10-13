@@ -1823,12 +1823,15 @@ size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t sta
  * never crosses a segment boundary). */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap)
 {
+	/* m_sample_size changes with the layout under m_lock: read it there, so a
+	 * concurrent capture cannot change it between the check and the divide
+	 * (#485 S9). */
+	k_mutex_lock(&m_lock, K_FOREVER);
 	if (m_sample_size == 0 || cap < m_sample_size) {
+		k_mutex_unlock(&m_lock);
 		return 0;
 	}
 	uint32_t per_frame = (uint32_t)(cap / m_sample_size);
-
-	k_mutex_lock(&m_lock, K_FOREVER);
 	bool take_unsynced = window_takes_unsynced(from_unix, to_unix);
 	uint16_t nseg = backend_nseg();
 	uint32_t frames = 0;

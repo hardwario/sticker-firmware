@@ -933,16 +933,13 @@ void app_sensor_sample(void)
 	/* A whole sweep where every attempted I2C read failed points at a wedged
 	 * bus (slave holding SDA low). After a few such sweeps, bit-bang it free —
 	 * otherwise every I2C sensor stays dead until a reboot that may never come. */
+	bool recover = false;
+
 	if (i2c_tried > 0 && i2c_failed == i2c_tried) {
 		if (++m_i2c_fail_streak >= I2C_RECOVER_FAIL_THRESHOLD) {
 			LOG_WRN("All %d I2C reads failed for %d sweeps; recovering bus", i2c_tried,
 				m_i2c_fail_streak);
-			if (device_is_ready(m_i2c_dev)) {
-				ret = i2c_recover_bus(m_i2c_dev);
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("i2c_recover_bus", ret);
-				}
-			}
+			recover = true;
 			m_i2c_fail_streak = 0;
 		}
 	} else {
@@ -987,4 +984,13 @@ void app_sensor_sample(void)
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	/* Bit-bang the bus free outside the data lock, so the alarm poll and the
+	 * history capture do not wait on it (#485 S9). */
+	if (recover && device_is_ready(m_i2c_dev)) {
+		ret = i2c_recover_bus(m_i2c_dev);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("i2c_recover_bus", ret);
+		}
+	}
 }

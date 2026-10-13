@@ -272,14 +272,19 @@ static bool unpack_rule(const uint8_t in[RULE_PACK_LEN], struct app_alarm_rule *
 
 /* ---- CRUD (rule-addressed) ---------------------------------------------- */
 
+/* count/occupied/first_free read `used` under the rules lock like _get()
+ * does (#485 S9): reload_from_config() and _set()/_clear() rewrite it there. */
 uint8_t app_alarm_rules_count(void)
 {
 	uint8_t n = 0;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
 		if (m_rules[i].used) {
 			n++;
 		}
 	}
+	k_mutex_unlock(&m_lock);
 	return n;
 }
 
@@ -302,17 +307,30 @@ bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 
 bool app_alarm_rules_occupied(uint8_t rule)
 {
-	return rule < APP_ALARM_RULE_COUNT && m_rules[rule].used;
+	bool used;
+
+	if (rule >= APP_ALARM_RULE_COUNT) {
+		return false;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	used = m_rules[rule].used;
+	k_mutex_unlock(&m_lock);
+	return used;
 }
 
 int app_alarm_rules_first_free(void)
 {
+	int idx = -1;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_RULE_COUNT; i++) {
 		if (!m_rules[i].used) {
-			return i;
+			idx = i;
+			break;
 		}
 	}
-	return -1;
+	k_mutex_unlock(&m_lock);
+	return idx;
 }
 
 int app_alarm_rules_set(uint8_t rule, const struct app_alarm_rule *r)
