@@ -2509,37 +2509,6 @@ The hall pins (PA3/PA7) are not ADC-capable and stay digital.
   fault path, buzzer variant, GP_B, 13.5–24 V, idle power. The first implementation's
   GP_B sweep (2026-08-26) is in the same report.
 
-## 47. Stay off below 1.8 V battery at boot (#496)
-
-A depleted cell boot-looped on brownout (F-HIL-8 in #494: STICKER 5625 on a spent lithium AAA,
-one boot every ~18 s). Every boot wrote the P2P FCnt base to flash, burnt 256 FCnt values and
-sent a Hello; a cell can sit at that knee for days.
-
-- **Gate.** `main()` measures the battery first, before anything loads the cell (best of 3
-  reads, `app_power_boot_battery_low()`). Below `CONFIG_APP_BATTERY_BOOT_MIN_MV` (default
-  1800 mV, range 1000..3600) the STICKER does not start.
-- **Indication.** The boot carousel still plays; then the red LED blinks every 200 ms for 5 s,
-  stays on for 1 s, and the STM32WL goes to Shutdown (`app_power_low_battery_off()`). The
-  indication waits 250 ms past the carousel and clears all three LEDs first (a play cut short by
-  `app_led_hold()` skips its own all-off, which left green/yellow lit). Clock,
-  history, alarms, radio, NVS and sensors are never started. The IWDG is fed throughout.
-- **Wake.** Only NRST or a power-cycle (battery replacement); the next boot runs the check
-  again. A cell that recovers on its own (temperature) stays off.
-- **Fail-safe.** A battery monitor that fails to init or read boots normally.
-- **Build.** `CONFIG_APP_BATTERY_BOOT_GATE` (default y, needs `HAS_POWEROFF` + `ADC`) selects
-  `POWEROFF`, so the release image now links `app_power.c`. The `battery_level` alarm
-  threshold (2400 mV) is independent and unchanged.
-- **Cost:** release 189 100 B flash (+336 B), RAM unchanged (49 160 B).
-- **HIL** (801053709 + PPK2): 3.0 V → normal boot; `MIN_MV=3600` build on a healthy supply →
-  carousel, 25 red blinks at 200 ms, 1 s red, off, no reboot / IWDG reset; NRST from the off state
-  runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
-  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
-  AT-PWR-16 in `doc/automated-test-playbook.md`.
-
----
-
-*Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
-
 ## 46. v1.5.0 review leftovers (#485)
 
 Second pass over the #485 findings that PR #489 left open. Each item was re-checked against
@@ -2619,6 +2588,33 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     stream alone, and a second answer that needs pages (GetConfig/GetParam, GetSettings, GetInfo,
     GetRadioState, W1Scan) gets Error `NOT_READY` with its seq; the host asks again once the
     stream is out. The autonomous Info / settings-info wait for the stream as before.
+  - *Duty hold vs M-2 (F-HIL-10).* On 5132 (DR0) a short periodic announce fit the duty ledger
+    before a held 49 B history frame; its send cleared the whole duty-hold streak, so the next
+    stale tick rejoined (M-2) and dropped the running replay. A send now clears the streak only
+    when no known hold is running; the held frame's own send still clears it.
+  - *Alarm batch of 8 (F-HIL-11).* An alarm window (or a batch held for the radio, #462) kept
+    8 events: 12 deactivations after `alarm clear all` sent 8 while `total` said 12 (5724, also
+    with `alarm-limit 0`). The batch now holds `APP_ALARM_RULE_COUNT` (16) events, a full
+    `alarm-limit` window is sent at once, and frames are still paged at
+    `AlarmReport.events max_count` (8). Only a batch held for the radio that collects more than
+    16 edges still drops the rest (`total` counts them). `app_cmd_build_alarm_report()` returns
+    `-EMSGSIZE` above 8 events instead of truncating.
+  - *Probe log (F-HIL-12).* The page-layout probe in `alarm_batch_flush()` logged
+    `<err> pb_encode: stream full` for every expected overflow; it logs at DBG now, like
+    `encode_response()`. Deactivations after a rule clear carry no value by design (no reading).
+  - *Shutdown pin parks (F-HIL-9), reverted.* Holding pin levels through Shutdown (70f53dfe)
+    did not lower the 145 µA Shutdown floor: a bisect showed the LPD pull-up alone adds ~97 µA
+    against a low LPD and the other parks are neutral. Reverted in 98848e0b; the floor stays
+    open (likely the ST25DV powered while LPD floats/is held low).
+  - *GP_A/GP_B "open input reads active", not a bug.* The input module DIP switches were set
+    wrong; the module biases the pins itself (no FW pull, as before). The pull experiments
+    (91cab2cd, c7a6813a) were reverted in 244e369e. A conflict-free input mode config is #498.
+  - *ds2484 bus lock.* The 1-Wire bus mutex was never initialised (lost wakeup → wedge + IWDG);
+    fixed in the Zephyr fork (sticker-zephyr#6, `79067560` on `v4.3.0-sticker2-branch`).
+    Builds pick it up with `west update`.
+  - *Inputs/alarms on 5625 (P2P, Hub 182).* Hall left/right (magnet), input A dry contact,
+    alarm edge (dwell 0/5 s), level (dwell 5 s, immediate clear) and rate (≥3 per window) rules
+    fire as expected and go out as fPort 3 AlarmReports; the LED flashes red on each alarm.
   - *Bench PASS:* clock window, alarm `fault_field`, injector, B1 (5 boots with a failing probe),
     B6 (40× stop stress), buzzer pin hold, R12 (P2P paired boot, 4 boots, no JoinRequest, FCnt
     monotonic), R7 (P2P suspend: no uplinks, wake without join) and the LoRaWAN regression on
@@ -2626,8 +2622,40 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     get_info, req_history with history off).
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
-- **Cost:** release 189 628 B flash (89.03 %), 47 880 B RAM (73.06 %); debug 238 736 B
-  (97.14 %), 55 816 B (85.17 %; +704 B for the 255 B injector reply and its hex echo).
+- **Cost:** release 190 020 B flash (89.21 %), 48 008 B RAM (73.25 %); debug 239 320 B
+  (97.38 %), 55 944 B (85.36 %; +704 B for the 255 B injector reply and its hex echo, +128 B
+  for the 16-event alarm batch).
 - **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `cmd`, `history`, `nfc_hw`,
   `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
   decoder 132, clang-format 22.1.5 clean. HIL on the "Test nodes" bench as listed above.
+
+## 47. Stay off below 1.8 V battery at boot (#496)
+
+A depleted cell boot-looped on brownout (F-HIL-8 in #494: STICKER 5625 on a spent lithium AAA,
+one boot every ~18 s). Every boot wrote the P2P FCnt base to flash, burnt 256 FCnt values and
+sent a Hello; a cell can sit at that knee for days.
+
+- **Gate.** `main()` measures the battery first, before anything loads the cell (best of 3
+  reads, `app_power_boot_battery_low()`). Below `CONFIG_APP_BATTERY_BOOT_MIN_MV` (default
+  1800 mV, range 1000..3600) the STICKER does not start.
+- **Indication.** The boot carousel still plays; then the red LED blinks every 200 ms for 5 s,
+  stays on for 1 s, and the STM32WL goes to Shutdown (`app_power_low_battery_off()`). The
+  indication waits 250 ms past the carousel and clears all three LEDs first (a play cut short by
+  `app_led_hold()` skips its own all-off, which left green/yellow lit). Clock,
+  history, alarms, radio, NVS and sensors are never started. The IWDG is fed throughout.
+- **Wake.** Only NRST or a power-cycle (battery replacement); the next boot runs the check
+  again. A cell that recovers on its own (temperature) stays off.
+- **Fail-safe.** A battery monitor that fails to init or read boots normally.
+- **Build.** `CONFIG_APP_BATTERY_BOOT_GATE` (default y, needs `HAS_POWEROFF` + `ADC`) selects
+  `POWEROFF`, so the release image now links `app_power.c`. The `battery_level` alarm
+  threshold (2400 mV) is independent and unchanged.
+- **Cost:** release 189 100 B flash (+336 B), RAM unchanged (49 160 B).
+- **HIL** (801053709 + PPK2): 3.0 V → normal boot; `MIN_MV=3600` build on a healthy supply →
+  carousel, 25 red blinks at 200 ms, 1 s red, off, no reboot / IWDG reset; NRST from the off state
+  runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
+  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
+  AT-PWR-16 in `doc/automated-test-playbook.md`.
+
+---
+
+*Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
