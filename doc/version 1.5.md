@@ -2519,7 +2519,9 @@ sent a Hello; a cell can sit at that knee for days.
   reads, `app_power_boot_battery_low()`). Below `CONFIG_APP_BATTERY_BOOT_MIN_MV` (default
   1800 mV, range 1000..3600) the STICKER does not start.
 - **Indication.** The boot carousel still plays; then the red LED blinks every 200 ms for 5 s,
-  stays on for 1 s, and the STM32WL goes to Shutdown (`app_power_low_battery_off()`). Clock,
+  stays on for 1 s, and the STM32WL goes to Shutdown (`app_power_low_battery_off()`). The
+  indication waits 250 ms past the carousel and clears all three LEDs first (a play cut short by
+  `app_led_hold()` skips its own all-off, which left green/yellow lit). Clock,
   history, alarms, radio, NVS and sensors are never started. The IWDG is fed throughout.
 - **Wake.** Only NRST or a power-cycle (battery replacement); the next boot runs the check
   again. A cell that recovers on its own (temperature) stays off.
@@ -2527,10 +2529,11 @@ sent a Hello; a cell can sit at that knee for days.
 - **Build.** `CONFIG_APP_BATTERY_BOOT_GATE` (default y, needs `HAS_POWEROFF` + `ADC`) selects
   `POWEROFF`, so the release image now links `app_power.c`. The `battery_level` alarm
   threshold (2400 mV) is independent and unchanged.
-- **Cost:** release 189 060 B flash (+296 B), RAM unchanged (49 160 B).
-- **HIL:** to be run with the SWD probe detached (it back-powers the chip, #210): PPK2 at 1.7 V
-  → indication + Shutdown, at 1.9 V → normal boot; a build with
-  `-DCONFIG_APP_BATTERY_BOOT_MIN_MV=3600` exercises the path on a healthy supply.
+- **Cost:** release 189 100 B flash (+336 B), RAM unchanged (49 160 B).
+- **HIL** (801053709 + PPK2): 3.0 V → normal boot; `MIN_MV=3600` build on a healthy supply →
+  carousel, 25 red blinks at 200 ms, 1 s red, off, no reboot / IWDG reset; NRST from the off state
+  runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
+  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe.
 
 ---
 
