@@ -519,16 +519,40 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 		config->cap_sht = src->cap_sht;
 	}
 	if (src->has_sensor1_type) {
-		config->sensor1_type = src->sensor1_type;
+		int val = src->sensor1_type;
+
+		if ((val >= 0 && val <= UINT8_MAX)) {
+			config->sensor1_type = val;
+		} else {
+			FAULT(23);
+		}
 	}
 	if (src->has_sensor2_type) {
-		config->sensor2_type = src->sensor2_type;
+		int val = src->sensor2_type;
+
+		if ((val >= 0 && val <= UINT8_MAX)) {
+			config->sensor2_type = val;
+		} else {
+			FAULT(24);
+		}
 	}
 	if (src->has_sensor3_type) {
-		config->sensor3_type = src->sensor3_type;
+		int val = src->sensor3_type;
+
+		if ((val >= 0 && val <= UINT8_MAX)) {
+			config->sensor3_type = val;
+		} else {
+			FAULT(25);
+		}
 	}
 	if (src->has_sensor4_type) {
-		config->sensor4_type = src->sensor4_type;
+		int val = src->sensor4_type;
+
+		if ((val >= 0 && val <= UINT8_MAX)) {
+			config->sensor4_type = val;
+		} else {
+			FAULT(26);
+		}
 	}
 	return ret;
 }
