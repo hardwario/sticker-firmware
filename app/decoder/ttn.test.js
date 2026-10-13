@@ -149,6 +149,28 @@ test("config_dump renders cap_buzzer + cap_sht (sensors tags 19, 22) (#465)", ()
   assert.equal(u.config_dump.sensors.cap_sht, 0);
 });
 
+// #396: cap_analog_a / cap_analog_b (sensors tags 20 / 21).
+test("set_param cap_analog_a/b (tags 20/21) are reachable both ways (#396)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param",
+      set_param: { sensors: { cap_analog_a: true, cap_analog_b: false } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.sensors.cap_analog_a, 1);
+  assert.equal(back.set_param.sensors.cap_analog_b, 0);
+});
+
+test("config_dump renders cap_analog_a/b (sensors tags 20, 21) (#396)", () => {
+  // Response{ seq:1, config_dump: ConfigDump{ page_count:1,
+  //   sensors: Sensors{ cap_analog_a:true, cap_analog_b:false } } }, version 01:
+  // 01 08 01 22 0a 10 01 2a 06 a0 01 01 a8 01 00 (tags 0xa0 0x01 / 0xa8 0x01).
+  const dump = hex("010801220a10012a06a00101a80100");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.sensors.cap_analog_a, 1);
+  assert.equal(u.config_dump.sensors.cap_analog_b, 0);
+});
+
 // #412: the boot settings-info uplink carries the detected 1-Wire slot type per
 // slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Values are
 // the sensor type ids (#430): 0=empty, 2=dallas, 3=machine-probe (same
@@ -580,6 +602,14 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
   assert.equal(got.data.accel_motion_count, 3);
 });
 
+// #396: input A/B analog voltage, fields 30/31 in mV (motherboard ch 11/14).
+test("fPort-2 telemetry decodes input_a_voltage/input_b_voltage (fields 30/31, #396)", () => {
+  // tag (30<<3)=0xf0 0x01, 1650 = f2 0c; tag (31<<3)=0xf8 0x01, 3300 = e4 19
+  const got = codec.decodeUplink({ bytes: hex("01f001f20cf801e419"), fPort: 2 }).data;
+  assert.equal(got.input_a_voltage, 1.65);
+  assert.equal(got.input_b_voltage, 3.3);
+});
+
 // #92: pin the numeric scaling of barometer/light fields — these were never
 // asserted, which is why the pressure unit could drift 10x. Frame: version 01,
 // pressure (field 5, tag 0x28) raw 10135 -> 1013.5 hPa (hPa x10),
@@ -811,6 +841,20 @@ test("history frame with channels/w1_types decodes any registry channel (#430)",
     s1_temperature: -5.25, pir_motion: 1, hall_left_count: 1234, altitude: -123 });
   assert.deepEqual(hf.records[1], { time: 1780000060, temperature: null, humidity: null,
     s1_temperature: null, pir_motion: 0, hall_left_count: null, altitude: null });
+});
+
+test("history frame decodes input A/B voltage channels (#396)", () => {
+  // motherboard ch 11 input-a-voltage, ch 14 input-b-voltage: u16 mV, 0xffff absent
+  const rec0 = [].concat(le16(1650), le16(24000));
+  const rec1 = [].concat(le16(0xffff), le16(0));
+  const f = buildLayoutFrame(1780000000, 60, [0x0b, 0x0e], [0, 0, 0, 0], rec0.concat(rec1));
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+
+  assert.deepEqual(hf.channels, ["input_a_voltage", "input_b_voltage"]);
+  assert.deepEqual(hf.records[0], { time: 1780000000, input_a_voltage: 1.65,
+    input_b_voltage: 24 });
+  assert.deepEqual(hf.records[1], { time: 1780000060, input_a_voltage: null,
+    input_b_voltage: 0 });
 });
 
 test("history frame with an unknown column leaves records undecoded (#430)", () => {
