@@ -2533,7 +2533,8 @@ sent a Hello; a cell can sit at that knee for days.
 - **HIL** (801053709 + PPK2): 3.0 V → normal boot; `MIN_MV=3600` build on a healthy supply →
   carousel, 25 red blinks at 200 ms, 1 s red, off, no reboot / IWDG reset; NRST from the off state
   runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
-  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe.
+  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
+  AT-PWR-16 in `doc/automated-test-playbook.md`.
 
 ---
 
