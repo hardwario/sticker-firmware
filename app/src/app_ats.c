@@ -1087,7 +1087,10 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 		return -EINVAL;
 	}
 
-	static uint8_t out[64];
+	/* #494 HIL: sized like the NFC mailbox reply (256 B frame minus the channel
+	 * byte), so NFC-sized answers (get_config pages, get_info) can be injected
+	 * too; 64 B failed them with "response too large". */
+	static uint8_t out[255];
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
@@ -1101,7 +1104,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 	/* Mirror the response to the shell terminal as one hex line. The log channel
 	 * can drop the INF hexdump under debug-level noise, so this is the reliable
 	 * way to capture the Response for an over-the-wire round-trip check. */
-	char resp_hex[2 * sizeof(out) + 1];
+	static char resp_hex[2 * sizeof(out) + 1]; /* static: 511 B off the shell stack */
 	bin2hex(out, out_len, resp_hex, sizeof(resp_hex));
 	shell_print(sh, "RESP %s", resp_hex);
 
