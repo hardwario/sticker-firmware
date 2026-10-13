@@ -2587,13 +2587,20 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
   - *Build without the barometer.* `CONFIG_MPL3115A2=n` failed to link (barometer init/read
     and `app_mpl3115a2.c` were unconditional); now guarded like OPT3001. A debug image with
     `W1=y` and LoRaWAN needs `-DCONFIG_SHELL_HELP=n` to fit (`debug.conf` note).
+  - *One page stream at a time.* A GetSettings queued right behind a paged GetConfig cancelled
+    the GetConfig page stream after page 0. Now an answer that fits one frame leaves the running
+    stream alone, and a second answer that needs pages (GetConfig/GetParam, GetSettings, GetInfo,
+    GetRadioState, W1Scan) gets Error `NOT_READY` with its seq; the host asks again once the
+    stream is out. The autonomous Info / settings-info wait for the stream as before.
   - *Bench PASS:* clock window, alarm `fault_field`, injector, B1 (5 boots with a failing probe),
     B6 (40× stop stress), buzzer pin hold, R12 (P2P paired boot, 4 boots, no JoinRequest, FCnt
-    monotonic) and R7 (P2P suspend: no uplinks, wake without join).
+    monotonic), R7 (P2P suspend: no uplinks, wake without join) and the LoRaWAN regression on
+    Hub 182 ChirpStack (OTAA, DeviceTime, LinkADR, DevStatusAns, LinkCheck, telemetry decode,
+    get_info, req_history with history off).
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
-- **Cost:** release 189 340 B flash (88.90 %), 47 880 B RAM (73.06 %); debug 238 408 B
-  (97.01 %), 55 816 B (85.17 %; +704 B for the 255 B injector reply and its hex echo).
+- **Cost:** release 189 628 B flash (89.03 %), 47 880 B RAM (73.06 %); debug 238 736 B
+  (97.14 %), 55 816 B (85.17 %; +704 B for the 255 B injector reply and its hex echo).
 - **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `cmd`, `history`, `nfc_hw`,
   `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
-  decoder 132, clang-format 22.1.5 clean. No HIL.
+  decoder 132, clang-format 22.1.5 clean. HIL on the "Test nodes" bench as listed above.
