@@ -47,36 +47,11 @@ static int poll_impl(bool prime)
 		input_b_is_active = false;
 	}
 
-	/* GP_A/GP_B have no pull on the board, so an unconnected input floats and
-	 * reads as asserted (active low). Pull up only for the sample, like
-	 * app_hall.c: a contact held to GND then draws no current between polls. */
-	int ret = 0;
-
-	if (g_app_config.cap_input_a) {
-		ret = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT | GPIO_PULL_UP);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			goto restore;
-		}
-	}
-
-	if (g_app_config.cap_input_b) {
-		ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT | GPIO_PULL_UP);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			goto restore;
-		}
-	}
-
-	/* Let the pull-up settle before sampling (see app_hall.c). */
-	k_busy_wait(10);
-
 	if (g_app_config.cap_input_a) {
 		int val = gpio_pin_get_dt(&m_input_a);
 		if (val < 0) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
-			ret = val;
-			goto restore;
+			return val;
 		}
 		/* gpio_pin_get_dt() already applies the devicetree GPIO_ACTIVE_LOW
 		 * flag (sw2/gp_a), so val is 1 when the input is actually asserted —
@@ -88,35 +63,9 @@ static int poll_impl(bool prime)
 		int val = gpio_pin_get_dt(&m_input_b);
 		if (val < 0) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
-			ret = val;
-			goto restore;
+			return val;
 		}
 		input_b_is_active = val;
-	}
-
-restore:
-	if (g_app_config.cap_input_a) {
-		int err = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (err) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", err);
-			if (!ret) {
-				ret = err;
-			}
-		}
-	}
-
-	if (g_app_config.cap_input_b) {
-		int err = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (err) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", err);
-			if (!ret) {
-				ret = err;
-			}
-		}
-	}
-
-	if (ret) {
-		return ret;
 	}
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
@@ -205,14 +154,17 @@ int app_input_init(void)
 		return -ENODEV;
 	}
 
-	/* Rest state between polls; poll_impl() pulls up only for the sample. */
-	ret = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT | GPIO_PULL_DOWN);
+	/* GP_A/GP_B have no pull on the board, so an open input floats and reads
+	 * as asserted (active low). The input front-end RC is too slow for a
+	 * pulsed pull-up like app_hall.c (10 us still reads low on HW), so keep
+	 * the pull-up on. A contact held closed draws VDD / R_pu (~80 uA). */
+	ret = gpio_pin_configure_dt(&m_input_a, GPIO_INPUT | GPIO_PULL_UP);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
-	ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT | GPIO_PULL_DOWN);
+	ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT | GPIO_PULL_UP);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
