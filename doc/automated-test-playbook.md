@@ -866,12 +866,24 @@ on release FW verify via the next fPort-2 telemetry (slower — prefer debug for
   counters +3 each; no cross-talk (left magnet must not count on right).
 
 ### AT-SEN-03 — inputs A/B (D, SA; maps S9)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a digital`, `cap-gpio-input-b digital`
+  (#498; PIR / buzzer own both pins, so the inputs are inactive with any other mode).
 - **Steps:** assist: "short input A to GND 3×, then input B". Watch check/sample.
 - **Expect:** counts +3 per input; state reflects level while held (#352: `input_a`/`input_b` =
   `1` while shorted to GND, `0` idle — same polarity regression check as AT-SEN-02).
 
+### AT-SEN-03b — S0 pulse counter on input A (D, SA; #498)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a s0`, save/reboot. Pulse source on GP_A:
+  an S0 meter output, or a generator / relay giving low-active pulses ≥ 30 ms.
+- **Steps:** read `input-a-count`; apply 100 pulses of 30 ms at ≤ 10 Hz; read again. Then
+  20 pulses of 5 ms spaced ≥ 30 ms apart, and a burst of edges < 20 ms apart (contact bounce).
+- **Expect:** +100 for the 30 ms pulses (the 100 ms poll alone would miss most of them); a
+  bounce burst counts once (20 ms debounce). No `input-a-state` channel / state flag and no
+  input alarm edge in telemetry; `input_a_count` keeps counting while `input-a-counter` is off.
+- **Evidence:** counts before/after, telemetry frame.
+
 ### AT-SEN-04 — PIR (D, SA; maps S5)
-- **Pre:** `cap-pir-detector` on.
+- **Pre:** `cap-gpio-mode pir` (#498, was `cap-pir-detector`).
 - **Steps:** keep the bench still 60 s (baseline: no events) → assist: "wave a hand 30 cm
   above the device 3×".
 - **Expect:** motion events only during the waves; none during the still window (false
@@ -1048,7 +1060,7 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Cleanup:** clear slot 15.
 
 ### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)
-- **Pre:** `cap-buzzer true` (buzzer HW variant fitted), `alarm-buzzer-mode normal`,
+- **Pre:** `cap-gpio-mode buzzer` (buzzer HW variant fitted; #498, was `cap-buzzer`), `alarm-buzzer-mode normal`,
   save/reboot (#154, config save reboots). One armed rule, e.g. AT-ALM-01's
   onboard-temperature slot 0.
 - **Steps:** cross the threshold to activate the rule (same assist as AT-ALM-01); assist:
@@ -1063,7 +1075,7 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Expect:** melody starts on each newly activated alarm, replays per the mode's interval
   (`once` = never, `slow`/`normal`/`fast` = 120/30/10 s, `continuous` ≈ every 2.4 s) while
   any alarm stays active, stops immediately once the last one clears. Negative case:
-  `alarm-buzzer-mode off` (or `cap-buzzer false`) → same rule activation produces the red
+  `alarm-buzzer-mode off` (or `cap-gpio-mode none`) → same rule activation produces the red
   LED as normal but stays silent.
 - **Evidence:** operator confirmation of beep timing per mode + the negative (silent) case.
 - **Cleanup:** clear the rules; `alarm-buzzer-mode off` (factory default).

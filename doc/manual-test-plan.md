@@ -867,10 +867,10 @@ sub-band's 8 channels have all been used by failed joins and after each rejoin's
 ### S5 — PIR motion
 
 **Goal:** PIR detects motion and counts it.
-**Observable:** Telemetry `motion_count` increments (requires `cap_pir_detector`).
+**Observable:** Telemetry `motion_count` increments (requires `cap-gpio-mode pir`, #498).
 
 **Prompt for Claude:**
-> Confirm `cap_pir_detector` is enabled in config (enable and save it if needed, noting the
+> Confirm `cap-gpio-mode` is `pir` in config (set and save it if needed, noting the
 > change). Read `motion_count`, ask me to wave in front of the PIR, then re-read and confirm the
 > count increased. Confirm it propagates to fPort 2 telemetry.
 
@@ -936,14 +936,15 @@ deact, bit2 active); requires `cap_hall_left`/`cap_hall_right`.
 ### S9 — Input A/B
 
 **Goal:** GPIO inputs count edges.
-**Observable:** Telemetry `input_a_count`/`input_b_count` and flags; requires `cap_input_a`/
-`cap_input_b`. Note: PIR and Input share pins — if PIR is enabled, Input is skipped.
+**Observable:** Telemetry `input_a_count`/`input_b_count` and flags; requires
+`cap-gpio-mode inputs` and `cap-gpio-input-a`/`-b` `digital` (#498: one owner of the GP pins,
+so PIR and inputs can no longer be enabled together).
 
 **Prompt for Claude:**
-> Confirm `cap_input_a`/`cap_input_b` are enabled **and** that PIR is disabled (they share GPIO —
-> if PIR is on, inputs are skipped). Read the input counters, ask me to toggle each input, and
-> confirm the counters and flags update. Confirm via fPort 2 telemetry. Flag the PIR/Input
-> mutual-exclusion explicitly in your report.
+> Confirm `cap-gpio-mode inputs` and `cap-gpio-input-a`/`-b` `digital` (set and save if
+> needed, noting the change). Read the input counters, ask me to toggle each input, and
+> confirm the counters and flags update. Confirm via fPort 2 telemetry. For an S0 meter use
+> `s0` instead of `digital` (count only, no state flag; see AT-SEN-03b).
 
 - [ ] Pass
 
@@ -1353,7 +1354,7 @@ only the first activates, confirming the rest are correctly hold-suppressed, not
 its own fire.
 
 **Prompt for Claude:**
-> Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
+> Enable the sensor (`config cap-gpio-mode pir` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
 > `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — only
 > edge rules are accepted on these momentary channels. Ask me to trigger motion repeatedly; confirm the FIRST

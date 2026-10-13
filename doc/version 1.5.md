@@ -28,13 +28,14 @@ technical detail.
 | **Switchable onboard sensor** | `cap-sht` turns the onboard temperature/humidity sensor off like every other sensor. | §36 |
 | **Every sensor value is a channel** | Each sensor type publishes its own channel table (`app_sensor_types.yaml`). Alarm rules, telemetry and history address a value as (slot, channel): two temperatures on one machine probe, the barometer temperature, any on-board value can be alarmed and recorded. A 1-Wire slot expects a sensor type; a different sensor raises a `sensor_mismatch` alarm. | §40 |
 | **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
-| **Analog inputs** | `cap-analog-a` / `cap-analog-b` measure 0–24 V on the external inputs A/B. The value is a sensor channel like any other: telemetry, history, threshold alarms, no-data watchdog. | §45 |
+| **Analog inputs** | `cap-gpio-input-a` / `cap-gpio-input-b` `analog` measure 0–24 V on the external inputs A/B. The value is a sensor channel like any other: telemetry, history, threshold alarms, no-data watchdog. | §45, §48 |
+| **GP pin owner + S0 counter** | `cap-gpio-mode` gives GP_A/GP_B to the inputs, the PIR or the buzzer; each input is `digital`, `analog` or `s0` (pulse counter). A pin conflict can no longer be stored. | §48 |
 
 ### New configuration parameters
 
 | Parameter | Default | Values | Purpose | § |
 |---|---|---|---|---|
-| `alarm-buzzer-mode` | `off` | `off` / `once` / `slow` (120 s) / `normal` (30 s) / `fast` (10 s) / `continuous` | Buzzer while an alarm is active; needs `cap-buzzer` | §1 |
+| `alarm-buzzer-mode` | `off` | `off` / `once` / `slow` (120 s) / `normal` (30 s) / `fast` (10 s) / `continuous` | Buzzer while an alarm is active; needs `cap-gpio-mode buzzer` | §1 |
 | `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
 | `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
 | `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
@@ -44,7 +45,8 @@ technical detail.
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
 | `sensor1-type`…`sensor4-type` | `0` (none) | type id: `2` dallas, `3` machine-probe | Sensor type a 1-Wire slot expects; set by teach/auto-enroll or by provisioning | §40 |
 | `history-channels` | onboard temperature + humidity | up to 24 (slot, channel) entries | Replaces `history-sensors` | §40 |
-| `cap-analog-a`, `cap-analog-b` | `false` | `true` / `false` | 0–24 V analog voltage on input A / B; digital `cap-input-*`, PIR and buzzer win the shared pin | §45 |
+| `cap-gpio-mode` | `none` | `none` / `inputs` / `pir` / `buzzer` | Owner of GP_A/GP_B; replaces `cap-input-a/-b`, `cap-pir-detector`, `cap-buzzer` | §48 |
+| `cap-gpio-input-a`, `cap-gpio-input-b` | `none` | `none` / `digital` / `analog` / `s0` | Mode of input A / B with `cap-gpio-mode inputs`; `analog` = 0–24 V (replaces `cap-analog-a/-b`, §45), `s0` = pulse counter | §48 |
 
 ### New commands
 
@@ -369,7 +371,7 @@ after every persisted change — no diff-tracking, no extra state.
 | Group | Fields |
 |---|---|
 | `application` | `interval_sample`, `interval_report`, `history_enable` |
-| `sensors` | every capability flag, emitted explicitly incl. `false`: `cap_hall_left` … `cap_accelerometer` (1–9), `cap_buzzer` (19) and `cap_sht` (22) — the last two since #465 (§36) |
+| `sensors` | every capability flag, emitted explicitly incl. `false`: `cap_hall_left`, `cap_hall_right`, `cap_light_sensor`, `cap_barometer`, `cap_w1_sensors`, `cap_accelerometer`, `cap_sht` (22, #465, §36) and the effective `cap_gpio_mode` / `cap_gpio_input_a` / `cap_gpio_input_b` (27–29, §48; before #498 the bool GP caps 3/4/7/19) |
 | `w1_slot_type` | detected 1-Wire sensor type per logical slot 1..4 |
 
 `w1_slot_type` (`ConfigDump` field 7, packed `repeated uint32`) reports what is
@@ -395,10 +397,10 @@ config reply, bool fields decode as `0`/`1`):
 ```json
 { "config_dump": {
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
-    "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
-                 "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
-                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
-                 "cap_buzzer": 0, "cap_sht": 1 },
+    "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_light_sensor": 1,
+                 "cap_barometer": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
+                 "cap_sht": 1, "cap_gpio_mode": "inputs", "cap_gpio_input_a": "s0",
+                 "cap_gpio_input_b": "none" },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
 
@@ -407,7 +409,8 @@ config reply, bool fields decode as `0`/`1`):
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. `cap_buzzer` + `cap_sht` (#465) add 6 B (3 B each, tag ≥ 16);
-  the worst case is then 40 B without / 46 B with 1-Wire (§36). It fits the EU868 DR0 budget (51 B)
+  the worst case is then 40 B without / 46 B with 1-Wire (§36). #498 (§48) keeps that
+  size: four bool caps (2 B each) and `cap_buzzer` (3 B) became three enums (3 B each). It fits the EU868 DR0 budget (51 B)
   and the 64 B response buffer; below that it pages (§13).
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
   budget the settings-info is paged (§13); a setting that does not fit even alone is
@@ -887,7 +890,7 @@ the §4 content on request.
 |---|---|
 | Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
 | Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
-| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, every `sensors.cap_*` flag (incl. `cap_buzzer` / `cap_sht`, #465), runtime `w1_slot_type` (1-Wire builds) |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, every `sensors.cap_*` flag (incl. `cap_sht`, #465, and the effective `cap_gpio_*`, §48), runtime `w1_slot_type` (1-Wire builds) |
 | Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire before #465, +6 B for `cap_buzzer`/`cap_sht`, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
 | Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
 | Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
@@ -2461,7 +2464,9 @@ connector). Signals beyond 0–24 V (e.g. 4–20 mA loop shunts) need external c
 The hall pins (PA3/PA7) are not ADC-capable and stay digital.
 
 - **Configuration** (`sensors` proto group, the ids reserved by §40): `cap-analog-a`
-  (proto_id 20) and `cap-analog-b` (21), both default `false`.
+  (proto_id 20) and `cap-analog-b` (21), both default `false`. **Replaced by #498
+  (§48):** `cap-gpio-mode inputs` + `cap-gpio-input-a/-b analog`; the pin-sharing
+  rules below can no longer be configured.
 - **Pin sharing.** GP_A/GP_B are also wired to the digital inputs, the PIR and the buzzer
   HW variant. `app_sensor_init()` resolves conflicts at boot; the loser is cleared at
   runtime (not persisted) with a `LOG_WRN`:
@@ -2660,6 +2665,69 @@ sent a Hello; a cell can sit at that knee for days.
   runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
   off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
   AT-PWR-16 in `doc/automated-test-playbook.md`.
+
+## 48. GP pins: one owner, a mode per input, S0 counter (#498)
+
+GP_A (PB4) and GP_B (PA11) are shared by the digital inputs, the analog inputs (§45), the
+PIR and the buzzer HW variant. Six bool capabilities (`cap-input-a/-b`, `cap-analog-a/-b`,
+`cap-pir-detector`, `cap-buzzer`) could store any combination, and `app_sensor_init()`
+silently dropped the losers at boot. They are replaced by one owner and a mode per pin, so a
+conflict can no longer be configured:
+
+```
+config cap-gpio-mode    <none|inputs|pir|buzzer>
+config cap-gpio-input-a <none|digital|analog|s0>
+config cap-gpio-input-b <none|digital|analog|s0>
+```
+
+| Parameter | proto (`sensors`) | Default | Meaning |
+|---|:-:|---|---|
+| `cap-gpio-mode` | 27 | `none` | `pir` / `buzzer` take both pins; `inputs` hands each pin to its input mode |
+| `cap-gpio-input-a`, `cap-gpio-input-b` | 28, 29 | `none` | `digital` state + count (as before), `analog` 0–24 V (§45), `s0` pulse counter; used only with `cap-gpio-mode inputs` |
+
+- **Stored vs effective.** The input modes are kept as set while the mode is `pir` /
+  `buzzer`; they are just inactive. `app_sensor_init()` normalizes the runtime copy
+  (`g_app_config`): input modes off unless `inputs`, `analog` off without `CONFIG_ADC`,
+  `pir` / `buzzer` off when the driver is not built in (`LOG_WRN` each). `GetConfig` /
+  `config show` report the stored values; the settings dump (boot, `get_settings`) reports
+  the effective ones.
+- **S0 (IEC 62053-31).** S0 pulses are ≥ 30 ms; the 100 ms input poll would miss most of
+  them. An `s0` pin counts on its asserting edge in a GPIO interrupt (EXTI 4 / 11, free on
+  this board), with a 20 ms debounce; the poll folds the ISR count into `input_x_count`. An
+  S0 pin always counts (`input-x-counter` is ignored), has no state, no state flag and no
+  input alarm edge. Each pulse wakes the CPU briefly; not measured.
+- **Channels (§40).** `cap` in `app_sensor_types.yaml` can now name an enum parameter and the
+  values that enable the channel: `input-a-state` = `cap_gpio_input_a=digital`,
+  `input-a-count` = `cap_gpio_input_a=digital|s0`, `input-a-voltage` =
+  `cap_gpio_input_a=analog` (B alike), `pir-motion` / `pir-count` = `cap_gpio_mode=pir`.
+  sensorgen validates the values against `app_config.yml` and emits a `cap_mask`;
+  `app_sensor_channel_cap_on()` is the one gate telemetry, history and alarms use. The
+  channel struct gains a `cap_mask` byte.
+- **Settings dump.** It now carries `cap_hall_left` / `cap_hall_right` and the three
+  `cap_gpio_*` fields; `cap_analog_a/_b` were never in it (bug). Same size as before:
+  the four bool caps (2 B each) and `cap_buzzer` (3 B) became three enums (3 B each).
+- **Upgrade.** The config schema version stays 4, so the old NVS keys are converted by a
+  hand-written hook (`app_config_legacy.c`, wired by the new configen `module.legacy_hook`):
+  `h_set` keeps the old bool values, `h_commit` maps them with the precedence the old
+  runtime applied (PIR > buzzer > digital > analog per pin; the input modes are cleared
+  when PIR / buzzer wins), and init persists the result and only then deletes the old keys.
+  A device keeps doing exactly what it did before the update. configen also rejects an enum
+  `default` that is not one of its values.
+- **Proto / decoder.** Old `sensors` ids 3, 4, 7, 19, 20, 21 are `reserved`. nanopb skips
+  them, so an old host's `SetParam` with a bool cap is accepted without effect; `ttn.js`
+  refuses to encode them. Enum values decode as names (`"inputs"`, `"s0"`).
+- **Buzzer.** `alarm-buzzer-mode` and the `ats buzzer` commands need `cap-gpio-mode buzzer`.
+- **Cost:** release 190 756 B flash (+672 B), 48 072 B RAM (+64 B); debug 240 528 B
+  (+1 144 B), 55 944 B RAM (±0), against `v1.5.0` `0ecf20fb`.
+- **Tests:** new `tests/config_legacy` suite (7 cases: the precedence rules, all-false,
+  unknown keys / bad length, cleanup deletes each loaded key once); `sensor_types` enum gates; `cmd` settings dump incl. hall and
+  the effective gpio fields; `compose` / `alarm_eval` on the new parameters; sensorgen enum-cap
+  validation and mask rendering; configen legacy-hook wiring (cleanup only after a
+  successful save) and enum defaults; `ttn.js`
+  round-trip of tags 27–29 and rejection of the removed caps. All 17 native suites, pytest
+  87, decoder 130, clang-format 22.1.5 clean.
+- **HIL:** not run yet (S0 timing, legacy-key upgrade from a v1.5.0 image with the old caps
+  set, PIR and buzzer variants).
 
 ---
 
