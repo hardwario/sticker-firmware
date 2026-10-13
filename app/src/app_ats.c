@@ -1133,6 +1133,15 @@ static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
 }
 
+/* #316: inject a plaintext Command over the vendor transport — the bench
+ * equivalent of NFC mailbox channel 0x02 after the vendor_token decrypt. Reaches
+ * vendor_reset and the writable:[vendor] fields; the deferred action is only
+ * reported, not executed (#485 D4). */
+static int cmd_cmd_vnd(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_VENDOR, argv[1]);
+}
+
 /* #415: inject a raw (unencrypted) Command over the plain_text transport — the
  * bench equivalent of the NFC mailbox channel 0x03. Only allow-listed commands
  * answer (get_claim_info); anything else returns NOT_READY "transport not
@@ -1192,8 +1201,8 @@ static int cmd_cmd_history(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 
-		/* Holds one encoded HistoryFrame (<= 242 B samples + envelope); the NFC
-		 * rsp record itself lives in the 512 B ST25DV user memory. */
+		/* Holds one encoded HistoryFrame; on the air an NFC page is capped to
+		 * one 256 B mailbox frame (DUMP_PAGE_BUDGET_NFC), this is shell slack. */
 		static uint8_t out[512];
 		size_t out_len = 0;
 		enum app_cmd_action action = APP_CMD_ACTION_NONE;
@@ -1257,6 +1266,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(vnd, NULL,
+		      "Inject over the vendor transport (#316, NFC channel 0x02 "
+		      "after decrypt). Usage: vnd <hex>",
+		      cmd_cmd_vnd, 2, 0),
 	SHELL_CMD_ARG(plain, NULL,
 		      "Inject a raw Command over the unauthenticated plain_text transport "
 		      "(#415). Usage: plain <hex>",
@@ -1646,10 +1659,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-/* #415: (re)open the claim window -> ACTIVE, so the clm record is laid again on
- * the next NFC poll (while claim_token is set) and get_claim_info discloses the
- * token. Non-destructive alternative to app_settings_vendor_reset() for bench
- * re-testing the claim flow. */
+/* #415: (re)open the claim window -> ACTIVE, so get_claim_info discloses the token
+ * again (while claim_token is set). Non-destructive alternative to app_settings_vendor_reset() for
+ * bench re-testing the claim flow. */
 static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1666,8 +1678,8 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "claim window -> active");
 	if (!claim_set) {
-		shell_print(sh, "warning: claim_token is unset - clm record will NOT appear "
-				"until one is provisioned (`config claim-token <hex>`)");
+		shell_print(sh, "warning: claim_token is unset - get_claim_info answers "
+				"NOT_READY until one is provisioned (`config claim-token <hex>`)");
 	}
 	return 0;
 }

@@ -291,7 +291,7 @@ static void motion_trigger_handler(const struct device *dev, const struct sensor
 	 * persistently asserted INT2 line then re-fires in a tight ISR/work
 	 * loop on the system workqueue, starving the main loop and the
 	 * watchdog feed. Disarm + delayed re-arm bounds the interrupt rate to
-	 * 1/MOTION_REARM_SECONDS by construction, whatever the chip state. */
+	 * 1/MOTION_REARM_MS (50 Hz) by construction, whatever the chip state. */
 	int ret = sensor_trigger_set(dev, &m_motion_trig, NULL);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("sensor_trigger_set(disarm)", ret);
