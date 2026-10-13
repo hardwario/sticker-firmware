@@ -120,7 +120,12 @@ bool app_power_boot_battery_low(void)
 
 void app_power_low_battery_off(void)
 {
+	/* A play cut short by the hold skips its own all-off (thread writes are
+	 * blocked while held), so clear every channel before the indication. */
 	app_led_hold(true);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
 	for (int i = 0; i < LOW_BATT_BLINKS; i++) {
 		app_led_set(APP_LED_CHANNEL_R, APP_LED_ON);
 		k_sleep(K_MSEC(LOW_BATT_BLINK_MS));

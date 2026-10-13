@@ -417,8 +417,10 @@ int main(void)
 
 #if defined(CONFIG_POWEROFF)
 	if (battery_low) {
-		k_sleep(K_MSEC(carousel_ms)); /* let the carousel finish */
-		app_power_low_battery_off();  /* does not return */
+		/* Let the carousel finish; the margin covers the LED thread's own
+		 * scheduling latency so the hold does not cut the last step. */
+		k_sleep(K_MSEC(carousel_ms + 250));
+		app_power_low_battery_off(); /* does not return */
 	}
 #else
 	ARG_UNUSED(carousel_ms);
