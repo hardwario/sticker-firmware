@@ -95,6 +95,32 @@ config APP_DEBUG_AUTOSUSPEND_S
 	  Wake is by NRST / power-cycle (clean boot; NVS identity and
 	  LoRaWAN keys survive in flash).
 
+config APP_BATTERY_BOOT_GATE
+	bool "Stay off when the battery is too low at boot"
+	default y
+	depends on HAS_POWEROFF && ADC
+	select POWEROFF
+	help
+	  #496: measure the battery first thing at boot, before the IWDG,
+	  the radio, NVS writes and the sensors. Below
+	  APP_BATTERY_BOOT_MIN_MV the STICKER does not start: it powers
+	  down to STM32WL Shutdown and stays off until NRST / a
+	  power-cycle (battery replacement) runs the check again. A
+	  depleted cell otherwise boot-loops on brownout, writing the P2P
+	  FCnt base to flash and sending a Hello on every boot. A failed
+	  ADC read boots normally.
+
+config APP_BATTERY_BOOT_MIN_MV
+	int "Minimum battery voltage to start (mV)"
+	depends on APP_BATTERY_BOOT_GATE
+	default 1800
+	range 1000 3600
+	help
+	  Battery voltage below which the STICKER stays off at boot
+	  (APP_BATTERY_BOOT_GATE). 1.8 V is the STM32WLE5 / flash minimum
+	  (1.71 V) plus margin. Independent of the low-battery alarm
+	  threshold (`battery_level`).
+
 config APP_LORAWAN_1_1
 	bool "Use LoRaWAN 1.1.x crypto for OTAA"
 	default n
