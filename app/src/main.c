@@ -456,6 +456,12 @@ int main(void)
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
 
+#if defined(CONFIG_WATCHDOG)
+	/* #485 B1: app_sensor_init() can take seconds (1-Wire scans of taught slots);
+	 * feed between the init steps so their sum never meets the 10 s IWDG. */
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	/* NFC last, once every component a command can reach is up (#414): the poll
 	 * thread serves phone commands as soon as it starts, and one served before
 	 * app_counters_init() / app_history_init() / app_sensor_init() / ... would act
