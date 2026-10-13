@@ -118,6 +118,14 @@ K_MUTEX_DEFINE(m_lock);
 static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool active, uint8_t type,
 			  bool has_value, int32_t value);
 
+/* Type of the deactivate edge of a latched rule: a threshold latch carries the
+ * bound it latched (LOW/HIGH); STATE and RATE latches never set rt->type and
+ * fire as TRIGGER (#485 S6), so their deactivate edge must say TRIGGER too. */
+static uint8_t rt_edge_type(const struct rstate *rt)
+{
+	return rt->type != ALARM_TYPE_NONE ? rt->type : ALARM_TYPE_TRIGGER;
+}
+
 /* Return rule `idx`, syncing its runtime latch: an empty rule (or one that
  * changed at all since the latch was last reset — any field, e.g. a live edit
  * of lo/hi/dwell/enabled/from_state/to_state on the SAME channel) is reset.
@@ -137,7 +145,8 @@ static bool rt_sync(uint8_t idx, struct app_alarm_rule *out, bool *should_send)
 	if (!app_alarm_rules_get(idx, out)) {
 		if (rt->used) {
 			if (rt->active) {
-				alarm_collect(idx, &rt->last_rule, false, rt->type, false, 0);
+				alarm_collect(idx, &rt->last_rule, false, rt_edge_type(rt), false,
+					      0);
 				*should_send = true;
 			}
 			*rt = (struct rstate){0};
@@ -146,7 +155,7 @@ static bool rt_sync(uint8_t idx, struct app_alarm_rule *out, bool *should_send)
 	}
 	if (!rt->used || memcmp(&rt->last_rule, out, sizeof(*out)) != 0) {
 		if (rt->active) {
-			alarm_collect(idx, &rt->last_rule, false, rt->type, false, 0);
+			alarm_collect(idx, &rt->last_rule, false, rt_edge_type(rt), false, 0);
 			*should_send = true;
 		}
 		*rt = (struct rstate){.used = true, .last_rule = *out};
@@ -170,7 +179,10 @@ static bool rt_sync_armed(uint8_t idx, struct app_alarm_rule *out, bool *should_
 
 /* ---- Alarm-detail batch (#27) ------------------------------------------- */
 
-#define ALARM_BATCH_MAX 8
+/* One window holds an edge of every rule (F-HIL-11: 12 deactivations at once
+ * lost 4 with 8); a burst beyond that flushes the window early. Frames still
+ * carry at most AlarmReport.events max_count each: the batch is paged. */
+#define ALARM_BATCH_MAX APP_ALARM_RULE_COUNT
 #define ALARM_FRAME_MAX 64
 
 static struct app_cmd_alarm_event m_batch[ALARM_BATCH_MAX];
@@ -376,8 +388,12 @@ static void alarm_batch_flush(void)
 	uint8_t page_n[ALARM_BATCH_MAX];
 	uint8_t pages = 0;
 	uint8_t laid = 0;
+	bool skipped = false;
 
-	while (laid < m_batch_count) {
+	/* F-HIL-13: one report takes at most the whole alarm queue; the events left
+	 * over stay held as the next report (same base_time) and go when app_radio
+	 * frees a slot. */
+	while (laid < m_batch_count && pages < APP_RADIO_TX_QUEUE_DEPTH) {
 		size_t len = 0;
 		uint8_t n = m_batch_count - laid;
 		int ret = -EMSGSIZE;
@@ -398,6 +414,7 @@ static void alarm_batch_flush(void)
 			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
 				"in telemetry system_flags",
 				m_batch_count - laid, (unsigned)cap);
+			skipped = true;
 			break;
 		}
 		page_n[pages++] = n;
@@ -421,9 +438,14 @@ static void alarm_batch_flush(void)
 		return;
 	}
 
+	/* The report counts what it carries plus what the window dropped; the
+	 * events left over count in the next report. */
+	uint8_t left = skipped ? 0 : m_batch_count - laid;
+	uint16_t total = m_window_total - left;
+
 	for (uint8_t p = 0, first = 0; p < pages; first += page_n[p], p++) {
 		size_t len = 0;
-		int ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
+		int ret = app_cmd_build_alarm_report(m_window_base_unix, total, synced,
 						     &m_batch[first], page_n[p], p, pages, buf, cap,
 						     &len);
 		if (ret) {
@@ -432,7 +454,18 @@ static void alarm_batch_flush(void)
 		}
 		(void)app_radio_send_alarm(buf, len);
 		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u (%u B)", p + 1, pages,
-			first + 1, first + page_n[p], m_window_total, (unsigned)len);
+			first + 1, first + page_n[p], total, (unsigned)len);
+	}
+
+	if (left > 0) {
+		memmove(m_batch, &m_batch[laid], left * sizeof(m_batch[0]));
+		m_batch_count = left;
+		m_window_total = left;
+		m_window_base_synced = synced;
+		m_batch_held = true;
+		m_window_open = true;
+		LOG_INF("Alarm batch: %u event(s) held for the next report", left);
+		return;
 	}
 
 	m_batch_count = 0;
@@ -516,6 +549,10 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	if (m_batch_count < ALARM_BATCH_MAX) {
 		ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
 		m_batch[m_batch_count++] = ev;
+	}
+	if (m_batch_count == ALARM_BATCH_MAX && !m_batch_held) {
+		/* Full: close the window now instead of dropping later edges. */
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
 	}
 
 	k_mutex_unlock(&m_lock);
@@ -955,7 +992,9 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 	}
 
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
-	if (rule->hi > 0 && delta >= (uint32_t)rule->hi && !rt->active) {
+	/* Compare as float, not (uint32_t)hi: hi is validated to [0, UINT32_MAX]
+	 * (#485 S7) and a fractional hi is no longer truncated (2.5 needs 3). */
+	if (rule->hi > 0 && (float)delta >= rule->hi && !rt->active) {
 		rt->active = true;
 		rt->oneshot_expiry = now + rule_hold_ms(rule);
 		*should_send = true;
@@ -1603,7 +1642,7 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Rules. type: threshold rules latch LOW/HIGH in rt->type; state/count
-	 * rules report TRIGGER. */
+	 * rules report TRIGGER (rt_edge_type()). */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_RULE_COUNT && n < max; i++) {
 		if (!m_rt[i].used || !m_rt[i].active) {
@@ -1616,8 +1655,7 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 			.slot = r->slot,
 			.channel = r->channel,
 			.sensor_type = r->sensor_type,
-			.type = rt_kind(i) == APP_SENSOR_KIND_THRESHOLD ? m_rt[i].type
-									: ALARM_TYPE_TRIGGER,
+			.type = rt_edge_type(&m_rt[i]),
 		};
 	}
 	k_mutex_unlock(&m_lock);

@@ -53,14 +53,10 @@ ZTEST_SUITE(buzzer, NULL, suite_setup, before, NULL, NULL);
 
 /* ---- melody playback sequencing (SET/DELAY pattern walk) -----------------
  *
- * execute_pattern() skips the LAST delay of the LAST repetition outright (it
- * would otherwise run only to have the trailing set(false) immediately
- * override it) — harmless for ALARM, whose last step is already an "off"
- * delay, but it means INFO/WARNING's final beep-on pulse is applied and
- * cleared within the same non-yielding execution, with no k_sleep in
- * between. A test thread can only observe GPIO state at a k_sleep()
- * boundary, so that final pulse is provably unobservable here — these tests
- * only assert the OBSERVABLE parts of each pattern walk. */
+ * execute_pattern() skips the last delay of the last repetition only when the
+ * buzzer is already off (ALARM's trailing gap). Before #494 it skipped it
+ * unconditionally, so INFO, WARNING's second beep and app_buzzer_on() were a
+ * ~0 ms pulse (HIL: PA11 never seen high during `ats buzzer beep 5000`). */
 
 ZTEST(buzzer, test_warning_melody_first_beep_is_observable)
 {
@@ -72,7 +68,10 @@ ZTEST(buzzer, test_warning_melody_first_beep_is_observable)
 	k_sleep(K_MSEC(100)); /* 130 ms total: within the 150 ms silent gap */
 	zassert_false(buzzer_on(), "WARNING's gap between beeps stayed on");
 
-	k_sleep(K_MSEC(200)); /* past the whole pattern (230 ms) */
+	k_sleep(K_MSEC(140)); /* 270 ms: within the second 80 ms beep (230-310) */
+	zassert_true(buzzer_on(), "WARNING's second beep never turned the buzzer on");
+
+	k_sleep(K_MSEC(100)); /* past the whole pattern (310 ms) */
 	zassert_false(buzzer_on(), "WARNING never settled off after the pattern finished");
 }
 
@@ -97,15 +96,28 @@ ZTEST(buzzer, test_alarm_melody_walks_all_five_repetitions)
 	zassert_false(buzzer_on(), "ALARM did not settle off after 5 repetitions");
 }
 
-ZTEST(buzzer, test_info_melody_dispatches_without_error)
+ZTEST(buzzer, test_info_melody_beeps_80_ms)
 {
-	/* INFO's single beep is entirely inside the unobservable last-pulse
-	 * window (see comment above) — only the dispatch + eventual settle can
-	 * be asserted here. */
 	zassert_equal(app_buzzer_play(APP_BUZZER_KIND_INFO), 0, "play(INFO) failed");
 
-	k_sleep(K_MSEC(50));
+	k_sleep(K_MSEC(40)); /* within the 80 ms beep */
+	zassert_true(buzzer_on(), "INFO beep never turned the buzzer on");
+
+	k_sleep(K_MSEC(80)); /* 120 ms: past the beep */
 	zassert_false(buzzer_on(), "INFO never settled off");
+}
+
+/* app_buzzer_on(ms) holds the buzzer on for the whole duration (#494 HIL). */
+ZTEST(buzzer, test_on_ms_holds_for_the_duration)
+{
+	zassert_equal(app_buzzer_on(300), 0, "app_buzzer_on failed");
+
+	k_sleep(K_MSEC(50));
+	zassert_true(buzzer_on(), "on(300) off after 50 ms");
+	k_sleep(K_MSEC(200)); /* 250 ms */
+	zassert_true(buzzer_on(), "on(300) off after 250 ms");
+	k_sleep(K_MSEC(100)); /* 350 ms */
+	zassert_false(buzzer_on(), "on(300) still on after 350 ms");
 }
 
 /* ---- off/stop aborts -------------------------------------------------- */
@@ -145,7 +157,7 @@ ZTEST(buzzer, test_off_while_idle_does_not_lock_out_next_play)
 
 ZTEST(buzzer, test_off_during_active_repeat_does_not_replay)
 {
-	/* WARNING's pattern is 230 ms; repeat_s=1 replays 1 s after each
+	/* WARNING's pattern is 310 ms; repeat_s=1 replays 1 s after each
 	 * playback finishes. Regression (found on real HW): stopping while the
 	 * thread is parked waiting out the repeat interval must not have the
 	 * wakeup misread as "interval elapsed naturally" and replay the
@@ -154,13 +166,47 @@ ZTEST(buzzer, test_off_during_active_repeat_does_not_replay)
 	zassert_equal(app_buzzer_play_repeating(APP_BUZZER_KIND_WARNING, 1), 0,
 		      "play_repeating(WARNING, 1) failed");
 
-	k_sleep(K_MSEC(300)); /* past the 230 ms pattern: now parked waiting out repeat_s */
+	k_sleep(K_MSEC(400)); /* past the 310 ms pattern: now parked waiting out repeat_s */
 	zassert_false(buzzer_on(), "WARNING should have finished its single playback by now");
 
 	zassert_equal(app_buzzer_play_repeating(APP_BUZZER_KIND_STOP, 0), 0, "stop failed");
 
 	k_sleep(K_MSEC(1200)); /* past when the 1 s repeat would have fired */
 	zassert_false(buzzer_on(), "stopped melody replayed after its repeat interval elapsed");
+}
+
+/* #485 B6: a stop issued from a thread below the buzzer thread's priority (5),
+ * as the radio / NFC command paths are, while a request waits in the queue and
+ * the buzzer thread sleeps out REQUEST_MIN_DELAY_MS after a playback. The
+ * k_wakeup() inside the stop used to preempt the caller before its purge: the
+ * buzzer thread took the queued request and played it. */
+static K_THREAD_STACK_DEFINE(low_stop_stack, 1024);
+static struct k_thread low_stop_thread;
+
+static void low_stop_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	(void)app_buzzer_play_repeating(APP_BUZZER_KIND_STOP, 0);
+}
+
+ZTEST(buzzer, test_stop_from_low_priority_drops_queued_request)
+{
+	zassert_equal(app_buzzer_play(APP_BUZZER_KIND_WARNING), 0, "play(WARNING) failed");
+	k_sleep(K_MSEC(400)); /* past the 310 ms pattern: in the 500 ms cooldown */
+	zassert_false(buzzer_on(), "WARNING should have finished by now");
+
+	zassert_equal(app_buzzer_play(APP_BUZZER_KIND_ALARM), 0, "enqueue(ALARM) failed");
+	k_thread_create(&low_stop_thread, low_stop_stack, K_THREAD_STACK_SIZEOF(low_stop_stack),
+			low_stop_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+	k_thread_join(&low_stop_thread, K_FOREVER);
+
+	for (int i = 0; i < 20; i++) { /* the whole 900 ms ALARM would show here */
+		k_sleep(K_MSEC(50));
+		zassert_false(buzzer_on(), "the queued ALARM played after the stop (%d ms)",
+			      (i + 1) * 50);
+	}
 }
 
 /* ---- queue policy: newest replaces not-yet-started --------------------- */
@@ -181,9 +227,9 @@ ZTEST(buzzer, test_queue_newest_replaces_not_yet_started)
 
 	/* Whichever of WARNING/INFO plays next, it must not be a fresh ALARM
 	 * cycle (5 on/off repetitions) — spot-check by outlasting a single
-	 * WARNING/INFO pattern (230 ms) and confirming it already went quiet,
-	 * which a freshly-started ALARM (900 ms) would not have by then. */
-	k_sleep(K_MSEC(300));
+	 * WARNING/INFO pattern (310 ms) and confirming it already went quiet,
+	 * which a freshly-started ALARM (900 ms, on 360-460 ms) would not have. */
+	k_sleep(K_MSEC(400));
 	zassert_false(buzzer_on(),
 		      "queued request after abort still looks like a fresh ALARM cycle");
 }

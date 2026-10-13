@@ -12,7 +12,7 @@
 #if defined(CONFIG_WATCHDOG)
 #include "app_wdog.h"
 #endif
-#if defined(CONFIG_LORAWAN)
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
 #include "app_report.h"
 #include "app_radio.h"
 #endif
@@ -39,7 +39,8 @@ void app_power_suspend(void)
 	/* WRN level so the line survives the debug log filter (LOG_MAX_LEVEL=2). */
 	LOG_WRN("Entering deep sleep (Shutdown) — wake via NRST / power-cycle");
 
-#if defined(CONFIG_LORAWAN)
+	/* #485 R7: a P2P-only image has the report cadence and a radio too. */
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
 	app_report_suspend(); /* stop the report cadence before the radio teardown */
 	app_radio_suspend();
 #endif

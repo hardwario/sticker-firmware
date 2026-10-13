@@ -253,8 +253,11 @@ void app_alarm_rules_clear_all(void)
  * app_cmd_handle_set_param) without needing the real app_alarm_rules.c linked. */
 int test_alarm_reload_dropped;
 
+bool test_alarm_reloaded;
+
 int app_alarm_rules_reload_from_config(void)
 {
+	test_alarm_reloaded = true;
 	return test_alarm_reload_dropped;
 }
 
@@ -270,6 +273,21 @@ bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 int app_alarm_rules_stale_count(void)
 {
 	return 0;
+}
+
+/* Slots the forced fault names (#494 fault_field): the stale mask is read
+ * before and after the reload, so a test sets the "after" value only. */
+uint32_t test_alarm_invalid_mask;
+uint32_t test_alarm_stale_mask_after;
+
+uint32_t app_alarm_rules_stale_mask(void)
+{
+	return test_alarm_reloaded ? test_alarm_stale_mask_after : 0;
+}
+
+uint32_t app_alarm_rules_invalid_mask(void)
+{
+	return test_alarm_invalid_mask;
 }
 
 enum app_radio_state app_radio_get_state(void)

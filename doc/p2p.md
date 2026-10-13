@@ -284,6 +284,9 @@ JoinAccept (38 B)   Data, src = net_id, dest = low32(DevEUI), counter = the Join
 3. **Check the JoinAccept.** It must open under `join_key` with the expected counter
    and dest. Its `net_id` must equal the frame's `src` and must not be reserved. Its
    `rx_delay` must be 1..15 s. A longer value is accepted and its tail ignored.
+   The value is stored and reported (`ats radio info`) but drives no window: the
+   JoinAccept window opens after the default 1 s, before any JoinAccept is known,
+   and the data windows follow the turnaround above.
 4. **Apply the TX power.** `tx_power_dbm` in 2..22 is applied as the session TX
    power. 0 means none, and a value out of range is ignored; either way the node
    still pairs.

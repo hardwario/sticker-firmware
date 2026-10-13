@@ -18,6 +18,14 @@
 #include <stddef.h>
 #include <string.h>
 
+const struct app_sensor_hist_enc_info app_sensor_hist_encs[APP_SENSOR_HIST_COUNT] = {
+	[APP_SENSOR_HIST_U8] = {.size = 1, .lo = INT64_C(0), .hi = INT64_C(254)},
+	[APP_SENSOR_HIST_I16] = {.size = 2, .lo = INT64_C(-32768), .hi = INT64_C(32766)},
+	[APP_SENSOR_HIST_U16] = {.size = 2, .lo = INT64_C(0), .hi = INT64_C(65534)},
+	[APP_SENSOR_HIST_I32] = {.size = 4, .lo = INT64_C(-2147483648), .hi = INT64_C(2147483646)},
+	[APP_SENSOR_HIST_U32] = {.size = 4, .lo = INT64_C(0), .hi = INT64_C(4294967294)},
+};
+
 static const struct app_sensor_channel m_ch_motherboard[] =
 	{
 		[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE] =

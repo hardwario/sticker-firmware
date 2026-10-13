@@ -40,6 +40,10 @@ KINDS = ["threshold", "state", "rate", "none"]
 WIRE_TYPES = {"sint32": (-(2**31), 2**31 - 1), "uint32": (0, 2**31 - 1)}
 # Usable value range of each history encoding; the top value is the "absent"
 # sentinel (INT16_MAX / INT32_MAX / all-ones) and is kept free.
+# History encodings, in enum order (APP_SENSOR_HIST_<NAME> = index + 1):
+# name -> (lowest, highest storable value). The value above the highest is
+# the "absent" sentinel. The record size, the C limits/sentinel table and the
+# decoder's twin tables are all generated from this (#485 S10).
 HISTORY_ENCS = {
     "u8": (0, 0xFE),
     "i16": (-0x8000, 0x7FFE),
@@ -47,6 +51,7 @@ HISTORY_ENCS = {
     "i32": (-(2**31), 2**31 - 2),
     "u32": (0, 2**32 - 2),
 }
+HISTORY_ENC_SIZE = {"u8": 1, "i16": 2, "u16": 2, "i32": 4, "u32": 4}
 
 TOP_KEYS = {"version", "max_channels", "max_channels_w1", "pending_caps", "types"}
 TYPE_KEYS = {"id", "name", "label", "slot", "w1_family", "channels"}
@@ -331,7 +336,17 @@ def build_model(reg, enum_caps=None):
             "channels": chans,
             "parts": parts,
         })
+    hist_encs = [{
+        "name": name,
+        "sym": f"APP_SENSOR_HIST_{name.upper()}",
+        "size": HISTORY_ENC_SIZE[name],
+        "lo": lo,
+        "hi": hi,
+        # Two's-complement bit pattern of the sentinel as stored (hi + 1).
+        "sentinel": hex(hi + 1),
+    } for name, (lo, hi) in HISTORY_ENCS.items()]
     return {
+        "hist_encs": hist_encs,
         "version": reg["version"],
         "max_channels": reg["max_channels"],
         "max_channels_w1": reg["max_channels_w1"],

@@ -57,8 +57,8 @@ bool app_nfc_session_active(void);
  * Returned by app_nfc_claim_state_get(); the numeric values are wire-stable and
  * match the legacy pending/consumed bytes so the NVS migration is a no-op for
  * the common cases (see app_nfc.c). */
-#define APP_NFC_CLAIM_ACTIVE 1 /* claimable: clm record laid, get_claim_info discloses token */
-#define APP_NFC_CLAIM_DONE   2 /* claimed: no clm record, get_claim_info -> NOT_READY */
+#define APP_NFC_CLAIM_ACTIVE 1 /* claimable: get_claim_info discloses the token */
+#define APP_NFC_CLAIM_DONE   2 /* claimed: get_claim_info -> NOT_READY */
 
 /* (Re)open the claim window (#415): CLAIM_ACTIVE + persist, no reboot. Reached
  * from the claim_active command and `ats claim active`. `reason` goes to the

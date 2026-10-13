@@ -30,15 +30,15 @@ AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32
-# Sized so the NFC paged read (#260) fills a whole NFC response per tap (fewest
-# pages). The binding limit is the ST25DV 512 B tag memory: the rsp NDEF record is
-# ~22 B framing + encrypted(8 B nonce + plaintext + 16 B CCM tag), so plaintext
-# <= ~466 B; minus the ~26 B Response/HistoryFrame protobuf envelope leaves ~440 B
-# for samples. The runtime cap (app_cmd_history_sample_capacity, out_cap =
-# DUMP_PAGE_BUDGET_NFC 450) is the real binding value; this field just must not be
-# smaller. The LoRaWAN replay is separately capped to its DR budget (m_hist_tx_buf,
-# APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B) so it never fills this. RAM-free: the Response oneof is dominated by
-# ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
+# Upper bound for one history page. Since #414 the binding limit is the NFC
+# mailbox, not this field: one 256 B FTM frame carries <= 231 B of plaintext
+# (1 B channel + 8 B header + 16 B CCM tag), so the NFC page is capped at
+# runtime by app_cmd_history_sample_capacity(..., DUMP_PAGE_BUDGET_NFC 200).
+# 440 dates from the v1.4.x 512 B NDEF rsp record and is kept only as a ceiling
+# that no transport reaches (#485 D3). The LoRaWAN replay is separately capped
+# to its DR budget (m_hist_tx_buf, APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B).
+# RAM-free: the Response oneof is dominated by ConfigDump (~563 B), so
+# HistoryFrame at ~472 B does not enlarge Response.
 Response.HistoryFrame.samples max_size:440
 # #430 record layout: one entry per column (APP_HISTORY_MAX_CH) / per 1-Wire slot.
 Response.HistoryFrame.channels max_size:24
@@ -53,7 +53,7 @@ Command.SetSecretKey.key    max_size:16 fixed_length:true
 # claim_active command (#351/#415): fixed 16-byte optional new claim token, no callback.
 Command.ClaimActive.new_claim_token max_size:16 fixed_length:true
 
-# NFC clm provisioning record (#247): fixed 16-byte claim token, no callback.
+# get_claim_info reply (#247/#415): fixed 16-byte claim token, no callback.
 ClaimInfo.claim_token       max_size:16 fixed_length:true
 
 # Alarm-detail batch (fPort 3, #27). 8 events fit the smallest practical DR; the

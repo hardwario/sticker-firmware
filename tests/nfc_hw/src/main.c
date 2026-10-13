@@ -466,7 +466,8 @@ static const uint8_t PLAIN_GET_BASIC_INFO[] = {0x03, 0x08, 0x01, 0xF2, 0x01, 0x0
  * decides whether the hold must end on its own. */
 struct hold_probe {
 	int32_t delay_ms;
-	bool exchange; /* true: one get_basic_info exchange; false: app_cmd_get_info() */
+	bool exchange; /* true: one mailbox exchange; false: app_cmd_get_info() */
+	bool authed;   /* exchange: owner get_info (GETINFO_C1) instead of plain basic_info */
 	int64_t done_ms;
 	uint32_t device_status;
 	size_t reply_len;
@@ -480,9 +481,18 @@ static void hold_probe_fn(void *a, void *b, void *c)
 
 	k_msleep(pr->delay_ms);
 	if (pr->exchange) {
+		uint8_t frame[65];
+		size_t flen;
+
+		if (pr->authed) {
+			frame[0] = 0x01; /* chan: owner command */
+			flen = 1 + unhex_local(GETINFO_C1, &frame[1], sizeof(frame) - 1);
+		} else {
+			memcpy(frame, PLAIN_GET_BASIC_INFO, sizeof(PLAIN_GET_BASIC_INFO));
+			flen = sizeof(PLAIN_GET_BASIC_INFO);
+		}
 		st25dv_emul_rf_set_mb_en(true);
-		if (st25dv_emul_rf_put_message(PLAIN_GET_BASIC_INFO,
-					       sizeof(PLAIN_GET_BASIC_INFO)) == 0) {
+		if (st25dv_emul_rf_put_message(frame, flen) == 0) {
 			uint8_t reply[256];
 
 			for (int spin = 0; spin < 150; spin++) {
@@ -557,21 +567,40 @@ ZTEST(nfc_hw, test_field_held_without_mailbox_releases_after_120s)
 		     (long long)elapsed);
 }
 
-/* Finding 2, "longer communication": mailbox traffic restarts the 120 s hold, so
- * an exchange late in a long tap is served and the release comes 120 s after it,
- * not 120 s after the tap started. */
+/* Finding 2, "longer communication": authenticated mailbox traffic restarts the
+ * 120 s hold, so an exchange late in a long tap is served and the release comes
+ * 120 s after it, not 120 s after the tap started. */
 ZTEST(nfc_hw, test_field_hold_restarts_after_mailbox_traffic)
 {
 	mb_bring_up(KEY_HEX);
 	st25dv_emul_set_field_on(true);
 
-	struct hold_probe pr = {.delay_ms = 100000, .exchange = true};
+	struct hold_probe pr = {.delay_ms = 100000, .exchange = true, .authed = true};
 	int64_t elapsed = run_hold(&pr);
 
 	st25dv_emul_set_field_on(false);
 	zassert_true(pr.reply_len > 1, "the exchange at 100 s got no reply (%zu B)", pr.reply_len);
 	zassert_true(elapsed >= 100000 + 120000 && elapsed < 100000 + 120000 + 6000,
 		     "hold ended after %lld ms (expected ~120 s after the exchange)",
+		     (long long)elapsed);
+}
+
+/* #485 C6: an unauthenticated (plaintext) exchange is served but must not extend
+ * the hold, or anyone with a phone could keep the chip powered and the CPU out
+ * of Stop2 indefinitely by repeating get_basic_info. */
+ZTEST(nfc_hw, test_field_hold_not_extended_by_plaintext_traffic)
+{
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	struct hold_probe pr = {.delay_ms = 100000, .exchange = true, .authed = false};
+	int64_t elapsed = run_hold(&pr);
+
+	st25dv_emul_set_field_on(false);
+	zassert_true(pr.reply_len > 1, "the plain exchange at 100 s got no reply (%zu B)",
+		     pr.reply_len);
+	zassert_true(elapsed >= 120000 && elapsed < 126000,
+		     "hold ended after %lld ms (expected ~120 s from the tap, not extended)",
 		     (long long)elapsed);
 }
 

@@ -471,7 +471,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	struct app_config snapshot = *app_config();
 	/* Rules already stale before this batch (#430) do not fail it; only a
 	 * batch that makes more rules stale or invalid does. */
-	const int stale_before = app_alarm_rules_stale_count();
+	const uint32_t stale_before = app_alarm_rules_stale_mask();
 
 	/* alarms_replace: the host is the source of truth for the whole alarm table
 	 * (ProXimos Portal). Empty every rule slot in staging first, so the alarms
@@ -536,11 +536,23 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		/* A sensors-group change of sensorN_type can turn rules stale
 		 * (#430), so it reloads (and is checked) like an alarms change. */
 		if ((sp->has_alarms || sp->has_sensors || alarms_replace) &&
-		    app_alarm_rules_reload_from_config() > stale_before) {
+		    app_alarm_rules_reload_from_config() > __builtin_popcount(stale_before)) {
+			/* #494 HIL: name the rule (alarm_N tag) the batch broke: one
+			 * it made invalid, else one it made stale. */
+			const uint32_t bad = app_alarm_rules_invalid_mask() |
+					     (app_alarm_rules_stale_mask() & ~stale_before);
+
 			*app_config() = snapshot;                   /* roll back the batch */
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
-			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
+			BUILD_ASSERT(AppConfigMessage_Alarms_alarm_15_tag ==
+					     AppConfigMessage_Alarms_alarm_0_tag + 15,
+				     "alarm_N tags must be contiguous");
+			/* group 4 = alarms; tag 0 only if no slot could be named */
+			uint32_t tag =
+				bad ? AppConfigMessage_Alarms_alarm_0_tag + __builtin_ctz(bad) : 0;
+
+			resp->body.error.fault_field = 4 * 100 + tag;
 			goto out;
 		}
 		/* F-1: LoRaWAN staging changed but the running copy (used by
@@ -1059,8 +1071,8 @@ static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command
  * Response.claim_info while the claim window is active; Error NOT_READY
  * "claimed" once it is done, or "no claim token" when none was provisioned.
  * Read-only, no side effects — the identity-class-only rule a plain_text command
- * must obey. Discloses exactly what the plaintext hio.stck:clm record does
- * today, but only on a powered unit while the window is open. */
+ * must obey. Discloses what the removed plaintext hio.stck:clm record did
+ * (#414), but only on a powered unit while the window is open. */
 static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Command *cmd,
 					  Response *resp, enum app_cmd_action *action)
 {
@@ -1165,7 +1177,7 @@ static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command 
  * stays valid until taken. */
 static uint8_t m_pending_vendor_secret_key[16];
 
-/* #316: vendor_reset over the vendor channel (NFC hio.stck:vnd, authenticated by
+/* #316: vendor_reset over the vendor channel (NFC mailbox channel 0x02, authenticated by
  * vendor_token — decrypt() runs before app_cmd_handle() is reached). Body reuses
  * the SetSecretKey shape: the mandatory replacement secret_key, because
  * app_settings_vendor_reset() zeroes the old key (secret_key is NOT in the
@@ -1258,7 +1270,7 @@ void app_cmd_run_action(enum app_cmd_action action)
 		app_settings_factory_reset();
 		break;
 	case APP_CMD_ACTION_VENDOR_RESET:
-		/* #299/#316, narrowest tier: only the NFC hio.stck:vnd (vendor-token)
+		/* #299/#316, narrowest tier: only the NFC mailbox channel 0x02 (vendor-token)
 		 * channel reaches it. The replacement secret_key travelled in the same
 		 * request. */
 		LOG_INF("Command: vendor reset (keep serial + vendor token) + reboot");
@@ -1496,12 +1508,6 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 
 #endif /* APP_CMD_HAVE_W1 */
 
-/* Sanity bounds for a wall-clock time supplied over NFC: reject obviously wrong
- * epochs. 2024-01-01 .. 2100-01-01 (UTC) comfortably brackets any real device
- * provisioning while staying well inside the uint32 range (rolls over in 2106). */
-#define APP_CMD_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
-#define APP_CMD_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
-
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -1512,7 +1518,9 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 	 * This bootstraps a device before/without a network. */
 	if (cmd->body.clock_sync.has_unix_time) {
 		uint32_t unix_s = cmd->body.clock_sync.unix_time;
-		if (unix_s < APP_CMD_CLOCK_UNIX_MIN || unix_s > APP_CMD_CLOCK_UNIX_MAX) {
+		/* Same window app_clock enforces (app_clock.h), checked here so a
+		 * bad epoch answers BAD_REQUEST, not "rtc set failed". */
+		if (unix_s < APP_CLOCK_UNIX_MIN || unix_s >= APP_CLOCK_UNIX_END) {
 			make_error(resp, Response_Error_Code_BAD_REQUEST, "bad epoch");
 			return;
 		}
@@ -2016,6 +2024,10 @@ static struct {
 	} u;
 } m_page_stream;
 
+/* One stream at a time (F-HIL-6). An answer that fits one frame leaves the
+ * running stream alone, and a second answer that would need pages is refused
+ * with NOT_READY (stream_busy()) instead of replacing it: a GetSettings queued
+ * behind a paged GetConfig used to cut the GetConfig pages off after page 0. */
 void app_cmd_stream_cancel(void)
 {
 	m_page_stream.kind = PAGE_STREAM_NONE;
@@ -2047,6 +2059,16 @@ static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *re
 	page_stream_start(PAGE_STREAM_REQUEST, resp->seq, 0, resp->page_count);
 	m_page_stream.next = resp->page_index + 1;
 	return true;
+}
+
+/* A second answer that needs pages while a stream runs (F-HIL-6): NOT_READY
+ * with the command's seq, the host asks again once the running stream is out. */
+static void stream_busy(Response *resp, uint32_t seq)
+{
+	LOG_WRN("Page stream busy: seq %u refused", (unsigned)seq);
+	*resp = (Response)Response_init_zero;
+	resp->seq = seq;
+	make_error(resp, Response_Error_Code_NOT_READY, NULL);
 }
 
 /* ---- settings-info pages (#412 content) --------------------------------- */
@@ -2215,13 +2237,16 @@ static int settings_paged(Response *resp, uint8_t *out, size_t cap, size_t *out_
 	uint32_t count;
 	int ret;
 
-	app_cmd_stream_cancel();
+	/* `resp` is the scratch; a one-page answer keeps the running stream. */
 	ret = config_status_page(resp, cap, seq, 0, out, cap, out_len, &count);
 	if (ret) {
 		return ret;
 	}
 	*streamed = count > 1;
 	if (*streamed) {
+		if (app_cmd_stream_active()) {
+			return -EBUSY;
+		}
 		page_stream_start(PAGE_STREAM_SETTINGS, seq, cap, count);
 	}
 	return 0;
@@ -2257,6 +2282,9 @@ static __noinline bool w1_scan_arm_pages(Response *resp, size_t cap)
 	}
 	if (k == n || k == 0) {
 		return false; /* fits whole, or nothing fits */
+	}
+	if (app_cmd_stream_active()) {
+		return false; /* page 0 would be lost too: app_cmd_handle() says NOT_READY */
 	}
 
 	m_page_stream.u.w1.scan = resp->body.w1_scan;
@@ -2560,7 +2588,10 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
 	uint32_t count;
 
-	app_cmd_stream_cancel();
+	/* The snapshot lives in the stream state: never over a running stream. */
+	if (app_cmd_stream_active()) {
+		return -EBUSY;
+	}
 	memset(snap, 0, sizeof(*snap));
 	fill_info(APP_CMD_TRANSPORT_LRW, &snap->info, SIZE_MAX);
 	snap->info.active_alarms.funcs.encode = NULL;
@@ -2717,7 +2748,9 @@ static int radio_state_paged(Response *resp, uint8_t *out, size_t cap, size_t *o
 	uint32_t mask = 0, count;
 	int ret;
 
-	app_cmd_stream_cancel();
+	if (app_cmd_stream_active()) {
+		return -EBUSY; /* as info_paged() */
+	}
 	m_page_stream.u.rs = resp->body.radio_state;
 	ret = rs_layout(&m_page_stream.u.rs, seq, cap, 0, &mask, &count, resp);
 	if (ret) {
@@ -3020,13 +3053,15 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		 * in one RF session). */
 		if (radio_transport(transport) &&
 		    (cmd_body == Command_get_config_tag || cmd_body == Command_get_param_tag)) {
-			app_cmd_stream_cancel();
-			if (page_stream_arm(in, in_len, &resp)) {
+			/* A one-page answer keeps the running stream (F-HIL-6). */
+			if (resp.which_body == Response_config_dump_tag &&
+			    resp.page_index + 1 < resp.page_count && app_cmd_stream_active()) {
+				stream_busy(&resp, resp.seq);
+			} else if (page_stream_arm(in, in_len, &resp)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
 			}
 		} else if (radio_transport(transport) && resp.which_body == Response_w1_scan_tag) {
 			/* #425: a scan that does not fit is paged by ROM. */
-			app_cmd_stream_cancel();
 			if (w1_scan_arm_pages(&resp, out_cap)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
 			}
@@ -3113,6 +3148,14 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		if (ret == 0 && streamed) {
 			act = APP_CMD_ACTION_PAGE_STREAM;
 		}
+	}
+
+	if (radio_transport(transport) &&
+	    (ret == -EBUSY || (ret == -EMSGSIZE && resp.which_body == Response_w1_scan_tag &&
+			       app_cmd_stream_active()))) {
+		/* F-HIL-6: this answer needs pages, but another stream is running. */
+		stream_busy(&resp, seq);
+		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 
 	/* Last resort for an Info that still overflows (not even one page fits):
@@ -3220,6 +3263,9 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, b
 		return ret;
 	}
 	if (count > 1) {
+		if (app_cmd_stream_active()) {
+			return -EBUSY; /* F-HIL-6: never over a running stream */
+		}
 		page_stream_start(PAGE_STREAM_SETTINGS, 0, out_cap, count);
 		*more = true;
 	}
@@ -3317,7 +3363,12 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 		report.page_count = page_count;
 	}
 
-	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
+	/* More events than one report holds: the caller pages the batch (#425). */
+	if (n_events > ARRAY_SIZE(report.events)) {
+		return -EMSGSIZE;
+	}
+
+	size_t n = n_events;
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
 		ev->rule = events[i].rule;
@@ -3344,7 +3395,13 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
 	if (!pb_encode(&ostream, AlarmReport_fields, &report)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		/* "stream full" is the expected answer while alarm_batch_flush()
+		 * probes how many events fit the budget (F-HIL-12). */
+		if (strcmp(PB_GET_ERROR(&ostream), "stream full") == 0) {
+			LOG_DBG("pb_encode: does not fit %zu B", out_cap);
+		} else {
+			LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		}
 		return -EMSGSIZE;
 	}
 

@@ -276,7 +276,7 @@ commands:
     # so it could never even confirm delivery.
     - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack, transports: [nfc, shell]}
     # Change the secret_key over an already-encrypted channel: authenticated by the
-    # CURRENT secret_key on hio.stck:cmd, or by vendor_token on hio.stck:vnd (#316),
+    # CURRENT secret_key on mailbox channel 0x01, or by vendor_token on mailbox channel 0x02 (#316),
     # so a lost/rotated key never needs a J-Link. The new key is never readable back
     # via GetParam/GetConfig (secret_key stays proto_field:false).
     - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell, vendor]}
@@ -294,7 +294,7 @@ commands:
     # window with no claim_token (#471: the owner re-opens it with claim_active,
     # which generates one), and installs the replacement secret_key carried in the body
     # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
-    # Reachable ONLY over the vendor transport (NFC hio.stck:vnd, vendor-token
+    # Reachable ONLY over the vendor transport (NFC mailbox channel 0x02, vendor-token
     # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
     # vendor_reset_allow (in the handler + app_settings_vendor_reset); recovery from
     # allow==false is a vendor-channel set_param(vendor_reset_allow=true) first.
@@ -361,7 +361,7 @@ parameters:
   # GetParam / GetConfig. Their `readable`/`writable` lists therefore only govern the
   # `config` shell command, hence both `[shell]`. Their real air exposure is a SEPARATE,
   # hand-written channel that does NOT consult these lists: serial + nonce high-water
-  # are published in the plaintext `hio.stck:inf` record, and serial + claim_token in
+  # are returned by the plaintext get_basic_info (NFC mailbox channel 0x03), and serial + claim_token in
   # the GetInfo `Info` message (over nfc + lrw). Writes come from the shell (`config
   # <name>`), firmware provisioning, or a full NVS erase — `persistent: [...]` (#299)
   # keeps each across the matching reset tier (device_reset/factory_reset/vendor_reset).
@@ -415,7 +415,7 @@ parameters:
 
   # #299 vendor-token security model: per-device, factory-unique, 128-bit,
   # immutable (write-once, never re-writable even after a reset). Authenticates
-  # `vendor_reset` (NFC hio.stck:vnd + shell) so HARDWARIO can recover a device
+  # `vendor_reset` (NFC mailbox channel 0x02 + shell) so HARDWARIO can recover a device
   # without knowing a possibly user-changed secret_key. Survives every tier —
   # it is the one thing every reset (short of `settings erase`) always keeps.
   - name: vendor_token
@@ -485,7 +485,7 @@ parameters:
     help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
 
   # #299/#316: gates whether vendor_reset is accepted. Writable over the vendor
-  # transport (NFC hio.stck:vnd, vendor-token) and shell — so a secret_key holder
+  # transport (NFC mailbox channel 0x02, vendor-token) and shell — so a secret_key holder
   # can no longer disable recovery over a LoRaWAN downlink / NFC SetParam (#340
   # M10: shell is dev/commissioning-only and already implies full physical
   # access, same reasoning as every other shell-ungated command, so it stays
