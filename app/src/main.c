@@ -90,7 +90,8 @@ static void die(void)
 /* Boot self-test of all three LEDs, 3 s. It plays in the LED thread; main()
  * goes on with the init chain meanwhile, and an NFC tap cuts it short
  * (app_led_hold), so neither the phone nor the boot waits for it. */
-static void play_carousel_boot(void)
+/* Returns how long the carousel plays (ms). */
+static int play_carousel_boot(void)
 {
 	struct app_led_play_req req = {
 		.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
@@ -106,8 +107,15 @@ static void play_carousel_boot(void)
 			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
 			     {.type = APP_LED_CMD_END}},
 		.repetitions = 1};
+	int ms = 0;
 
+	for (size_t i = 0; req.commands[i].type != APP_LED_CMD_END; i++) {
+		if (req.commands[i].type == APP_LED_CMD_DELAY) {
+			ms += req.commands[i].duration;
+		}
+	}
 	app_led_play(&req);
+	return ms * req.repetitions;
 }
 
 /* #414: before an NFC-triggered reboot, let the mailbox session's result finish
@@ -356,6 +364,14 @@ int main(void)
 #endif /* defined(CONFIG_HWINFO) */
 	fault_record_take();
 
+#if defined(CONFIG_POWEROFF)
+	/* #496: a depleted cell stays off instead of boot-looping on brownout.
+	 * Measured before anything loads the cell; the boot carousel still plays,
+	 * then the low-battery indication, then Shutdown -- before anything writes
+	 * flash or keys up the radio. */
+	const bool battery_low = app_power_boot_battery_low();
+#endif /* defined(CONFIG_POWEROFF) */
+
 	/* Shared HW init */
 #if defined(CONFIG_WATCHDOG)
 	ret = app_wdog_init();
@@ -397,7 +413,18 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	play_carousel_boot();
+	int carousel_ms = play_carousel_boot();
+
+#if defined(CONFIG_POWEROFF)
+	if (battery_low) {
+		/* Let the carousel finish; the margin covers the LED thread's own
+		 * scheduling latency so the hold does not cut the last step. */
+		k_sleep(K_MSEC(carousel_ms + 250));
+		app_power_low_battery_off(); /* does not return */
+	}
+#else
+	ARG_UNUSED(carousel_ms);
+#endif /* defined(CONFIG_POWEROFF) */
 
 	ret = app_clock_init();
 	if (ret) {
