@@ -124,6 +124,7 @@ static void reset_cfg(void)
 	test_alarm_invalid_mask = 0;
 	test_alarm_stale_mask_after = 0;
 	test_alarm_reloaded = false;
+	app_cmd_stream_cancel(); /* one stream at a time (F-HIL-6): none leaks into a test */
 	test_set_lrw_dirty(false);
 	test_set_active_alarm_count(0);
 	g_claim_done_calls = 0;
@@ -2756,6 +2757,93 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_p2p)
 	zassert_true(walk_pages(out, out_len, sizeof(out), 11, visit_any_page) > 1, "paged");
 }
 
+/* F-HIL-6: answer `hex` over P2P at `cap` while a stream runs; returns the
+ * decoded Response (asserts the handler succeeded and armed no new stream). */
+static Response busy_probe(const char *hex, size_t cap)
+{
+	uint8_t in[16], out[256];
+	size_t in_len = unhex(hex, in, sizeof(in));
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, cap, &out_len,
+				     &action),
+		      0, "handle %s", hex);
+	zassert_equal(action, APP_CMD_ACTION_NONE, "%s armed a stream (%d)", hex, action);
+	return decode_resp(out, out_len);
+}
+
+static void assert_not_ready(const Response *r, uint32_t seq)
+{
+	zassert_equal(r->seq, seq, "seq %u != %u", r->seq, seq);
+	zassert_equal(r->which_body, Response_error_tag, "seq %u: which=%d", seq, r->which_body);
+	zassert_equal(r->body.error.code, Response_Error_Code_NOT_READY, "seq %u: code %d", seq,
+		      r->body.error.code);
+}
+
+/* F-HIL-6: the Hub queues GetConfig (seq 64) and GetSettings (seq 65) back to
+ * back. Nothing answered while the GetConfig pages stream may cut them off:
+ * one-frame answers go out as usual, an answer that needs pages itself gets
+ * NOT_READY, and every page of seq 64 still follows. */
+ZTEST(cmd, test_running_stream_survives_other_answers)
+{
+	uint8_t in[16], out[64];
+	size_t in_len;
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+	g_app_config.serial_number = 1234567890;
+	test_set_active_alarm_count(2); /* an Info that needs pages at 20 B */
+	in_len = unhex("08402a00", in, sizeof(in)); /* seq64 get_config{} */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, 51, &out_len, &action),
+		      0, "get_config");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	r = decode_resp(out, out_len);
+	uint32_t count = r.page_count;
+	zassert_true(count > 2, "test needs >= 3 pages, got %u", count);
+
+	/* seq65 get_settings{} fits one frame: answered, stream kept. */
+	r = busy_probe("0841fa0100", 64);
+	zassert_equal(r.seq, 65, "seq 65");
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	/* ... at 20 B it needs pages: NOT_READY. */
+	r = busy_probe("0841fa0100", 20);
+	assert_not_ready(&r, 65);
+
+	for (uint32_t p = 1; p < count; p++) {
+		if (p == 2) {
+			/* seq66 get_param{ lorawan_field=[6 deveui] }: one page. */
+			r = busy_probe("08421a030a0106", 51);
+			zassert_equal(r.seq, 66, "seq 66");
+			zassert_equal(r.which_body, Response_config_dump_tag, "which=%d",
+				      r.which_body);
+			/* seq67 get_config{}: pages, NOT_READY. */
+			r = busy_probe("08432a00", 51);
+			assert_not_ready(&r, 67);
+			/* seq68 get_info{} at 20 B: pages, NOT_READY. */
+			r = busy_probe("08442200", 20);
+			assert_not_ready(&r, 68);
+		}
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		r = decode_resp(out, out_len);
+		zassert_equal(r.seq, 64, "seq %u on page %u", r.seq, p);
+		zassert_equal(r.page_index, p, "page_index");
+		zassert_equal(r.page_count, count, "page_count");
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* Stream over: the same GetConfig streams again. */
+	in_len = unhex("08432a00", in, sizeof(in));
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, 51, &out_len, &action),
+		      0, "get_config again");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	reset_cfg();
+}
+
 /* The 1-Wire slot ROMs (sensors 11..14, `dump_lrw: false`) are left out of a
  * LoRaWAN GetConfig — they only cost answer pages there — but an NFC GetConfig
  * and an explicit GetParam still return them. */
@@ -2849,6 +2937,7 @@ static bool radio_dump_has_p2p(enum app_cmd_transport tp)
 	for (uint32_t p = 0; p < count && p < 32; p++) {
 		/* seq9 get_config{page:p} */
 		const uint8_t cmd[] = {0x08, 0x09, 0x2a, 0x02, 0x08, (uint8_t)p};
+		app_cmd_stream_cancel(); /* host-driven here: no NOT_READY for page p */
 
 		zassert_equal(
 			app_cmd_handle(tp, cmd, sizeof(cmd), out, sizeof(out), &out_len, &action),
@@ -2909,6 +2998,7 @@ ZTEST(cmd, test_get_config_layout_and_11b_floor)
 	is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode 51 B");
 	count51 = r.page_count;
+	app_cmd_stream_cancel();
 
 	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
 				     &action),

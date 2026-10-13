@@ -194,7 +194,8 @@ void app_cmd_run_action(enum app_cmd_action action);
  * GetInfo uplink on join. When the full Info does not fit `out_cap` it is paged
  * (#425): page 0 goes into `out` and *more is set; the remaining pages come from
  * app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL argument,
- * or -EMSGSIZE if not even one Info field fits. */
+ * -EMSGSIZE if not even one Info field fits, or -EBUSY if it needs pages while
+ * another page stream runs. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Same as app_cmd_build_info(), but the Info (every page of it) carries `seq`:
@@ -214,7 +215,9 @@ int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_
  * each call here then encodes the next page of that same answer (same seq, same
  * layout, Response.page_index/page_count) into `out`. Returns 0 with *out_len
  * set, -ENODATA when no stream is active or it has finished, or a negative
- * errno (the stream is dropped). A new paged request replaces a running one. */
+ * errno (the stream is dropped). One stream at a time: a one-frame answer
+ * leaves a running stream alone, a second answer that needs pages is refused
+ * with Error NOT_READY (F-HIL-6). */
 int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
 
 /* Drop a running page stream (e.g. on rejoin). */
@@ -230,7 +233,8 @@ bool app_cmd_stream_active(void);
  * network learns the effective config on join without polling (#412). When it
  * does not fit `out_cap` it is paged (#425): page 0 into `out`, *more set, the
  * rest from app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL
- * argument, or -EMSGSIZE if not even one setting fits. */
+ * argument, -EMSGSIZE if not even one setting fits, or -EBUSY if it needs pages
+ * while another page stream runs. */
 int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
