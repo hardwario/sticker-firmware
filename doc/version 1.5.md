@@ -2599,6 +2599,11 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     `AlarmReport.events max_count` (8). Only a batch held for the radio that collects more than
     16 edges still drops the rest (`total` counts them). `app_cmd_build_alarm_report()` returns
     `-EMSGSIZE` above 8 events instead of truncating.
+  - *Report larger than the alarm queue (F-HIL-13).* 16 events with values can need more pages
+    than the 4-slot alarm queue (P2P: 5 pages); the 5th was dropped as "Alarm queue full". One
+    report now takes at most `APP_RADIO_TX_QUEUE_DEPTH` pages; the events left over stay held as
+    the next report (same `base_time`, its own `total`) and go when app_radio takes an alarm
+    frame (#462 release).
   - *Probe log (F-HIL-12).* The page-layout probe in `alarm_batch_flush()` logged
     `<err> pb_encode: stream full` for every expected overflow; it logs at DBG now, like
     `encode_response()`. Deactivations after a rule clear carry no value by design (no reading).
@@ -2622,8 +2627,8 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     get_info, req_history with history off).
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
-- **Cost:** release 190 020 B flash (89.21 %), 48 008 B RAM (73.25 %); debug 239 320 B
-  (97.38 %), 55 944 B (85.36 %; +704 B for the 255 B injector reply and its hex echo, +128 B
+- **Cost:** release 190 076 B flash (89.24 %), 48 008 B RAM (73.25 %); debug 239 384 B
+  (97.41 %), 55 944 B (85.36 %; +704 B for the 255 B injector reply and its hex echo, +128 B
   for the 16-event alarm batch).
 - **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `cmd`, `history`, `nfc_hw`,
   `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
