@@ -13,15 +13,17 @@ project(sticker)
 # the GetInfo command). CI passes the numeric version components and build type
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
 #   tag v1.3.4 -> 1/3/4, type 0 (MAIN)
-#   branch/PR  -> 0/0/0, type 1 (DEV)
-# Local builds (no override) use the hardcoded development version below and are
-# always type 2 (CUSTOM). The debug/release config is a separate axis
-# (CONFIG_FW_DEBUG), not set here.
+#   branch/PR  -> the version below, type 1 (DEV)
+# Local builds (no override) use the version below and are type 2 (CUSTOM).
+# Keep it at the release this branch builds towards. The debug/release config
+# is a separate axis (CONFIG_FW_DEBUG), not set here.
 if(NOT DEFINED APP_VERSION_MAJOR)
-  set(APP_BUILD_TYPE 2) # CUSTOM
   set(APP_VERSION_MAJOR 1)
   set(APP_VERSION_MINOR 4)
   set(APP_VERSION_PATCH 0)
+endif()
+if(NOT DEFINED APP_BUILD_TYPE)
+  set(APP_BUILD_TYPE 2) # CUSTOM
 endif()
 add_compile_definitions(
   APP_VERSION_MAJOR=${APP_VERSION_MAJOR}
