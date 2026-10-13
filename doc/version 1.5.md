@@ -2580,9 +2580,13 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
     one it made stale; 400 when no slot can be named.
   - *Shell injector.* `ats cmd nfc|vnd|plain` replies up to 255 B (was 64 B), so NFC-sized
     answers such as `get_config` pages can be injected.
+  - *Buzzer final beep.* `execute_pattern()` skipped the last delay of the last repetition
+    even when it was the beep itself, so `app_buzzer_on(ms)` (`ats buzzer beep`), INFO and
+    WARNING's second beep were ~0 ms pulses (since #338). It now skips it only when the buzzer is
+    already off (ALARM's trailing gap); WARNING lasts 310 ms, INFO 80 ms.
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
   (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
-- **Cost:** release 189 332 B flash (88.89 %), 47 880 B RAM (73.06 %); debug 238 408 B
+- **Cost:** release 189 340 B flash (88.90 %), 47 880 B RAM (73.06 %); debug 238 408 B
   (97.01 %), 55 816 B (85.17 %; +704 B for the 255 B injector reply and its hex echo).
 - **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `cmd`, `history`, `nfc_hw`,
   `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
