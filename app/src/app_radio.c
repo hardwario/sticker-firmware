@@ -634,6 +634,35 @@ void app_radio_duty_charge(uint32_t air_ms)
 	app_radio_set_duty_held(false);
 }
 
+/* Network backoff (P2P 0x15): uptime it ends at, 0 = none. Under m_duty_lock. */
+static int64_t m_backoff_until_ms;
+
+void app_radio_backoff_set(uint32_t s)
+{
+	s = MIN(s, APP_RADIO_BACKOFF_MAX_S);
+
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+
+	m_backoff_until_ms = s ? k_uptime_get() + (int64_t)s * MSEC_PER_SEC : 0;
+	k_spin_unlock(&m_duty_lock, key);
+}
+
+int64_t app_radio_backoff_wait_ms(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+	int64_t left = m_backoff_until_ms ? m_backoff_until_ms - k_uptime_get() : 0;
+	bool expired = m_backoff_until_ms && left <= 0;
+
+	if (expired) {
+		m_backoff_until_ms = 0;
+	}
+	k_spin_unlock(&m_duty_lock, key);
+	if (expired) {
+		LOG_INF("Network backoff expired");
+	}
+	return MAX(left, 0);
+}
+
 void app_radio_get_status(struct app_radio_status *st)
 {
 	int64_t now = k_uptime_get();
@@ -652,6 +681,7 @@ void app_radio_get_status(struct app_radio_status *st)
 	st->has_airtime = m_duty_on;
 	st->airtime_hour_ms = m_duty_on ? app_radio_ledger_used_ms(&m_duty, k_uptime_get()) : 0;
 	k_spin_unlock(&m_duty_lock, key);
+	st->backoff_s = (uint32_t)DIV_ROUND_UP(app_radio_backoff_wait_ms(), MSEC_PER_SEC);
 
 	st->state = app_radio_get_state();
 	st->uptime_s = (uint32_t)(now / 1000);
@@ -849,12 +879,19 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 	f->attempt = m_ack_retries;
 
 	/* doc/plan/460 §2.7 (T2d): the frame waits for the duty ledger, exactly
-	 * as long as it takes to fit, on either radio. */
+	 * as long as it takes to fit, on either radio. A network backoff (P2P
+	 * 0x15) holds all but an alarm the same way, M-2 excuse included. */
 	int64_t hold = app_radio_duty_wait_ms(m_be->airtime_ms(f->len));
+	int64_t backoff = f->kind == APP_RADIO_FRAME_ALARM ? 0 : app_radio_backoff_wait_ms();
 	int ret;
 
-	if (hold > 0) {
+	if (backoff > hold) {
+		LOG_WRN("TX held by the network backoff for %lld ms", backoff);
+		hold = backoff;
+	} else if (hold > 0) {
 		LOG_WRN("TX duty-cycle blocked for %lld ms", hold);
+	}
+	if (hold > 0) {
 		stale_note_hold(hold);
 		res->wait_ms = (uint32_t)hold + TX_DUTY_MARGIN_MS;
 		ret = -EAGAIN;
@@ -934,7 +971,13 @@ int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag 
 		LOG_WRN("%s queue full; dropped", alarm ? "Alarm" : "Answer");
 		return -ENOMEM;
 	}
-	app_radio_tx_kick();
+	if (alarm && app_radio_backoff_wait_ms() > 0) {
+		/* The run waits out a network backoff, which an alarm skips: now.
+		 * Whatever else is due is held again by tx_send(). */
+		tx_schedule(0);
+	} else {
+		app_radio_tx_kick();
+	}
 	return 0;
 }
 
@@ -1035,17 +1078,53 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
 
 /* Send the queued frame in progress, or the next one. Returns false when both
  * queues are empty (the run goes on to telemetry). */
+/* A network backoff (P2P 0x15) holds every frame but an alarm, so a held frame
+ * must not keep a queued alarm waiting. The confirmed slot of a frame that waits
+ * for its Ack retry is given up, and an answer caught as the current frame goes
+ * back to the head of its queue (a full queue keeps it: the alarm waits). Either
+ * goes again as a fresh frame after the backoff; the gateway may then get it
+ * twice, as after a lost Ack. */
+static void backoff_yield_to_alarm(void)
+{
+	if (k_msgq_num_used_get(&m_alarm_q) == 0 || app_radio_backoff_wait_ms() == 0) {
+		return;
+	}
+	if (m_cur_valid && m_cur_kind == APP_RADIO_FRAME_ANSWER) {
+		if (k_msgq_put_front(&m_answer_q, &m_cur) != 0) {
+			return;
+		}
+		m_cur_valid = false;
+	}
+	if (m_ack_pending && m_ack_kind != APP_RADIO_FRAME_ALARM) {
+		LOG_INF("Alarm past the network backoff: the held retry (kind %u) goes afresh "
+			"after it",
+			m_ack_kind);
+		ack_release(m_ack_kind);
+	}
+}
+
 static bool tx_queued_step(void)
 {
+	backoff_yield_to_alarm();
+
 	/* A report frame waits for its Ack retry: it goes before any queued one. */
 	if (m_ack_pending && m_ack_kind == APP_RADIO_FRAME_TELEMETRY) {
 		return false;
 	}
 	if (!m_cur_valid) {
-		if (k_msgq_get(&m_answer_q, &m_cur, K_NO_WAIT) == 0) {
+		/* A network backoff (P2P 0x15) holds the answers in their queue, so
+		 * that an alarm, which it does not hold, is not stuck behind one
+		 * (backoff_yield_to_alarm() covers one already taken). */
+		int64_t backoff = app_radio_backoff_wait_ms();
+
+		if (backoff == 0 && k_msgq_get(&m_answer_q, &m_cur, K_NO_WAIT) == 0) {
 			m_cur_kind = APP_RADIO_FRAME_ANSWER;
 		} else if (k_msgq_get(&m_alarm_q, &m_cur, K_NO_WAIT) == 0) {
 			m_cur_kind = APP_RADIO_FRAME_ALARM;
+		} else if (backoff > 0 && k_msgq_num_used_get(&m_answer_q) > 0) {
+			stale_note_hold(backoff);
+			tx_schedule((uint32_t)backoff + TX_DUTY_MARGIN_MS);
+			return true;
 		} else {
 			return false;
 		}
@@ -1851,6 +1930,7 @@ void app_radio_test_tx_reset(void)
 	m_debug_tx_mute = false;
 	m_ready_cb = NULL;
 	app_radio_duty_init(0); /* no limit unless a test sets one */
+	app_radio_backoff_set(0);
 }
 
 void app_radio_test_link_reset(void)

@@ -9,6 +9,7 @@
  * replay moved to app_radio (doc/plan/460 F3c), tested in tests/radio_common.
  */
 
+#include "app_battery.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_radio.h"
@@ -19,6 +20,8 @@
 #include <zephyr/toolchain.h>
 
 #include <errno.h>
+#include <math.h>
+#include <string.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -244,6 +247,31 @@ void app_radio_reset_link(void)
 {
 }
 
+/* The network backoff (app_radio.c, P2P 0x15): what the backend set, and a
+ * settable hold for the 0x91 uplink. Its TX hold is tested in tests/radio_common. */
+uint32_t test_backoff_s;
+int test_backoff_calls;
+int64_t test_backoff_wait_ms;
+
+void app_radio_backoff_set(uint32_t s)
+{
+	test_backoff_s = s;
+	test_backoff_calls++;
+}
+
+int64_t app_radio_backoff_wait_ms(void)
+{
+	return test_backoff_wait_ms;
+}
+
+/* The DevStatusAns battery (app_battery.c is not built here): volts, NAN = none. */
+float test_battery_v = NAN;
+
+float app_battery_last_sample(void)
+{
+	return test_battery_v;
+}
+
 /* Common downlink path (app_radio.c, doc/plan/460 F3): a received command is
  * handed over here; its dispatch is tested in tests/radio_common. The last one
  * is kept for the envelope checks. */
@@ -305,9 +333,12 @@ size_t app_radio_tx_answer_cap(size_t buf_size)
 }
 
 /* ---- settings: a RAM stub store (CONFIG_SETTINGS_CUSTOM). Saves succeed unless
- * a case sets test_settings_save_ret; nothing is kept or loaded back. ---- */
+ * a case sets test_settings_save_ret; only the last p2pjoin/state record is
+ * kept, for a case to load back. ---- */
 
 int test_settings_save_ret;
+uint8_t test_join_state[32];
+size_t test_join_state_len;
 
 static int stub_store_load(struct settings_store *cs, const struct settings_load_arg *arg)
 {
@@ -320,9 +351,11 @@ static int stub_store_save(struct settings_store *cs, const char *name, const ch
 			   size_t val_len)
 {
 	ARG_UNUSED(cs);
-	ARG_UNUSED(name);
-	ARG_UNUSED(value);
-	ARG_UNUSED(val_len);
+	if (!test_settings_save_ret && strcmp(name, "p2pjoin/state") == 0 &&
+	    val_len <= sizeof(test_join_state)) {
+		memcpy(test_join_state, value, val_len);
+		test_join_state_len = val_len;
+	}
 	return test_settings_save_ret;
 }
 

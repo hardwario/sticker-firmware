@@ -41,7 +41,7 @@ const TWR_TYPE_DATA = 0;
 const TWR_TYPE_ACK = 1;
 const TWR_FLAG_CONFIRMED = 0x01;
 const TWR_ACK_PENDING = 0x01;
-const TWR_FRAME_MAX = 100; // the node's MTU (Capabilities)
+const TWR_FRAME_MAX = 96; // the TOWER MTU (Capabilities), every PHY profile
 
 const ENV_DATA = 0x81;
 const ENV_CTRL = 0x91;
@@ -63,10 +63,14 @@ const CTRL = {
   HELLO: 0x02,
   DETACH: 0x03,
   REJOIN_REQ: 0x04,
+  HOME_GATEWAY: 0x06,
   JOIN_REQ: 0x07,
   JOIN_ACCEPT: 0x08,
   LINK_CHECK: 0x10,
+  BACKOFF: 0x15,
   TIME: 0x20,
+  PENDING_INFO: 0x22,
+  DEV_STATUS: 0x30,
 };
 
 const CTRL_NAMES = {
@@ -74,10 +78,14 @@ const CTRL_NAMES = {
   [CTRL.HELLO]: "hello",
   [CTRL.DETACH]: "detach",
   [CTRL.REJOIN_REQ]: "rejoin_request",
+  [CTRL.HOME_GATEWAY]: "home_gateway",
   [CTRL.JOIN_REQ]: "join_request",
   [CTRL.JOIN_ACCEPT]: "join_accept",
   [CTRL.LINK_CHECK]: "link_check",
+  [CTRL.BACKOFF]: "backoff",
   [CTRL.TIME]: "time",
+  [CTRL.PENDING_INFO]: "pending_info",
+  [CTRL.DEV_STATUS]: "dev_status",
 };
 
 function asBuffer(b) {
@@ -357,6 +365,23 @@ function decodeCtrl(cmd, v) {
         return null; // TimeReq
       }
       return { unix: v.readUInt32LE(0), frac: v[4], reqCounter: v.readUInt32LE(5) };
+    case CTRL.HOME_GATEWAY:
+      return v.length < 5 ? null : { gwAddr: v.readUInt32LE(0), flags: v[4] };
+    case CTRL.BACKOFF:
+      return v.length < 2 ? null : { seconds: v.readUInt16LE(0) }; // 0 = end it
+    case CTRL.PENDING_INFO:
+      return v.length < 1 ? null : { more: v[0] };
+    case CTRL.DEV_STATUS:
+      if (v.length < 9) {
+        return null; // DevStatusReq
+      }
+      return {
+        batteryMv: v.readUInt16LE(0), // 0 = no measurement
+        dlRssi: v.readInt8(2),
+        dlSnr: v.readInt8(3),
+        txPower: v.readInt8(4),
+        uptime: v.readUInt32LE(5),
+      };
     default:
       return null;
   }

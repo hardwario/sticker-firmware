@@ -70,7 +70,7 @@ the MCU, and everything durable is in the central.
 - Bad CRC: drop the frame, resync on the next `0x7E`, count `crc_err`.
 
 **Throughput check.** At 115200 bd one byte takes ~87 µs.
-- The largest message is `EVT_TWR_UPLINK` with 78 B plaintext, ~100 B framed. That is
+- The largest message is `EVT_TWR_UPLINK` with 74 B plaintext (the 96 B TOWER MTU, PR #486), ~96 B framed. That is
   ~9 ms on the wire.
 - A LoRa SF7 frame is on air for ≥ 40 ms, so the link is never the bottleneck. This holds
   even for a full peer-table restore (256 × `TWR_NODE_ADD` ≈ 256 × 34 B ≈ 0.8 s).

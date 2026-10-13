@@ -1055,9 +1055,9 @@ parameters:
     type: int
     default: 14
     min: 2
-    max: 22
+    max: 14
     persistent: [device_reset]
-    help: "Get/Set P2P TX power in dBm."
+    help: "Get/Set P2P TX power in dBm (2-14: the board wires the RFO_LP path only)."
 
   # TOWER PHY profile (doc/plan/470 §3): lora = the TOWER frames over LoRa, fsk =
   # TOWER-native GFSK (bit-exact with SPIRIT1). Both ends must match; applied at

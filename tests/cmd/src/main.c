@@ -508,7 +508,7 @@ ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
 	reset_cfg();
 	g_app_config.p2p_frequency = 868300000;
 	g_app_config.p2p_spreading_factor = 9;
-	g_app_config.p2p_tx_power = 20;
+	g_app_config.p2p_tx_power = 12;
 
 	/* seq2 get_param{ p2p_field=[1 frequency, 2 spreading_factor, 3 tx_power] } */
 	const char *gp_hex = "08021a053203010203";
@@ -521,7 +521,7 @@ ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
 	zassert_true(r.body.config_dump.p2p.has_spreading_factor, "spreading_factor not dumped");
 	zassert_equal(r.body.config_dump.p2p.spreading_factor, 9, "spreading_factor value");
 	zassert_true(r.body.config_dump.p2p.has_tx_power, "tx_power not dumped");
-	zassert_equal(r.body.config_dump.p2p.tx_power, 20, "tx_power value");
+	zassert_equal(r.body.config_dump.p2p.tx_power, 12, "tx_power value");
 
 	/* A plain GetConfig{} dump (no field selection) covers the p2p group too.
 	 * Walk every page at the NFC mailbox cap (as test_get_config_pages_fit_
@@ -535,7 +535,7 @@ ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
 	reset_cfg();
 	g_app_config.p2p_frequency = 868300000;
 	g_app_config.p2p_spreading_factor = 9;
-	g_app_config.p2p_tx_power = 20;
+	g_app_config.p2p_tx_power = 12;
 
 	/* Bounded like test_get_config_pages_fit_mailbox_frame's page loop, so the
 	 * compiler can prove %02x never truncates in the hex[] buffer below. */

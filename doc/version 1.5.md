@@ -37,7 +37,7 @@ technical detail.
 | `lrw-datarate` | `auto` | `auto`, `dr0`…`dr7` | Fixed uplink DR; only with `lrw-adr false` | §8 |
 | `lrw-region` | — | adds `as923` | AS923-1 channel plan (release builds) | §11 |
 | `radio-mode` | `lorawan` | adds `p2p` | Selects the P2P radio | §6 |
-| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora`; `fsk` not supported yet) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
+| `p2p-frequency`, `p2p-spreading-factor` (default 7), `p2p-tx-power`, `p2p-modulation` (`lora` / `fsk`, the latter toward a stock TOWER gateway, #490) | — | shell only | P2P radio parameters; must match the Hub | §6, §28, §41 |
 | `radio-alarm-ack` | `false` | `true` / `false` | Send alarms as confirmed uplinks (both radios) | §30 |
 | `interval-announce` | `24` | 0 (off), 1–168 h | Period of the Info + settings-info re-announce | §37 |
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
@@ -200,7 +200,7 @@ technical detail.
 | Board | **Changed** — the 32.768 kHz LSE crystal is driven at the highest strength (`driving-capability = <3>`, was medium-low, #477): AN2867 worst case for the fitted ABS07 crystal needs it. No measurable change on the bench (start-up, RTC drift), +0.45 µA idle. See §38. |
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
-| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 100 B MTU), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` refuses to start). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
+| Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` = TOWER GFSK with TOWER OTA pairing toward a stock TOWER gateway, #490). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
 
 ---
 
@@ -506,7 +506,7 @@ The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
 | Downlink commands | `0x56` carries the same protobuf `Command` as LoRaWAN fPort 85, dispatched through the shared handler and answered with a `0x55`. Deferred actions (`settings_save`, `reboot`) execute only **after** that answer has been acknowledged, so a commanded reboot cannot swallow its own response. |
 | RX window | The announcing Ack states the pending command's exact on-air length, so the receiver stays on for that frame instead of a 255 B worst case — 548 ms instead of 2514 ms for a short command at SF10. The window keeps a fixed 120 ms after the expected frame (F-P2P-2), so a central's constant Ack lateness cannot cut off an Ack at SF7. |
 | Pairing control | The central can end a pairing (`Detach`) or ask for a rekey (`RejoinRequest`); both are authenticated and empty-bodied. A detached node goes quiet and stays quiet — no automatic re-join — until a reboot or an explicit `join`. |
-| Radio assignment | JoinAccept can assign this node's TX power (2..22 dBm), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
+| Radio assignment | JoinAccept can assign this node's TX power (2..14 dBm since #486; 15–22 is ignored), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
 | Duty cycle | Raw LoRa bypasses LoRaMac's enforcement, so the node keeps its own exact sliding-hour ledger: **every** rolling hour stays within EU868's 1 %, not merely the long-run average. |
 | History replay | A central-requested history replay works over P2P too (B8): a device-driven stream of history frames, each acknowledged, with telemetry paused for the duration. |
 | Self-healing | Eight consecutive fully-failed uplink cycles start a re-join with exponential backoff (60 s → 1 h), so a node survives a central DB restore or a long outage without a site visit. |
@@ -2274,8 +2274,9 @@ is abandoned, with no rollback. Design: `doc/plan/470 - TOWER protocol as the P2
 transport.md`; node behaviour: `doc/p2p.md`.
 
 - **Frames:** `ver_type | flags | src(4 LE) | dest(4 LE) | counter(4 LE)`, all 14 B as
-  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 100 B,
-  which leaves a 76 B body. The node's address is low32(DevEUI), the gateway's the
+  AAD. AES-128-CCM with an 8 B tag. Nonce `src ‖ counter ‖ 0*5`. The MTU is 96 B
+  (the TOWER MTU on every PHY profile, #486), which leaves a 72 B body. Nodes and every
+  NB move to 96 B together: each side drops the other's frames over 96 B. The node's address is low32(DevEUI), the gateway's the
   `net_id`.
 - **Confirmed send:** up to 3 byte-identical transmissions, each with a 200 ms (SF7)
   ACK window armed at TX-done. An ACK with PENDING keeps the receiver on for one
@@ -2286,7 +2287,17 @@ transport.md`; node behaviour: `doc/p2p.md`.
   - Capabilities `0x01`, Hello `0x02`;
   - Detach `0x03`, RejoinReq `0x04`;
   - JoinReq `0x07`, JoinAccept `0x08`;
-  - LinkCheck `0x10`, Time `0x20`.
+  - LinkCheck `0x10`, Time `0x20`;
+  - HomeGateway `0x06`, Backoff `0x15`, PendingInfo `0x22`, DevStatus `0x30` (#487).
+- **Control commands (#487, Hynek 2026-10-12):** DevStatusReq queues a DevStatusAns
+  (battery mV, DL RSSI/SNR, TX power, uptime). Backoff holds every uplink but alarms
+  for up to 3600 s through the duty-cycle hold path (no rejoin). HomeGateway is recorded
+  for the session. PendingInfo makes the node fetch further queued downlinks with empty
+  confirmed `0x91` frames, at most 8 in a row (no Poll). Any ACK may carry Backoff and
+  PendingInfo; the ACK window has room for their 7 B. Rekey `0x05`, RadioParamReq
+  `0x11` and Poll `0x21` are dropped; `0x12`–`0x14`, `0x23`, `0x31`, `0x32` reserved.
+  The Capabilities bitmap stays 64 bits. Release +776 B flash. See
+  `doc/plan/487 - P2P control commands.md`.
 - **Join:** a JoinReq under `join_key = CMAC(app_key, "HIO-TWR-JOIN" ‖ 1 ‖ DevEUI)`,
   counter = the dev_nonce. The JoinAccept arrives in a 1 s RX window and carries
   `net_id`, `central_nonce`, `rx_delay` and `tx_power`. `session_key = CMAC(app_key,
@@ -2297,9 +2308,10 @@ transport.md`; node behaviour: `doc/p2p.md`.
 - **Answers in the ACK** (plan §13.5, Hynek 2026-10-06): the gateway answers a
   LinkCheckReq / TimeReq in the request's own ACK. ACK flags bit 1 (CTRL) marks a `0x91`
   TLV tail after the flags: LinkCheckAns, then TimeAns. The request's ACK window grows
-  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only; any other
-  TLV there is skipped. Clock sync no longer waits a report interval for the next
+  by their 17 B (SF7 200 ms, SF10 643 ms). The tail answers requests only, plus
+  Backoff / PendingInfo in any ACK (#487); any other TLV there is skipped. Clock sync no longer waits a report interval for the next
   PENDING. A `0x91` downlink after PENDING still carries answers, for an older gateway.
+  Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `tower-net-core` (hardwario/tower-firmware#1, #486 W9).
 - **Confirmed uplinks:** every telemetry report is confirmed, like answers and
   history; alarms follow `radio-alarm-ack` (finding F6, Hynek 2026-10-06). A queued
   downlink rides the next report's PENDING, so it waits at most one report interval.
@@ -2314,8 +2326,10 @@ transport.md`; node behaviour: `doc/p2p.md`.
   check; LoRaWAN's link check itself is the LinkCheckAns, as before.
 - **Radio:** SF7 / 14 dBm fixed per network (§3.3 of the plan). WARNING has no power
   rung; the SF sweep and adoption are gone.
-- **Config:** `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` is plan
-  P5: P2P refuses to start with it.
+- **Config:** `p2p-tx-power` 2..14 dBm (#486; was 2..22, but the board wires only the
+  RFO_LP path and the driver capped at 14 anyway; a stored 15–22 loads as 14).
+  `p2p-modulation` (proto_id 4, `lora` / `fsk`, shell only). `fsk` (#490) is
+  the TOWER GFSK PHY and joins through TOWER's OTA pairing (`doc/p2p.md` §15).
 - **Fixtures:** `tests/ccm/tower_frame_kat.json` (from the upstream Rust crates) and
   `tests/ccm/tower_join_kat.json` replace `p2p_join_kat` / `p2p_data_kat`.
   `tests/ccm/p2p_tower_ack_ctrl_kat.txt` (ACK tails) is the Northbridge's file, copied
@@ -2402,6 +2416,36 @@ Fixes for the bugs confirmed in the v1.5.0 code review. Every claim was checked 
   fault: reason 27`) and S4 (unplug → rebind 20 ms, no extra sample; replug → rebind +
   one sample; unchanged bus → ROM search only). S3, R2, R3 and R4 are covered by host
   tests only.
+
+## 44. One TOWER protocol on both PHY profiles (#486, #487, #490)
+
+`fsk` and `lora` differ only in the physical layer; the frames, the crypto, the counters
+and the data are the same on both (Hynek, 2026-10-12). Plan:
+`doc/plan/486 - One TOWER protocol on both PHY profiles.md`. The details are in §41.
+
+- **One MTU (U-1):** 96 B frame, 74 B payload, 72 B body on both profiles; Capabilities
+  advertise MTU 96. Deploy the nodes and every Northbridge of the Hub cluster together
+  (NB 0.4.1 and the central with MTU 96).
+- **Control commands (#487):** DevStatus `0x30`, Backoff `0x15`, HomeGateway `0x06`,
+  PendingInfo `0x22`; `0x05` / `0x11` / `0x21` dropped. Central side: proximos-v2 MR !153.
+- **`p2p-tx-power` 2..14 dBm (W8):** a JoinAccept assigning 15–22 is ignored.
+- **ACK flag bit 1 (`CTRL` tail)** reserved upstream in hardwario/tower-firmware#1 (W9).
+- **Backoff yields to an alarm:** a held ack retry or a current answer gives up its slot
+  to a queued alarm and goes afresh after the backoff.
+- **`fsk` toward a stock TOWER gateway (#490, PR #493):** TOWER GFSK PHY bit-exact with
+  SPIRIT1 (software CRC16 and PN9), TOWER OTA pairing, the counter keeps running across
+  a re-pairing, and the pairing record carries its modulation so a lora ↔ fsk switch pairs
+  afresh. Needs hardwario/sticker-zephyr#5 (`LORA_FSK`, merged `f21ab9d6`); run
+  `west update`. `doc/p2p.md` §15.
+- **Cost:** release 187 916 B flash (88.23 %), 49 096 B RAM (74.91 %) merged with
+  `v1.5.0` `ed577d0c` (+3 192 B / +248 B vs that head).
+- **Tests:** all 16 native suites pass (`p2p_logic` 91, `radio_common` 213), configen /
+  proto pytest 80, JS decoder 128, clang-format 22.1.5 clean.
+- **HIL (2026-10-12, STICKER 5722):** control commands and MTU 96 against Hubs 182 / 158,
+  the backoff yield, and `fsk` against a stock `radio_dongle_gateway` (pairing, confirmed
+  uplinks, downlink, re-pair, release image, modulation switch). Not on HW: a 96 B uplink,
+  range, power, several nodes per TOWER. Upstream E4 (keyed join) is a draft only
+  (hardwario/tower-firmware#2).
 
 ---
 

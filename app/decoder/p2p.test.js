@@ -241,32 +241,40 @@ test("control answers: LinkCheckAns and TimeAns", () => {
 });
 
 test("control uplink: Capabilities | Hello as app_radio_p2p.c ctrl_build() lays them out", () => {
-  // 0x91 | Caps(12): proto 1, MTU 100, profiles lora, cmd bitmap, power class
+  // 0x91 | Caps(12): proto 1, MTU 96, profiles lora, cmd bitmap, power class
   // battery | Hello(9): session_id, reset_reason, fw 1.5.0, reserved.
-  // | LinkCheckReq | TimeReq -- the full set, 30 B.
+  // | LinkCheckReq | TimeReq | DevStatusAns(9) -- the full set, 41 B.
   const pt = hex(
     "91" +
-      "010c" + "01" + "64" + "02" + "9e01010001000000" + "01" +
+      "010c" + "01" + "60" + "02" + "de01210005000100" + "01" +
       "0209" + "78563412" + "03" + "010500" + "00" +
       "1000" +
-      "2000",
+      "2000" +
+      "3009" + "c40b" + "c3" + "07" + "0e" + "10270000",
   );
   const env = p2p.decodeEnvelope(pt);
 
-  assert.equal(pt.length, 30);
+  assert.equal(pt.length, 41);
   assert.equal(env.envelope, "control");
   assert.deepEqual(
     env.tlvs.map((e) => e.name),
-    ["capabilities", "hello", "link_check", "time"],
+    ["capabilities", "hello", "link_check", "time", "dev_status"],
   );
   assert.deepEqual(env.tlvs[0].fields, {
     protoVersion: 1,
     mtu: p2p.TWR_FRAME_MAX,
     profiles: { fsk: false, lora: true },
-    cmdBitmap: "9e01010001000000",
+    cmdBitmap: "de01210005000100",
     powerClass: 1,
   });
   assert.deepEqual(env.tlvs[1].fields, { sessionId: 0x12345678, resetReason: 3, fwVersion: "1.5.0" });
+  assert.deepEqual(env.tlvs[4].fields, {
+    batteryMv: 3012,
+    dlRssi: -61,
+    dlSnr: 7,
+    txPower: 14,
+    uptime: 10000,
+  });
 
   // The bitmap marks exactly the IDs the node implements (bit id % 8 of byte id / 8).
   const bitmap = hex(env.tlvs[0].fields.cmdBitmap);
@@ -276,7 +284,20 @@ test("control uplink: Capabilities | Hello as app_radio_p2p.c ctrl_build() lays 
       ids.push(id);
     }
   }
-  assert.deepEqual(ids, [0x01, 0x02, 0x03, 0x04, 0x07, 0x08, 0x10, 0x20]);
+  assert.deepEqual(ids, [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x10, 0x15, 0x20, 0x22, 0x30]);
+});
+
+test("control downlinks: HomeGateway, Backoff, PendingInfo, DevStatusReq", () => {
+  const t = p2p.parseTlvs(hex("0605" + "78563412" + "01" + "1502" + "2c01" + "2201" + "03" + "3000"));
+
+  assert.deepEqual(
+    t.map((e) => e.name),
+    ["home_gateway", "backoff", "pending_info", "dev_status"],
+  );
+  assert.deepEqual(t[0].fields, { gwAddr: 0x12345678, flags: 1 });
+  assert.deepEqual(t[1].fields, { seconds: 300 });
+  assert.deepEqual(t[2].fields, { more: 3 });
+  assert.equal(t[3].fields, null); // DevStatusReq: empty
 });
 
 test("decodeEnvelope: 0x81 ports go through the ttn.js fPort decoders; unknown envelope", () => {

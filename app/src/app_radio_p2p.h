@@ -33,6 +33,9 @@ extern "C" {
 #define TWR_NONCE_LEN       13
 #define TWR_TYPE_DATA       0
 #define TWR_TYPE_ACK        1
+#define TWR_TYPE_JOIN_REQ   4 /* TOWER OTA pairing (fsk profile, issue #490) */
+#define TWR_TYPE_JOIN_RESP  5
+#define TWR_TYPE_JOIN_CONF  6
 #define TWR_FLAG_CONFIRMED  0x01
 #define TWR_ACK_PENDING     0x01 /* ACK payload flags: a downlink follows */
 #define TWR_ACK_CTRL        0x02 /* a 0x91 TLV tail follows the flags (plan §13.5) */
@@ -59,15 +62,19 @@ struct twr_ack {
 
 /* The answers a gateway puts in the ACK of a request (plan §13.5): LinkCheckAns
  * (2 + 4 B) and TimeAns (2 + 9 B). The request's ACK window grows by these. */
-#define TWR_ACK_TAIL_MAX 17
+#define TWR_ACK_TAIL_MAX         17
+/* What a gateway may put in the tail of any ACK, asked or not: Backoff (2 + 2 B)
+ * and PendingInfo (2 + 1 B). Every ACK window has room for them. */
+#define P2P_ACK_TAIL_UNSOLICITED 7
 
-/* The lora profile's MTU (D14, P1 decision D-g): a frame of at most 100 B, so a
- * 78 B payload -- the STICKER envelope (2 B) and a 76 B body, the LoRaWAN fPort
- * payload including its APP_PROTO_VERSION byte (D-a). */
-#define P2P_FRAME_MAX   100
-#define TWR_PAYLOAD_MAX (P2P_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) /* 78 */
+/* The TOWER MTU (D14, revised 2026-10-12): a frame of at most 96 B on every PHY
+ * profile -- fsk and lora differ in the PHY only, the frames and their data are
+ * the same. So a 74 B payload: the STICKER envelope (2 B) and a 72 B body, the
+ * LoRaWAN fPort payload including its APP_PROTO_VERSION byte (D-a). */
+#define P2P_FRAME_MAX   96
+#define TWR_PAYLOAD_MAX (P2P_FRAME_MAX - TWR_HDR_LEN - TWR_TAG_LEN) /* 74 */
 #define P2P_ENV_LEN     2
-#define P2P_MAX_BODY    (TWR_PAYLOAD_MAX - P2P_ENV_LEN) /* 76 */
+#define P2P_MAX_BODY    (TWR_PAYLOAD_MAX - P2P_ENV_LEN) /* 72 */
 #define P2P_KEY_LEN     16
 
 /* STICKER application envelopes (plan §8), the payload's first byte. */
@@ -82,22 +89,33 @@ enum p2p_port {
 	P2P_PORT_COMMAND = 86,  /* downlink */
 };
 
-/* 0x91 command IDs (plan §8.2, final). P1 sends Capabilities, Hello, JoinReq,
- * LinkCheckReq and TimeReq, and handles Capabilities, Detach, RejoinReq,
- * JoinAccept, LinkCheckAns and TimeAns; any other ID is skipped by its length. */
+/* 0x91 command IDs (plan §8.2, final). The node sends Capabilities, Hello,
+ * JoinReq, LinkCheckReq, TimeReq and DevStatusAns, and handles Capabilities,
+ * Detach, RejoinReq, HomeGateway, JoinAccept, LinkCheckAns, Backoff,
+ * TimeAns, PendingInfo and DevStatusReq; any other ID is skipped by its
+ * length. */
 #define P2P_CTRL_CAPABILITIES 0x01
 #define P2P_CTRL_HELLO        0x02
 #define P2P_CTRL_DETACH       0x03
 #define P2P_CTRL_REJOIN_REQ   0x04
+#define P2P_CTRL_HOME_GATEWAY 0x06
 #define P2P_CTRL_JOIN_REQ     0x07
 #define P2P_CTRL_JOIN_ACCEPT  0x08
 #define P2P_CTRL_LINK_CHECK   0x10
+#define P2P_CTRL_BACKOFF      0x15
 #define P2P_CTRL_TIME         0x20
+#define P2P_CTRL_PENDING_INFO 0x22
+#define P2P_CTRL_DEV_STATUS   0x30
 
 #define P2P_CAPS_LEN           12 /* proto(1) mtu(1) profiles(1) cmds(8) power_class(1) */
 #define P2P_HELLO_LEN          9  /* session_id(4) reset_reason(1) fw(4) */
+#define P2P_HOME_GATEWAY_LEN   5  /* gw_addr(4) flags(1) */
 #define P2P_LINK_CHECK_ANS_LEN 4  /* rssi(i8) snr(i8) margin(i8) gw_count(1) */
+#define P2P_BACKOFF_LEN        2  /* seconds(2), 0 = end it */
 #define P2P_TIME_ANS_LEN       9  /* unix(4) frac(1, 1/256 s) req_counter(4) */
+#define P2P_PENDING_INFO_LEN   1  /* downlinks queued after the one PENDING announced */
+/* battery_mv(2) dl_rssi(i8) dl_snr(i8) tx_power(i8) uptime_s(4); DevStatusReq is empty */
+#define P2P_DEV_STATUS_ANS_LEN 9
 
 /* Join frames (plan §6.3): TOWER Data frames under join_key, 0x91 payloads.
  *
@@ -108,6 +126,21 @@ enum p2p_port {
 #define P2P_JOIN_ACCEPT_VALUE_LEN 13
 #define P2P_JOIN_REQ_LEN          (TWR_HDR_LEN + 3 + P2P_JOIN_REQ_VALUE_LEN + TWR_TAG_LEN) /* 39 */
 #define P2P_JOIN_ACCEPT_LEN (TWR_HDR_LEN + 3 + P2P_JOIN_ACCEPT_VALUE_LEN + TWR_TAG_LEN)    /* 38 */
+
+/* TOWER OTA pairing (fsk profile toward a stock TOWER gateway, issue #490):
+ * the 3-way JOIN of tower-firmware src/radio/net/pairing.rs, all three frames
+ * under the public TWR_PAIRING_KEY. JOIN_REQ carries the node address (LE),
+ * JOIN_RESP the per-node key(16) | challenge(4, LE), JOIN_CONFIRM the node
+ * address | challenge. */
+#define TWR_PAIRING_KEY         "TOWER-PAIR-KEY!" /* + its NUL = 16 B */
+#define TWR_PAIR_REQ_PT_LEN     4
+#define TWR_PAIR_RESP_PT_LEN    20
+#define TWR_PAIR_CONF_PT_LEN    8
+#define TWR_PAIR_REQ_LEN        (TWR_HDR_LEN + TWR_PAIR_REQ_PT_LEN + TWR_TAG_LEN)  /* 26 */
+#define TWR_PAIR_RESP_LEN       (TWR_HDR_LEN + TWR_PAIR_RESP_PT_LEN + TWR_TAG_LEN) /* 42 */
+#define TWR_PAIR_CONF_LEN       (TWR_HDR_LEN + TWR_PAIR_CONF_PT_LEN + TWR_TAG_LEN) /* 30 */
+#define TWR_PAIR_RESP_WINDOW_MS 300 /* JOIN_RESP_WINDOW */
+#define TWR_PAIR_TURNAROUND_MS  20  /* ACK_TURNAROUND before the JOIN_CONFIRM */
 
 /* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
  *
@@ -120,7 +153,7 @@ enum p2p_port {
 /* JoinAccept tx_power: 0 = no assignment (the node keeps p2p_tx_power), else
  * within the config parameter's own range. */
 #define P2P_TX_POWER_MIN_DBM 2  /* mirrors app_config.yml::p2p_tx_power min */
-#define P2P_TX_POWER_MAX_DBM 22 /* ... and its max */
+#define P2P_TX_POWER_MAX_DBM 14 /* ... and its max (the RFO_LP limit) */
 
 /* A parsed, validated JoinAccept (p2p_parse_join_accept()). */
 struct p2p_join_accept {
@@ -248,6 +281,11 @@ struct app_radio_p2p_info {
 	int8_t lc_snr;
 	int8_t lc_margin;
 	uint8_t lc_gw_count;
+	/* The last HomeGateway (0x06) this session: the gateway the central made
+	 * this node's home. Recorded, not acted on (multi-gateway is plan P7). */
+	bool home_gw_valid;
+	uint32_t home_gw_addr;
+	uint8_t home_gw_flags;
 	/* False means radio_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
@@ -314,6 +352,10 @@ uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
 uint32_t rx1_preamble_catch_ms(int sf);
 uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
 uint32_t p2p_twr_window_ms(int sf, uint8_t frame_len);
+size_t p2p_fsk_wrap(const uint8_t *frame, size_t len, uint8_t *air);
+int p2p_fsk_unwrap(uint8_t *air, size_t air_len, size_t *len);
+uint32_t p2p_fsk_toa_ms(size_t frame_len);
+uint32_t p2p_fsk_window_ms(uint8_t frame_len);
 int p2p_replay_check(uint32_t last, uint32_t counter);
 int p2p_tlv_next(const uint8_t *buf, size_t len, size_t *off, struct p2p_tlv *tlv);
 int p2p_parse_join_accept(const uint8_t *val, size_t len, uint32_t hdr_src,
@@ -337,6 +379,7 @@ void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
 void p2p_test_set_session(uint32_t net_id, const uint8_t key[P2P_KEY_LEN]);
+void p2p_test_join_state_load(const uint8_t *rec, size_t len);
 void p2p_test_tx_reset(void);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);
@@ -349,6 +392,12 @@ void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);
 int p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 int p2p_test_open_join_accept(uint32_t dev_nonce, const uint8_t *frame, size_t len);
+int p2p_test_twr_pair_req(uint32_t counter, uint8_t out[TWR_PAIR_REQ_LEN]);
+int p2p_test_twr_pair_commit(uint32_t gw, const uint8_t key[P2P_KEY_LEN]);
+int p2p_test_twr_pair_resp(const uint8_t *frame, size_t len, uint32_t *gw, uint8_t key[P2P_KEY_LEN],
+			   uint32_t *challenge);
+int p2p_test_twr_pair_conf(uint32_t counter, uint32_t gw, uint32_t challenge,
+			   uint8_t out[TWR_PAIR_CONF_LEN]);
 void p2p_test_set_dev_nonce(uint32_t v);
 uint32_t p2p_test_get_dev_nonce(void);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);

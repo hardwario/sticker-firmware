@@ -155,7 +155,7 @@ building type is measured in M9 / P2 HIL.
 (bench, range tests), with the values above as defaults; production never changes them.
 Proposed for P1 commit C:
 - `p2p-frequency` default 869.525 MHz: **done 2026-10-08** (`3e08006c`); bench cut over 11:02–11:09Z (both nodes set by shell + save, rel `3e08006c` with RX boost; NB 0.3.2 `7ee6cbc2`, Hub config `frequency_hz` 869525000); 5625 and 5722 resumed without a join, LC/TimeReq answered; central defaults MR !124 (draft); `fsk` sets 868.1 MHz (TOWER ch0) explicitly, D9;
-- `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit);
+- `p2p-tx-power` max 22 → 14 dBm (the RFO_LP limit): **done** in PR #486 (W8);
 - the `p2p-spreading-factor` help text without the SF sweep.
 
 ## 4. Frame layer — adopted verbatim
@@ -444,12 +444,13 @@ port: 2 telemetry · 3 alarm · 85 response/announce · 86 command (downlink) �
 
 - The body after `port` is **byte-identical to the LoRaWAN fPort payload**, version byte
   included (P1 decision D-a), so the central reuses its decoder and `app_cmd_handle()` is
-  unchanged. Budget: `fsk` 96 B frame → 70 B body; `lora` ≤ 100 B frame → 76 B body (D14).
+  unchanged. Budget on every profile: 96 B frame → 74 B payload → 72 B body (D14, revised
+  2026-10-12 in PR #486).
   The `first_uplink` vector in `tower_frame_kat.json` predates this and carries no version
   byte; it tests the frame layer only and stays as is (sha pinned).
 
 - 72 B per frame: responses are already paged for 64 B (#425); `app_compose` splits
-  telemetry against a budget, which becomes 72 B for P2P (larger in `lora` if D14).
+  telemetry against a budget, which becomes 72 B for P2P on both profiles (D14).
 - Optional nicety (later): also emit a TOWER `NodeMsg::Info` (postcard) at boot so
   `tower-cli nodes` names a STICKER natively.
 - `NodeCmd::Shell` is **not** supported — STICKER keeps typed commands with the M-3 field
@@ -475,27 +476,30 @@ port: 2 telemetry · 3 alarm · 85 response/announce · 86 command (downlink) �
 - The `app_radio` link-check machine counts a `LinkCheckAns` as an explicit check result; a
   plain TOWER ACK still counts as "link alive".
 
-Stage 1 command set (IDs final — they carry over to N1 unchanged):
+Stage 1 command set (IDs final — they carry over to N1 unchanged; set revised by Hynek
+2026-10-12, PR #487, `doc/plan/487 - P2P control commands.md`):
 
 | ID | Command | Dir | Value | Replaces / purpose |
 |---|---|---|---|---|
 | 0x01 | `Capabilities` | ↑↓ | proto version(1), MTU(1), profiles(1), cmd bitmap(8), power class(1) | what each side understands; sent at boot/join announce |
 | 0x02 | `Hello` | ↑ | session_id(4), reset_reason(1), fw version(4) | reboot on the link level (today: boot `Info`) |
-| 0x03 | `Detach` | ↓ | reason(1) | `0xFD` |
-| 0x04 | `RejoinReq` | ↓ | kind(1): rediscover / rekey | `0xFE` |
+| 0x03 | `Detach` | ↓ | reason(1) | `0xFD`; the central sends it on node removal (H3.11) |
+| 0x04 | `RejoinReq` | ↓ | kind(1): rediscover / rekey | `0xFE`; also the only rekey (no `0x05`) |
+| 0x06 | `HomeGateway` | ↓ | gw_addr(4 LE), flags(1, reserved = 0) | the gateway the central made the node's home (§9, D17); the node records it for the session, P7 decides what it acts on |
 | 0x07 | `JoinReq` | ↑ | product_type, proto_version, DevEUI(8), fw_version(4) — under `join_key` (§6.3) | P2P JoinRequest `0xF0` |
 | 0x08 | `JoinAccept` | ↓ | net_id(4), central_nonce(4), rx_delay(1), tx_power(1), reserved(3) — under `join_key` | P2P JoinAccept `0xF1` |
 | 0x10 | `LinkCheckReq` / `Ans` | ↑↓ | Ans: rssi(i8), snr(i8), margin(i8), gw_count(1) | link check with numbers; uplink SNR |
-| 0x11 | `RadioParamReq` / `Ans` | ↓↑ | tx_power(1), sf(1), channel(1), revert_after(1 uplinks); Ans: status bits | JoinAccept `reserved(4)` assignment (network-wide change, not ADR); auto-revert if no ACK |
-| 0x14 | `LinkPolicy` | ↓ | confirm_every(1), warn_after(1), rejoin_after(1) | network-set supervision parameters |
-| 0x15 | `Backoff` | ↓ | seconds(2) | gateway/central congestion or duty relief |
+| 0x15 | `Backoff` | ↓ | seconds(2 LE); 0 = end it | gateway/central congestion or duty relief: every uplink but alarms waits; the node cuts it to 3600 s; RAM only, a new session ends it. Also in any ACK tail (§13.5) |
 | 0x20 | `TimeReq` / `TimeAns` | ↑↓ | Ans: unix(4) ‖ fraction(1, 1/256 s) ‖ req_counter(4 LE) — the time at the end of the TimeReq uplink whose frame counter is `req_counter`; the node applies it relative to that frame's TX-done and drops an Ans with an unknown `req_counter` | B5 Unix-time tail, `clock_sync` |
-| 0x21 | `Poll` | ↑ | — | "anything for me?" without data |
-| 0x30 | `DevStatusReq` / `Ans` | ↓↑ | battery mV(2), battery %(1), MCU temp(i8), uptime(4), dl rssi/snr(2) | LoRaWAN DevStatus (#419 gap) |
+| 0x22 | `PendingInfo` | ↓ | more(1): downlinks queued after the one `PENDING` announced | replaces `Poll`: the node fetches the next one with an empty confirmed `0x91` frame, at most 8 in a row. Also in any ACK tail (§13.5) |
+| 0x30 | `DevStatusReq` / `Ans` | ↓↑ | Req: empty. Ans: battery_mv(2 LE, 0 = none), dl_rssi(i8), dl_snr(i8) of the downlink that carried the Req, tx_power(i8), uptime_s(4 LE) — 9 B | LoRaWAN DevStatus (#419 gap) |
 
-Later (stage 2 or when needed): `RekeyReq/Conf` (0x05), `HomeGateway` (0x06),
-`RxParamSetup` (0x12), `ChannelPlan` (0x13), `PendingInfo` (0x22), `PowerMode` (0x23),
-`Ping` (0x31), `RadioStats` (0x32).
+Reserved, not implemented: `RxParamSetup` (0x12), `ChannelPlan` (0x13), `LinkPolicy`
+(0x14), `PowerMode` (0x23), `Ping` (0x31), `RadioStats` (0x32).
+
+Dropped (Hynek 2026-10-12): `RekeyReq/Conf` (0x05, `RejoinReq` rekeys), `RadioParamReq`
+(0x11, no ADR: SF and power are network-wide, set by config and `JoinAccept`), `Poll`
+(0x21, `PendingInfo` covers it). The IDs stay unused.
 
 Not control (stays in `0x81`): configuration, sensors, alarms, history, typed commands.
 
@@ -594,7 +598,7 @@ refused, we keep it **off by default** behind a flag bit so the core stays compa
 | `p2p-modulation` | `fsk` / `lora` | shell | new; reboot |
 | `p2p-frequency` | 863–870 MHz | shell | `fsk` default 868.1 (TOWER ch0) |
 | `p2p-spreading-factor` | 7..12 | shell | `lora` only; fixed SF7 (§3.3) |
-| `p2p-tx-power` | 2..22 dBm (→ 2..14, §3.3) | shell | fixed 14 dBm (RFO_LP max) |
+| `p2p-tx-power` | 2..14 dBm (§3.3, PR #486) | shell | fixed 14 dBm (RFO_LP max) |
 | gateway address | `net_id` from the JoinAccept | read-only, `ats radio status` | persisted with the session |
 | address | derived from DevEUI | read-only, `ats radio status` | |
 
@@ -794,9 +798,9 @@ the message tables live only there. The address collision check runs at `node-ad
 | H3.6 | NB `boot` → re-send every `NodeAdd` with the exact `last_seen` + a new counter block |
 | H3.7 | `0x81` → the existing decoder by port (2/3/85); uplink event shape unchanged plus the transport |
 | H3.8 | `0x91`: `Capabilities` / `Hello` (store FW + caps), `LinkCheckAns` (margin from RSSI/SNR, gateway count), `TimeAns` (§8.2 format, time = the Northbridge `t_rx` of the TimeReq frame) — queued as DL; the answer rides `PENDING` on the node's next confirmed uplink (P1 forces up to 3 confirmed reports after a TimeReq/LinkCheckReq, no `Poll`) |
-| H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ the `lora` MTU (D14), longer → the existing paging |
+| H3.9 | Commands: port 86 → `0x81 ‖ 86 ‖ protobuf` → `QueuePush`; `seq` correlation and redelivery as today; DL payload ≤ 74 B, the TOWER MTU on both profiles (D14), longer → the existing paging |
 | H3.10 | `P2pRadio` config: add `modulation` (`lora`), `sync_word`, `tx_power`; drop what only the old wire needed |
-| H3.11 (P3) | `node-remove` → `Detach` (`0x91 03`) then `NodeRemove`; `RejoinReq` (`0x91 04`); `DevStatus` |
+| H3.11 (P3) | `node-remove` → `Detach` (`0x91 03`) then `NodeRemove`; `RejoinReq` (`0x91 04`); `DevStatusReq` (`0x91 30`) and the `DevStatusAns` northbound; `Backoff` (`0x15`), `PendingInfo` (`0x22`, in the ACK tail), `HomeGateway` (`0x06`) — spec in `doc/plan/487 - P2P control commands.md` |
 
 **H4 — Portal (minimal).** No change to the node-add form (serial, DevEUI, AppKey,
 `radio = p2p`), decoded data, alarms or the command UI.
@@ -916,7 +920,7 @@ Each command DL went `PENDING` on the next confirmed uplink, and the fPort-85 an
 
 - P3-F1 (latency, not loss): a pending `0x91` answer takes the single DL slot ahead of a queued command, so force-send and SetParam each waited one extra interval (70 s and 66 s at 60 s). **Kept as is:** a `LinkCheckAns` or `TimeAns` pushed behind a command would count as a missed link-check on the node (supervision) or leave the RTC unsynced. Fixed by §13.5 (N1 part A pulled into P3: the answer rides in the ACK).
 
-Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, DevStatus), HW tests of Detach/RejoinReq. Supervision and history replay over the radio: **PASS**, §13.6.
+Still open in P3: central H3.11 (Detach, RejoinReq, DevStatus, Backoff, PendingInfo, HomeGateway), HW tests of Detach/RejoinReq and of the PR #487 commands. Node side of DevStatus, Backoff, HomeGateway and PendingInfo: done in PR #487; `RadioParamReq` dropped. Supervision and history replay over the radio: **PASS**, §13.6.
 
 ### 13.5 P3: `LinkCheckAns` / `TimeAns` in the ACK (N1 part A, Hynek 2026-10-06)
 
@@ -924,8 +928,12 @@ Still open in P3: node `RadioParamReq` / `DevStatus`, central H3.11 (Detach, Dev
 
 **Wire (flag day, no capability gate).**
 - ACK plaintext: `acked_counter(4) ‖ rssi(i8) ‖ flags(1) [‖ TLV…]`. Flags bit 1 `CTRL` = a TLV tail follows up to the end of the plaintext, in the `0x91` codec (`id(1) ‖ len(1) ‖ body`, §8.2 IDs). Bit 0 `PENDING` is unchanged; both bits may be set.
-- Receivers that do not know `CTRL` ignore the tail (the ≥ 4 B ACK rule), so upstream TOWER parsers stay compatible.
+- Receivers that do not know `CTRL` ignore the tail (the ≥ 4 B ACK rule), so upstream TOWER parsers stay compatible. Bit 1 is reserved upstream as `ack_flags::CTRL` in tower-firmware `crates/tower-net-core/src/ack.rs` (hardwario/tower-firmware#1, PR #486 W9).
 - An ACK without a request carries no tail: **a normal uplink's ACK and window are unchanged.**
+  *Extended by PR #487 (2026-10-12):* any ACK may carry a `Backoff` (0x15, 2 + 2 B) and/or
+  a `PendingInfo` (0x22, 2 + 1 B) tail, after the answers; every node ACK window has room
+  for these 7 B. Anything else in a tail (a command such as `Detach` or `DevStatusReq`) is
+  skipped by the node.
 
 **Northbridge (gateway).** For a fresh confirmed `0x91` uplink that contains `LinkCheckReq` (0x10) and/or `TimeReq` (0x20), the NB builds the answers itself inside the 20 ms turnaround and appends them to the ACK:
 - `LinkCheckAns` 0x10: `rssi i8, snr i8 (dB, floored), margin i8 (floored), gw_count u8 = 1`. The margin uses the same formula the central uses today (SNR minus the SF demodulation floor), moved to the NB. `gw_count` = 1 because only the home gateway ACKs (P7 limit, documented).
@@ -1023,7 +1031,7 @@ Findings:
 | D11 | Legacy public-key pairing on the Hub for stock TOWER nodes | allowed, user-initiated, short window, documented as insecure |
 | D12 | TOWER-side owner for the upstream work | **Decided 2026-09-28:** we first verify each proposal on our side (P0–P3), then prepare the PRs to `hardwario/tower` ourselves |
 | D13 | PR: reuse #410 or a new PR | **Decided: new PR #470**; #410 closed as superseded |
-| D14 | MTU per profile | **Decided 2026-09-28:** `fsk` 96 B frame (TOWER); `lora` ≤ ~100 B frame (SF12 fits the SX12xx 4 s TX timeout, §17) |
+| D14 | MTU per profile | **Revised 2026-10-12 (Hynek, PR #486): one MTU, the TOWER 96 B frame / 74 B payload / 72 B body, on both profiles.** `fsk` and `lora` differ in the PHY only; the frames and their data are the same. A larger `lora`-only MTU was rejected: the data would depend on the PHY, the gain is one header + ACK on long telemetry only, and 96 B is already the SF12 ceiling of the 4 s TX timeout (3941 ms). The Capabilities MTU field could negotiate a larger one later without a wire change. *Superseded 2026-09-28 decision: `fsk` 96 B, `lora` ≤ ~100 B.* |
 | D15 | Key ownership and gateway power loss | **Decided 2026-09-28:** keys only on the Hub (§6.6); the Northbridge holds derived keys in RAM, no flash copy |
 | D17 | Which gateway ACKs in a multi-Hub network | **Decided 2026-09-28: A** — the server assigns a home gateway per node from the reported RSSI/SNR history; the home ACKs locally. B (per-frame server arbitration, ~100–200 ms turnaround) documented as not chosen (§6.3.1) |
 | D16 | Fast TX→RX fork call (hardwario/sticker-zephyr#2) | **Decided 2026-09-28:** merge |
@@ -1043,8 +1051,8 @@ Findings:
 
 - **Zephyr SX12xx 4 s TX timeout** (found in P0 by the Northbridge build): `sx12xx_lora_config()`
   hard-codes 4000 ms; a longer frame is cut mid-air and `lora_send()` blocks forever. Caps the
-  `lora` MTU at ~100 B frame on SF12 and ~198 B on SF11 until the fork driver derives the
-  timeout from ToA (input to D14; same fork change as #408 B7).
+  `lora` frame at ~100 B on SF12 and ~198 B on SF11 until the fork driver derives the
+  timeout from ToA (same fork change as #408 B7). The 96 B MTU (D14) fits it at every SF.
 - **Gateway TX counter across power cycles**: the P0 Northbridge restarts it at 1 (nonce
   reuse with a static key). P2 needs a reserved-block counter on the Northbridge, persisted
   by the central (§9.4).

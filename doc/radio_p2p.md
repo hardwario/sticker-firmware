@@ -47,7 +47,7 @@ Fixed per network. There is no ADR and no power or SF control.
 | Channel | `p2p-frequency` = 869.525 MHz (h1.6, 10 % duty), both directions |
 | RX gain | boosted (0x96, ~+2 dB) on the Node and the NB |
 | TX power | `p2p-tx-power` = 14 dBm, or the JoinAccept's assignment (the central sends none today) |
-| Frame MTU | 100 B (the SX126x 4 s TX timeout caps `lora` there) |
+| Frame MTU | 96 B, the TOWER MTU on every PHY profile (PR #486); it also fits the SX126x 4 s TX timeout at SF12 |
 
 `fsk` (TOWER-native GFSK) is accepted by the config but refuses to start until phase P5.
 
@@ -63,7 +63,7 @@ ver_type(1) | flags(1) | src(4 LE) | dest(4 LE) | counter(4 LE) | ciphertext | t
   goes to `dest = 0`. 0 and `0xFFFFFFFF` are reserved.
 - AES-128-CCM, 8 B tag, AAD = the 14 B header, nonce = `src ‖ counter ‖ 0*5`.
 - `counter` strictly increases per sender and session, 0 is reserved.
-- 100 B frame → 78 B plaintext → **76 B body** after the envelope.
+- 96 B frame → 74 B plaintext → **72 B body** after the envelope.
 
 ### 2.3 Envelopes
 
@@ -75,8 +75,10 @@ ver_type(1) | flags(1) | src(4 LE) | dest(4 LE) | counter(4 LE) | ciphertext | t
 - `0x81` ports = the LoRaWAN ones: 2 telemetry, 3 alarm, 85 answers, 86 commands (down).
   The body is byte-identical to LoRaWAN, so one decoder serves both radios.
 - `0x91` IDs: `0x01` Capabilities ↑, `0x02` Hello ↑, `0x03` Detach ↓, `0x04` RejoinReq ↓,
-  `0x07` JoinReq ↑, `0x08` JoinAccept ↓, `0x10` LinkCheckReq/Ans, `0x20` TimeReq/Ans.
-  Unknown IDs are skipped by length.
+  `0x06` HomeGateway ↓, `0x07` JoinReq ↑, `0x08` JoinAccept ↓, `0x10` LinkCheckReq/Ans,
+  `0x15` Backoff ↓, `0x20` TimeReq/Ans, `0x22` PendingInfo ↓, `0x30` DevStatusReq ↓ /
+  DevStatusAns ↑ (PR #487, `doc/plan/487 - P2P control commands.md`). Unknown IDs are
+  skipped by length. 0x05, 0x11, 0x21 are dropped; 0x12–0x14, 0x23, 0x31, 0x32 reserved.
 
 ### 2.4 Join
 
@@ -141,15 +143,24 @@ ACK itself, as the CTRL tail (plan §13.5). The Node needs no extra receive wind
   command.
 - An older NB (status 172 / 171 B) does not answer in the ACK; the central then queues
   the answers as `0x91` downlinks, delivered after the next PENDING.
+- **Any** ACK may also carry `0x15` Backoff and `0x22` PendingInfo, after the answers
+  (PR #487). The Node's ACK window always has room for these 7 B (SF10 +82 ms, SF12
+  +164 ms; SF7 stays at the 200 ms floor). Other IDs in a tail are skipped.
 
 ### 2.7 Downlink
 
 - The central queues the downlink on the NB. On the Node's next confirmed uplink the NB
   sets **PENDING**, and the downlink goes out `dl_gap_ms` (20 ms) after the ACK.
-- The Node keeps its receiver on for **one** Data frame (SF7 221 ms).
+- The Node keeps its receiver on for **one** Data frame (SF7 211 ms).
 - Commands (`0x81` port 86) are sent **confirmed**: the Node ACKs them 20 ms after
   RxDone under its own next counter.
-- `0x91` downlinks (answers, Detach, RejoinReq) are unconfirmed.
+- `0x91` downlinks (answers, Detach, RejoinReq, HomeGateway, Backoff, PendingInfo,
+  DevStatusReq) are unconfirmed.
+- More than one queued downlink: the gateway adds PendingInfo (`more`). The Node fetches
+  each with an empty confirmed `0x91` frame (23 B on air), at most 8 in a row. There is
+  no Poll.
+- Backoff holds every Node uplink but alarms for up to 3600 s, like a duty-cycle wait
+  (no rejoin).
 - A downlink not delivered is retried by the central, not the NB (§3.6).
 
 ### 2.8 Link supervision and lifecycle
@@ -178,7 +189,7 @@ ACK itself, as the CTRL tail (plan §13.5). The Node needs no extra receive wind
 | empty Data (22 B) | 57 ms |
 | ACK (28 B) / ACK with full tail (45 B) | 67 / ~93 ms |
 | JoinReq / JoinAccept | 83 ms |
-| MTU (100 B) | 175 ms |
+| MTU (96 B) | 165 ms |
 
 ---
 
@@ -277,8 +288,9 @@ the link would lose the data, hence:
 - `0x81` payloads are decoded by the STICKER decoder by port (2 telemetry, 3 alarm, 85
   answers) into the **same documents as LoRaWAN** (reading, alarm, history, config,
   device info, command), with `transport = p2p` and `dev_addr` = the 32-bit `addr`.
-- `0x91` control uplinks (Capabilities, Hello, LinkCheckReq, TimeReq) are consumed by
-  the central and publish no reading. "Answered in the ACK" is in the central log and in
+- `0x91` control uplinks (Capabilities, Hello, LinkCheckReq, TimeReq, empty drain
+  frames) are consumed by the central and publish no reading. DevStatusAns goes north as
+  a device-status document (battery mV, DL RSSI/SNR, TX power, uptime). "Answered in the ACK" is in the central log and in
   the NB counters only.
 - `received_at` = the air time of the frame, not the handling time.
 
@@ -296,7 +308,7 @@ the link would lose the data, hence:
 ### 4.3 Commands from the Portal
 
 - The Portal sends commands through the existing enqueue API; the central wraps them as
-  `0x81 ‖ 86 ‖ protobuf` (body ≤ 76 B; longer responses use paging).
+  `0x81 ‖ 86 ‖ protobuf` (body ≤ 72 B; longer responses use paging).
 - The answer comes back as a port-85 uplink and is correlated by `seq`.
 - After 5 failed attempts the central publishes `{kind: "undelivered", attempts: 5, …}`.
   The Portal ends the command with this result (H4, proximos-v2 `b357e231`, not merged yet).
