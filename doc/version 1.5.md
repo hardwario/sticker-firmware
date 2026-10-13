@@ -8,7 +8,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v1.5.0. The numbered sections below (§1–§43) carry the full
+moves from v1.4.x to v1.5.0. The numbered sections below (§1–§45) carry the full
 technical detail.
 
 ### Highlights
@@ -28,6 +28,7 @@ technical detail.
 | **Switchable onboard sensor** | `cap-sht` turns the onboard temperature/humidity sensor off like every other sensor. | §36 |
 | **Every sensor value is a channel** | Each sensor type publishes its own channel table (`app_sensor_types.yaml`). Alarm rules, telemetry and history address a value as (slot, channel): two temperatures on one machine probe, the barometer temperature, any on-board value can be alarmed and recorded. A 1-Wire slot expects a sensor type; a different sensor raises a `sensor_mismatch` alarm. | §40 |
 | **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
+| **Analog inputs** | `cap-analog-a` / `cap-analog-b` measure 0–24 V on the external inputs A/B. The value is a sensor channel like any other: telemetry, history, threshold alarms, no-data watchdog. | §45 |
 
 ### New configuration parameters
 
@@ -43,6 +44,7 @@ technical detail.
 | `cap-sht` | `true` | `true` / `false` | Onboard SHT4x on/off | §36 |
 | `sensor1-type`…`sensor4-type` | `0` (none) | type id: `2` dallas, `3` machine-probe | Sensor type a 1-Wire slot expects; set by teach/auto-enroll or by provisioning | §40 |
 | `history-channels` | onboard temperature + humidity | up to 24 (slot, channel) entries | Replaces `history-sensors` | §40 |
+| `cap-analog-a`, `cap-analog-b` | `false` | `true` / `false` | 0–24 V analog voltage on input A / B; digital `cap-input-*`, PIR and buzzer win the shared pin | §45 |
 
 ### New commands
 
@@ -2446,6 +2448,63 @@ and the data are the same on both (Hynek, 2026-10-12). Plan:
   uplinks, downlink, re-pair, release image, modulation switch). Not on HW: a 96 B uplink,
   range, power, several nodes per TOWER. Upstream E4 (keyed join) is a draft only
   (hardwario/tower-firmware#2).
+
+---
+
+## 45. Analog voltage on external inputs A/B (#396, PR #407)
+
+The external inputs GP_A (PB4, ADC1_IN3) and GP_B (PA11, ADC1_IN7) can be read as an
+analog voltage instead of a digital state. A 33k/1k divider on the front-end (33k series,
+1k shunt to GND) scales 0–24 V at the connector into the pin's 0..VDD range. The firmware
+reports the **input-referred** voltage, `V_in = V_pin × 34`, 12-bit (~34 mV/LSB at the
+connector). Signals beyond 0–24 V (e.g. 4–20 mA loop shunts) need external conditioning.
+The hall pins (PA3/PA7) are not ADC-capable and stay digital.
+
+- **Configuration** (`sensors` proto group, the ids reserved by §40): `cap-analog-a`
+  (proto_id 20) and `cap-analog-b` (21), both default `false`.
+- **Pin sharing.** GP_A/GP_B are also wired to the digital inputs, the PIR and the buzzer
+  HW variant. `app_sensor_init()` resolves conflicts at boot; the loser is cleared at
+  runtime (not persisted) with a `LOG_WRN`:
+  1. PIR or buzzer together with any input / analog capability clears all four (as in
+     v1.4.0, H-7).
+  2. `cap-input-a` / `cap-input-b` win over the analog capability of the same pin.
+  3. `cap-analog-a` / `cap-analog-b` take the pin only when nothing above claims it.
+  A build without `CONFIG_ADC` clears both analog capabilities.
+- **Pin mode.** An analog pin is switched to analog mode through GPIO
+  (`GPIO_DISCONNECTED`), not through the ADC pinctrl: the STM32 ADC driver re-applies its
+  pinctrl on every PM resume, so a pin listed there would be taken from the digital input,
+  the PIR or the buzzer after every battery read. `adc1` pinctrl keeps only the battery pin.
+- **One ADC1 path.** `app_analog_read_mv()` (new `app_analog.c`) does the one-shot
+  RESUME → channel setup → read → SUSPEND under one lock for the battery and both inputs.
+  `app_battery.c` uses it; the #118 serialization moved with it.
+- **Sensor channels (§40).** The values are motherboard channels 11 `input-a-voltage` and
+  14 `input-b-voltage`, reserved in `app_sensor_types.yaml` since §40 (range 0–30 V, wire
+  `uint32` mV, history `u16` mV). This change only drops their `pending_caps` entry and
+  marks them `liveness`. Everything else comes from the registry:
+  - **Telemetry:** `input_a_voltage = 30`, `input_b_voltage = 31` (mV, rounded), sent
+    with the G_INPUT_A / G_INPUT_B group and only with a valid reading (§42).
+  - **History:** `history-channels` entries `0b` / `0e` (slot 0), `u16` mV, `0xffff` =
+    no reading.
+  - **Alarms:** threshold rules on (slot 0, channel 11 / 14), e.g.
+    `alarm new mb input-b-voltage lo 1.5 hi 5`.
+  - **No-data watchdog:** both channels are liveness channels, so an enabled input
+    without a reading raises `no_data` like the other onboard sensors.
+    `APP_ALARM_NODATA_MB_MAX` 4 → 6.
+- **Shell:** `ats sensors check` lists `input-a-voltage` / `input-b-voltage`;
+  `ats sensors sample` prints both in V.
+- **Decoder:** `ttn.js` maps fields 30/31 (÷ 1000 → V) and the capability names.
+- **Power:** one ADC conversion per enabled input per `interval-sample`, the same
+  resume/suspend pattern as the battery read. Idle current not re-measured.
+- **Cost:** release 186 508 B flash (87.57 %), 48 904 B RAM (74.62 %); debug 237 560 B
+  (96.66 %), 56 392 B (86.05 %), on `v1.5.0` `c7c6485a`.
+- **Tests:** `tests/compose` `test_input_analog_voltage` (capability gating, mV rounding,
+  omit without a reading); `ttn.test.js` (fields 30/31, history channels 11/14,
+  `set_param` / `config_dump` of the capabilities); configen / sensorgen round-trip.
+  All 16 native suites, pytest 80, decoder 132, clang-format 22.1.5 clean.
+- **HIL:** the first implementation (2026-08-26, old wire layout) verified the divider
+  correction, linearity, telemetry, history and a threshold alarm with a PPK2 as source:
+  `doc/hil-analog-inputs-396.md`. Re-verification on this layout, including the
+  pin-sharing regression (digital input / PIR / buzzer after a battery read), is pending.
 
 ---
 
