@@ -8,7 +8,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v1.5.0. The numbered sections below (§1–§40) carry the full
+moves from v1.4.x to v1.5.0. The numbered sections below (§1–§43) carry the full
 technical detail.
 
 ### Highlights
@@ -85,6 +85,11 @@ technical detail.
   `channel` (`source` is now `slot`, the old `slot` is `rule`). A 1-Wire `SensorReading` is a
   valid mask + packed channel values, decoded as `values` / `units` by channel name. 1-Wire
   no-data is reported per chip and per device (§40).
+- **A missing onboard reading is omitted (#483).** A NaN temperature, humidity,
+  pressure, altitude or illuminance is no longer sent as a 5-byte "not available"
+  sentinel; the field is left out. An enabled barometer on a board without one saved
+  10 B per uplink. The fault is still reported by `device_status` and the `no_data`
+  alarm (§42).
 - **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
   retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
   `p2p-frequency` (§31).
@@ -2339,6 +2344,78 @@ transport.md`; node behaviour: `doc/p2p.md`.
     the fake radio: codec, join and ACK-tail KATs byte for byte, repetitions, ACK /
     PENDING / node ACK, ACK tails and their window, replay, control TLVs.
   - All 14 native suites pass.
+
+## 42. Omit missing onboard readings (#483)
+
+An enabled onboard analog sensor whose reading is NaN (sensor absent or failed) used to
+go out as a "not available" sentinel: `INT32_MIN` for `temperature` / `altitude`,
+`UINT32_MAX` for `humidity` / `pressure` / `illuminance`. Each one is a 5-byte varint
+plus its tag. With `cap-barometer true` on a board that has no barometer, every uplink
+carried 10 B of `pressure` + `altitude` that decoded to `null`. At EU868 DR0 (51 B) that
+is a fifth of the frame and can push a report onto a second page (§13).
+
+- **Firmware:** `fill_telemetry()` sets `has_<field>` only for a real reading. A valid
+  reading is encoded as before; the wire format is unchanged.
+- **What the host sees:** an absent key means "not measured in this report". It no longer
+  tells "enabled but failed" from "disabled" by the field alone. That information comes
+  from `device_status` / the `no_data` alarm (the failure) and from settings-info /
+  `GetConfig` (the enabled capabilities). This reverses the v1.4.0 sentinel rule for the
+  onboard analog fields only.
+- **Unchanged:** `voltage` keeps its 0 "no sample" value (system group, always sent). The
+  1-Wire `SensorReading` valid mask is unchanged.
+- **Decoder:** `ttn.js` still maps the old sentinels to `null`, so frames from older
+  firmware decode as before. Hub decoder: proximos/proximos-v2#119.
+- **Cost:** release 183 004 B flash / 48 636 B RAM (−56 B flash, 0 RAM vs v1.5.0
+  `73c0b802`).
+- **Tests:** `tests/compose` `test_omit_absent_analog` (cap-barometer + light on, all
+  NaN → no field), `test_system_always_present` updated; `ttn.test.js` "omitted analog
+  readings stay absent".
+
+## 43. v1.5.0 review fixes (#485, PR #489)
+
+Fixes for the bugs confirmed in the v1.5.0 code review. Every claim was checked against
+`72ef088b` first; the ones that were not bugs are listed in #485.
+
+- **History kept across a boot layout change (S1).** The 1-Wire rebind (auto-enroll, a
+  typed legacy slot) or a PIR/buzzer pin conflict could change the history channel
+  layout after the ring had mounted. The first capture then restarted the ring over the
+  stored records on every boot. Now the first capture remounts if the layout changed, and
+  a mount that restores nothing continues after the newest valid page.
+- **One failed onboard read is held (S2).** A single failed read of the accelerometer,
+  SHT4x, light sensor or barometer used to clear the value, so the report said `no_data`
+  and a threshold alarm went DEACT/ACT. The first miss in a row now keeps the previous
+  value; the second one clears it as before.
+- **Machine probe without its accelerometer (S3).** A probe whose LIS2DH12 fails to init
+  is still registered, so its thermometer keeps working; the tilt alert recovers through
+  the existing re-init path.
+- **1-Wire probe plugged in after boot (S4).** While a taught slot has no bound device,
+  the bus is checked 2, 5, 10 and 15 min after boot or a `W1Scan`, then every 15 min.
+  Each check is a bare ROM search (a few ms). The full scan + rebind (~1 s with a probe
+  present) runs only when the set of ROMs on the bus changed, and a fresh sample follows
+  only when a slot was newly bound. A fully bound bus is never scanned. `W1Scan` (NFC or
+  downlink) now also rebinds the slots.
+- **Fault record (B2).** A CPU fault stores reason / PC / LR in a no-init RAM record and
+  cold-reboots at once; before, the device halted until the watchdog fired, or forever if
+  the fault came before the watchdog started. The next boot logs the record and sends it
+  once in Info fields 20–22 (`fault_reason`, `fault_pc`, `fault_lr`). On Cortex-M the
+  reason is a `K_ERR_ARM_*` code (16–36); the TTN decoder adds `fault_reason_name`.
+- **Two commands in one downlink window (R4).** A second command that rides the receive
+  window of the first one's answer no longer overwrites the first one's post-command
+  action. Pending actions are merged and run once: counters save, link reset, then the
+  strongest reboot-class action; a forced rejoin only if nothing reboots.
+- **P2P link state changes on the radio work queue (R2).** NFC `lrw_join`, the shell
+  `join`, `ats radio unjoin` and `lrw_reset` now change the P2P link state on the radio
+  work queue instead of from their own thread.
+- **Duty-held report goes out late instead of being dropped (R3).** An `-EAGAIN` from
+  the duty-cycle hold no longer counts as a failed send. A held report is resent after
+  the hold and dropped only once it is one `interval_report` old.
+- **Host side:** Info gains optional fields 20–22; older readers ignore them.
+- **Cost:** release 184 724 B flash (86.73 %, +1 720 B vs `72ef088b`), 48 848 B RAM
+  (74.54 %).
+- **HW-verified** on STICKER 2162165132: B2 (forced bus fault → self-reboot → `Last
+  fault: reason 27`) and S4 (unplug → rebind 20 ms, no extra sample; replug → rebind +
+  one sample; unchanged bus → ROM search only). S3, R2, R3 and R4 are covered by host
+  tests only.
 
 ---
 

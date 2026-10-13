@@ -1560,6 +1560,10 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	print_reset_cause(sh, info.reset_cause);
+	if (info.has_fault) {
+		shell_print(sh, "Last fault:    reason %u, pc 0x%08x, lr 0x%08x", info.fault_reason,
+			    info.fault_pc, info.fault_lr);
+	}
 	print_device_status(sh, info.device_status);
 	/* #313 D7: FTM mailbox authorisation is a per-unit hardware property — a
 	 * unit that cannot enable it has no interactive NFC channel and must not

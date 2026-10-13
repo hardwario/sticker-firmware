@@ -3387,13 +3387,62 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info)
 /* Debug / bench helpers (ats radio ..., #118, CONFIG_SHELL)                */
 /* ======================================================================== */
 
+/* #485 R2: the link state (m_link_state, the join backoff, the session) is
+ * owned by the radio work queue, and the queue sleeps inside an exchange. An
+ * NFC lrw_join, the shell `join` or `ats radio unjoin` used to rewrite it from
+ * their own thread in the middle of one: a Detach could leave the node
+ * UNPAIRED and silent, a JoinAccept could swallow the operator's rejoin. Those
+ * entry points now hand the change to the queue. */
+static bool on_radio_wq(void)
+{
+	return k_current_get() == k_work_queue_thread_get(app_radio_work_q());
+}
+
+static int m_pairing_clear_ret;
+
+static void pairing_clear_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	m_pairing_clear_ret = pairing_clear();
+}
+
+static K_WORK_DEFINE(m_pairing_clear_work, pairing_clear_work_handler);
+
+/* Clear the pairing on the radio work queue and wait for it: a caller reboots
+ * right after (lrw_reset), or reports the result (unjoin). */
+static int pairing_clear_sync(void)
+{
+	struct k_work_sync sync;
+
+	/* A queue that is not running (early boot, the host tests) refuses the
+	 * submit; nothing can race the change then. */
+	if (on_radio_wq() ||
+	    k_work_submit_to_queue(app_radio_work_q(), &m_pairing_clear_work) < 0) {
+		return pairing_clear();
+	}
+	(void)k_work_flush(&m_pairing_clear_work, &sync);
+	return m_pairing_clear_ret;
+}
+
+static void rejoin_work_handler(struct k_work *work);
+static K_WORK_DEFINE(m_rejoin_work, rejoin_work_handler);
+
 void app_radio_p2p_forget_pairing(void)
 {
-	(void)pairing_clear();
+	(void)pairing_clear_sync();
 }
 
 void app_radio_p2p_rejoin(void)
 {
+	if (on_radio_wq() || k_work_submit_to_queue(app_radio_work_q(), &m_rejoin_work) < 0) {
+		rejoin_work_handler(NULL);
+	}
+}
+
+static void rejoin_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
 	/* Same gates as app_radio_p2p_start() -- the shell must not be a way
 	 * around them (a JoinRequest sealed under an all-zero app_key is
 	 * forgeable by anyone; see app_key_is_set()). */
@@ -3418,7 +3467,7 @@ void app_radio_p2p_rejoin(void)
 
 int app_radio_p2p_unjoin(void)
 {
-	int ret = pairing_clear();
+	int ret = pairing_clear_sync();
 
 	if (ret) {
 		return ret;

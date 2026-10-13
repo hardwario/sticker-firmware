@@ -131,6 +131,10 @@ struct app_cmd_info {
 	uint8_t radio_state;    /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
+	bool has_fault;         /* the previous boot ended in a fatal error (#485 B2) */
+	uint32_t fault_reason;  /* its Zephyr K_ERR_* reason */
+	uint32_t fault_pc;      /* faulting PC, 0 = unknown */
+	uint32_t fault_lr;      /* LR at the fault, 0 = unknown */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from
@@ -140,6 +144,10 @@ void app_cmd_set_reset_cause(uint32_t cause);
 
 /* The cached reset-cause bitmask (app_cmd_set_reset_cause()); 0 = unknown. */
 uint32_t app_cmd_get_reset_cause(void);
+
+/* Cache the fatal error that ended the previous boot (main.c fault record,
+ * #485 B2). Reported in GetInfo fields 20-22 until the next reboot. */
+void app_cmd_set_last_fault(uint32_t reason, uint32_t pc, uint32_t lr);
 
 /* Fill `info` with the current device info: FW version, build type, serial,
  * uptime, and wall-clock time (has_unix_time=false when the RTC is unsynced or

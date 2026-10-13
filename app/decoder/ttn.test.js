@@ -380,6 +380,33 @@ test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
   assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
 });
 
+// The last fatal error (fields 20-22, #485 B2) tells the backend a reboot came
+// from a CPU fault, not a plain watchdog. Inner Info: fw 1.5.0, reset_cause=0x02,
+// fault_reason=0 (CPU exception), pc=0x0800abcd, lr=0x08001235.
+test("decodeUplink decodes get_info last fault (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a15080110055802a00100a801cdd78240b001b5a48040"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.fault_reason, 0);
+  assert.equal(got.info.fault_reason_name, "cpu_exception");
+  assert.equal(got.info.fault_pc, "0x0800abcd");
+  assert.equal(got.info.fault_lr, "0x08001235");
+});
+
+// A Cortex-M fault reports the finer K_ERR_ARM_* code: 27 = instruction bus
+// fault, as seen on HW after a jump to an unmapped address (fw 1.5.0).
+test("decodeUplink names a Cortex-M fault reason (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a16080110055802a0011ba8018080848002b001d3bc8a40"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.fault_reason, 27);
+  assert.equal(got.info.fault_reason_name, "bus_instruction");
+  assert.equal(got.info.fault_pc, "0x20010000");
+  assert.equal(got.info.fault_lr, "0x08029e53");
+});
+
 // Info carries dev_eui (field 13, 8 bytes), emitted over NFC only. The radio
 // link state is not part of Info (#446: get_radio_state). Inner Info: fw 1.4.2,
 // dev_eui=0102030405060708.
@@ -1138,6 +1165,17 @@ test("fPort-2 telemetry: not-available sentinels decode to null", () => {
   const got = codec.decodeUplink({ bytes: hex("0118ffffffff0f20ffffffff0f"), fPort: 2 }).data;
   assert.equal(got.temperature, null);
   assert.equal(got.humidity, null);
+});
+
+// #483: firmware now omits a NaN analog reading; only the system group is on
+// the wire and the absent sensor keys are simply not in the decoded object.
+test("fPort-2 telemetry: omitted analog readings stay absent", () => {
+  // 01 version, voltage (field 1, tag 0x08) = 150 (3.0 V), system_flags (tag 0x10) = 0
+  const got = codec.decodeUplink({ bytes: hex("01089601" + "1000"), fPort: 2 }).data;
+  assert.equal(got.temperature, undefined);
+  assert.equal(got.pressure, undefined);
+  assert.equal(got.altitude, undefined);
+  assert.equal(got.illuminance, undefined);
 });
 
 // #205 follow-up / #212: no_data watchdog event (sensor stopped reporting).

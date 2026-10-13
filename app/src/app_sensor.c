@@ -21,6 +21,7 @@
 #include "app_sensor.h"
 #include "app_sensor_types.h"
 #include "app_sht4x.h"
+#include "app_w1.h"
 #include "app_w1_slots.h"
 
 /* Zephyr includes */
@@ -49,6 +50,17 @@ LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 #define I2C_RECOVER_FAIL_THRESHOLD 3
 static const struct device *const m_i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static int m_i2c_fail_streak;
+
+/* #485 S2: consecutive failed reads per onboard I2C sensor (app_sensor_miss_hold).
+ * Guarded by g_app_sensor_data_lock, like m_i2c_fail_streak. */
+enum mb_src {
+	MB_SRC_ACCEL,
+	MB_SRC_SHT,
+	MB_SRC_LIGHT,
+	MB_SRC_BARO,
+	MB_SRC_COUNT
+};
+static uint8_t m_mb_miss[MB_SRC_COUNT];
 
 BUILD_ASSERT(APP_SENSOR_CH_MOTHERBOARD_COUNT <= 32, "motherboard valid mask is a uint32");
 BUILD_ASSERT(APP_SENSOR_W1_CH_MAX <= 32, "1-Wire valid mask is a uint32");
@@ -151,6 +163,164 @@ static void sensor_work_handler(struct k_work *work)
 }
 
 static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);
+
+#if defined(CONFIG_W1)
+/* #485 S4: the boot scan was the only automatic rebind, so a probe plugged in
+ * after boot (or one that missed the boot scan) stayed no_data until a reboot.
+ *
+ * While a taught slot is unbound, a rescan runs on a backoff of 2, 5, 10 and
+ * 15 min, then every 15 min. Each one is a bare ROM search (a few ms, no device
+ * init or read). The full scan + rebind (~1 s: probe re-init plus a throwaway
+ * read per device) runs only when the set of ROMs on the bus differs from the
+ * one the last rebind saw, and a fresh sample follows only when that rebind
+ * bound more slots. A fully bound bus is never touched. Everything runs on the
+ * sensor work queue, so a scan never reshuffles driver indices under a sample. */
+static const uint16_t W1_RESCAN_BACKOFF_S[] = {120, 300, 600, 900};
+
+struct w1_bus_sig {
+	uint64_t sum; /* order-independent sum of the full ROM codes */
+	uint16_t count;
+};
+
+static struct w1_bus_sig m_w1_sig; /* bus seen by the last rebind */
+static int m_w1_present;           /* slots bound by the last rebind */
+static uint8_t m_w1_rescan_step;
+static bool m_w1_rescan_force;
+
+static int w1_sig_callback(struct w1_rom rom, void *user_data)
+{
+	struct w1_bus_sig *sig = user_data;
+
+	sig->sum += w1_rom_to_uint64(&rom);
+	sig->count++;
+	return 0;
+}
+
+/* Bare ROM search of the DS2484 bus, nothing else on the bus is touched. */
+static int w1_bus_sig_read(struct w1_bus_sig *sig)
+{
+	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+	static struct app_w1 w1;
+	int ret;
+	int res;
+
+	*sig = (struct w1_bus_sig){0};
+
+	ret = app_w1_acquire(&w1, dev);
+	if (ret) {
+		(void)app_w1_release(&w1, dev);
+		return ret;
+	}
+
+	res = app_w1_scan(&w1, dev, w1_sig_callback, sig);
+
+	ret = app_w1_release(&w1, dev);
+	return res ? res : ret;
+}
+
+/* Scan every 1-Wire driver and rebind the slots by ROM. Returns the first scan
+ * error; the rebind still runs on what was found. */
+static int w1_scan_rebind(void)
+{
+	int ret;
+	int res = 0;
+
+	/* Remember the bus this rebind sees; a failed search forces the next
+	 * rescan to do the full scan again. */
+	if (w1_bus_sig_read(&m_w1_sig)) {
+		m_w1_sig.count = UINT16_MAX;
+	}
+
+	ret = app_ds18b20_scan();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
+		res = ret;
+	}
+
+#if defined(CONFIG_DS28E17)
+	ret = app_machine_probe_scan();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
+		res = res ? res : ret;
+	}
+#endif /* defined(CONFIG_DS28E17) */
+
+	m_w1_present = app_w1_slots_rebind();
+
+	LOG_INF("1-Wire slots: %d sensor(s) bound", m_w1_present);
+	return res;
+}
+
+static void w1_rescan_work_handler(struct k_work *work);
+
+static K_WORK_DELAYABLE_DEFINE(m_w1_rescan_work, w1_rescan_work_handler);
+
+/* Arm the next backoff step while a taught slot is unbound, else end the
+ * episode. */
+static void w1_rescan_arm_next(void)
+{
+	if (!app_w1_slots_need_rescan()) {
+		m_w1_rescan_step = 0;
+		return;
+	}
+
+	uint16_t delay = W1_RESCAN_BACKOFF_S[m_w1_rescan_step];
+
+	if (m_w1_rescan_step < ARRAY_SIZE(W1_RESCAN_BACKOFF_S) - 1) {
+		m_w1_rescan_step++;
+	}
+	(void)k_work_schedule_for_queue(&m_sensor_work_q, &m_w1_rescan_work, K_SECONDS(delay));
+}
+
+static void w1_rescan_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	bool force = m_w1_rescan_force;
+
+	m_w1_rescan_force = false;
+
+	if (!g_app_config.cap_w1_sensors || !app_w1_slots_any_taught()) {
+		m_w1_rescan_step = 0;
+		return;
+	}
+
+	if (force || app_w1_slots_need_rescan()) {
+		struct w1_bus_sig sig;
+		bool changed = w1_bus_sig_read(&sig) != 0 || sig.count != m_w1_sig.count ||
+			       sig.sum != m_w1_sig.sum;
+
+		LOG_INF("1-Wire rescan: %u device(s) on the bus, %s", sig.count,
+			force || changed ? "rebind" : "unchanged");
+
+		if (force || changed) {
+			int before = m_w1_present;
+
+			(void)w1_scan_rebind();
+
+			/* Fresh readings only for a newly bound sensor. */
+			if (m_w1_present > before) {
+				app_sensor_sample();
+			}
+		}
+	}
+
+	w1_rescan_arm_next();
+}
+#endif /* defined(CONFIG_W1) */
+
+void app_sensor_w1_rescan(bool force)
+{
+#if defined(CONFIG_W1)
+	if (force) {
+		m_w1_rescan_force = true;
+		m_w1_rescan_step = 0;
+	}
+	(void)k_work_reschedule_for_queue(&m_sensor_work_q, &m_w1_rescan_work, K_NO_WAIT);
+#else
+	ARG_UNUSED(force);
+#endif
+}
 
 static void sensor_timer_handler(struct k_timer *timer)
 {
@@ -465,26 +635,9 @@ int app_sensor_init(void)
 	 * alert is armed per probe inside app_machine_probe_scan() (scan_callback), so
 	 * it survives on-demand re-scans/enrolls too. */
 #if defined(CONFIG_W1)
-	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
-
-	if (w1_taught) {
-		ret = app_ds18b20_scan();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
-			res = res ? res : ret;
-		}
-
-#if defined(CONFIG_DS28E17)
-		ret = app_machine_probe_scan();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
-			res = res ? res : ret;
-		}
-#endif /* defined(CONFIG_DS28E17) */
-
-		int present = app_w1_slots_rebind();
-
-		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
+	if (g_app_config.cap_w1_sensors && app_w1_slots_any_taught()) {
+		ret = w1_scan_rebind();
+		res = res ? res : ret;
 	}
 #endif /* defined(CONFIG_W1) */
 
@@ -493,6 +646,13 @@ int app_sensor_init(void)
 	k_work_queue_start(&m_sensor_work_q, m_sensor_work_stack,
 			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+
+#if defined(CONFIG_W1)
+	/* #485 S4: start the rescan backoff if the boot rebind left a slot unbound. */
+	if (g_app_config.cap_w1_sensors && app_w1_slots_any_taught()) {
+		w1_rescan_arm_next();
+	}
+#endif /* defined(CONFIG_W1) */
 
 	if (g_app_config.interval_sample) {
 		k_timer_start(&m_sensor_timer, K_SECONDS(1),
@@ -546,6 +706,9 @@ void app_sensor_sample(void)
 	 * true (write-through, same as today) whenever CONFIG_SHT4X is off. */
 	bool sht4x_valid = true;
 
+	/* #485 S2: which onboard sensor's read failed this sweep (comm error). */
+	bool failed[MB_SRC_COUNT] = {false};
+
 	struct app_sensor_w1 w1[APP_W1_SLOT_COUNT];
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		app_sensor_w1_clear(&w1[s], APP_SENSOR_TYPE_NONE);
@@ -564,6 +727,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_ACCEL] = true;
 			LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
 		}
 	}
@@ -591,6 +755,7 @@ void app_sensor_sample(void)
 			i2c_tried++;
 			if (ret) {
 				i2c_failed++;
+				failed[MB_SRC_SHT] = true;
 				LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
 			}
 		}
@@ -603,6 +768,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_LIGHT] = true;
 			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
@@ -613,6 +779,7 @@ void app_sensor_sample(void)
 		i2c_tried++;
 		if (ret) {
 			i2c_failed++;
+			failed[MB_SRC_BARO] = true;
 			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
 		}
 	}
@@ -730,17 +897,28 @@ void app_sensor_sample(void)
 
 	struct app_sensor_mb *g = &g_app_sensor_data.mb;
 
-	/* #340 M18: keep the last known-good reading on a plausibility reject
-	 * instead of overwriting it with this sweep's NaN locals. */
-	if (!sht4x_valid) {
-		const uint32_t keep = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE) |
-				      BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY);
+	/* Keep the last known-good reading instead of this sweep's NaN locals:
+	 * - #340 M18: on an SHT4x plausibility reject (always);
+	 * - #485 S2: on a failed read, for APP_SENSOR_MISS_HOLD sweeps. A single
+	 *   transient I2C error would otherwise leave NaN for a whole sample
+	 *   interval (900 s by default), long past the no-data window, and raise
+	 *   no_data plus a DEACTIVATE/ACTIVATE pair on every threshold rule of the
+	 *   channel. A second failure in a row goes NaN, as before. */
+	static const uint32_t src_mask[MB_SRC_COUNT] = {
+		[MB_SRC_ACCEL] = BIT(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION),
+		[MB_SRC_SHT] = BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE) |
+			       BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY),
+		[MB_SRC_LIGHT] = BIT(APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE),
+		[MB_SRC_BARO] = BIT(APP_SENSOR_CH_MOTHERBOARD_PRESSURE) |
+				BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE_BARO) |
+				BIT(APP_SENSOR_CH_MOTHERBOARD_ALTITUDE),
+	};
+	uint32_t keep = sht4x_valid ? 0 : src_mask[MB_SRC_SHT];
 
-		mb.v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE] =
-			g->v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE];
-		mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY] = g->v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY];
-		mb.valid = (mb.valid & ~keep) | (g->valid & keep);
+	for (int i = 0; i < MB_SRC_COUNT; i++) {
+		keep |= app_sensor_miss_hold(&m_mb_miss[i], failed[i], src_mask[i]);
 	}
+	app_sensor_mb_keep(&mb, g, keep);
 
 	/* The PIR / accel event counters are owned by their event handlers, not by
 	 * this sweep — carry them over. */
