@@ -31,6 +31,7 @@ target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${APP_DIR}/sr
 target_sources(app PRIVATE
   ${proto_srcs}
   ${APP_DIR}/src/app_compose.c
+  ${APP_DIR}/src/app_sensor_types.c
   src/main.c
   src/stubs.c
 )

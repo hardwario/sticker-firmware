@@ -101,14 +101,14 @@ static int poll_impl(bool prime)
 	/* Fire alarm events after releasing the data mutex (see app_hall.c): keeps
 	 * the data lock off the alarm lock + uplink-enqueue path. */
 	if (a_rise) {
-		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE, true);
 	} else if (a_fall) {
-		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE, false);
 	}
 	if (b_rise) {
-		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE, true);
 	} else if (b_fall) {
-		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE, false);
 	}
 
 	return 0;

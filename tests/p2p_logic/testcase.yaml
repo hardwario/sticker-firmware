@@ -1,0 +1,5 @@
+common:
+  tags: sticker p2p
+  platform_allow: native_sim
+tests:
+  sticker.p2p_logic: {}

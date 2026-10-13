@@ -25,6 +25,7 @@ nanopb_generate_cpp(proto_srcs proto_hdrs RELPATH ${APP_DIR}
   ${APP_DIR}/src/app_config.proto)
 
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${APP_DIR}/src)
+
 target_sources(app PRIVATE
   ${proto_srcs}
   ${APP_DIR}/src/app_cmd.c

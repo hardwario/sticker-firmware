@@ -1,0 +1,27 @@
+# Plans
+
+Design and proposal documents, one per pull request.
+
+**Naming convention:** `<PR number> - <PR name>.md`
+
+The PR number makes the document's discussion thread, review history, and merge state
+findable from the filename alone; keeping plans in one directory keeps them out of the
+way of the operational documentation in `doc/` (test plans, release notes, hardware).
+
+A plan is renamed if its PR is renamed, so the two stay in step.
+
+| Plan | PR |
+|---|---|
+| `408 - LoRa improvements - P2P hardening.md` | [#408](https://github.com/hardwario/sticker-firmware/pull/408) |
+| `409 - LoRaWAN improvements - regions, datarate, diagnostics.md` | [#409](https://github.com/hardwario/sticker-firmware/pull/409) |
+| `410 - TOWER GFSK transport (radio-mode tower).md` | [#410](https://github.com/hardwario/sticker-firmware/pull/410) |
+| `v1.5.0_mailbox.md` — NFC command channel over the ST25DV FTM mailbox (mailbox-only) | [#414](https://github.com/hardwario/sticker-firmware/pull/414) |
+| `v1.5.0_claiming.md` — plaintext command transport and explicit claiming | [#415](https://github.com/hardwario/sticker-firmware/pull/415) |
+| `425 - Universal response paging.md` | [#425](https://github.com/hardwario/sticker-firmware/pull/425) |
+| `431 - Sensor channel model for alarms.md` | [#431](https://github.com/hardwario/sticker-firmware/pull/431) |
+| `439 - Radio transport layer.md` | [#439](https://github.com/hardwario/sticker-firmware/pull/439) |
+| `447 - RadioState.md` — radio link state and diagnostics (GetRadioState) | [#447](https://github.com/hardwario/sticker-firmware/pull/447) |
+| `460 - One implementation per function in app_radio.md` — decision #23: queues, link supervision, post-command, confirmed alarms, duty ledger common | [#460](https://github.com/hardwario/sticker-firmware/pull/460) |
+| `470 - TOWER protocol as the P2P transport.md` — TOWER wire-compatible net layer replaces P2P, `fsk`/`lora` PHY; supersedes the #410 plan | #470 |
+| `470 - Northbridge-Hub link protocol.md` — our Northbridge ↔ Hub link v2 for the TOWER gateway (framing, messages, recovery, event delivery) | #470 |
+| `P2P control-radio completion.md` | *(PR not yet opened — rename to `<PR number> - P2P control-radio completion.md` when it is)* |

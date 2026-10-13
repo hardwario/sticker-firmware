@@ -1,0 +1,14 @@
+{
+  "_comment": "TOWER OTA pairing + fsk packet KAT (issue #490): prints tower_pair_kat.json.\n\nThe 3-way JOIN of tower-firmware src/radio/net/pairing.rs, all frames under the\npublic PAIRING_KEY b\"TOWER-PAIR-KEY!\\0\":\nJOIN_REQ     = type 4, src=addr, dest=0,  counter=c,   payload addr(4 LE)\nJOIN_RESP    = type 5, src=gw,   dest=addr, counter=g, payload key(16) challenge(4 LE)\nJOIN_CONFIRM = type 6, src=addr, dest=gw, counter=c+1, payload addr(4 LE) challenge(4 LE)\nFrame/CCM exactly as tower_frame_kat.json (14 B header = AAD, nonce src|counter|0*5, 8 B tag).\n\nfsk packet (SPIRIT1 on the stock TOWER, docs/radio.md): len(1) | frame | CRC16\n(poly 0x1021, seed 0xFFFF, over len+frame, big-endian), then CC1101 PN9\nwhitening (seed 0x1FF) over all of it.",
+  "dev_eui": "5876070000000413",
+  "addr": 1043,
+  "gw": 765170254,
+  "counter": 88,
+  "gw_counter": 7,
+  "node_key": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "challenge": 3237998097,
+  "join_req": "24001304000000000000580000001a0786d2cb371badb9805f28",
+  "join_resp": "25004e929b2d1304000007000000cd71823e0755a67d90e07f1a36a944e50b46e80709c473dbb3b5e404",
+  "join_confirm": "2600130400004e929b2d59000000ca652c1b032d7519254089873e6e524b",
+  "join_req_fsk": "e5c51d89e9853324ea7ad2617097571053fbff135a161736e706ef4d11"
+}

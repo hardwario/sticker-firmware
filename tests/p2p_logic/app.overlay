@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2026 HARDWARIO a.s.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	lora_emul: lora-emul {
+		compatible = "hardwario,lora-emul";
+		status = "okay";
+	};
+
+	aliases {
+		lora0 = &lora_emul;
+	};
+};

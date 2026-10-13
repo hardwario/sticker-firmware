@@ -1,10 +1,16 @@
 # HIL Test Report — Analog inputs GP_A/GP_B (#396)
 
-> Target firmware: **v1.5.0**, branch `hynek/issue396-analog-input` (PR #407).
-> Feature spec: [`version 1.5.md` §3](version%201.5.md). This report covers the
-> hardware-in-the-loop verification of the analog voltage measurement on the
-> external inputs GP_A/GP_B, including the `×34` divider correction (commit
-> `ec25fff`).
+> Target firmware: **v1.5.0**, PR #407. Feature spec:
+> [`version 1.5.md` §45](version%201.5.md).
+>
+> **Two firmware layouts.** The executed tests T1–T4 below ran on 2026-08-26 against
+> the first implementation (branch head `ec25fff`), which used Telemetry fields 28/29,
+> history bits after `accel-motion` and alarm sources `input-a`/`input-b`. The reworked
+> PR moves the values onto the §40 sensor channel model: Telemetry fields **30/31**,
+> history channels **(0, 11) / (0, 14)**, alarm rules on `mb input-a-voltage` /
+> `mb input-b-voltage`, and the no-data watchdog. The measurement chain (divider,
+> ×34 correction, ADC read) is unchanged, so T1 still holds; T2–T4 must be repeated on
+> the new layout — see [Re-verification on the reworked layout](#re-verification-on-the-reworked-layout-pending).
 
 The measurement chain under test is:
 
@@ -76,7 +82,7 @@ below the PPK2 source floor, not a firmware error. Quantization is ~34 mV/LSB
 referred to the input (0.8 mV pin × 34), i.e. coarse at the low end — inherent to
 the ×34 attenuation.
 
-### T2 — Telemetry propagation
+### T2 — Telemetry propagation (old layout)
 
 **Goal:** the measured value reaches the fPort-2 `Telemetry` frame (fields
 28/29) and decodes correctly.
@@ -94,7 +100,7 @@ ttn.js: { input_a_voltage: 0.068, input_b_voltage: 1.054 }
 the floating-A baseline. The same encoder feeds the synchronous NFC `Sample`
 response (`app_compose_snapshot()` → `fill_telemetry()`).
 
-### T3 — History propagation
+### T3 — History propagation (old layout)
 
 **Goal:** the value is stored in and read back from the history buffer.
 **Observable:** `history capture` + `history read`.
@@ -111,7 +117,7 @@ history capture ; history read
 inter-sample ADC quantization). Note: history commands are the root `history …`
 command, not `ats history`.
 
-### T4 — Alarm propagation
+### T4 — Alarm propagation (old layout)
 
 **Goal:** a `voltage` threshold rule on an analog input source evaluates the real
 reading and latches/recovers correctly.
@@ -141,8 +147,8 @@ Not covered by the session above; ordered roughly by value.
    DAC / calibrator or a resistor ladder to verify 0–800 mV, where the ~34 mV/LSB
    quantization is proportionally largest.
 3. **Top of the range & over-range.** Drive the input toward 24 V (pin approaches
-   VDD): confirm the reported value saturates cleanly at the 65534 mV wire clamp,
-   and characterize behaviour above 24 V (pin clipping at VDD, no damage — the
+   VDD): confirm the reading tracks up to 24 V (registry range 0–30 V; a value
+   outside it is dropped as no reading), and characterize behaviour above 24 V (pin clipping at VDD, no damage — the
    divider protects the pin only up to ~112 V at VDD).
 4. **Accuracy across units & supply.** The ×34 constant assumes nominal 33k/1k and
    VDDA = 3.3 V. Measure several units and a supply sweep (undervoltage band) to
@@ -154,18 +160,37 @@ Not covered by the session above; ordered roughly by value.
 7. **Both channels + crosstalk.** Drive A and B independently (two sources or
    sequential) and confirm no channel-to-channel coupling.
 8. **Fault / sentinel path.** Force an ADC failure (or leave the cap on with the
-   pin lost to a sharing conflict) and confirm the reading is NaN → `TM_U32_NA`
-   (telemetry) / `0xFFFF` (history) → `null` in `ttn.js`.
+   pin lost to a sharing conflict) and confirm the reading is NaN → field 30/31
+   omitted (telemetry, §42) / `0xFFFF` (history) and a `no_data` alarm (R5).
 9. **Pin-sharing mutual exclusion on HW.** Enable `cap-input-a` + `cap-analog-a`
    (and PIR/buzzer combinations) and confirm the runtime resolution order and the
-   `LOG_WRN`, matching `version 1.5.md` §3.
+   `LOG_WRN`, matching `version 1.5.md` §45 (R8).
 10. **Dynamic signals.** One-shot sampling against a slowly varying / pulsed input
     — characterize aliasing and the effective sample instant.
 11. **Alarm dwell & hysteresis.** Non-zero `dwell` on an analog threshold rule
     (confirm the band + dwell timing), and history/alarm behaviour over a full
     LoRaWAN replay and NFC paged readout of the new channels.
 
+## Re-verification on the reworked layout (pending)
+
+Same bench as above (PPK2 as the source on the input connector). Debug build of the
+PR head.
+
+| # | Test | Steps | Expected |
+|---|---|---|---|
+| R1 | Divider spot check | `config cap-analog-b true`, `config save`; PPK2 1000 / 3000 / 5000 mV on B; `ats sensors sample` | `input-b-voltage` ≈ source (ratio 1.00–1.02, as T1) |
+| R2 | Telemetry | `ats lrw compose` → `ttn.js` | `input_b_voltage` in V from field 31; field 30 absent with `cap-analog-a false` |
+| R3 | History | `config history-channels 00010b0e` + rest `ff`; `history capture`; `history read` | both channels recorded, values as R1 |
+| R4 | Threshold alarm | `alarm new mb input-b-voltage lo 1.5 hi 5`; PPK2 1000 → 3000 mV; `alarm poll` | active below the band, recovers inside it; clear the rule afterwards |
+| R5 | No-data watchdog | `cap-analog-b true`, force a failed read (temporary hook) | `no_data` alarm on (0, 14) |
+| R6 | **Pin-sharing regression** | `cap-input-a true` (digital) + `cap-analog-b true`; toggle input A while sampling for several `interval-sample` periods | input A keeps counting after every battery / analog read (pin stays digital) |
+| R7 | PIR / buzzer regression | buzzer HW variant, `cap-buzzer true`, no analog cap; play a melody after a sample | buzzer still sounds after a battery read |
+| R8 | Conflict resolution | `cap-input-a true` + `cap-analog-a true`; reboot | `LOG_WRN`, analog A cleared at runtime, digital A works |
+
+R6/R7 cover review finding 1 of the first implementation: its DTS put GP_A/GP_B into
+the ADC pinctrl, which the STM32 ADC driver re-applies on every PM resume.
+
 > **Open hardware question:** the divider commit (`ec25fff`) names the **JP11**
-> connector; `version 1.5.md` §3's earlier draft named **JP2**. Confirm the
+> connector; an earlier draft of the spec named **JP2**. Confirm the
 > correct connector/pin against `hio-sticker-sch-r2.1.pdf` before finalizing the
 > customer-facing wiring docs.

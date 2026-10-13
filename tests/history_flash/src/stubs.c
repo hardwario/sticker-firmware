@@ -5,6 +5,7 @@
  * Clock stub for app_history (APP_HISTORY_HAVE_CLOCK). Tests toggle test_clock_*.
  */
 
+#include "app_radio.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -18,4 +19,13 @@ int app_clock_get_unix(uint32_t *unix_s)
 	}
 	*unix_s = test_clock_unix;
 	return 0;
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

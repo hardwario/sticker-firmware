@@ -18,29 +18,27 @@ extern "C" {
  * success, -ENODEV if the RTC is not ready. */
 int app_clock_init(void);
 
-/* Ask the LoRaWAN network for the current time (DeviceTimeReq MAC command).
- * The answer arrives asynchronously on the next downlink; feed it to
- * app_clock_handle_downlink(). No-op when CONFIG_LORAWAN is disabled. */
-void app_clock_request_sync(void);
-
-/* Force a re-sync: clear the synced guard and request DeviceTimeReq again.
- * Used by the ClockSync downlink command. No-op when CONFIG_LORAWAN is off. */
-void app_clock_force_resync(void);
-
-/* Inspect a downlink's flags; if LORAWAN_TIME_UPDATED is set, read the network
- * time and set the RTC from it. Call from the LoRaWAN downlink callback.
- * No-op when CONFIG_LORAWAN is disabled. */
-void app_clock_handle_downlink(uint8_t flags);
-
 /* Read the current wall-clock time as a Unix timestamp (seconds, UTC).
  * Returns 0 on success, -ENODATA if the RTC has not been set yet, -EINVAL on
  * a NULL argument, or another negative errno from the RTC driver. */
 int app_clock_get_unix(uint32_t *unix_s);
 
 /* Set the RTC from a Unix timestamp (seconds, UTC). Mainly for testing /
- * manual provisioning; the normal path is app_clock_handle_downlink(). Returns
+ * manual provisioning; the normal path is app_clock_set_network_time(). Returns
  * 0 on success or a negative errno from the RTC driver. */
 int app_clock_set_unix(uint32_t unix_s);
+
+/* Apply a wall-clock time received from the network: the LoRaWAN DeviceTimeAns
+ * or the P2P Ack time tail (the radio backends; asking for one is
+ * app_radio_time_request()). Rejects a value outside the plausible window
+ * (2024-01-01 .. 2100-01-01, L-5) instead of skewing every history/alarm
+ * timestamp. The first one arms the weekly re-sync (#96). Returns 0, -ERANGE
+ * for an implausible time, or the app_clock_set_unix() error. */
+int app_clock_set_network_time(uint32_t unix_s);
+
+/* Uptime (ms) at which the last network time was applied by
+ * app_clock_set_network_time(), or 0 if none has been since boot. */
+int64_t app_clock_network_time_at_ms(void);
 
 #ifdef __cplusplus
 }

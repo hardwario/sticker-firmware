@@ -75,7 +75,7 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 
 /* #316 vendor channel (hio.stck:vnd), sealed under VND_KEY (dir=REQUEST): the
  * plaintext is APP_PROTO_VERSION + Command{ seq=1, vendor_reset{ key = 16x0xAB } }
- * (field 26, SetSecretKey shape — 25 is clm_ack, #308, so vendor_reset is 26).
+ * (field 26, SetSecretKey shape — 25 is claim_done (ex-clm_ack, #308), so vendor_reset is 26).
  * Same nonce/AAD/tag construction as REQ_WIRE. */
 #define VND_REQ_PLAIN "010801d201120a10abababababababababababababababab"
 /* clang-format off */

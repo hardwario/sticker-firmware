@@ -109,6 +109,7 @@ pkgs.mkShell {
       if [ ! -d "$ws/zephyr" ]; then
         echo "[sticker] west update — fetching the Zephyr tree (first time only, may take minutes)..."
         ( cd "$ws" && west update )               || return 1
+        ( cd "$ws" && west patch apply )          || return 1   # zephyr/patches.yml (#419)
         ( cd "$ws" && west zephyr-export )         || true
         ( cd "$ws" && west packages pip --install )|| true   # Zephyr's own Python deps
       fi

@@ -14,20 +14,25 @@
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio.h"
+#include "app_radio_lrw.h"
 #include "app_sensor.h"
 #include "app_settings.h"
 
 #include "src/app_config.pb.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/ztest.h>
 
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Config under test — seeded per test; app_config_ingest/app_nfc write through
  * here. app_config() and g_app_config share one struct (a test simplification
@@ -92,12 +97,27 @@ int app_clock_set_unix(uint32_t unix_s)
 	return 0;
 }
 
-void app_clock_force_resync(void)
+void app_radio_clock_sync(uint32_t seq)
+{
+	ARG_UNUSED(seq);
+}
+
+/* ReqHistory over a radio: never reached here (every request arrives over NFC). */
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+	ARG_UNUSED(seq);
+	return -EAGAIN;
+}
+
+void app_report_force(void)
 {
 }
 
 /* Battery (GetInfo battery field). */
-struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
+struct app_sensor_data g_app_sensor_data = {
+	.mb = {.v = {[APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE] = {.f = NAN}}}};
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 int app_battery_measure(float *voltage)
@@ -132,7 +152,8 @@ void app_input_reset_count(bool input_a, bool input_b)
 /* History — req_history_page (NFC-only, #260). Empty backend: export writes
  * nothing, next_ord stays at start_ord (has_more false). */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord)
 {
 	(void)from_unix;
 	(void)to_unix;
@@ -140,6 +161,9 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	(void)cap;
 	if (t0_out) {
 		*t0_out = 0;
+	}
+	if (synced_out) {
+		*synced_out = false;
 	}
 	if (n_written) {
 		*n_written = 0;
@@ -163,19 +187,14 @@ size_t app_history_count(void)
 	return 0;
 }
 
-uint32_t app_history_get_mask(void)
+void app_history_get_layout(struct app_history_layout *out)
 {
-	return 0;
+	memset(out, 0, sizeof(*out));
 }
 
 uint32_t app_history_get_interval(void)
 {
 	return 0;
-}
-
-bool app_history_base_synced(void)
-{
-	return false;
 }
 
 bool app_history_is_ready(void)
@@ -184,16 +203,16 @@ bool app_history_is_ready(void)
 }
 
 /* Dynamic alarm rules — inert; no test here exercises alarm_rule mutation. */
-int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t rule_idx, const struct app_alarm_rule *rule)
 {
-	(void)slot;
+	(void)rule_idx;
 	(void)rule;
 	return 0;
 }
 
-int app_alarm_rules_clear(uint8_t slot)
+int app_alarm_rules_clear(uint8_t rule)
 {
-	(void)slot;
+	(void)rule;
 	return 0;
 }
 
@@ -206,22 +225,27 @@ int app_alarm_rules_reload_from_config(void)
 	return 0;
 }
 
-bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
+bool app_alarm_rules_get(uint8_t rule, struct app_alarm_rule *out)
 {
-	(void)slot;
+	(void)rule;
 	(void)out;
 	return false;
 }
 
-enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+int app_alarm_rules_stale_count(void)
 {
-	(void)q;
-	return APP_ALARM_KIND_THRESHOLD;
+	return 0;
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_state app_radio_get_state(void)
 {
-	return APP_LRW_STATE_HEALTHY;
+	return APP_RADIO_STATE_HEALTHY;
+}
+
+void app_radio_get_status(struct app_radio_status *st)
+{
+	*st = (struct app_radio_status){0};
+	st->state = app_radio_get_state();
 }
 
 uint32_t app_alarm_status_flags(void)
@@ -245,11 +269,23 @@ bool app_sensor_i2c_wedged(void)
  * channel/state, only that app_nfc.c's calls into it don't crash the link. */
 int g_led_set_calls;
 
+/* Last state written per channel (R, G, Y) — the NFC LED tests assert on it. */
+int g_led_ch[3];
+
 void app_led_set(enum app_led_channel ch, int state)
 {
-	(void)ch;
-	(void)state;
+	if ((int)ch >= 0 && (int)ch < 3) {
+		g_led_ch[ch] = state;
+	}
 	g_led_set_calls++;
+}
+
+/* Indicator hold (app_led_hold) as last set by app_nfc.c. */
+int g_led_hold;
+
+void app_led_hold(bool hold)
+{
+	g_led_hold = hold;
 }
 
 /* Reset/save ladder — app_nfc.c only reaches these via its deferred-action
@@ -291,4 +327,38 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 int app_settings_save_nonce_counter(void)
 {
 	return 0;
+}
+
+/* #460 F3: the rest of what app_cmd_run_action() (app_cmd.c) calls. This suite
+ * never runs a deferred action; a reboot would fail it. */
+int app_counters_save(bool force)
+{
+	ARG_UNUSED(force);
+	return 0;
+}
+
+void app_radio_rejoin(void)
+{
+}
+
+void app_radio_reset_link(void)
+{
+}
+
+FUNC_NORETURN void sys_reboot(int type)
+{
+	printk("unexpected sys_reboot(%d)\n", type);
+	ztest_test_fail();
+	for (;;) {
+		k_sleep(K_FOREVER);
+	}
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }
