@@ -1391,6 +1391,23 @@ integrated. Report per scenario: idle avg excluding bursts, floor median, min, a
   a buzzer.
 - **Evidence:** mode × {mC per melody, avg over 2 min alarm, avg after clear}.
 
+### AT-PWR-16 — boot battery gate: stay off below 1.8 V (R+PPK2, SA — LED by eye; #496)
+- **Pre:** release image, **SWD probe detached** (it back-powers the chip, #210), PPK2 in
+  source mode on the battery terminals.
+- **Steps:** (a) PPK2 1.7 V, power-cycle, capture 20 s. (b) NRST (or power-cycle) from the off
+  state, capture again. (c) PPK2 1.9 V, power-cycle. (d) Optional without lowering the supply: a
+  build with `-DCONFIG_APP_BATTERY_BOOT_MIN_MV=3600` on 3.0 V.
+- **Expect:** (a) boot carousel (R → Y → G), then **only red** blinks every 200 ms for 5 s, red
+  on for 1 s, then Shutdown — flat µA floor, no further boot within 30 s (no brownout loop, no
+  IWDG reset), no uplink, no NVS write. Green/yellow lit during the red blinking = FAIL (fixed in
+  2a05d06c). (b) the same sequence again (the check runs on every boot). (c) normal boot.
+  (d) as (a).
+- **Evidence:** trace with the phase timings, Shutdown floor in µA (probe detached).
+- **Run 2026-10-13** (801053709, release `2a05d06c`): (a) PASS (operator: only red blinks);
+  (b) PASS with the probe attached (DAP down before NRST = Shutdown, sequence re-ran);
+  (d) PASS (3 s carousel, 25 × 200 ms, 1 s red, off 33 s). Not run: (c), Shutdown floor without
+  the probe (~140 µA with the probe attached is not representative).
+
 ## 16. Adversarial & "unrealistic" scenarios (AT-ADV)
 
 Purpose: not to pass — to **find soft spots**. Any crash, wedge, reboot loop, or silent

@@ -2509,6 +2509,33 @@ The hall pins (PA3/PA7) are not ADC-capable and stay digital.
   fault path, buzzer variant, GP_B, 13.5–24 V, idle power. The first implementation's
   GP_B sweep (2026-08-26) is in the same report.
 
+## 47. Stay off below 1.8 V battery at boot (#496)
+
+A depleted cell boot-looped on brownout (F-HIL-8 in #494: STICKER 5625 on a spent lithium AAA,
+one boot every ~18 s). Every boot wrote the P2P FCnt base to flash, burnt 256 FCnt values and
+sent a Hello; a cell can sit at that knee for days.
+
+- **Gate.** `main()` measures the battery first, before anything loads the cell (best of 3
+  reads, `app_power_boot_battery_low()`). Below `CONFIG_APP_BATTERY_BOOT_MIN_MV` (default
+  1800 mV, range 1000..3600) the STICKER does not start.
+- **Indication.** The boot carousel still plays; then the red LED blinks every 200 ms for 5 s,
+  stays on for 1 s, and the STM32WL goes to Shutdown (`app_power_low_battery_off()`). The
+  indication waits 250 ms past the carousel and clears all three LEDs first (a play cut short by
+  `app_led_hold()` skips its own all-off, which left green/yellow lit). Clock,
+  history, alarms, radio, NVS and sensors are never started. The IWDG is fed throughout.
+- **Wake.** Only NRST or a power-cycle (battery replacement); the next boot runs the check
+  again. A cell that recovers on its own (temperature) stays off.
+- **Fail-safe.** A battery monitor that fails to init or read boots normally.
+- **Build.** `CONFIG_APP_BATTERY_BOOT_GATE` (default y, needs `HAS_POWEROFF` + `ADC`) selects
+  `POWEROFF`, so the release image now links `app_power.c`. The `battery_level` alarm
+  threshold (2400 mV) is independent and unchanged.
+- **Cost:** release 189 100 B flash (+336 B), RAM unchanged (49 160 B).
+- **HIL** (801053709 + PPK2): 3.0 V → normal boot; `MIN_MV=3600` build on a healthy supply →
+  carousel, 25 red blinks at 200 ms, 1 s red, off, no reboot / IWDG reset; NRST from the off state
+  runs the check again; probe detached, PPK2 below 1.8 V → carousel, then only red blinks, then
+  off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
+  AT-PWR-16 in `doc/automated-test-playbook.md`.
+
 ---
 
 *Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
