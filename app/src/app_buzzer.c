@@ -175,6 +175,8 @@ static void execute_pattern(const struct buzzer_cmd *commands, int repetitions)
 		length = i + 1;
 	}
 
+	bool on = false;
+
 	for (int rep = 0; rep < repetitions; rep++) {
 		for (int i = 0; i < length; i++) {
 			if (atomic_get(&m_abort)) {
@@ -184,15 +186,19 @@ static void execute_pattern(const struct buzzer_cmd *commands, int repetitions)
 
 			const struct buzzer_cmd *cmd = &commands[i];
 
-			/* Skip last delay on last repetition */
+			/* The last delay of the last repetition is only skipped when
+			 * the buzzer is already off (ALARM's trailing gap). An "on"
+			 * delay is the beep itself: skipping it made app_buzzer_on(),
+			 * INFO and WARNING's last beep a ~0 ms pulse (#494 HIL). */
 			if (rep == repetitions - 1 && i == length - 1 &&
-			    cmd->type == BUZZER_CMD_DELAY) {
+			    cmd->type == BUZZER_CMD_DELAY && !on) {
 				break;
 			}
 
 			switch (cmd->type) {
 			case BUZZER_CMD_SET:
-				set(cmd->on);
+				on = cmd->on;
+				set(on);
 				break;
 			case BUZZER_CMD_DELAY:
 				if (cmd->duration > 0) {
