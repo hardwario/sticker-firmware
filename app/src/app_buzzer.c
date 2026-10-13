@@ -31,10 +31,14 @@ static const struct gpio_dt_spec m_b_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user
 #define REQUEST_MIN_DELAY_MS 500
 
 /* The debug build (RTT log + shell, CONFIG_PM=n) runs close to its RAM budget
- * even without the buzzer, so this thread's stack is kept modest — well above
- * the 256 B the equivalent bench-test thread (gpio writes + k_sleep +
- * occasional LOG_ERR, no msgq/switch) ran fine at, for margin around the extra
- * k_msgq_get()/switch this version adds. */
+ * even without the buzzer, so this thread's stack is kept modest. Measured
+ * (#485 B7, -fstack-usage on the release image, LTO off so the per-function
+ * frames are visible): the deepest path is z_thread_entry 8 + thread_entry 72
+ * + execute_pattern 40 + k_sleep -> z_tick_sleep -> z_add_timeout 80, or
+ * k_msgq_get -> z_pend_curr -> add_to_waitq / z_add_timeout 112, plus the
+ * 32 B exception frame (no FPU): ~260 B, so 512 B keeps ~50 % margin. The
+ * release image logs nothing; a debug image with CONFIG_APP_BUZZER=y adds the
+ * LOG_ERR path and should be re-checked with CONFIG_THREAD_ANALYZER. */
 #define BUZZER_THREAD_STACK_SIZE 512
 #define BUZZER_THREAD_PRIORITY   K_PRIO_PREEMPT(5)
 

@@ -323,6 +323,12 @@ static void fault_record_take(void)
 	m_fault.magic = 0;
 }
 
+/* Power-up settle before the POST_KERNEL drivers (#485 B8): added with the
+ * MPL3115A2 driver (54f45c09, 2025-05), it runs at priority 0, ahead of the
+ * drivers that probe their chip at boot (e.g. the SHT40; the other on-board
+ * sensors are zephyr,deferred-init and wait for app_sensor_init()). It costs
+ * 500 ms per boot but runs before the IWDG starts. Shorten it only after a HIL
+ * cold boot (battery insert) shows every sensor probing without it. */
 static int init(void)
 {
 	k_sleep(K_MSEC(500));
