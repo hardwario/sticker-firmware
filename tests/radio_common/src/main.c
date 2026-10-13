@@ -1497,8 +1497,14 @@ ZTEST(radio_common, test_stale_known_hold_lasts_until_its_end)
 	app_radio_stale_note_hold(&dc, t0 + 60 * 1000, 1000);
 	zassert_equal(dc.until_ms, t0 + hold);
 
-	/* A send ends it. */
+	/* F-HIL-10: another frame sent while the hold runs (a 31 B announce fits the
+	 * ledger before the held 49 B history frame) keeps the excuse. */
 	app_radio_stale_note(&dc, true, false, t0 + 2 * 60 * 1000);
+	zassert_equal(app_radio_stale_check(t0 + hold, 1, &dc, 60), APP_RADIO_STALE_HOLD_DC,
+		      "a send during the hold keeps it");
+
+	/* A send once the hold is over ends it. */
+	app_radio_stale_note(&dc, true, false, t0 + hold);
 	zassert_equal(app_radio_stale_check(t0 + margin + 1000, 1, &dc, 60), APP_RADIO_STALE_REJOIN,
 		      "the streak is gone");
 
@@ -1538,6 +1544,26 @@ static void stale_ledger_hold_keeps_m2_quiet(void)
 	zassert_equal(fk.rejoin_calls, 1, "mute after the hold: rejoin");
 }
 BOTH_PROFILES(stale_ledger_hold_keeps_m2_quiet)
+
+/* F-HIL-10 (5132, DR0): a replay frame held by the ledger, then a small answer
+ * that fits sooner goes out. The held frame still waits: M-2 must not rejoin
+ * (it would drop the replay) until the hold is past. */
+static void stale_send_during_hold_keeps_excuse(void)
+{
+	const int64_t hold = 30 * 60 * 1000;
+
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_test_stale_note_hold(hold);
+	app_radio_note_send(true, false); /* the announce that fit */
+	app_radio_test_stale_tick(t0 + STALE_MS + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS);
+	zassert_equal(fk.rejoin_calls, 0, "held frame still waiting: no rejoin");
+	app_radio_test_stale_tick(t0 + hold + 60 * 1000 + APP_RADIO_STALE_DC_RECENT_MARGIN_MS +
+				  5000);
+	zassert_equal(fk.rejoin_calls, 1, "mute after the hold: rejoin");
+}
+BOTH_PROFILES(stale_send_during_hold_keeps_excuse)
 
 /* ---- Network backoff (P2P 0x15) ------------------------------------------ */
 

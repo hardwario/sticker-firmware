@@ -1976,6 +1976,11 @@ void app_radio_test_stale_tick(int64_t now_ms)
 	stale_tick(now_ms);
 }
 
+void app_radio_test_stale_note_hold(int64_t hold_ms)
+{
+	stale_note_hold(hold_ms);
+}
+
 void app_radio_test_duty_charge_at(int64_t end_ms, uint32_t air_ms)
 {
 	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
