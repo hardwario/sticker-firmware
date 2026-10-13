@@ -964,8 +964,8 @@ static bool key_is_provisioned(const uint8_t *key, size_t key_len)
 /* CCM is provided by app_ccm (RFC 3610 over the STM32WL HW AES or the soft-SE AES,
  * #261), replacing mbedTLS. The wire bytes are byte-identical to the previous
  * mbedtls_ccm, so the phone-side contract and the nfc_crypto golden vectors are
- * unchanged. `key` is g_app_config.secret_key for the hio.stck:cmd channel or
- * g_app_config.vendor_token for the hio.stck:vnd channel (#299, #316) — both are
+ * unchanged. `key` is g_app_config.secret_key for mailbox channel 0x01 or
+ * g_app_config.vendor_token for mailbox channel 0x02 (#299, #316) — both are
  * 128-bit, and this function is otherwise identical either way. */
 static int decrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_size, size_t *out_len)
@@ -1132,7 +1132,7 @@ static int encrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint32_
  * #340 M1: `m_resp_cache_req`/`m_resp_cache_req_len` hold the exact request frame
  * (ciphertext + CCM tag) that produced the cached reply. A cache hit requires a
  * byte-exact match against it, not just the plaintext (serial, counter) header —
- * both of those are public (readable from the resting hio.stck:inf record), so
+ * both of those are public (plaintext get_basic_info, mailbox channel 0x03), so
  * matching on them alone would let anyone forge an 8-byte frame and get the cached
  * reply served without ever proving key possession. A genuine retransmission from
  * the phone resends the identical frame, so this doesn't affect the legitimate
@@ -1150,8 +1150,8 @@ static uint8_t m_cmd_plain[ST25DV_MB_RAM_SIZE];
 static uint8_t m_resp_plain[ST25DV_MB_RAM_SIZE];
 static size_t m_resp_cache_req_len;
 
-/* Process one encrypted command frame for a keyed NDEF channel: secret_key over
- * hio.stck:cmd, or vendor_token over hio.stck:vnd (#316). `key` selects the
+/* Process one encrypted command frame for a keyed mailbox channel: secret_key over
+ * 0x01, or vendor_token over 0x02 (#316). `key` selects the
  * AES-CCM key; `transport` is passed to app_cmd_handle() (NFC vs VENDOR command/
  * writable gating); `cache` enables the same-counter response cache — hio.stck:cmd
  * passes true, the vendor channel passes false so it neither serves from nor
@@ -1187,7 +1187,7 @@ static int handle_encrypted_cmd_inner(const uint8_t *key, enum app_cmd_transport
 		counter, m_resp_cache_counter, app_config()->nonce_counter);
 
 	/* #340 M1: serial+counter alone are not proof of key possession (both are
-	 * public, readable off the resting hio.stck:inf record) - require the whole
+	 * public, readable via plaintext get_basic_info) - require the whole
 	 * incoming frame to match the one that produced the cached reply. A genuine
 	 * retransmission resends the identical ciphertext+tag; a forged header-only
 	 * frame does not and falls through to decrypt(), which rejects it below. */

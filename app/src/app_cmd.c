@@ -1062,8 +1062,8 @@ static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command
  * Response.claim_info while the claim window is active; Error NOT_READY
  * "claimed" once it is done, or "no claim token" when none was provisioned.
  * Read-only, no side effects — the identity-class-only rule a plain_text command
- * must obey. Discloses exactly what the plaintext hio.stck:clm record does
- * today, but only on a powered unit while the window is open. */
+ * must obey. Discloses what the removed plaintext hio.stck:clm record did
+ * (#414), but only on a powered unit while the window is open. */
 static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Command *cmd,
 					  Response *resp, enum app_cmd_action *action)
 {
@@ -1168,7 +1168,7 @@ static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command 
  * stays valid until taken. */
 static uint8_t m_pending_vendor_secret_key[16];
 
-/* #316: vendor_reset over the vendor channel (NFC hio.stck:vnd, authenticated by
+/* #316: vendor_reset over the vendor channel (NFC mailbox channel 0x02, authenticated by
  * vendor_token — decrypt() runs before app_cmd_handle() is reached). Body reuses
  * the SetSecretKey shape: the mandatory replacement secret_key, because
  * app_settings_vendor_reset() zeroes the old key (secret_key is NOT in the
@@ -1261,7 +1261,7 @@ void app_cmd_run_action(enum app_cmd_action action)
 		app_settings_factory_reset();
 		break;
 	case APP_CMD_ACTION_VENDOR_RESET:
-		/* #299/#316, narrowest tier: only the NFC hio.stck:vnd (vendor-token)
+		/* #299/#316, narrowest tier: only the NFC mailbox channel 0x02 (vendor-token)
 		 * channel reaches it. The replacement secret_key travelled in the same
 		 * request. */
 		LOG_INF("Command: vendor reset (keep serial + vendor token) + reboot");

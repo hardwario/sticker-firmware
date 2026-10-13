@@ -31,7 +31,7 @@ enum app_cmd_transport {
 	 * Same generic Command/Response dispatch and writability gating as the
 	 * LoRaWAN transport -- P2P is the network-server-less equivalent. */
 	APP_CMD_TRANSPORT_P2P,
-	/* NFC hio.stck:vnd record, authenticated with vendor_token instead of
+	/* NFC mailbox channel 0x02 (vendor), authenticated with vendor_token instead of
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
 	APP_CMD_TRANSPORT_VENDOR,
@@ -94,7 +94,7 @@ enum app_cmd_action {
 	/* Reset ladder (#299) — device_reset (renamed from the old, single
 	 * factory_reset) keeps identity+full LoRaWAN; factory_reset (new, narrower)
 	 * keeps identity only, drops the LoRaWAN session/keys. vendor_reset is
-	 * reachable only over the vendor transport — the NFC hio.stck:vnd record
+	 * reachable only over the vendor transport — NFC mailbox channel 0x02
 	 * (decrypted with vendor_token, app_nfc.c) dispatched as a generic Command
 	 * (#316), or the shell `settings vendor-reset`. */
 	APP_CMD_ACTION_DEVICE_RESET,      /* defaults (keep identity+LoRaWAN) + reboot */
@@ -173,7 +173,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action);
 
 /* The replacement secret_key staged by a successful vendor_reset Command (#316,
- * carried over the NFC hio.stck:vnd vendor-token channel) — call exactly once,
+ * carried over NFC mailbox channel 0x02, vendor-token) — call exactly once,
  * when handling the deferred APP_CMD_ACTION_VENDOR_RESET set by app_cmd_handle().
  * Returns a pointer to a static 16-byte buffer valid until the next vendor_reset.
  * vendor_reset zeroes secret_key, so this replacement is mandatory to keep the
