@@ -18,6 +18,12 @@
 #include <stddef.h>
 #include <string.h>
 
+const struct app_sensor_hist_enc_info app_sensor_hist_encs[APP_SENSOR_HIST_COUNT] = {
+{% for e in hist_encs %}
+	[{{ e.sym }}] = {.size = {{ e.size }}, .lo = INT64_C({{ e.lo }}), .hi = INT64_C({{ e.hi }})},
+{% endfor %}
+};
+
 {% for t in types %}
 static const struct app_sensor_channel m_ch_{{ t.cname }}[] = {
 {% for c in t.channels %}

@@ -71,11 +71,6 @@ BUILD_ASSERT(SIZEOF_FIELD(struct app_config, history_channels) == APP_HISTORY_MA
 BUILD_ASSERT(APP_HISTORY_MAX_CH <= 32, "present mask is 32-bit");
 BUILD_ASSERT(APP_W1_SLOT_COUNT <= 7 && APP_SENSOR_MB_CH_MAX <= 32, "entry is slot<<5|ch");
 
-static const uint8_t m_enc_size[] = {
-	[APP_SENSOR_HIST_U8] = 1,  [APP_SENSOR_HIST_I16] = 2, [APP_SENSOR_HIST_U16] = 2,
-	[APP_SENSOR_HIST_I32] = 4, [APP_SENSOR_HIST_U32] = 4,
-};
-
 /* ---- Module state ------------------------------------------------------- */
 
 static struct k_mutex m_lock;
@@ -1092,7 +1087,7 @@ static const struct app_sensor_channel *entry_channel(uint8_t entry, uint8_t *ty
 	const struct app_sensor_channel *c = app_sensor_channel_get(*type, HIST_CH(entry));
 
 	if (c == NULL || (c->flags & APP_SENSOR_F_RETIRED) || c->hist_enc == APP_SENSOR_HIST_NONE ||
-	    c->hist_enc >= ARRAY_SIZE(m_enc_size)) {
+	    c->hist_enc >= APP_SENSOR_HIST_COUNT) {
 		return NULL;
 	}
 	if (c->cap_off != APP_SENSOR_NO_CAP &&
@@ -1127,8 +1122,10 @@ static bool layout_build(void)
 		if (c == NULL) {
 			continue;
 		}
-		cols[n] = (struct hist_col){
-			.desc = c, .entry = e, .type = type, .size = m_enc_size[c->hist_enc]};
+		cols[n] = (struct hist_col){.desc = c,
+					    .entry = e,
+					    .type = type,
+					    .size = app_sensor_hist_encs[c->hist_enc].size};
 		size += cols[n].size;
 		/* The guard covers what decoding a stored record depends on. */
 		uint8_t key[3] = {e, type, c->hist_enc};
@@ -1173,23 +1170,9 @@ static void layout_reset(void)
 
 static void enc_limits(uint8_t enc, int64_t *lo, int64_t *hi)
 {
-	switch (enc) {
-	case APP_SENSOR_HIST_U8:
-		*lo = 0, *hi = UINT8_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_I16:
-		*lo = INT16_MIN, *hi = INT16_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_U16:
-		*lo = 0, *hi = UINT16_MAX - 1;
-		break;
-	case APP_SENSOR_HIST_I32:
-		*lo = INT32_MIN, *hi = INT32_MAX - 1;
-		break;
-	default:
-		*lo = 0, *hi = (int64_t)UINT32_MAX - 1;
-		break;
-	}
+	/* Generated with the decoder's twin tables by sensorgen (#485 S10). */
+	*lo = app_sensor_hist_encs[enc].lo;
+	*hi = app_sensor_hist_encs[enc].hi;
 }
 
 /* The "absent" sentinel: the top value of the encoding (INT16_MAX / INT32_MAX /

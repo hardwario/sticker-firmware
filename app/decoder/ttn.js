@@ -302,6 +302,9 @@ var _SENSOR_TYPES = {
   }
 };
 var _SENSOR_MB_TYPE = 1;
+// History encodings: record bytes and the "absent" sentinel as stored (#485 S10).
+var _HIST_ENC_SIZE = { u8: 1, i16: 2, u16: 2, i32: 4, u32: 4 };
+var _HIST_ENC_SENTINEL = { u8: 0xff, i16: 0x7fff, u16: 0xffff, i32: 0x7fffffff, u32: 0xffffffff };
 // END GENERATED SENSOR_TYPES
 
 function _decodeLorawan(bytes, start, end) {
@@ -669,9 +672,6 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
 // other values are raw / scale. Column key = snake_case channel name, prefixed
 // "sN_" for 1-Wire slot N. Returns null when a column is unknown (the record
 // size cannot be derived, so the samples are not decoded).
-var _HIST_ENC_SIZE = { u8: 1, i16: 2, u16: 2, i32: 4, u32: 4 };
-var _HIST_ENC_SENTINEL = { u8: 0xff, i16: 0x7fff, u16: 0xffff, i32: 0x7fffffff,
-                           u32: 0xffffffff };
 
 function _historyColumns(channels, w1Types) {
   var cols = [];

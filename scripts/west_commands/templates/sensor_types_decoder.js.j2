@@ -16,3 +16,6 @@ var _SENSOR_TYPES = {
 {% endfor %}
 };
 var _SENSOR_MB_TYPE = {{ mb.id }};
+// History encodings: record bytes and the "absent" sentinel as stored (#485 S10).
+var _HIST_ENC_SIZE = { {% for e in hist_encs %}{{ e.name }}: {{ e.size }}{{ ', ' if not loop.last }}{% endfor %} };
+var _HIST_ENC_SENTINEL = { {% for e in hist_encs %}{{ e.name }}: {{ e.sentinel }}{{ ', ' if not loop.last }}{% endfor %} };

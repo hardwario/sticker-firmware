@@ -108,7 +108,18 @@ enum app_sensor_hist_enc {
 	APP_SENSOR_HIST_U16,
 	APP_SENSOR_HIST_I32,
 	APP_SENSOR_HIST_U32,
+	APP_SENSOR_HIST_COUNT,
 };
+
+/* Size and storable range of a history encoding, indexed by enum
+ * app_sensor_hist_enc (NONE = all zero); hi + 1 is the absent sentinel. */
+struct app_sensor_hist_enc_info {
+	uint8_t size;
+	int64_t lo;
+	int64_t hi;
+};
+
+extern const struct app_sensor_hist_enc_info app_sensor_hist_encs[APP_SENSOR_HIST_COUNT];
 
 #define APP_SENSOR_F_MOMENTARY     0x01 /* pulse source, STATE rules are edge-only */
 #define APP_SENSOR_F_COUNTER       0x02 /* raw uint32 counter (exact integer delta) */
