@@ -183,6 +183,28 @@ def test_normalize_access_rejects_bad_transport():
         configen.normalize_access(cfg)
 
 
+def test_enum_default_must_name_an_enum_value():
+    enums = {"mode": [{"name": "DISABLED", "value": 0, "shell": "none"}]}
+    ok = [{"name": "x", "type": "enum", "enum": "mode", "default": "disabled"}]
+    configen.check_enum_defaults(ok, enums)
+    # The shell spelling is not the C enumerator name.
+    bad = [{"name": "x", "type": "enum", "enum": "mode", "default": "none"}]
+    with pytest.raises(SystemExit):
+        configen.check_enum_defaults(bad, enums)
+
+
+def test_legacy_hook_is_wired_into_the_settings_handler(workdir):
+    _run_configen(workdir)
+    c_src = (workdir / "app_config.c").read_text()
+    # h_set falls back to the hook, h_commit converts, init persists then drops
+    # the old keys — and only after a successful save.
+    assert '#include "app_config_legacy.h"' in c_src
+    assert "app_config_legacy_set(key, len, read_cb, cb_arg)" in c_src
+    assert "app_config_legacy_commit(&m_app_config)" in c_src
+    init = c_src[c_src.index("if (m_app_config_legacy) {"):]
+    assert init.index("settings_save_subtree") < init.index("app_config_legacy_cleanup()")
+
+
 def test_build_proto_model_structure():
     model = configen.build_proto_model(_load_config())
     assert model["message"] == "AppConfigMessage"

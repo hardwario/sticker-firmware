@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from configen import rewrite_marked_text  # noqa: E402
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+DEFAULT_APP_CONFIG = Path(__file__).resolve().parents[2] / "app" / "src" / "app_config.yml"
 
 DECODER_BEGIN = "BEGIN GENERATED SENSOR_TYPES"
 DECODER_END = "END GENERATED SENSOR_TYPES"
@@ -69,14 +70,37 @@ def load_caps(app_config_yaml):
             if p.get("name", "").startswith("cap_") and p.get("type") == "bool"}
 
 
+def load_enum_caps(app_config_yaml):
+    """{name: {shell value: C enumerator}} of the enum cap_* parameters (#498)."""
+    with open(app_config_yaml) as f:
+        cfg = yaml.safe_load(f)
+    module = cfg["module"]["name"].upper()
+    enums = cfg.get("enums", {})
+    out = {}
+    for p in cfg.get("parameters", []):
+        if p.get("name", "").startswith("cap_") and p.get("type") == "enum":
+            ekey = p["enum"]
+            out[p["name"]] = {v["shell"]: f"{module}_{ekey.upper()}_{v['name'].upper()}"
+                              for v in enums[ekey]}
+    return out
+
+
+def parse_cap(cap):
+    """A channel `cap`: `cap_x` (bool) or `cap_x=v1|v2` (enum, any of the shell
+    values). Returns (name, [values]) — values empty for a bool cap."""
+    name, _, vals = str(cap).partition("=")
+    return name, [v for v in vals.split("|") if v] if vals else []
+
+
 def _fits(lo, hi, scale, limits):
     a, b = limits
     return a <= round(lo * scale) and round(hi * scale) <= b
 
 
-def validate(reg, caps):
+def validate(reg, caps, enum_caps=None):
     """Return a list of error strings (empty = valid)."""
     err = []
+    enum_caps = enum_caps or {}
 
     for k in set(reg) - TOP_KEYS:
         err.append(f"unknown top-level key '{k}'")
@@ -180,10 +204,21 @@ def validate(reg, caps):
                                                  and NAME_RE.match(c["part"])):
                     err.append(f"{cw}: 1-Wire channel needs `part: <chip name>`")
             if c.get("cap") is not None:
+                cap, vals = parse_cap(c["cap"])
                 if not is_mb:
                     err.append(f"{cw}: cap only applies to motherboard channels")
-                elif c["cap"] not in known_caps:
-                    err.append(f"{cw}: unknown capability '{c['cap']}'")
+                elif "=" in str(c["cap"]):
+                    if cap not in enum_caps:
+                        err.append(f"{cw}: unknown enum capability '{cap}'")
+                    elif not vals:
+                        err.append(f"{cw}: enum capability '{cap}' needs values (cap=v1|v2)")
+                    else:
+                        for v in vals:
+                            if v not in enum_caps[cap]:
+                                err.append(f"{cw}: '{v}' is not a value of '{cap}' "
+                                           f"({'|'.join(enum_caps[cap])})")
+                elif cap not in known_caps:
+                    err.append(f"{cw}: unknown capability '{cap}'")
 
             wire = c.get("wire")
             if wire is not None:
@@ -232,8 +267,10 @@ def parse_committed_ids(header_text):
             re.finditer(r"^\s*(APP_SENSOR_(?:TYPE|CH)_[A-Z0-9_]+) = (\d+),", header_text, re.M)}
 
 
-def build_model(reg):
+def build_model(reg, enum_caps=None):
     pending = sorted(reg.get("pending_caps") or [])
+    if enum_caps is None:
+        enum_caps = load_enum_caps(DEFAULT_APP_CONFIG)
     types = []
     for t in reg["types"]:
         tid_sym = f"APP_SENSOR_TYPE_{c_ident(t['name'])}"
@@ -270,7 +307,11 @@ def build_model(reg):
                 "range_max": float(rng[1]) if rng else 0.0,
                 "part": parts.index(c["part"]) if c.get("part") else "APP_SENSOR_NO_PART",
                 "part_name": c.get("part"),
-                "cap": c.get("cap") if c.get("cap") not in pending else None,
+                "cap": (parse_cap(c["cap"])[0]
+                        if c.get("cap") is not None and c["cap"] not in pending else None),
+                "cap_mask": " | ".join(f"BIT({enum_caps[parse_cap(c['cap'])[0]][v]})"
+                                       for v in parse_cap(c["cap"])[1])
+                            if c.get("cap") is not None else "",
                 "cap_pending": c.get("cap") if c.get("cap") in pending else None,
                 # decoder
                 "unit": c["unit"],
@@ -306,11 +347,11 @@ def _js_num(v):
     return repr(int(v)) if float(v).is_integer() else repr(float(v))
 
 
-def render(reg, templates_dir=TEMPLATES_DIR):
+def render(reg, templates_dir=TEMPLATES_DIR, enum_caps=None):
     """(header, source, decoder_region) text for a validated registry."""
     env = Environment(loader=FileSystemLoader(str(templates_dir)),
                       trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
-    model = build_model(reg)
+    model = build_model(reg, enum_caps)
     return (env.get_template("sensor_types.h.j2").render(**model),
             env.get_template("sensor_types.c.j2").render(**model),
             env.get_template("sensor_types_decoder.js.j2").render(**model).rstrip("\n"))
@@ -363,13 +404,14 @@ class Sensorgen(WestCommand):
         decoder = (args.decoder or out.parent / "decoder" / "ttn.js").resolve()
 
         reg = yaml.safe_load(yaml_path.read_text())
-        errors = validate(reg, load_caps(app_config))
+        enum_caps = load_enum_caps(app_config)
+        errors = validate(reg, load_caps(app_config), enum_caps)
         if errors:
             for e in errors:
                 log.err(e)
             log.die(f"{yaml_path.name}: {len(errors)} error(s)")
 
-        header, source, region = render(reg)
+        header, source, region = render(reg, enum_caps=enum_caps)
 
         header_path = out / "app_sensor_types.h"
         source_path = out / "app_sensor_types.c"

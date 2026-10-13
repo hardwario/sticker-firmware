@@ -295,6 +295,21 @@ def filter_is_64bit(param):
     return param.get("type") in {"int64", "uint64"}
 
 
+def check_enum_defaults(parameters, enums):
+    """An enum `default` must name one of its enum values (by `name`, as the C
+    enumerator is built from it) — a typo would only surface at compile time."""
+    for p in parameters:
+        if p.get("type") != "enum" or p.get("default") is None:
+            continue
+        values = enums.get(p.get("enum"))
+        if values is None:
+            log.die(f"Parameter '{p['name']}' uses unknown enum '{p.get('enum')}'")
+        names = [str(v["name"]).upper() for v in values]
+        if str(p["default"]).upper() not in names:
+            log.die(f"Parameter '{p['name']}' default '{p['default']}' is not a value "
+                    f"of enum '{p['enum']}' ({', '.join(names)})")
+
+
 def filter_default_value(param, module_name):
     """Format default value for C initialization."""
     default = param.get("default")
@@ -1145,6 +1160,7 @@ class Configen(WestCommand):
         # Validate parameters
         for param in parameters:
             self._validate_param(param)
+        check_enum_defaults(parameters, enums)
         check_nvs_keys(parameters)
 
         # Derive the internal access flags (dump / no_shell / ...) from the

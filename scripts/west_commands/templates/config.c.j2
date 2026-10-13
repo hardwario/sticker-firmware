@@ -358,6 +358,9 @@ int {{ module.name }}_{{ op }}(void)
  */
 
 #include "{{ module.name }}.h"
+{% if module.legacy_hook is defined %}
+#include "{{ module.legacy_hook }}.h"
+{% endif %}
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -395,6 +398,12 @@ static const struct {{ module.name }} m_{{ module.name }}_defaults = {
  * migrated config so the stored version is bumped exactly once. */
 static bool m_{{ module.name }}_migrated;
 
+{% if module.legacy_hook is defined %}
+/* Set by h_commit when the legacy hook converted keys of removed parameters;
+ * init persists the converted config, then drops the old keys. */
+static bool m_{{ module.name }}_legacy;
+
+{% endif %}
 /* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
  * boots on compile-time defaults with its identity + provisioning gone. Queryable
  * so the app can surface a distinct state (LED / GetInfo) instead of silently
@@ -470,6 +479,15 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 
 #undef SETTINGS_SET
 
+{% if module.legacy_hook is defined %}
+	/* A key of a removed parameter: the legacy hook keeps its value for the
+	 * conversion in h_commit. */
+	ret = {{ module.legacy_hook }}_set(key, len, read_cb, cb_arg);
+	if (ret != -ENOENT) {
+		return ret;
+	}
+
+{% endif %}
 	return -ENOENT;
 }
 
@@ -503,6 +521,14 @@ static int h_commit(void)
 {% endfor %}
 
 		m_{{ module.name }}_migrated = true;
+	}
+
+{% endif %}
+{% if module.legacy_hook is defined %}
+	/* Convert values loaded under keys of removed parameters into their
+	 * replacements; persisted (and the old keys deleted) by init. */
+	if ({{ module.legacy_hook }}_commit(&m_{{ module.name }})) {
+		m_{{ module.name }}_legacy = true;
 	}
 
 {% endif %}
@@ -894,6 +920,22 @@ static int {{ module.name }}_init(void)
 		} else {
 			LOG_INF("Config migrated to version %u and persisted",
 				{{ module.name | upper }}_VERSION);
+		}
+	}
+
+{% endif %}
+{% if module.legacy_hook is defined %}
+	if (m_{{ module.name }}_legacy) {
+		m_{{ module.name }}_legacy = false;
+
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			/* Only after the converted values are stored: a failed save
+			 * keeps the old keys, so the conversion runs again. */
+			{{ module.legacy_hook }}_cleanup();
+			LOG_INF("Legacy config keys converted and persisted");
 		}
 	}
 
