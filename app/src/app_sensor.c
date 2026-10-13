@@ -445,6 +445,7 @@ int app_sensor_init(void)
 	}
 #endif /* defined(CONFIG_OPT3001) */
 
+#if defined(CONFIG_MPL3115A2)
 	if (g_app_config.cap_barometer) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
 
@@ -454,6 +455,7 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 	}
+#endif /* defined(CONFIG_MPL3115A2) */
 
 	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
 		ret = app_hall_init();
@@ -826,6 +828,7 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_OPT3001) */
 
+#if defined(CONFIG_MPL3115A2)
 	if (g_app_config.cap_barometer) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, &baro_temperature);
 		i2c_tried++;
@@ -835,6 +838,7 @@ void app_sensor_sample(void)
 			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
 		}
 	}
+#endif /* defined(CONFIG_MPL3115A2) */
 
 	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
 		ret = app_hall_get_data(&hall_data);
