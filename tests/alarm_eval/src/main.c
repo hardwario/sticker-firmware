@@ -652,6 +652,36 @@ ZTEST(alarm_eval, test_empty_queue_takes_an_oversized_batch)
 		      test_alarm_frames);
 }
 
+/* F-HIL-11: every rule firing in one alarm-limit window reaches the server (8
+ * of 12 did before), and a full batch closes its window at once. */
+ZTEST(alarm_eval, test_full_window_keeps_every_rule_and_flushes_early)
+{
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+	};
+
+	g_app_config.alarm_limit = 10;
+	test_alarm_max_events = 8; /* AlarmReport.events max_count */
+	for (uint8_t i = 0; i < APP_ALARM_RULE_COUNT; i++) {
+		zassert_equal(app_alarm_rules_set(i, &r), 0, "rule %u rejected", i);
+	}
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f;
+	test_alarm_frames = 0;
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	k_sleep(K_MSEC(20));
+
+	zassert_equal(test_alarm_frames, 2, "two pages before the window's end, got %zu",
+		      test_alarm_frames);
+	zassert_equal(test_alarm_event_count, APP_ALARM_RULE_COUNT, "every rule, got %zu",
+		      test_alarm_event_count);
+}
+
 /* #462: before a post-command action (a reboot) app_radio asks for a batch
  * still open in its alarm-limit window: it goes now, not at the window's end. */
 ZTEST(alarm_eval, test_flush_pending_sends_a_collecting_window)

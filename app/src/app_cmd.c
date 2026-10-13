@@ -3346,7 +3346,12 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 		report.page_count = page_count;
 	}
 
-	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
+	/* More events than one report holds: the caller pages the batch (#425). */
+	if (n_events > ARRAY_SIZE(report.events)) {
+		return -EMSGSIZE;
+	}
+
+	size_t n = n_events;
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
 		ev->rule = events[i].rule;
@@ -3373,7 +3378,13 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
 	if (!pb_encode(&ostream, AlarmReport_fields, &report)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		/* "stream full" is the expected answer while alarm_batch_flush()
+		 * probes how many events fit the budget (F-HIL-12). */
+		if (strcmp(PB_GET_ERROR(&ostream), "stream full") == 0) {
+			LOG_DBG("pb_encode: does not fit %zu B", out_cap);
+		} else {
+			LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		}
 		return -EMSGSIZE;
 	}
 

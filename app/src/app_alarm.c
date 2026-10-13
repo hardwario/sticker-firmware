@@ -179,7 +179,10 @@ static bool rt_sync_armed(uint8_t idx, struct app_alarm_rule *out, bool *should_
 
 /* ---- Alarm-detail batch (#27) ------------------------------------------- */
 
-#define ALARM_BATCH_MAX 8
+/* One window holds an edge of every rule (F-HIL-11: 12 deactivations at once
+ * lost 4 with 8); a burst beyond that flushes the window early. Frames still
+ * carry at most AlarmReport.events max_count each: the batch is paged. */
+#define ALARM_BATCH_MAX APP_ALARM_RULE_COUNT
 #define ALARM_FRAME_MAX 64
 
 static struct app_cmd_alarm_event m_batch[ALARM_BATCH_MAX];
@@ -525,6 +528,10 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	if (m_batch_count < ALARM_BATCH_MAX) {
 		ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
 		m_batch[m_batch_count++] = ev;
+	}
+	if (m_batch_count == ALARM_BATCH_MAX && !m_batch_held) {
+		/* Full: close the window now instead of dropping later edges. */
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
 	}
 
 	k_mutex_unlock(&m_lock);

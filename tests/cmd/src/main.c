@@ -3343,3 +3343,16 @@ ZTEST(cmd, test_alarm_report_sensor_type_only_for_slot_events)
 	zassert_equal(r.events[2].channel, 2);
 	zassert_equal(r.events[2].value, -500);
 }
+
+/* F-HIL-11: more events than one report holds is -EMSGSIZE (the caller pages
+ * the batch), never a silently truncated report. */
+ZTEST(cmd, test_alarm_report_rejects_more_events_than_it_holds)
+{
+	struct app_cmd_alarm_event ev[9] = {0};
+	uint8_t out[256];
+	size_t len = 0;
+
+	zassert_equal(app_cmd_build_alarm_report(0, 9, true, ev, 9, 0, 1, out, sizeof(out), &len),
+		      -EMSGSIZE);
+	zassert_ok(app_cmd_build_alarm_report(0, 8, true, ev, 8, 0, 1, out, sizeof(out), &len));
+}
