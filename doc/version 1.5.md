@@ -2544,11 +2544,35 @@ Second pass over the #485 findings that PR #489 left open. Each item was re-chec
   steps, so failing machine probes (~3 s each) cannot run the boot into a watchdog reset loop.
 - **B3.** CI fails the release build below 8 KiB free flash or RAM; every build writes its
   memory table to the job summary.
+- **R6.** The radio heartbeat (M-2 stale check) runs on every build; only the IWDG liveness
+  channel stays under `CONFIG_WATCHDOG`.
+- **R7.** `app_power_suspend()` stops the report cadence and the radio on a P2P-only image;
+  `app_radio_p2p_suspend()` also cancels the join retry and the 0x91 control uplink.
+- **R8.** P2P counts outstanding-answer reports before the LinkCheckReq check, so a lost
+  LinkCheckAns does not delay the next request by one report.
+- **R10.** The LoRaWAN join air window ends when `lorawan_join()` returns (a lost confirm,
+  `-ETIMEDOUT`, keeps the old behaviour).
+- **R11.** A history replay requested at budget 0 starts instead of failing with `-EMSGSIZE`.
+- **R12.** The persisted-pairing P2P boot runs `mark_ready()` on the radio work queue.
+- **R13.** The JoinAccept `rx_delay` is documented as stored/reported only (`doc/p2p.md`).
+- **R16.** A budget-0 MAC flush held by the duty ledger or a backoff waits for the hold
+  (`app_radio_tx_result.held`) instead of closing the report.
+- **B6.** The buzzer stop path sets the pin and purges the queue under `k_sched_lock()`, so a
+  lower-priority caller cannot have a queued request played after stop.
+- **B7, B8.** Comments only: the 512 B buzzer stack measures ~260 B worst case
+  (`-fstack-usage`); the 500 ms boot settle delay stays until a HIL cold boot.
+- **B9.** `tests/run_native.sh` keeps the build log (tail on failure) and runs each suite
+  under `timeout` (`SUITE_TIMEOUT`, 600 s). The ARM toolchain in the `unit-tests` job is kept.
+- **B10.** Workflow `permissions: contents: read` (write only for the release job); push
+  builds only `main`, `v*` branches and tags (+ `workflow_dispatch`); the clang-format step
+  checks it runs 22.1.5.
+- **D1–D5.** The mailbox and claiming plans match what was built (120 s hold, 4 KiB poll
+  stack, `vendor_reset` → claim done); source comments no longer mention NDEF records;
+  `ats cmd vnd <hex>` injects a Command over the vendor transport; motion re-arm comment fixed.
 - **Not changed:** B4 (other config variants are not built in CI, by decision), B5
-  (unpinned dependencies, explained in the PR), C1 and #476 (out of scope). R6–R8, R10–R13,
-  R16, B6–B10 and D1–D5 were re-verified and are listed in the PR for a decision.
-- **Cost:** release 189 060 B flash (88.76 %), 47 880 B RAM (73.06 %); debug 238 040 B
-  (96.86 %), 55 112 B (84.09 %).
-- **Tests:** new cases in `alarm_eval`, `alarm_rules`, `history`, `nfc_hw`, `radio_common`
-  and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
+  (unpinned dependencies, explained in the PR), C1 and #476 (out of scope).
+- **Cost:** release 189 212 B flash (88.84 %), 47 880 B RAM (73.06 %); debug 238 248 B
+  (96.94 %), 55 112 B (84.09 %).
+- **Tests:** new cases in `alarm_eval`, `alarm_rules`, `buzzer`, `history`, `nfc_hw`,
+  `p2p_logic`, `radio_common` and configen pytest, each failing before its fix. All 16 native suites, pytest 81,
   decoder 132, clang-format 22.1.5 clean. No HIL.
