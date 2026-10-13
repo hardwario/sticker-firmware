@@ -1246,7 +1246,12 @@ static size_t encode_value(uint8_t *p, int i)
 			uint32_t cnt = v[c->pulses_ch].u;
 
 			if (m_pulses_known & BIT(i)) {
-				x = cnt > m_pulses_prev[i] ? 1 : 0;
+				/* A counter below its base was reset (counters reset
+				 * zeroes it; a uint32 wrap is out of reach): whatever it
+				 * holds now came in this interval (#485 S8). */
+				uint32_t base = cnt < m_pulses_prev[i] ? 0 : m_pulses_prev[i];
+
+				x = cnt > base ? 1 : 0;
 				have = true;
 			}
 			m_pulses_prev[i] = cnt;
