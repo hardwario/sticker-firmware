@@ -520,6 +520,33 @@ ZTEST(radio_common, test_queued_duty_hold_default_wait)
 	zassert_equal(fk.n, 2);
 }
 
+/* #485 R5: an alarm queued while a report waits out a duty-cycle hold does not
+ * wait for that run: it goes at once, and the report is tried again after it. */
+static void alarm_preempts_held_report(void)
+{
+	const int r[] = {-EAGAIN};
+	const size_t lens[] = {20};
+
+	fk.report_flags = 0;
+	frames(lens, 1);
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 60000;
+	app_radio_send_telemetry_now();
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1, "the report frame was held");
+	fk.wait_ms = 0;
+
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_SECONDS(1));
+	zassert_true(fk.n >= 2, "the alarm waited for the report's hold");
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ALARM);
+	zassert_ok(fk.log[1].ret);
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.log[fk.n - 1].kind, APP_RADIO_FRAME_TELEMETRY);
+	zassert_equal(reports_done(), 1);
+}
+BOTH_PROFILES(alarm_preempts_held_report)
+
 /* A refused frame is retried every 15 s, 8 times, then dropped; the next
  * frame goes. */
 static void queued_error_retried_then_dropped(void)

@@ -971,9 +971,13 @@ int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag 
 		LOG_WRN("%s queue full; dropped", alarm ? "Alarm" : "Answer");
 		return -ENOMEM;
 	}
-	if (alarm && app_radio_backoff_wait_ms() > 0) {
-		/* The run waits out a network backoff, which an alarm skips: now.
-		 * Whatever else is due is held again by tx_send(). */
+	if (alarm && (app_radio_backoff_wait_ms() > 0 || !m_ack_pending)) {
+		/* #485 R5: an alarm does not wait for a run another frame scheduled
+		 * (a network backoff, which an alarm skips; a report's duty-cycle
+		 * hold, retry or frame gap): the run goes now and takes the alarm
+		 * first. Whatever else is due is held again by tx_send(). A pending
+		 * Ack retry keeps its randomised time (it spreads colliding nodes);
+		 * the backoff case gives that slot up (backoff_yield_to_alarm()). */
 		tx_schedule(0);
 	} else {
 		app_radio_tx_kick();
