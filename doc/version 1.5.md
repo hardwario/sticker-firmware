@@ -2501,10 +2501,13 @@ The hall pins (PA3/PA7) are not ADC-capable and stay digital.
   omit without a reading); `ttn.test.js` (fields 30/31, history channels 11/14,
   `set_param` / `config_dump` of the capabilities); configen / sensorgen round-trip.
   All 16 native suites, pytest 80, decoder 132, clang-format 22.1.5 clean.
-- **HIL:** the first implementation (2026-08-26, old wire layout) verified the divider
-  correction, linearity, telemetry, history and a threshold alarm with a PPK2 as source:
-  `doc/hil-analog-inputs-396.md`. Re-verification on this layout, including the
-  pin-sharing regression (digital input / PIR / buzzer after a battery read), is pending.
+- **HIL:** 2026-10-13 on STICKER 5722 (`doc/hil-analog-inputs-396.md`): GP_A sweep
+  0.7–13.5 V within +0.6 % from 5 V up (+3 % at 0.7 V, one ADC step ≈ 34 mV);
+  telemetry, history, threshold alarm and the input-A conflict pass; the pin stays a
+  digital input after a battery read (`GPIOB_MODER`). With the 1k shunt populated the
+  digital input on the same pin reads low regardless of the source. Not run: no-data
+  fault path, buzzer variant, GP_B, 13.5–24 V, idle power. The first implementation's
+  GP_B sweep (2026-08-26) is in the same report.
 
 ---
 

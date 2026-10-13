@@ -10,7 +10,7 @@
 > history channels **(0, 11) / (0, 14)**, alarm rules on `mb input-a-voltage` /
 > `mb input-b-voltage`, and the no-data watchdog. The measurement chain (divider,
 > ×34 correction, ADC read) is unchanged, so T1 still holds; T2–T4 must be repeated on
-> the new layout — see [Re-verification on the reworked layout](#re-verification-on-the-reworked-layout-pending).
+> the new layout — see [Re-verification on the reworked layout](#re-verification-on-the-reworked-layout).
 
 The measurement chain under test is:
 
@@ -171,10 +171,9 @@ Not covered by the session above; ordered roughly by value.
     (confirm the band + dwell timing), and history/alarm behaviour over a full
     LoRaWAN replay and NFC paged readout of the new channels.
 
-## Re-verification on the reworked layout (pending)
+## Re-verification on the reworked layout
 
-Same bench as above (PPK2 as the source on the input connector). Debug build of the
-PR head.
+Plan (R1–R8) and results of the 2026-10-13 run below.
 
 | # | Test | Steps | Expected |
 |---|---|---|---|
@@ -189,6 +188,57 @@ PR head.
 
 R6/R7 cover review finding 1 of the first implementation: its DTS put GP_A/GP_B into
 the ADC pinctrl, which the STM32 ADC driver re-applies on every PM resume.
+
+### Results 2026-10-13
+
+| Item | Value |
+|---|---|
+| STICKER unit | SN 2162165722, debug build of PR head `0dfb2915` (flashed without erase) |
+| Probe | J-Link `822005108`, RTT via `rttt` |
+| Signal source | lab supply on the input A connector (before the divider), voltage read on the supply |
+| Channel | GP_A only (`cap-analog-a true`) |
+
+| # | Result | Observation |
+|---|---|---|
+| R1 | **PASS** | see the sweep below |
+| R2 | **PASS** | `ats radio compose` → `01088e01100118b224205af001ce0e`; `ttn.js` → `input_a_voltage: 1.87`, no `input_b_voltage` (cap off) |
+| R3 | **PASS** | `history-channels 00010b…`: `history read` shows 2.11 → 0.99 → 3.09 V as the source was changed |
+| R4 | **PASS** | `alarm new mb input-a-voltage lo 1.5 hi 5`: 1.05 V → `active=1`, 3.06 V → `active=0` |
+| R5 | not run | needs a temporary fault hook |
+| R6 | **PASS** (register level) | `cap-input-a true`: after `ats sensors sample` (which reads the battery through ADC1) `GPIOB_MODER` = `0xFCFFFCFF`: PB4 = `00` (input), PB3 = `11` (battery analog). The first implementation would leave PB4 at `11`. |
+| R7 | not run | 5722 is not the buzzer HW variant |
+| R8 | **PASS** | `cap-input-a true` + `cap-analog-a true` → boot `<wrn> app_sensor: Input A digital and analog share GP_A — analog disabled`; `input-a-voltage: nan`, digital input A works |
+
+**R1 sweep** (GP_A, 5 samples per point via `ats sensors sample`):
+
+| Source [V] | Readings [V] | Mean [V] | Ratio |
+|---:|---|---:|---:|
+| 0 (open) | 0.00 0.00 0.03 | 0.010 | — |
+| 0.699 | 0.75 0.68 0.71 0.75 0.71 | 0.720 | 1.030 |
+| 1.592 | 1.60 1.63 1.60 1.60 1.60 | 1.606 | 1.009 |
+| 3.685 | 3.64 3.71 3.77 3.77 3.74 | 3.726 | 1.011 |
+| 5.151 | 5.20 5.20 5.17 5.17 5.17 | 5.182 | 1.006 |
+| 7.31 | 7.31 ×5 | 7.310 | 1.000 |
+| 8.89 | 8.87 8.94 8.91 8.87 8.87 | 8.892 | 1.000 |
+| 10.15 | 10.13 10.20 10.20 10.20 10.17 | 10.180 | 1.003 |
+| 11.47 | 11.53 11.53 11.46 11.53 11.53 | 11.516 | 1.004 |
+| 13.31 | 13.33 ×5 | 13.330 | 1.002 |
+| 13.47 | 13.50 ×5 | 13.500 | 1.002 |
+
+Linear from 0.7 V to 13.5 V: within +0.6 % from 5 V up, +3 % at 0.7 V, where one
+ADC step (~34 mV at the connector) plus a small positive offset dominates. Spread is at
+most one ADC step. GP_A agrees with the GP_B sweep of 2026-08-26 (T1), so both
+dividers behave the same. The supply topped out at 13.5 V; 13.5–24 V is not measured
+(pin at 13.5 V ≈ 0.40 V, far below VDD).
+
+**Hardware note (digital input on an analog-populated front-end).** With the 1k shunt
+(R5) populated, the pin of the active-low digital input stays low whatever the source
+does (0 V, open or 3 V → `GPIOB_IDR` PB4 = 0, `input-a active=true`, no edge); the pin
+would reach a logic high only at roughly 78 V on the connector. So a board populated for
+the analog function cannot use the same input as a digital contact input, and R6 could
+only be verified at register level, not by toggling the input.
+
+**Not covered:** R5, R7, GP_B on this firmware, 13.5–24 V, idle power.
 
 > **Open hardware question:** the divider commit (`ec25fff`) names the **JP11**
 > connector; an earlier draft of the spec named **JP2**. Confirm the
