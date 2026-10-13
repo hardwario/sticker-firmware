@@ -28,14 +28,6 @@
 #include <stm32_ll_system.h> /* LL_DBGMCU_Disable* */
 #endif
 
-#if defined(CONFIG_SOC_SERIES_STM32WLX)
-#include <soc.h>
-#include <stm32_ll_pwr.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/util.h>
-#endif
-
 #if defined(CONFIG_FW_DEBUG) && (CONFIG_APP_DEBUG_AUTOSUSPEND_S > 0)
 #include <SEGGER_RTT.h>
 #endif
@@ -61,97 +53,6 @@ void app_power_suspend(void)
 	app_power_off();
 }
 
-#if defined(CONFIG_SOC_SERIES_STM32WLX)
-/* F-HIL-9: every GPIO goes Hi-Z in Shutdown. Without a hold, LPD (PA1, no board
- * pull) floats and the ST25DV stays powered, and pins never configured on the
- * boot-gate path float too: the Shutdown floor (~148 uA) ended up above the
- * Stop2 sleep floor. PWR pull-ups/-downs (APC) hold each pin at the level it
- * has in Stop2; they apply only in Standby/Shutdown, and the wake is a reset. */
-static uint32_t pwr_port(uintptr_t gpio)
-{
-	switch (gpio) {
-	case GPIOA_BASE:
-		return LL_PWR_GPIO_A;
-	case GPIOB_BASE:
-		return LL_PWR_GPIO_B;
-	case GPIOC_BASE:
-		return LL_PWR_GPIO_C;
-	default:
-		return 0;
-	}
-}
-
-static void park_pin(uintptr_t gpio, uint32_t pin, bool high)
-{
-	uint32_t port = pwr_port(gpio);
-
-	if (!port) {
-		return;
-	}
-	if (high) {
-		LL_PWR_DisableGPIOPullDown(port, BIT(pin));
-		LL_PWR_EnableGPIOPullUp(port, BIT(pin));
-	} else {
-		LL_PWR_DisableGPIOPullUp(port, BIT(pin));
-		LL_PWR_EnableGPIOPullDown(port, BIT(pin));
-	}
-}
-
-/* Hold every output at its driven level and keep every input pull. Analog and
- * alternate-function pins (ADC, I2C, SWD) are left alone. */
-static void park_port(GPIO_TypeDef *gpio)
-{
-	for (uint32_t pin = 0; pin < 16; pin++) {
-		uint32_t mode = (gpio->MODER >> (2 * pin)) & 0x3;
-		uint32_t pupd = (gpio->PUPDR >> (2 * pin)) & 0x3;
-
-		if (mode == 0x1) {
-			park_pin((uintptr_t)gpio, pin, gpio->ODR & BIT(pin));
-		} else if (mode == 0x0 && pupd != 0x0 && pupd != 0x3) {
-			park_pin((uintptr_t)gpio, pin, pupd == 0x1);
-		}
-	}
-}
-
-#define PARK_DT(node, prop, high)                                                                  \
-	park_pin(DT_REG_ADDR(DT_GPIO_CTLR(node, prop)), DT_GPIO_PIN(node, prop), high)
-
-/* Physical level of a pin's inactive state. */
-#define INACTIVE_HIGH(node, prop) ((DT_GPIO_FLAGS(node, prop) & GPIO_ACTIVE_LOW) != 0)
-
-static void park_pins(void)
-{
-	park_port(GPIOA);
-	park_port(GPIOB);
-	park_port(GPIOC);
-
-	/* Pins that may never have been configured (boot gate: NFC, radio and
-	 * 1-Wire are not initialised yet). */
-#if DT_NODE_EXISTS(DT_NODELABEL(lpd))
-	PARK_DT(DT_NODELABEL(lpd), gpios, true); /* LPD high: ST25DV powered down */
-#endif
-#if DT_NODE_HAS_PROP(DT_NODELABEL(lora), tx_enable_gpios)
-	PARK_DT(DT_NODELABEL(lora), tx_enable_gpios,
-		INACTIVE_HIGH(DT_NODELABEL(lora), tx_enable_gpios));
-#endif
-#if DT_NODE_HAS_PROP(DT_NODELABEL(lora), antenna_enable_gpios)
-	PARK_DT(DT_NODELABEL(lora), antenna_enable_gpios,
-		INACTIVE_HIGH(DT_NODELABEL(lora), antenna_enable_gpios));
-#endif
-#if DT_NODE_HAS_PROP(DT_NODELABEL(ds2484), slpz_gpios)
-	/* SLPZ asserted (low) = DS2484 asleep; matches the board pull-down. */
-	PARK_DT(DT_NODELABEL(ds2484), slpz_gpios, false);
-#endif
-#define PARK_LED(lbl) PARK_DT(DT_NODELABEL(lbl), gpios, INACTIVE_HIGH(DT_NODELABEL(lbl), gpios))
-	PARK_LED(led_r);
-	PARK_LED(led_g);
-	PARK_LED(led_y);
-#undef PARK_LED
-
-	LL_PWR_EnablePUPDCfg();
-}
-#endif /* defined(CONFIG_SOC_SERIES_STM32WLX) */
-
 void app_power_off(void)
 {
 	/* Let the RTT log line flush before the core powers down. */
@@ -166,9 +67,6 @@ void app_power_off(void)
 	LL_DBGMCU_DisableDBGSleepMode();
 	LL_DBGMCU_DisableDBGStopMode();
 	LL_DBGMCU_DisableDBGStandbyMode();
-#endif
-#if defined(CONFIG_SOC_SERIES_STM32WLX)
-	park_pins();
 #endif
 
 	/* STM32WL Shutdown: lowest practical quiescent current. Identity and
