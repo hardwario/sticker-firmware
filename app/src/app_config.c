@@ -7,7 +7,6 @@
  */
 
 #include "app_config.h"
-#include "app_config_legacy.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -65,10 +64,6 @@ static const struct app_config m_app_config_defaults = {
 /* Set by h_commit when a schema version migration ran; init persists the
  * migrated config so the stored version is bumped exactly once. */
 static bool m_app_config_migrated;
-
-/* Set by h_commit when the legacy hook converted keys of removed parameters;
- * init persists the converted config, then drops the old keys. */
-static bool m_app_config_legacy;
 
 /* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
  * boots on compile-time defaults with its identity + provisioning gone. Queryable
@@ -260,13 +255,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 
 #undef SETTINGS_SET
 
-	/* A key of a removed parameter: the legacy hook keeps its value for the
-	 * conversion in h_commit. */
-	ret = app_config_legacy_set(key, len, read_cb, cb_arg);
-	if (ret != -ENOENT) {
-		return ret;
-	}
-
 	return -ENOENT;
 }
 
@@ -323,12 +311,6 @@ static int h_commit(void)
 		m_app_config.p2p_modulation = stored.p2p_modulation;
 
 		m_app_config_migrated = true;
-	}
-
-	/* Convert values loaded under keys of removed parameters into their
-	 * replacements; persisted (and the old keys deleted) by init. */
-	if (app_config_legacy_commit(&m_app_config)) {
-		m_app_config_legacy = true;
 	}
 
 	/* Clamp loaded values into their configured ranges so a corrupted or forged
@@ -1037,8 +1019,8 @@ static void print_cap_gpio_input_a(const struct shell *shell)
 	case APP_CONFIG_GPIO_INPUT_ANALOG:
 		str = "analog";
 		break;
-	case APP_CONFIG_GPIO_INPUT_S0:
-		str = "s0";
+	case APP_CONFIG_GPIO_INPUT_PULSE:
+		str = "pulse";
 		break;
 	default:
 		str = "unknown";
@@ -1060,8 +1042,8 @@ static void print_cap_gpio_input_b(const struct shell *shell)
 	case APP_CONFIG_GPIO_INPUT_ANALOG:
 		str = "analog";
 		break;
-	case APP_CONFIG_GPIO_INPUT_S0:
-		str = "s0";
+	case APP_CONFIG_GPIO_INPUT_PULSE:
+		str = "pulse";
 		break;
 	default:
 		str = "unknown";
@@ -1820,7 +1802,7 @@ static int cmd_cap_gpio_input_a(const struct shell *shell, size_t argc, char **a
 
 	/* `help`/`?` lists the accepted tokens. */
 	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: none, digital, analog, s0");
+		shell_print(shell, "valid values: none, digital, analog, pulse");
 		return 0;
 	}
 
@@ -1830,11 +1812,11 @@ static int cmd_cap_gpio_input_a(const struct shell *shell, size_t argc, char **a
 		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DIGITAL;
 	} else if (!strcmp(argv[1], "analog")) {
 		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
-	} else if (!strcmp(argv[1], "s0")) {
-		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_S0;
+	} else if (!strcmp(argv[1], "pulse")) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_PULSE;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: none, digital, analog, s0");
+		shell_print(shell, "valid values: none, digital, analog, pulse");
 		return -EINVAL;
 	}
 
@@ -1855,7 +1837,7 @@ static int cmd_cap_gpio_input_b(const struct shell *shell, size_t argc, char **a
 
 	/* `help`/`?` lists the accepted tokens. */
 	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: none, digital, analog, s0");
+		shell_print(shell, "valid values: none, digital, analog, pulse");
 		return 0;
 	}
 
@@ -1865,11 +1847,11 @@ static int cmd_cap_gpio_input_b(const struct shell *shell, size_t argc, char **a
 		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DIGITAL;
 	} else if (!strcmp(argv[1], "analog")) {
 		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_ANALOG;
-	} else if (!strcmp(argv[1], "s0")) {
-		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_S0;
+	} else if (!strcmp(argv[1], "pulse")) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_PULSE;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: none, digital, analog, s0");
+		shell_print(shell, "valid values: none, digital, analog, pulse");
 		return -EINVAL;
 	}
 
@@ -2390,11 +2372,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_cap_gpio_mode, 1, 1),
 
 	SHELL_CMD_ARG(cap-gpio-input-a, NULL,
-	              "Get/Set input A mode on GP_A (none/digital/analog/s0); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), s0 = S0 pulse counter (edge interrupt, 20 ms debounce).",
+	              "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
 	              cmd_cap_gpio_input_a, 1, 1),
 
 	SHELL_CMD_ARG(cap-gpio-input-b, NULL,
-	              "Get/Set input B mode on GP_B (none/digital/analog/s0); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), s0 = S0 pulse counter (edge interrupt, 20 ms debounce).",
+	              "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
 	              cmd_cap_gpio_input_b, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
@@ -2672,20 +2654,6 @@ static int app_config_init(void)
 			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
 		} else {
 			LOG_INF("Config migrated to version %u and persisted", APP_CONFIG_VERSION);
-		}
-	}
-
-	if (m_app_config_legacy) {
-		m_app_config_legacy = false;
-
-		ret = settings_save_subtree(SETTINGS_PFX);
-		if (ret) {
-			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
-		} else {
-			/* Only after the converted values are stored: a failed save
-			 * keeps the old keys, so the conversion runs again. */
-			app_config_legacy_cleanup();
-			LOG_INF("Legacy config keys converted and persisted");
 		}
 	}
 

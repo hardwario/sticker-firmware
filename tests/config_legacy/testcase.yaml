@@ -1,5 +1,0 @@
-common:
-  tags: sticker config
-  platform_allow: native_sim
-tests:
-  sticker.config_legacy: {}

@@ -94,7 +94,7 @@ message AppConfigMessage {
             DISABLED = 0;
             DIGITAL = 1;
             ANALOG = 2;
-            S0 = 3;
+            PULSE = 3;
         }
 
         reserved 3;
@@ -744,10 +744,10 @@ message Telemetry {
     // hall right (cap_hall_right)
     optional uint32 hall_right_count = 20;
     optional uint32 hall_right_flags = 21;
-    // input A (cap_gpio_input_a = digital or s0; s0 never sets the active bit, #498)
+    // input A (cap_gpio_input_a = digital or pulse; pulse never sets the active bit, #498)
     optional uint32 input_a_count    = 22;
     optional uint32 input_a_flags    = 23;  // bit0 notify_act, bit1 notify_deact, bit2 active
-    // input B (cap_gpio_input_b = digital or s0)
+    // input B (cap_gpio_input_b = digital or pulse)
     optional uint32 input_b_count    = 24;
     optional uint32 input_b_flags    = 25;
     // accelerometer any-motion (LIS2DH) event counter

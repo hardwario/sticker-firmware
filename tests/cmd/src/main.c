@@ -766,7 +766,7 @@ ZTEST(cmd, test_build_config_status_worst_case_dr0)
 	g_app_config.cap_hall_left = g_app_config.cap_hall_right = true;
 	g_app_config.cap_light_sensor = g_app_config.cap_barometer = true;
 	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
-	g_app_config.cap_gpio_input_a = g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_S0;
+	g_app_config.cap_gpio_input_a = g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_PULSE;
 	g_app_config.cap_w1_sensors = g_app_config.cap_accelerometer = true;
 	g_app_config.cap_sht = true;
 

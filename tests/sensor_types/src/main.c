@@ -172,14 +172,14 @@ ZTEST(sensor_types, test_enum_capability_gates)
 	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE));
 	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION));
 
-	/* digital A: state + count; S0 B: count only (no state); */
+	/* digital A: state + count; pulse B: count only (no state); */
 	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
 	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DIGITAL;
-	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_S0;
+	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_PULSE;
 	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_STATE));
 	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT));
 	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE));
-	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE), "S0 has no state");
+	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE), "pulse has no state");
 	zassert_true(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT));
 	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE));
 	zassert_false(mb_on(APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT));

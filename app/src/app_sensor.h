@@ -39,10 +39,10 @@ static inline bool app_sensor_gpio_buzzer(void)
 	return g_app_config.cap_gpio_mode == APP_CONFIG_GPIO_MODE_BUZZER;
 }
 
-/* Pin read by app_input: a digital input or an S0 pulse counter. */
+/* Pin read by app_input: a digital input or a pulse counter. */
 static inline bool app_sensor_gpio_is_input(enum app_config_gpio_input mode)
 {
-	return mode == APP_CONFIG_GPIO_INPUT_DIGITAL || mode == APP_CONFIG_GPIO_INPUT_S0;
+	return mode == APP_CONFIG_GPIO_INPUT_DIGITAL || mode == APP_CONFIG_GPIO_INPUT_PULSE;
 }
 
 /* One channel value (#430). Counter channels (APP_SENSOR_F_COUNTER) use `u` —

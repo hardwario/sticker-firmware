@@ -151,8 +151,8 @@ var _SEN_NAMES = {
 var _SEN_ENUMS = {
   10: ["off", "low", "medium", "high"],
   27: ["none", "inputs", "pir", "buzzer"],
-  28: ["none", "digital", "analog", "s0"],
-  29: ["none", "digital", "analog", "s0"]
+  28: ["none", "digital", "analog", "pulse"],
+  29: ["none", "digital", "analog", "pulse"]
 };
 var _SEN_FLOAT = {};
 var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "sensor4_rom" };

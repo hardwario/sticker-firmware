@@ -295,4 +295,4 @@ def test_enum_cap_renders_a_value_mask(workdir):
     _run(workdir)
     c_src = (workdir / "app_sensor_types.c").read_text()
     flat = " ".join(c_src.split())  # clang-format may wrap the mask
-    assert "BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) | BIT(APP_CONFIG_GPIO_INPUT_S0)" in flat
+    assert "BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) | BIT(APP_CONFIG_GPIO_INPUT_PULSE)" in flat

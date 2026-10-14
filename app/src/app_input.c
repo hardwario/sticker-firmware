@@ -32,54 +32,81 @@ static struct app_input_data m_input_data;
 
 K_MUTEX_DEFINE(m_input_data_mutex);
 
-/* #498: S0 pulse counting (IEC 62053-31: pulse >= 30 ms). The 100 ms poll would
- * miss short pulses, so an S0 pin counts on its asserting edge in the GPIO
- * interrupt; an edge within S0_DEBOUNCE_MS of the previous counted one is
- * contact bounce. The ISR only bumps m_s0_pending; the poll work folds it into
- * m_input_data under the mutex. */
-#define S0_DEBOUNCE_MS 20
+/* #498: pulse counting (e.g. S0 meter outputs, IEC 62053-31: pulse >= 30 ms).
+ * The 100 ms poll would miss short pulses, so a pulse pin counts in the GPIO
+ * interrupt. The pulse polarity is unknown (a meter may pull the line low or
+ * drive it high), so the pin interrupts on both edges and a pulse is a move
+ * AWAY from the idle level, whichever level that is. The idle level is the
+ * level at init and is re-learned by the poll once the pin has been quiet for
+ * PULSE_IDLE_RELEARN_MS (a pulse in progress at boot cannot stick). An edge is
+ * counted only if the pin was stable for PULSE_DEBOUNCE_MS before it: bounce on
+ * either edge of a pulse lands within that window of the previous edge. The ISR
+ * only bumps m_pulse_x.pending; the poll work folds it into m_input_data under
+ * the mutex. */
+#define PULSE_DEBOUNCE_MS     20
+#define PULSE_IDLE_RELEARN_MS 60000
 
-static struct gpio_callback m_s0_cb_a;
-static struct gpio_callback m_s0_cb_b;
-static atomic_t m_s0_pending_a;
-static atomic_t m_s0_pending_b;
-static uint32_t m_s0_last_a;
-static uint32_t m_s0_last_b;
+struct pulse_state {
+	const struct gpio_dt_spec *spec;
+	struct gpio_callback cb;
+	atomic_t pending;
+	atomic_t idle_level;
+	atomic_t last_edge_ms;
+};
 
-static void s0_edge(atomic_t *pending, uint32_t *last)
+static struct pulse_state m_pulse_a = {.spec = &m_input_a};
+static struct pulse_state m_pulse_b = {.spec = &m_input_b};
+
+static void pulse_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
 {
+	struct pulse_state *st = CONTAINER_OF(cb, struct pulse_state, cb);
 	uint32_t now = k_uptime_get_32();
+	uint32_t prev = (uint32_t)atomic_set(&st->last_edge_ms, (atomic_val_t)now);
+	int level = gpio_pin_get_raw(st->spec->port, st->spec->pin);
 
-	if (now - *last < S0_DEBOUNCE_MS) {
+	if (level < 0 || now - prev < PULSE_DEBOUNCE_MS) {
 		return;
 	}
-	*last = now;
-	atomic_inc(pending);
+	if (level != (int)atomic_get(&st->idle_level)) {
+		atomic_inc(&st->pending);
+	}
 }
 
-static void s0_a_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+/* Re-learn the idle level of a pulse pin that has been quiet for a while. */
+static void pulse_relearn(struct pulse_state *st)
 {
-	s0_edge(&m_s0_pending_a, &m_s0_last_a);
+	uint32_t quiet = k_uptime_get_32() - (uint32_t)atomic_get(&st->last_edge_ms);
+	int level;
+
+	if (quiet < PULSE_IDLE_RELEARN_MS) {
+		return;
+	}
+	level = gpio_pin_get_raw(st->spec->port, st->spec->pin);
+	if (level >= 0) {
+		atomic_set(&st->idle_level, level);
+	}
 }
 
-static void s0_b_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
-{
-	s0_edge(&m_s0_pending_b, &m_s0_last_b);
-}
-
-static int s0_setup(const struct gpio_dt_spec *spec, struct gpio_callback *cb,
-		    gpio_callback_handler_t handler)
+static int pulse_setup(struct pulse_state *st)
 {
 	int ret;
+	int level = gpio_pin_get_raw(st->spec->port, st->spec->pin);
 
-	gpio_init_callback(cb, handler, BIT(spec->pin));
-	ret = gpio_add_callback_dt(spec, cb);
+	if (level < 0) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_get_raw", level);
+		return level;
+	}
+	atomic_set(&st->idle_level, level);
+	atomic_set(&st->last_edge_ms, (atomic_val_t)k_uptime_get_32());
+
+	gpio_init_callback(&st->cb, pulse_handler, BIT(st->spec->pin));
+	ret = gpio_add_callback_dt(st->spec, &st->cb);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_add_callback_dt", ret);
 		return ret;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(spec, GPIO_INT_EDGE_TO_ACTIVE);
+	ret = gpio_pin_interrupt_configure_dt(st->spec, GPIO_INT_EDGE_BOTH);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_interrupt_configure_dt", ret);
 		return ret;
@@ -96,8 +123,8 @@ static int poll_impl(bool prime)
 {
 	bool input_a_is_active = false;
 	bool input_b_is_active = false;
-	bool s0_a = g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_S0;
-	bool s0_b = g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_S0;
+	bool pulse_a = g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_PULSE;
+	bool pulse_b = g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_PULSE;
 
 	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a)) {
 		int val = gpio_pin_get_dt(&m_input_a);
@@ -122,19 +149,21 @@ static int poll_impl(bool prime)
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 
-	/* An S0 pin counts in its ISR and has no state edges (no state alarms). */
-	bool a_rise = !prime && !s0_a && (!m_input_data.input_a_is_active && input_a_is_active);
-	bool a_fall = !prime && !s0_a && (m_input_data.input_a_is_active && !input_a_is_active);
-	bool b_rise = !prime && !s0_b && (!m_input_data.input_b_is_active && input_b_is_active);
-	bool b_fall = !prime && !s0_b && (m_input_data.input_b_is_active && !input_b_is_active);
+	/* A pulse pin counts in its ISR and has no state edges (no state alarms). */
+	bool a_rise = !prime && !pulse_a && (!m_input_data.input_a_is_active && input_a_is_active);
+	bool a_fall = !prime && !pulse_a && (m_input_data.input_a_is_active && !input_a_is_active);
+	bool b_rise = !prime && !pulse_b && (!m_input_data.input_b_is_active && input_b_is_active);
+	bool b_fall = !prime && !pulse_b && (m_input_data.input_b_is_active && !input_b_is_active);
 
-	/* S0 always counts: counting is all an S0 pin is for (input_x_counter only
+	/* A pulse pin always counts: counting is all a pulse pin is for (input_x_counter only
 	 * gates the digital pin's edge counter). */
-	if (s0_a) {
-		m_input_data.input_a_count += (uint32_t)atomic_clear(&m_s0_pending_a);
+	if (pulse_a) {
+		pulse_relearn(&m_pulse_a);
+		m_input_data.input_a_count += (uint32_t)atomic_clear(&m_pulse_a.pending);
 	}
-	if (s0_b) {
-		m_input_data.input_b_count += (uint32_t)atomic_clear(&m_s0_pending_b);
+	if (pulse_b) {
+		pulse_relearn(&m_pulse_b);
+		m_input_data.input_b_count += (uint32_t)atomic_clear(&m_pulse_b.pending);
 	}
 
 	m_input_data.input_a_is_active = input_a_is_active;
@@ -238,14 +267,14 @@ int app_input_init(void)
 		return ret;
 	}
 
-	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_S0) {
-		ret = s0_setup(&m_input_a, &m_s0_cb_a, s0_a_handler);
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_PULSE) {
+		ret = pulse_setup(&m_pulse_a);
 		if (ret) {
 			return ret;
 		}
 	}
-	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_S0) {
-		ret = s0_setup(&m_input_b, &m_s0_cb_b, s0_b_handler);
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_PULSE) {
+		ret = pulse_setup(&m_pulse_b);
 		if (ret) {
 			return ret;
 		}
@@ -274,11 +303,11 @@ void app_input_reset_count(bool input_a, bool input_b)
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 	if (input_a) {
 		m_input_data.input_a_count = 0;
-		atomic_clear(&m_s0_pending_a);
+		atomic_clear(&m_pulse_a.pending);
 	}
 	if (input_b) {
 		m_input_data.input_b_count = 0;
-		atomic_clear(&m_s0_pending_b);
+		atomic_clear(&m_pulse_b.pending);
 	}
 	k_mutex_unlock(&m_input_data_mutex);
 }

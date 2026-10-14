@@ -75,7 +75,7 @@ enum app_config_gpio_input {
 	APP_CONFIG_GPIO_INPUT_DISABLED = 0,
 	APP_CONFIG_GPIO_INPUT_DIGITAL = 1,
 	APP_CONFIG_GPIO_INPUT_ANALOG = 2,
-	APP_CONFIG_GPIO_INPUT_S0 = 3,
+	APP_CONFIG_GPIO_INPUT_PULSE = 3,
 };
 
 enum app_config_alarm_buzzer_mode {

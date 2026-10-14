@@ -113,13 +113,13 @@ test("set_param cap_w1_sensors (tag 8) is reachable both ways (#92)", () => {
 test("set_param cap_gpio_* (tags 27..29) are reachable both ways (#498)", () => {
   const enc = codec.encodeDownlink({
     data: { seq: 1, command: "set_param",
-      set_param: { sensors: { cap_gpio_mode: "inputs", cap_gpio_input_a: "s0",
+      set_param: { sensors: { cap_gpio_mode: "inputs", cap_gpio_input_a: "pulse",
         cap_gpio_input_b: "analog" } } },
   });
   assert.equal(enc.errors.length, 0, "encode errors");
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
   assert.equal(back.set_param.sensors.cap_gpio_mode, "inputs");
-  assert.equal(back.set_param.sensors.cap_gpio_input_a, "s0");
+  assert.equal(back.set_param.sensors.cap_gpio_input_a, "pulse");
   assert.equal(back.set_param.sensors.cap_gpio_input_b, "analog");
 });
 
@@ -145,13 +145,13 @@ test("set_param cap_sht (tag 22) is reachable both ways (#465)", () => {
 
 test("config_dump renders cap_gpio_* + cap_sht (sensors tags 27..29, 22) (#498)", () => {
   // Response{ seq:1, config_dump: ConfigDump{ page_count:1, sensors: Sensors{
-  //   cap_gpio_mode:INPUTS, cap_gpio_input_a:S0, cap_gpio_input_b:ANALOG,
+  //   cap_gpio_mode:INPUTS, cap_gpio_input_a:PULSE, cap_gpio_input_b:ANALOG,
   //   cap_sht:false } } }, version prefix 01. Tags >= 16 take 2 bytes:
   //   27 -> d8 01, 28 -> e0 01, 29 -> e8 01, 22 -> b0 01.
   const dump = hex("010801221010012a0cd80101e00103e80102b00100");
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.sensors.cap_gpio_mode, "inputs");
-  assert.equal(u.config_dump.sensors.cap_gpio_input_a, "s0");
+  assert.equal(u.config_dump.sensors.cap_gpio_input_a, "pulse");
   assert.equal(u.config_dump.sensors.cap_gpio_input_b, "analog");
   assert.equal(u.config_dump.sensors.cap_sht, 0);
 });

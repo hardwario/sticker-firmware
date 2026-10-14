@@ -190,7 +190,7 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
 				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) |
-					    BIT(APP_CONFIG_GPIO_INPUT_S0),
+					    BIT(APP_CONFIG_GPIO_INPUT_PULSE),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -239,7 +239,7 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
 				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) |
-					    BIT(APP_CONFIG_GPIO_INPUT_S0),
+					    BIT(APP_CONFIG_GPIO_INPUT_PULSE),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
