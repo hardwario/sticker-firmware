@@ -3064,7 +3064,12 @@ recorded frame); NA readings are still dropped at the 11 B tier (each sentinel i
   `test_run_action_failed_save_still_reboots` (every executor test now checks its reboot),
   `test_lrw_reset_and_calibration_not_over_radio`.
   All 16 native suites, 86 configen/proto tests and 131 decoder tests pass.
-- **HIL:** pending; procedure H1–H8 in `doc/plan/509 - v2.0.0 release review fixes.md`.
+- **Simulator run** (PR #510, `native_sim`, this branch merged on the simulator branch):
+  H1.1–6, H2 (sample 60 and 0), H3, H4.1–3, H5, H6, H7 and H9 pass. It found one defect,
+  fixed here: with more than 8 stale keys the overflow keys logged `set-value failure ...
+  error(-2)` on the first boot (now skipped quietly and removed on the next boot). Not
+  covered by the simulator: H1.7 (Stop2), H4.4 (US915 on air), H8 (release soak, IWDG).
+- **HIL:** pending for H1.7, H4.4, H8; procedure in `doc/plan/509 - v2.0.0 release review fixes.md`.
 
 ---
 
