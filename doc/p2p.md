@@ -352,7 +352,7 @@ Frames are spaced ≥ 200 ms apart.
 
 | Frame | Confirmed | Note |
 |---|---|---|
-| Alarms | per `radio-alarm-ack` | as on LoRaWAN (§30 of `version 1.5.md`) |
+| Alarms | per `radio-alarm-ack` | as on LoRaWAN (§30 of `version 2.0.md`) |
 | Answers (port 85), history | always | app_radio's queues |
 | Telemetry | always | plan §7.2, F6 (Hynek 2026-10-06); the link-check report (every `radio-link-check-interval`-th and the first after link-up) also queues a LinkCheckReq |
 | `0x91` control | always | up to 3 tries, 30 s apart, then dropped |

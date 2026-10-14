@@ -43,8 +43,8 @@ endif()
 # Keep it at the release this branch builds towards. The debug/release config
 # is a separate axis (CONFIG_FW_DEBUG), not set here.
 if(NOT DEFINED APP_VERSION_MAJOR)
-  set(APP_VERSION_MAJOR 1)
-  set(APP_VERSION_MINOR 5)
+  set(APP_VERSION_MAJOR 2)
+  set(APP_VERSION_MINOR 0)
   set(APP_VERSION_PATCH 0)
 endif()
 if(NOT DEFINED APP_BUILD_TYPE)
