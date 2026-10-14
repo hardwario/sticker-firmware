@@ -1872,8 +1872,9 @@ static void action_runs_after_the_answer_left(void)
 }
 BOTH_PROFILES(action_runs_after_the_answer_left)
 
-/* An answer that never leaves postpones the action six times at most. */
-static void action_waits_six_times_at_most(void)
+/* An answer that never leaves postpones the action 120 s at most: long enough
+ * for a DR0 duty-cycle hold, which outlived the old 48 s of deferrals. */
+static void action_waits_120_s_at_most(void)
 {
 	int64_t t0 = k_uptime_get();
 
@@ -1882,14 +1883,14 @@ static void action_waits_six_times_at_most(void)
 	g_cmd_resp_len = 10;
 	g_cmd_action = APP_CMD_ACTION_REBOOT;
 	app_radio_downlink(m_cmd, sizeof(m_cmd));
-	k_sleep(K_SECONDS(50));
+	k_sleep(K_SECONDS(110));
 	zassert_equal(g_run_action_calls, 0, "still deferring");
-	k_sleep(K_SECONDS(10));
-	zassert_equal(g_run_action_calls, 1, "ran after the last deferral");
-	zassert_within(g_run_action_at_ms - t0, 56000, 500, "8 s + 6 x 8 s (%lld ms)",
+	k_sleep(K_SECONDS(15));
+	zassert_equal(g_run_action_calls, 1, "ran at the deadline");
+	zassert_within(g_run_action_at_ms - t0, 120000, 500, "120 s after the command (%lld ms)",
 		       (long long)(g_run_action_at_ms - t0));
 }
-BOTH_PROFILES(action_waits_six_times_at_most)
+BOTH_PROFILES(action_waits_120_s_at_most)
 
 /* An action also waits for its answer's Ack where answers are confirmed (P2P):
  * held by the duty cycle on its retry, the answer is acknowledged at ~22 s and

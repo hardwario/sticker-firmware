@@ -2299,20 +2299,21 @@ static void page_stream_kick(void)
 
 /* A deferred action waits for its answer: 8 s covers a send and its receive
  * windows; a duty-cycle-held or retrying answer takes longer, so the wait is
- * re-checked, at most POST_CMD_DRAIN_MAX_DEFERRALS times -- a TX that keeps
- * failing must not postpone the commanded action forever. The action (mostly a
- * reboot) also waits for the alarm frames still queued and for an alarm batch
- * that can go now, which is sent early instead of at the end of its window
- * (#462). */
-#define POST_CMD_DRAIN_WAIT_SEC      8
-#define POST_CMD_DRAIN_MAX_DEFERRALS 6
+ * re-checked every 8 s, up to POST_CMD_DRAIN_MAX_SEC after the command -- long
+ * enough for a DR0 duty-cycle hold (the 48 s cap dropped answers there), but a
+ * TX that keeps failing must not postpone the commanded action forever. The
+ * action (mostly a reboot) also waits for the alarm frames still queued and for
+ * an alarm batch that can go now, which is sent early instead of at the end of
+ * its window (#462). */
+#define POST_CMD_DRAIN_WAIT_SEC 8
+#define POST_CMD_DRAIN_MAX_SEC  120
 
 /* Pending actions, one bit per enum app_cmd_action (#485 R4). Class A lets a
  * second command ride the receive window of the first one's answer, so a
  * second action used to overwrite the first: a settings_save followed by a
  * reset_counters lost the save and its reboot after the host got its ack. */
 static uint32_t m_post_cmd_pending;
-static uint8_t m_post_cmd_deferrals;
+static int64_t m_post_cmd_start_ms; /* uptime of the first pending command */
 
 /* Reboot-class actions, strongest first: a reset discards the staged config
  * anyway, every *_SAVE persists all of it, a plain reboot is in all of them.
@@ -2377,22 +2378,21 @@ static void post_cmd_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	bool alarm_batch = app_alarm_flush_pending();
+	int64_t left_ms =
+		POST_CMD_DRAIN_MAX_SEC * MSEC_PER_SEC - (k_uptime_get() - m_post_cmd_start_ms);
 
-	if ((alarm_batch || tx_undelivered()) &&
-	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
-		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command actions 0x%x deferred: frames still undelivered (%u/%u)",
-			(unsigned)m_post_cmd_pending, (unsigned)m_post_cmd_deferrals,
-			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+	if ((alarm_batch || tx_undelivered()) && left_ms > 0) {
+		int64_t wait_ms = MIN(left_ms, POST_CMD_DRAIN_WAIT_SEC * MSEC_PER_SEC);
+
+		LOG_WRN("Post-command actions 0x%x deferred: frames still undelivered (%u s left)",
+			(unsigned)m_post_cmd_pending, (unsigned)(left_ms / MSEC_PER_SEC));
+		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work, K_MSEC(wait_ms));
 		return;
 	}
 
 	uint32_t pending = m_post_cmd_pending;
 
 	m_post_cmd_pending = 0;
-	m_post_cmd_deferrals = 0;
 	post_cmd_run(pending);
 }
 
@@ -2431,15 +2431,15 @@ void app_radio_downlink(const uint8_t *buf, size_t len)
 		/* #409/#425: the remaining pages follow page 0 by themselves. */
 		page_stream_kick();
 	} else if (action != APP_CMD_ACTION_NONE) {
-		/* Merge into what is already pending. Neither the deferral count nor
-		 * the timer restarts, so a stream of commands cannot postpone the
-		 * first one's action; the new answer is waited for by the drain
-		 * check like any other frame. */
+		/* Merge into what is already pending. Neither the deadline nor the
+		 * timer restarts, so a stream of commands cannot postpone the first
+		 * one's action; the new answer is waited for by the drain check like
+		 * any other frame. */
 		bool first = m_post_cmd_pending == 0;
 
 		m_post_cmd_pending |= BIT(action);
 		if (first) {
-			m_post_cmd_deferrals = 0;
+			m_post_cmd_start_ms = k_uptime_get();
 			k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
 						  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
 		}
@@ -2644,7 +2644,6 @@ void app_radio_test_cmd_reset(void)
 	(void)k_work_cancel_delayable_sync(&m_periodic_announce_work, &sync);
 	(void)k_work_cancel_delayable_sync(&m_jitter_work, &sync);
 	m_post_cmd_pending = 0;
-	m_post_cmd_deferrals = 0;
 	atomic_clear(&m_announce);
 	atomic_clear(&m_announce_spreading);
 	atomic_clear(&m_seq_closed);
