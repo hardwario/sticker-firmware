@@ -240,7 +240,7 @@ only be verified at register level, not by toggling the input.
 
 **Not covered:** R5, R7, GP_B on this firmware, 13.5–24 V, idle power.
 
-> **Open hardware question:** the divider commit (`ec25fff`) names the **JP11**
-> connector; an earlier draft of the spec named **JP2**. Confirm the
-> correct connector/pin against `hio-sticker-sch-r2.1.pdf` before finalizing the
-> customer-facing wiring docs.
+> **Resolved (2026-10-14):** the connector is **JP11** (`DQ1` / `DQ2`), routed through the
+> DIP switch S1 of the STICKER Input variant; the analog divider is S1 switches 1+2 (A) /
+> 7+8 (B). See `version 2.0.md` §48 and
+> [STICKER Input Wiring](https://docs.hardwario.com/sticker/sticker-input-wiring/sticker-input-wiring/).
