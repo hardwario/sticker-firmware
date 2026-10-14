@@ -85,8 +85,9 @@ struct rstate {
 	bool have_prev_state;
 	uint32_t prev_count; /* COUNT: baseline counter at window start */
 	bool have_prev_count;
-	int64_t count_window_start; /* COUNT: start of the current interval_report window (#195) */
-	int64_t oneshot_expiry;     /* STATE edge / momentary / COUNT one-shot: auto-clear time (0 =
+	int64_t count_window_start; /* COUNT: start of the current window (dwell or interval_report,
+				       #195/#498) */
+	int64_t oneshot_expiry;     /* STATE edge / momentary one-shot: auto-clear time (0 =
 				       none) */
 	int64_t confirm_deadline; /* dwell-before-activation deadline (#348, 0 = none). While armed,
 				   * `type` doubles as the pending THRESHOLD side (LOW/HIGH) being
@@ -939,36 +940,29 @@ static void eval_state(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 	rt->prev_state = cur_lvl;
 }
 
-/* COUNT rate rule: alarm when the counter rose by >= hi over one interval_report
- * window. This is called on the 3 s LED poll, but the rate must be assessed over
- * interval_report ("per interval_report" contract, app_alarm_rules.h), not per
- * poll — otherwise with interval_sample < 3 s the counts split across polls and
- * the threshold under-counts (#195). So we accumulate across polls and evaluate
- * the delta only once a full interval_report window has elapsed (tumbling
- * window), re-baselining the counter and window each time. One-shot: fires and
- * then holds for `dwell` seconds (#348, same hold/re-arm role as a momentary
- * source) before it can fire again — 0 re-arms immediately. */
+/* COUNT rate rule (#498): alarm when the counter rose by >= hi within one
+ * window of `dwell` seconds (0 = interval_report, the pre-#498 window). Called on
+ * the 3 s poll; the counter keeps counting in between (ISR / poll work), so the
+ * window is a tumbling one from its start baseline.
+ *  - inactive: fires as soon as the delta since the window start reaches hi
+ *    (no wait for the window end), then a new window starts;
+ *  - active: stays active (one alarm for a sustained over-limit rate) while
+ *    each closed window reaches hi, and deactivates (sent) on the first closed
+ *    window that falls short. */
 static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rstate *rt,
 		       uint32_t cur, bool *should_send)
 {
 	int64_t now = k_uptime_get();
 
-	if (!rt->have_prev_count) {
+	if (!rt->have_prev_count || !rule->enabled) {
+		if (rt->active) {
+			rt->active = false;
+			*should_send = true;
+			alarm_collect(idx, rule, false, ALARM_TYPE_TRIGGER, true, (int32_t)cur);
+		}
 		rt->have_prev_count = true;
 		rt->prev_count = cur;
 		rt->count_window_start = now;
-		return;
-	}
-	if (!rule->enabled) {
-		rt->prev_count = cur;
-		rt->count_window_start = now;
-		return;
-	}
-
-	/* Hold until the interval_report window closes; counts keep accumulating
-	 * in prev_count's delta meanwhile. */
-	int64_t window_ms = (int64_t)g_app_config.interval_report * 1000;
-	if (window_ms > 0 && (now - rt->count_window_start) < window_ms) {
 		return;
 	}
 
@@ -982,25 +976,32 @@ static void eval_count(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 		return;
 	}
 
-	/* Expire a lapsed one-shot before the firing check, mirroring the momentary/
-	 * STATE pattern (eval_state()): otherwise a sustained over-limit condition
-	 * across multiple consecutive windows would re-fire every window instead of
-	 * once-then-hold. */
-	if (rt->active && rt->oneshot_expiry != 0 && now >= rt->oneshot_expiry) {
-		rt->active = false;
-		rt->oneshot_expiry = 0;
-	}
-
-	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
+	int64_t window_ms =
+		rule->dwell > 0 ? rule_hold_ms(rule) : (int64_t)g_app_config.interval_report * 1000;
+	bool closed = (now - rt->count_window_start) >= window_ms;
+	uint32_t delta = cur - rt->prev_count;
 	/* Compare as float, not (uint32_t)hi: hi is validated to [0, UINT32_MAX]
 	 * (#485 S7) and a fractional hi is no longer truncated (2.5 needs 3). */
-	if (rule->hi > 0 && (float)delta >= rule->hi && !rt->active) {
-		rt->active = true;
-		rt->oneshot_expiry = now + rule_hold_ms(rule);
-		*should_send = true;
-		alarm_collect(idx, rule, true, ALARM_TYPE_TRIGGER, true, (int32_t)cur);
+	bool over = rule->hi > 0 && (float)delta >= rule->hi;
+
+	if (!rt->active) {
+		if (over) {
+			rt->active = true;
+			*should_send = true;
+			alarm_collect(idx, rule, true, ALARM_TYPE_TRIGGER, true, (int32_t)cur);
+		} else if (!closed) {
+			return; /* keep accumulating in this window */
+		}
+	} else {
+		if (!closed) {
+			return;
+		}
+		if (!over) {
+			rt->active = false;
+			*should_send = true;
+			alarm_collect(idx, rule, false, ALARM_TYPE_TRIGGER, true, (int32_t)cur);
+		}
 	}
-	/* Re-baseline for the next window whether or not it fired. */
 	rt->prev_count = cur;
 	rt->count_window_start = now;
 }
