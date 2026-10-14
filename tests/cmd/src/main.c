@@ -1357,6 +1357,50 @@ ZTEST(cmd, test_device_reset_nfc_shell_only)
 	zassert_equal(r.which_body, Response_ack_tag, "device_reset acks (which=%d)", r.which_body);
 }
 
+/* Security review R-3 / C-1: lrw_reset wipes the OTAA DevNonce and
+ * calibration mode uplinks under public ABP keys, so neither lrw_reset,
+ * enter_calibration nor SetParam.application.calibration is accepted over a
+ * radio; NFC (and the shell) still are. */
+ZTEST(cmd, test_lrw_reset_and_calibration_not_over_radio)
+{
+	static const enum app_cmd_transport radio[] = {APP_CMD_TRANSPORT_LRW,
+						       APP_CMD_TRANSPORT_P2P};
+	Response r;
+
+	for (size_t i = 0; i < ARRAY_SIZE(radio); i++) {
+		/* lrw_reset (field 16) and enter_calibration (field 18), seq=1. */
+		reset_cfg();
+		zassert_equal(handle_via(radio[i], "0801820100", &r), APP_CMD_ACTION_NONE,
+			      "lrw_reset acted over radio %d", radio[i]);
+		zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+			      r.body.error.code);
+		reset_cfg();
+		zassert_equal(handle_via(radio[i], "0801920100", &r), APP_CMD_ACTION_NONE,
+			      "enter_calibration acted over radio %d", radio[i]);
+		zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+
+		/* set_param{application{calibration=true}} */
+		reset_cfg();
+		g_app_config.calibration = false;
+		handle_via(radio[i], "0801120412020801", &r);
+		zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+		zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+			      r.body.error.code);
+		zassert_false(g_app_config.calibration, "calibration written over radio");
+	}
+
+	reset_cfg();
+	zassert_equal(handle_via(APP_CMD_TRANSPORT_NFC, "0801820100", &r), APP_CMD_ACTION_LRW_RESET,
+		      "lrw_reset over nfc");
+	reset_cfg();
+	g_app_config.calibration = false;
+	handle_via(APP_CMD_TRANSPORT_NFC, "0801120412020801", &r);
+	zassert_equal(r.which_body, Response_ack_tag, "nfc set_param acks (which=%d)",
+		      r.which_body);
+	zassert_true(g_app_config.calibration, "calibration over nfc");
+	g_app_config.calibration = false;
+}
+
 /* factory_reset (field 23, NEW #299 tier — narrower than device_reset above, a
  * different command/id, not a renumbering of it) is nfc/shell only: a LoRaWAN
  * downlink triggering it would destroy the very session/keys carrying it, so
@@ -1573,7 +1617,7 @@ ZTEST(cmd, test_claim_active)
 }
 
 /* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
- * clock_sync/enter_calibration are lrw/nfc-only too). app_cmd never validates
+ * clock_sync is radio/nfc-only too). app_cmd never validates
  * `kind` itself — it forwards the raw id to app_buzzer_play_repeating()
  * unchanged (stubbed here) and only turns -ENOENT into BAD_REQUEST; repeat_s
  * is the one field app_cmd DOES range-check (0-999) before forwarding. */
@@ -1806,7 +1850,8 @@ ZTEST(cmd, test_lrw_join_rejected_when_staging_dirty)
 	reset_cfg();
 	zassert_equal(handle("08018a0100", &r), APP_CMD_ACTION_LRW_JOIN, "clean join acts");
 	zassert_equal(r.which_body, Response_ack_tag, "clean join acks");
-	zassert_equal(handle("0801820100", &r), APP_CMD_ACTION_LRW_RESET, "clean reset acts");
+	zassert_equal(handle_via(APP_CMD_TRANSPORT_NFC, "0801820100", &r), APP_CMD_ACTION_LRW_RESET,
+		      "clean reset acts");
 
 	reset_cfg();
 	test_set_lrw_dirty(true);
@@ -1815,7 +1860,8 @@ ZTEST(cmd, test_lrw_join_rejected_when_staging_dirty)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(handle("0801820100", &r), APP_CMD_ACTION_NONE, "dirty reset no action");
+	zassert_equal(handle_via(APP_CMD_TRANSPORT_NFC, "0801820100", &r), APP_CMD_ACTION_NONE,
+		      "dirty reset no action");
 	zassert_equal(r.which_body, Response_error_tag, "dirty reset errors");
 }
 
