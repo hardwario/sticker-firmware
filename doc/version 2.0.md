@@ -60,61 +60,173 @@ technical detail.
 | `get_basic_info` | Identity bootstrap for the phone (serial, nonce, versions); replaces the NDEF identity record | §18 |
 | `SetParam.alarms_replace` | Rewrite the whole alarm table in one message | §17 |
 
-### Changed behaviour
+### Changes by area
 
-- **Answer pairing.** Every answer can be paired with its request by `seq`: `clock_sync`
-  is answered by an Info with the command's `seq`, and a request that fails to decode gets
-  `BAD_REQUEST` with its `seq`. `force_send` / `sample` send at once, without the fleet
-  jitter (§15).
-- **Uplink timing.** A periodic report is sent at a fixed per-device offset of up to 60 s
-  after its time slot (was up to 10 s), so devices rebooted together do not collide (§27).
-- **Telemetry is paged (#480).** A periodic report that does not fit one frame goes out
-  as numbered pages (`page_index` / `page_count`, decoded as `pages: "i/N"`): sensor groups
-  first, then whole 1-Wire readings. A 1-Wire reading is never split; one bigger than a page
-  is sent alone (§13).
-- **Alarm state in every telemetry frame** (`system_flags`, decoded as `alarm_status`),
-  and alarm batches are split across frames instead of being cut (§9).
-- **LoRaWAN `GetConfig`** leaves out the 1-Wire slot ROMs (4 pages instead of 6 at EU868
-  DR0) and sends all its pages after one request. NFC and `GetParam` still return the
-  ROMs (§9, §16).
+Everything that changed for a user or an integrator, grouped by topic. The § numbers point
+to the full description.
+
+#### NFC and the Manager-App
+
+- **Mailbox instead of NDEF (breaking).** Every phone command goes through the ST25DV
+  Fast-Transfer-Mode mailbox: one tap, phone held still, the same on iOS and Android,
+  ~0.1–0.3 s per exchange. A frame carries 231 B of plaintext, so `GetConfig`, `GetParam` and
+  history are paged and read within the same hold. The AES-CCM envelope, nonce and anti-replay
+  window are unchanged (§18).
+- **The tag holds no NDEF record.** The identity record is gone too. The phone reads the
+  serial, the nonce and the versions with the plaintext `get_basic_info`. A generic NFC
+  reader, or a unit with a dead battery, shows a blank tag. Battery-less configuration and
+  Android tap-to-launch are removed (§18).
+- **Session rules.** A mailbox session lasts at most 120 s and ends after 3 s without a
+  request. A field held for 120 s without a served reply releases the chip. A command that
+  reboots ends the session and runs its action at once. Only authenticated frames extend the
+  session; 8 rejected frames in a row end it (§18, §46).
+- **NFC is ready ~1.2 s after reset** (was ~6 s). It starts last in the boot, so no command can
+  act on a half-initialised device. During a tap only the NFC LED shows (§3, §18).
+- **Plaintext transport.** Mailbox channel `0x03` carries unencrypted commands from a fixed
+  allow-list: `get_basic_info` and `get_claim_info`. Every other command answers `NOT_READY`
+  there, and the channel is never reachable over a radio (§19).
+- **Claiming.** The claim token is readable only from a powered device, with `get_claim_info`,
+  while the claim window is `active`. The window is an explicit switch: `claim_done` closes
+  it, `claim_active` re-opens it, creates a token if none is set and answers `ClaimInfo`
+  (renamed from `clm_ack` / `clm_rearm`, same wire ids). A corrupted stored value closes the
+  window. `vendor_reset` closes it and wipes the token (§19, §35).
+- **Reset tiers.** `factory_reset` also clears the pulse counters and the history (§35).
+- **Radio diagnostics over NFC.** `get_radio_state` replaces the radio fields of Info (§20, §24).
+
+#### Alarms
+
+- **A rule is (rule, slot, channel) (breaking).** Every value of every sensor is a channel and
+  can be alarmed: two temperatures of a machine probe, the barometer temperature, the analog
+  inputs. A rule records the sensor type it was written for (18 B, was 17 B). `AlarmEvent` /
+  `AlarmStatus` carry `slot` + `channel`. A 1-Wire slot that sees a different sensor type
+  raises `sensor_mismatch` (§40).
+- **Replace the whole table.** `SetParam.alarms_replace` makes one message the complete alarm
+  table, so rules deleted on the host are deleted on the device (§17).
+- **Stricter rule checks.** STATE `from` / `to` must be 0/1, RATE `hi` must be in range. A
+  rejected rule answers `fault_field` = 400 + the `alarm_N` tag, so the host knows which rule
+  failed (§46).
+- **RATE window = `dwell`.** A RATE rule counts within `dwell` seconds (`0` =
+  `interval-report`, the old window). It fires as soon as the count is reached, and a
+  sustained rate stays one alarm (§48).
+- **Motion and stillness states.** PIR and accelerometer motion take level rules:
+  `from 1 to 1` = "motion started / ended", `from 0 to 0` = "stopped" (e.g. a machine that
+  must report when it stops vibrating) (§48).
+- **Alarm state in every telemetry frame** (`system_flags`, decoded as `alarm_status`) (§9).
+- **No lost alarm frames.**
+  - A batch is split across frames instead of being cut (§9).
+  - A burst larger than the 4-frame alarm queue waits and collects the next edges (§32).
+  - An `alarm-limit` window holds up to 16 events (was 8) and is sent as soon as it is full.
+    One report takes at most 4 frames; the rest follows as the next report (§46).
+- **Confirmed alarms.** With `radio-alarm-ack true` alarms are confirmed uplinks on both radios
+  (§30).
+- **Audible alarms.** `alarm-buzzer-mode` plays a melody while an alarm is active. It needs the
+  buzzer HW variant and `cap-gpio-mode buzzer` (§1, §48).
+- **Fewer false alarms.** A single failed onboard read keeps the previous value instead of
+  causing `no_data` and a DEACT/ACT pair (§43). 1-Wire no-data is reported per chip and per
+  device (§40).
+
+#### Radio: LoRaWAN
+
+- **Faster recovery after link loss.** The device first lowers the data rate and raises the
+  TX power, and rejoins only when that fails: about 4–5 h from link loss to rejoin (was
+  9–10 h). US915/AU915 keep their sub-band across failed joins (§12).
+- **Duty cycle.** A frame is held until the sliding hour has room for it, instead of retrying
+  against the MAC's refusal. The M-2 watchdog no longer rejoins during a hold (a rejoin reset
+  the band credits). A report held by the duty cycle goes out late instead of being dropped
+  (§22, §31, §43).
+- **Fixes in the Zephyr fork.** No stale join result and no wedged radio work queue, and
+  `DevStatusAns` is sent (battery and margin show in ChirpStack) (§5, §10).
+- **New options.** `lrw-region as923` (§11). With ADR off, `lrw-datarate dr0`…`dr7` fixes the
+  data rate (§8).
+- **Region not in the image.** A stored `lrw-region` that is not compiled in keeps the radio
+  silent and reports `lrw_disabled`. The radio never falls back to another band (§7).
+- **`GetConfig` over LoRaWAN** leaves out the 1-Wire slot ROMs (4 pages instead of 6 at EU868
+  DR0) and sends all its pages after one request. NFC and `GetParam` still return the ROMs
+  (§16).
+
+#### Radio: P2P (new)
+
+- **`radio-mode p2p`** talks directly to a HARDWARIO FIBER modem and a ProXimos Hub, with no
+  LoRaWAN network. The same image does both radios; the choice is made at boot (§6).
+- **TOWER radio protocol (flag day).** Frames are AES-CCM with a 96 B MTU (74 B payload) on
+  both PHY profiles. A confirmed send is up to 3 identical transmissions with a local gateway
+  ACK. The join, Hello, LinkCheck and Time go in a control envelope (§41, §44).
+- **`p2p-modulation fsk`** works toward a stock TOWER gateway (TOWER GFSK + TOWER pairing). A
+  switch between `lora` and `fsk` pairs afresh (§44).
+- **Hub control commands.** DevStatus, Backoff, HomeGateway and PendingInfo (§44).
+- **Parity with LoRaWAN.** Telemetry, alarms, commands, paging, history backfill, network time,
+  link supervision, `get_radio_state`, the boot and periodic announce, `force_send`, `sample`,
+  `buzzer_play`, `clock_sync` and a rejoin without a reboot all work as over LoRaWAN
+  (§23, §25, §28, §34).
+- **Timing and the duty cycle.** Retry n waits a random 1..2^n s, and each node has a stable
+  uplink phase (§27). The duty budget comes from the EU868 sub-band of `p2p-frequency`
+  (863–865 MHz: 0.1 %) (§31). `p2p-tx-power` is 2..14 dBm (§44).
+- **Pairing.** Reset tiers clear the P2P pairing (§25).
+
+#### Both radios
+
+- **The network knows the configuration.** After every boot/join the device sends its Info and
+  a settings-info (intervals, every capability, detected 1-Wire sensors). Both are re-sent
+  every `interval-announce` hours (default 24 h), and `get_settings` asks for them (§4, §14,
+  §37).
+- **Long answers always arrive.** An answer that does not fit one frame is split into
+  self-contained pages that the device sends by itself; periodic telemetry is paged the same
+  way. A 1-Wire reading is never split. At the lowest data rates a command is still answered
+  (`BUDGET_TOO_SMALL`) (§9, §13).
+- **One paged answer at a time.** While one goes out, a second request that needs pages gets
+  `NOT_READY` with its `seq`; ask again later (§46).
+- **Answer pairing.** Every answer carries its request's `seq`: `clock_sync` is answered by an
+  Info, a request that fails to decode gets `BAD_REQUEST`. `force_send` / `sample` send at once,
+  without the fleet jitter (§15).
+- **Uplink timing.** A periodic report goes at a fixed per-device offset of up to 60 s after its
+  slot (was up to 10 s), so devices rebooted together do not collide (§27).
+- **Reboot after a command.** A command that reboots (save, reset, reboot) first waits for its
+  answer, the queued alarm frames and pending ACKs. The wait is re-checked every 8 s; after at
+  most 120 s the device reboots anyway (§32, §50).
+- **Shared names.** `radio-deveui`, `radio-appkey` and `radio-link-check-*` apply to both
+  radios (§26, §33).
 - **Info** no longer carries `lrw_state` and the last-downlink RSSI/SNR. Use
-  `get_radio_state` (§24).
-- **`factory_reset`** now also clears the pulse counters and the history. `vendor_reset`
-  closes the claim window (§35).
-- **Region not in the image.** If the stored `lrw-region` is not compiled into the image,
-  the radio stays silent and reports `lrw_disabled`. It never falls back to another band (§7).
-- **LED.** Red and green are plain GPIO again, as in v1.4.0. The boot carousel no longer
-  delays the boot, and NFC answers ~1.2 s after reset (was ~6 s). During a tap only the
-  NFC LED shows (§3, §18).
-- **Alarm rules and sensor values (breaking).** A rule is (rule, slot, channel) with the
-  sensor type it was written for (18 B, was 17 B); `AlarmEvent` / `AlarmStatus` say `slot` +
-  `channel` (`source` is now `slot`, the old `slot` is `rule`). A 1-Wire `SensorReading` is a
-  valid mask + packed channel values, decoded as `values` / `units` by channel name. 1-Wire
-  no-data is reported per chip and per device (§40).
-- **A missing onboard reading is omitted (#483).** A NaN temperature, humidity,
-  pressure, altitude or illuminance is no longer sent as a 5-byte "not available"
-  sentinel; the field is left out. An enabled barometer on a board without one saved
-  10 B per uplink. The fault is still reported by `device_status` and the `no_data`
-  alarm (§42).
-- **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
-  retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
-  `p2p-frequency` (§31).
-- **Reboot after a command.** A command that reboots (save, reset, reboot) first waits for
-  its answer, queued alarm frames and pending ACKs: re-checked every 8 s, at most 120 s after
-  the command, then it reboots anyway (§32, §50).
-- **Alarm batches.** An `alarm-limit` window holds up to 16 events (was 8) and is sent as
-  soon as it is full. One report takes at most 4 frames; the rest follows as the next report
-  (§46).
-- **RATE alarm window and motion states (#498).** A RATE rule counts within `dwell` seconds
-  (`0` = `interval-report`, the old window), fires as soon as the count is reached and stays one
-  alarm while the rate lasts. PIR / accelerometer motion also take level rules: "motion
-  started / ended" (`from 1 to 1`) and "stopped" (`from 0 to 0`) (§48).
-- **One paged answer at a time.** While a paged answer is going out, a second request that
-  needs pages gets `NOT_READY` with its `seq`; ask again once the first one is out (§46).
+  `get_radio_state`, which reports the link state, SF/DR, TX power, both link directions,
+  gateway count, duty-cycle use and counters (§24).
+
+#### Sensors and inputs
+
+- **Channel model.** Each sensor type publishes its channel table (`app_sensor_types.yaml`).
+  Telemetry, history and alarms address a value as (slot, channel). A 1-Wire `SensorReading`
+  is a valid mask + packed values, decoded by channel name (§40).
+- **GP pins (breaking).** `cap-gpio-mode` gives GP_A/GP_B to the inputs, the PIR or the buzzer,
+  and each input is `digital`, `analog` (0–24 V) or `pulse` (pulse counter, e.g. S0). A pin
+  conflict can no longer be stored (§45, §48).
+- **`cap-sht`** switches the onboard temperature/humidity sensor off (§36).
+- **A missing onboard reading is omitted.** It used to be sent as a 5 B "not available"
+  sentinel; the fault is still reported by `device_status` and the `no_data` alarm (§42).
+- **1-Wire.** A probe plugged in after boot is found, at 2, 5, 10 and 15 min, then every
+  15 min. A machine probe whose accelerometer fails still measures temperature (§43). The bus
+  lock fix in the Zephyr fork ends a 1-Wire wedge + watchdog reset (§46).
+
+#### History
+
+- **Timestamps follow the RTC** across reboots, power loss, debugger halts and replays. Before,
+  they could be shifted by the length of an outage (§21).
+- **`history-channels`** (up to 24 (slot, channel) entries) replaces `history-sensors` (§40).
+- **Kept across a boot layout change.** The ring is no longer restarted when the channel
+  layout changes at boot (§43).
+
+#### Power, robustness, configuration
+
+- **Dead cell.** Below 1.8 V at boot the STICKER blinks red and switches itself off instead of
+  brownout-looping (§47).
+- **CPU fault.** The device reboots at once and the next Info reports the fault reason, PC and
+  LR (§43).
+- **Watchdog.** The IWDG is fed through a 1-Wire scan and the boot steps, so failing probes
+  cannot cause a reset loop (§46).
 - **Clock window.** `clock_sync`, network time and `clock set` accept only 2024-01-01 ..
-  2099-01-01; a time outside is refused (§46).
-- **Stale settings are cleaned up.** NVS keys of parameters that this firmware no longer has
-  are deleted at boot, up to 4 per boot. The `set-value failure ... error(-2)` boot errors
+  2099-01-01 (§46).
+- **LED.** Red and green are plain GPIO again, as in v1.4.0, and the boot carousel no longer
+  delays the boot (§3).
+- **LSE crystal.** It is driven at the highest strength, at a cost of +0.45 µA idle (§38).
+- **Stale settings are cleaned up.** NVS keys of parameters this firmware no longer has are
+  deleted at boot, up to 4 per boot, so the `set-value failure ... error(-2)` boot errors
   disappear (§51).
 
 ### Upgrading from v1.4.x — action required
