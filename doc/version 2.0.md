@@ -198,8 +198,10 @@ to the full description.
   and each input is `digital`, `analog` (0–24 V) or `pulse` (pulse counter, e.g. S0). A pin
   conflict can no longer be stored (§45, §48).
 - **`cap-sht`** switches the onboard temperature/humidity sensor off (§36).
-- **A missing onboard reading is omitted.** It used to be sent as a 5 B "not available"
-  sentinel; the fault is still reported by `device_status` and the `no_data` alarm (§42).
+- **A missing reading is `null`.** An enabled sensor without a valid sample is sent as the
+  5 B "not available" sentinel and decodes to `null`; an absent key means the capability is
+  off. #483 had omitted the field; that is reverted and extended to orientation and the
+  analog inputs (§52).
 - **1-Wire.** A probe plugged in after boot is found, at 2, 5, 10 and 15 min, then every
   15 min. A machine probe whose accelerometer fails still measures temperature (§43). The bus
   lock fix in the Zephyr fork ends a 1-Wire wedge + watchdog reset (§46).
@@ -350,7 +352,7 @@ to the full description.
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
 | Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` = TOWER GFSK with TOWER OTA pairing toward a stock TOWER gateway, #490). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
-| Telemetry | **Changed** — a missing onboard reading (NaN temperature, humidity, pressure, altitude, illuminance) is omitted instead of sent as a 5 B sentinel (#483). See §42. |
+| Telemetry | **Changed** — a missing reading of an enabled sensor is the NA sentinel (→ `null`), now also for `orientation` and `input_a/b_voltage`; #483's omission (§42) is reverted. See §52. |
 | Robustness | **Fix** — v2.0.0 review (#485, PR #489): history survives a boot layout change, one failed onboard read is held, machine probe without its accelerometer, 1-Wire probe plugged in after boot, CPU fault record + immediate reboot (Info fields 20–22), two commands in one downlink window, a duty-held report goes out late. See §43. |
 | Radio: P2P | **Changed** — one TOWER protocol on both PHY profiles (#486): MTU 96 / 74 B payload on `lora` and `fsk`, control commands DevStatus / Backoff / HomeGateway / PendingInfo (#487), `fsk` toward a stock TOWER gateway (#490). See §44. |
 | Sensors | **New** — analog voltage 0–24 V on the external inputs A/B (#396): sensor channels `input-a-voltage` / `input-b-voltage` with telemetry, history, alarms and no-data. See §45. |
@@ -2507,6 +2509,9 @@ transport.md`; node behaviour: `doc/p2p.md`.
 
 ## 42. Omit missing onboard readings (#483)
 
+> **Reverted in v2.0.0 by §52:** the sentinel is back, so a host can tell "enabled, no
+> valid sample" (`null`) from "capability off" (absent key) without its own state.
+
 An enabled onboard analog sensor whose reading is NaN (sensor absent or failed) used to
 go out as a "not available" sentinel: `INT32_MIN` for `temperature` / `altitude`,
 `UINT32_MAX` for `humidity` / `pressure` / `illuminance`. Each one is a 5-byte varint
@@ -2947,6 +2952,40 @@ firmware no longer has. The first boot after the flash still logged 3 `set-value
 (the 4 recorded keys were removed, the rest were over the per-boot limit); the second boot
 removed the rest, and from then on no boot logged any. Config values, identity and LoRaWAN
 credentials were unchanged.
+
+## 52. A missing reading is `null`, not an absent key
+
+Since #483 (§42) an enabled sensor without a valid sample was left out of the telemetry.
+A stateless decoder (TTN payload formatter) then could not tell a failed sensor from a
+disabled one: both were an absent key. The firmware sends the "not available" sentinel
+again, at the extreme of the wire type, as the Bluetooth SIG "value is not known" values.
+
+| Field | Sentinel | Decoded |
+|---|---|---|
+| `temperature`, `altitude` (sint32) | `INT32_MIN` | `null` |
+| `humidity`, `pressure`, `illuminance` (uint32) | `UINT32_MAX` | `null` |
+| `orientation` (uint32), **new** | `UINT32_MAX` | `null` |
+| `input_a_voltage`, `input_b_voltage` (uint32), **new** | `UINT32_MAX` | `null` |
+| `voltage` | 0 (unchanged) | `null` |
+
+- **Rule:** a field is on the wire whenever its capability is on. `null` = enabled, no valid
+  sample (sensor absent, failed, or outside the registry `range`, e.g. an analog input above
+  30 V). An absent key = capability off. Counters and digital flags always carry a value.
+- **1-Wire** keeps its `valid` mask (§40): a missing channel decodes to the same `null`.
+  History keeps its own sentinels (top value of the encoding → `null`).
+- **Cost:** 6 B per missing field, only while it is missing. A healthy report is unchanged.
+  An enabled barometer on a board without one costs 12 B again (§42).
+- **SHT4x implausible reading** (`-ERANGE`, #340 M18) no longer freezes the last value
+  forever. It counts as a miss like a failed read (#485 S2): one sweep keeps the last
+  good reading, the second in a row goes NaN → `null` + `no_data`. It still stays out of the
+  wedged-I2C accounting.
+- **Decoder:** `ttn.js` maps the sentinel to `null` for `orientation` and
+  `input_a/b_voltage` too (the other fields already did, for pre-#483 frames). Hub and
+  Manager-App must map the sentinels as well.
+- **Flash:** release 192 876 B (+48 B vs v2.0.0 `845f801e`), RAM unchanged.
+- **Tests:** `tests/compose` `test_na_sentinel_absent_analog` (replaces
+  `test_omit_absent_analog`), `test_system_always_present` and `test_input_analog_voltage`
+  updated; `ttn.test.js` "NA sentinels decode to null".
 
 ---
 
