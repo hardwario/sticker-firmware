@@ -15,11 +15,15 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/gpio/gpio_emul.h>
 #include <zephyr/kernel.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/util.h>
 
 #include <stdlib.h>
 #include <string.h>
+
+#include "cmdline.h"
+#include "soc.h"
 
 /* Board dividers, as in app_battery.c / app_analog.c. */
 #define BATT_DIV_NUM  100 /* R2 / (R1 + R2), 560k / 100k */
@@ -92,6 +96,34 @@ static void pin_cb_handler(const struct device *port, struct gpio_callback *cb,
 		(void)gpio_emul_input_set(pin->spec.port, pin->spec.pin, m_pin_level[pin - m_pins]);
 	}
 }
+
+/* Output edges per pin (the buzzer drives GP_B/GP_A as outputs): sampled
+ * every 1 ms, enough for its 2-4 kHz-free on/off melody steps. */
+static uint32_t m_out_edges[ARRAY_SIZE(m_pins)];
+static int m_out_last[ARRAY_SIZE(m_pins)];
+
+static void out_poll(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	for (size_t i = 0; i < ARRAY_SIZE(m_pins); i++) {
+		gpio_flags_t flags = 0;
+
+		(void)gpio_emul_flags_get(m_pins[i].spec.port, m_pins[i].spec.pin, &flags);
+		if (!(flags & GPIO_OUTPUT)) {
+			continue;
+		}
+
+		int v = gpio_emul_output_get(m_pins[i].spec.port, m_pins[i].spec.pin);
+
+		if (v >= 0 && v != m_out_last[i]) {
+			m_out_edges[i]++;
+			m_out_last[i] = v;
+		}
+	}
+}
+
+static K_TIMER_DEFINE(m_out_timer, out_poll, NULL);
 
 static int pin_get(const struct sim_pin *pin)
 {
@@ -240,7 +272,8 @@ static int cmd_pin(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 	if (argc == 2) {
-		shell_print(sh, "%s = %d", pin->name, pin_get(pin));
+		shell_print(sh, "%s = %d out_edges=%u", pin->name, pin_get(pin),
+			    m_out_edges[pin - m_pins]);
 		return 0;
 	}
 
@@ -475,9 +508,40 @@ static int cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 }
 #endif
 
+/* --pin_low=<name>[,<name>...]: pins held low from power-on (a pulse in
+ * progress at boot, or an idle-low wiring), as the external source would. */
+static char *m_pin_low_opt;
+
+static void sim_shell_native_options(void)
+{
+	static struct args_struct_t options[] = {
+		{.option = "pin_low",
+		 .name = "names",
+		 .type = 's',
+		 .dest = (void *)&m_pin_low_opt,
+		 .descript = "Comma-separated pins (hall_l, hall_r, gp_a, gp_b) held low "
+			     "from power-on"},
+		ARG_TABLE_ENDMARKER,
+	};
+
+	native_add_command_line_opts(options);
+}
+
+NATIVE_TASK(sim_shell_native_options, PRE_BOOT_1, 1);
+
 static int sim_shell_init(void)
 {
 	k_work_init_delayable(&m_pulse.work, pulse_work);
+	k_timer_start(&m_out_timer, K_MSEC(1), K_MSEC(1));
+
+	for (size_t i = 0; m_pin_low_opt != NULL && i < ARRAY_SIZE(m_pins); i++) {
+		const char *at = strstr(m_pin_low_opt, m_pins[i].name);
+		size_t n = strlen(m_pins[i].name);
+
+		if (at != NULL && (at[n] == '\0' || at[n] == ',')) {
+			m_pin_level[i] = 0;
+		}
+	}
 
 	for (size_t i = 0; i < ARRAY_SIZE(m_pins); i++) {
 		gpio_init_callback(&m_pin_cb[i], pin_cb_handler, BIT(m_pins[i].spec.pin));
@@ -488,6 +552,33 @@ static int sim_shell_init(void)
 }
 
 SYS_INIT(sim_shell_init, POST_KERNEL, 99);
+
+/* Raw settings write / delete, to stage NVS content an older firmware left
+ * behind (upgrade tests). The value is stored as is: no size check, no reload
+ * into the running config; reboot to see how the loader takes it. */
+static int cmd_nvs(const struct shell *sh, size_t argc, char **argv)
+{
+	if (strcmp(argv[1], "delete") == 0 && argc == 3) {
+		return settings_delete(argv[2]);
+	}
+	if (strcmp(argv[1], "write") != 0 || argc != 4) {
+		shell_error(sh, "usage: nvs write <key> <hex> | nvs delete <key>");
+		return -EINVAL;
+	}
+
+	uint8_t buf[64];
+	size_t len = hex2bin(argv[3], strlen(argv[3]), buf, sizeof(buf));
+
+	if (len == 0) {
+		shell_error(sh, "bad hex (max %u B)", (unsigned int)sizeof(buf));
+		return -EINVAL;
+	}
+
+	int ret = settings_save_one(argv[2], buf, len);
+
+	shell_print(sh, "%s: %u B, %d", argv[2], (unsigned int)len, ret);
+	return ret;
+}
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sim, SHELL_CMD_ARG(status, NULL, "Show simulated readings.", cmd_status, 1, 0),
@@ -514,6 +605,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_LORA_SX126X)
 	SHELL_CMD_ARG(radio, NULL, "SX1262 emulator state.", cmd_radio, 1, 0),
+	SHELL_CMD_ARG(nvs, NULL, "Raw settings: nvs write <key> <hex> | nvs delete <key>", cmd_nvs,
+		      3, 1),
 #endif
 #if defined(CONFIG_STICKER_SIM_ST25DV)
 	SHELL_CMD_ARG(nfc, NULL, "ST25DV emulator: nfc [on|off] (RF field)", cmd_nfc, 1, 1),
