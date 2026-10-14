@@ -413,6 +413,15 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	}
 }
 
+/* #498: sensors ids of the caps folded into cap_gpio_mode / cap_gpio_input_a/_b
+ * (cap_input_a/_b 3/4, cap_pir_detector 7, cap_buzzer 19, cap_analog_a/_b
+ * 20/21). They are reserved in the proto, so nanopb would silently drop them;
+ * an old host must get BAD_REQUEST instead of an ACK for a no-op. */
+static bool removed_sensor_id(uint32_t tag)
+{
+	return tag == 3 || tag == 4 || tag == 7 || tag == 19 || tag == 20 || tag == 21;
+}
+
 static void make_error(Response *resp, Response_Error_Code code, const char *detail)
 {
 	resp->which_body = Response_error_tag;
@@ -852,6 +861,14 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 
 	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
 	 * equals the index here (0..4). */
+	for (size_t j = 0; j < gp->sensors_field_count; j++) {
+		if (removed_sensor_id(gp->sensors_field[j])) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "removed field");
+			resp->body.error.fault_field = 300 + gp->sensors_field[j];
+			return;
+		}
+	}
+
 	const uint32_t *req_ids[5] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
 				      gp->alarms_field, gp->p2p_field};
 	const size_t req_n[5] = {gp->lorawan_field_count, gp->application_field_count,
@@ -3001,6 +3018,56 @@ static uint32_t peek_seq(const uint8_t *in, size_t in_len)
 	return 0;
 }
 
+/* #498: first removed sensors id (see removed_sensor_id()) in the raw
+ * SetParam.sensors submessage of a Command, 0 if none. */
+static uint32_t peek_removed_set_sensor(const uint8_t *in, size_t in_len)
+{
+	pb_istream_t s = pb_istream_from_buffer(in, in_len);
+	pb_wire_type_t wt;
+	uint32_t tag;
+	bool eof;
+
+	while (pb_decode_tag(&s, &wt, &tag, &eof)) {
+		if (tag != Command_set_param_tag || wt != PB_WT_STRING) {
+			if (!pb_skip_field(&s, wt)) {
+				return 0;
+			}
+			continue;
+		}
+		pb_istream_t sp;
+
+		if (!pb_make_string_substream(&s, &sp)) {
+			return 0;
+		}
+		while (pb_decode_tag(&sp, &wt, &tag, &eof)) {
+			if (tag == Command_SetParam_sensors_tag && wt == PB_WT_STRING) {
+				pb_istream_t se;
+
+				if (!pb_make_string_substream(&sp, &se)) {
+					return 0;
+				}
+				while (pb_decode_tag(&se, &wt, &tag, &eof)) {
+					if (removed_sensor_id(tag)) {
+						return tag;
+					}
+					if (!pb_skip_field(&se, wt)) {
+						break;
+					}
+				}
+				if (!pb_close_string_substream(&sp, &se)) {
+					return 0;
+				}
+			} else if (!pb_skip_field(&sp, wt)) {
+				break;
+			}
+		}
+		if (!pb_close_string_substream(&s, &sp)) {
+			return 0;
+		}
+	}
+	return 0;
+}
+
 /* Decode + dispatch in their own frame, so the ~550 B Command is gone again
  * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
  * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
@@ -3019,6 +3086,16 @@ static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport
 		resp->seq = peek_seq(in, in_len);
 		make_error(resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 		return 0;
+	}
+	if (cmd.which_body == Command_set_param_tag) {
+		uint32_t removed = peek_removed_set_sensor(in, in_len);
+
+		if (removed) {
+			resp->seq = cmd.seq;
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "removed field");
+			resp->body.error.fault_field = 300 + removed;
+			return cmd.which_body;
+		}
 	}
 	app_cmd_dispatch(transport, &cmd, resp, act);
 	if (cmd.which_body == Command_get_info_tag && cmd.body.get_info.has_page) {
