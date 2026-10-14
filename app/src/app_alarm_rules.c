@@ -130,9 +130,9 @@ bool app_alarm_rule_armed(const struct app_alarm_rule *r)
 		return false;
 	}
 	/* A motherboard rule may be provisioned before its capability is on; it
-	 * stays inert until then. */
-	return c->cap_off == APP_SENSOR_NO_CAP ||
-	       *(const bool *)((const char *)&g_app_config + c->cap_off);
+	 * stays inert until then. An enum cap (cap_gpio_mode) is matched against
+	 * cap_mask, not read as a bool. */
+	return app_sensor_channel_cap_on(c);
 }
 
 /* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
