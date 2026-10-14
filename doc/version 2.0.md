@@ -2703,3 +2703,9 @@ loader (generated from `config.c.j2`) now records an unknown `config/*` key, up 
 and deletes it once the subtree has loaded without error (`Stale key ... removed`). If a load
 fails, nothing is deleted. A firmware downgrade drops the newer firmware's extra keys the same
 way: those settings return to their defaults after upgrading again.
+
+HIL PASS (2026-10-14, STICKER 2162165132, J-Link 801053709, debug build): NVS held 7 keys this
+firmware no longer has. The first boot after the flash still logged 3 `set-value failure` lines
+(the 4 recorded keys were removed, the rest were over the per-boot limit); the second boot
+removed the rest, and from then on no boot logged any. Config values, identity and LoRaWAN
+credentials were unchanged.
