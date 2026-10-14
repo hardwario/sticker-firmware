@@ -4,7 +4,7 @@
 > transport.md`, "the TOWER plan"). Epic #118.
 >
 > **Merged into `v1.5.0` on 2026-10-13** with #487 (control commands) and #493
-> (`fsk` toward a stock TOWER gateway, #490). Summary: `doc/version 1.5.md` §44.
+> (`fsk` toward a stock TOWER gateway, #490). Summary: `doc/version 2.0.md` §44.
 
 ## Principle (Hynek, 2026-10-12)
 
@@ -27,7 +27,7 @@ plan §5). Timing is not on the wire.
 | # | Item | Where | State |
 |---|---|---|---|
 | W1 | `P2P_FRAME_MAX` 100 → 96, Capabilities MTU 96, tests, decoder | node | **done** `eebf82c4` |
-| W2 | Docs: TOWER plan D14, `doc/p2p.md`, `doc/radio_p2p.md`, `doc/version 1.5.md`, link doc | node | **done** (doc commit) |
+| W2 | Docs: TOWER plan D14, `doc/p2p.md`, `doc/radio_p2p.md`, `doc/version 2.0.md`, link doc | node | **done** (doc commit) |
 | W3 | NB `P2P_TWR_DL_MAX_PT` 78 → 74; RX refuses frames over 96 B (it parses up to 255 B today) | proximos-v2 NB | **done**, NB 0.4.1+d69b5d68 on Hubs 182 and 158 (2026-10-12) |
 | W4 | Central `MAX_FRAME` / `MAX_PAYLOAD` / `MAX_COMMAND_BODY` 100/78/76 → 96/74/72, Capabilities MTU 96; check that no command body needs more than 72 B (e.g. a large `SetParam`) | proximos-v2 central | **done**, branch `hynek/p2p-mtu96` 136cd2fa (no MR yet); the JoinAccept `tx_power` is capped at 14 too |
 | W5 | TOWER interop target: (a) stock TOWER nodes on the Hub and/or (b) a STICKER on a stock TOWER Radio Dongle. (b) needs a static-key mode or upstream E4, plus E3 for the `0x81`/`0x91` envelopes. **Decided 2026-10-12 (Hynek):** (a) dropped, no TOWER nodes will ever run on the Hub; (b) moved to #490 | decision | **decided**; (b) → #490 |

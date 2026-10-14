@@ -1274,7 +1274,7 @@ integrated. Report per scenario: idle avg excluding bursts, floor median, min, a
   (GitHub release artefact) and the v1.5.0 candidate (CI release artefact or a local release
   build of the tested commit — record its SHA). Run v1.4.0 **first**, then flash v1.5.0 without
   erase: the upgrade keeps NVS and history; the reverse (downgrade) needs `history clear`
-  (`version 1.5.md` §20).
+  (`version 2.0.md` §20).
 - **Config (both images):** `radio-mode lorawan` (joined, ADR on), `interval-report 900`,
   `interval-sample` default, history off, accelerometer off, the bench's fitted-sensor caps.
   Set it on v1.4.0 over the shell before detaching; v1.5.0 inherits it via NVS — verify with
