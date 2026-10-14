@@ -4,8 +4,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-"""STICKER simulator air peer: a LoRaWAN 1.0.x network server (EU868) for
-STICKERs running on native_sim (doc/simulator.md).
+"""STICKER simulator air peer: a LoRaWAN 1.0.x network server (EU868) and a
+P2P hub (TOWER protocol over LoRa, sim_p2p.py) for STICKERs running on
+native_sim (doc/simulator.md). The sync word tells the two apart: LoRaWAN
+public 0x3444, P2P private 0x1424.
 
 Each simulated node's SX1262 emulator sends every transmission here as a UDP
 datagram (drivers/sim/sim_air.h). This server answers each of them with a
@@ -14,10 +16,13 @@ answers LinkCheckReq/DeviceTimeReq, decodes the payload with the
 application's TTN decoder and sends queued downlinks.
 
 Commands on stdin:
-  down <deveui|*> <fport> <hex> [c]   queue a raw downlink (c = confirmed)
+  down <deveui|*> <fport> <hex> [c]   queue a raw downlink (c = confirmed;
+                                      P2P: 0x81 envelope, fPort 85 -> port 86)
   cmd <deveui|*> <json>               queue a DownlinkCommand through the
                                       decoder's encodeDownlink(), e.g.
                                       cmd * {"command":"get_info"}
+  ctrl <deveui|*> <hex>               queue a P2P 0x91 TLV list, e.g. 3000
+                                      (DevStatusReq), 040100 (RejoinReq)
   list                                show sessions and queued downlinks
 """
 
@@ -32,6 +37,7 @@ import sys
 import threading
 import time
 
+import sim_p2p
 from cryptography.hazmat.primitives import cmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -153,6 +159,8 @@ class Server:
             self.keys[int(eui, 16)] = bytes.fromhex(key)
         self.default_key = bytes.fromhex(args.appkey) if args.appkey else None
         self.join_nonce = random.randrange(1 << 20)
+        self.hub = sim_p2p.Hub(self, int(args.net_id, 16),
+                               [int(x, 16) for x in args.p2p_eui_prefix])
         self.decoder = None
         self.decoder_lock = threading.Lock()
         bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decoder_bridge.js")
@@ -217,6 +225,10 @@ class Server:
                else f"GFSK {f.bitrate} b/s")
         self.log(f"{addr[1]}: rx {f.freq_hz / 1e6:.3f} MHz {mod} {f.power_dbm} dBm "
                  f"{len(f.data)} B {f.data.hex()}")
+        if self.hub.accepts(f):
+            if not self.hub.handle(addr, f):
+                self.reply(addr, f)
+            return
         if f.modem != LORA or f.sync_word != LORAWAN_SYNC or f.iq_inverted or not f.data:
             self.reply(addr, f)  # not LoRaWAN: nothing to answer
             return
@@ -343,11 +355,13 @@ class Server:
 
     # --- console -----------------------------------------------------------
 
-    def targets(self, who):
+    def targets(self, who, p2p_only=False):
+        nodes = [] if p2p_only else list(self.sessions.values())
+        nodes += [p for p in self.hub.peers.values() if p.session_key]
         if who == "*":
-            return list(self.sessions.values())
+            return nodes
         eui = int(who, 16)
-        return [s for s in self.sessions.values() if s.deveui == eui]
+        return [s for s in nodes if s.deveui == eui]
 
     def stdin_loop(self):
         for line in sys.stdin:
@@ -365,6 +379,9 @@ class Server:
             for s in self.sessions.values():
                 self.log(f"{s.deveui:016x} DevAddr {s.devaddr or 0:08x} FCntUp {s.fcnt_up} "
                          f"FCntDown {s.fcnt_down} queued {len(s.queue)}")
+            for p in self.hub.peers.values():
+                self.log(f"{p.deveui:016x} P2P addr {p.addr:08x} paired {bool(p.session_key)} "
+                         f"up {p.node_last} down {p.gw_counter} queued {len(p.queue)}")
         elif parts[0] == "down" and len(parts) == 3:
             args = parts[2].split()
             item = (int(args[0]), bytes.fromhex(args[1]), len(args) > 2 and args[2] == "c")
@@ -380,8 +397,14 @@ class Server:
             for s in self.targets(parts[1]):
                 s.queue.append(item)
                 self.log(f"queued for {s.deveui:016x}: FPort {item[0]} {item[1].hex()}")
+        elif parts[0] == "ctrl" and len(parts) == 3:
+            item = ("ctrl", bytes.fromhex(parts[2]))
+            for p in self.targets(parts[1], p2p_only=True):
+                p.queue.append(item)
+                self.log(f"queued for {p.deveui:016x}: 0x91 {item[1].hex()}")
         else:
-            self.log("commands: down <deveui|*> <fport> <hex> [c] | cmd <deveui|*> <json> | list")
+            self.log("commands: down <deveui|*> <fport> <hex> [c] | cmd <deveui|*> <json> | "
+                     "ctrl <deveui|*> <hex> | list")
 
 
 def main():
@@ -391,9 +414,15 @@ def main():
     p.add_argument("--device", action="append", help="DEVEUI:APPKEY, repeatable")
     p.add_argument("--rssi", type=int, default=-60, help="downlink RSSI seen by the node, dBm")
     p.add_argument("--snr", type=int, default=9, help="downlink SNR seen by the node, dB")
+    p.add_argument("--net-id", default="4e420001", help="P2P hub net_id (hex)")
+    p.add_argument("--p2p-eui-prefix", action="append", default=[],
+                   help="upper 32 bits of P2P DevEUIs to try with --appkey (hex), repeatable; "
+                   "default 58760700")
     p.add_argument("--no-decode", action="store_true", help="do not run the TTN decoder")
+    args = p.parse_args()
+    args.p2p_eui_prefix = args.p2p_eui_prefix or ["58760700"]
     try:
-        Server(p.parse_args()).run()
+        Server(args).run()
     except KeyboardInterrupt:
         pass
 
