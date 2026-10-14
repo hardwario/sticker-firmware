@@ -2693,3 +2693,19 @@ joined, so the answer could not leave. A Reboot command was fed through `app_rad
 on the radio work queue. The action was deferred every 8 s ("112 s left" … "7 s left") and the
 reboot came exactly 120.0 s after the command. A join attempt in between shifted the 8 s steps
 but did not move the deadline.
+
+## 50. Stale NVS config keys are removed
+
+Keys of parameters that an older release removed or renamed (for example
+`config/alarm-notif-time`, `config/history-sensors`) stayed in NVS forever, and every boot
+logged `<err> settings: set-value failure. key: config/... error(-2)` for each. The config
+loader (generated from `config.c.j2`) now records an unknown `config/*` key, up to 4 per boot,
+and deletes it once the subtree has loaded without error (`Stale key ... removed`). If a load
+fails, nothing is deleted. A firmware downgrade drops the newer firmware's extra keys the same
+way: those settings return to their defaults after upgrading again.
+
+HIL PASS (2026-10-14, STICKER 2162165132, J-Link 801053709, debug build): NVS held 7 keys this
+firmware no longer has. The first boot after the flash still logged 3 `set-value failure` lines
+(the 4 recorded keys were removed, the rest were over the per-boot limit); the second boot
+removed the rest, and from then on no boot logged any. Config values, identity and LoRaWAN
+credentials were unchanged.

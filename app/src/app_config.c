@@ -115,6 +115,15 @@ void app_config_unlock(void)
 	k_mutex_unlock(&m_app_config_lock);
 }
 
+/* Keys found in NVS that this firmware no longer has (a parameter removed or
+ * renamed in an older release). Recorded while loading, deleted after it: the
+ * settings core would log a set-value failure for each on every boot. */
+#define STALE_KEYS_MAX     4
+#define STALE_KEY_NAME_MAX 32
+
+static char m_stale_keys[STALE_KEYS_MAX][STALE_KEY_NAME_MAX];
+static uint8_t m_stale_key_count;
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	int ret;
@@ -250,7 +259,31 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 
 #undef SETTINGS_SET
 
+	if (m_stale_key_count < STALE_KEYS_MAX && strlen(key) < STALE_KEY_NAME_MAX) {
+		strcpy(m_stale_keys[m_stale_key_count++], key);
+		return 0;
+	}
+
 	return -ENOENT;
+}
+
+/* Delete the stale keys h_set() recorded; a failure only means the key is
+ * reported again on the next boot. */
+static void remove_stale_keys(void)
+{
+	char path[sizeof(SETTINGS_PFX) + STALE_KEY_NAME_MAX];
+
+	for (uint8_t i = 0; i < m_stale_key_count; i++) {
+		snprintf(path, sizeof(path), SETTINGS_PFX "/%s", m_stale_keys[i]);
+		int ret = settings_delete(path);
+
+		if (ret) {
+			LOG_WRN("Stale key %s not removed: %d", path, ret);
+		} else {
+			LOG_INF("Stale key %s removed", path);
+		}
+	}
+	m_stale_key_count = 0;
 }
 
 static int h_commit(void)
@@ -2534,6 +2567,8 @@ static int app_config_init(void)
 		 * running rather than dead. */
 		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
 		m_app_config_load_failed = true;
+	} else {
+		remove_stale_keys();
 	}
 
 	if (m_app_config_migrated) {
