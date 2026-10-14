@@ -2664,3 +2664,13 @@ sent a Hello; a cell can sit at that knee for days.
 ---
 
 *Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
+
+## 48. CI version stamping
+
+Branch and PR builds in CI used to bake the latest git tag as the firmware version, so
+`v1.5.0` artifacts reported fw 1.4.0 and Portal refused the features it gates on fw ≥ 1.5.0
+(alarm table, `history_channels`). Now only a tag build passes its numbers
+(`-DAPP_VERSION_*`, build type 0 MAIN); a branch/PR build passes build type 1 (DEV) and keeps
+the version in `app/CMakeLists.txt`, the release the branch builds towards. Local builds are
+type 2 (CUSTOM) with the same version. Bump `app/CMakeLists.txt` when a branch starts the
+next release.
