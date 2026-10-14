@@ -2986,6 +2986,13 @@ again, at the extreme of the wire type, as the Bluetooth SIG "value is not known
 - **Tests:** `tests/compose` `test_na_sentinel_absent_analog` (replaces
   `test_omit_absent_analog`), `test_system_always_present` and `test_input_analog_voltage`
   updated; `ttn.test.js` "NA sentinels decode to null".
+- **HIL PASS** (2026-10-14, STICKER 2162165722, J-Link 822005110, debug P2P build, Hub 182):
+  with `cap-barometer` on a board without the MPL3115A2, `input_a` analog with the pin
+  floating, and `cap-accelerometer` on in an image without the LIS2DH12 driver, the uplink
+  carried `pressure`, `altitude`, `orientation` and `input_a_voltage` as `ffffffff0f`;
+  `ttn.js` decodes all four to `null`, temperature/humidity/illuminance are real values. The
+  Hub decoded `pressure`/`altitude` to `null` (Portal "–"); it still needed the sentinel
+  check for fields 8/30/31 (Hub fix 5ce440f6, proximos-v2 !179).
 
 ---
 
