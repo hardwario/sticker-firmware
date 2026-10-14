@@ -18,3 +18,8 @@ if(CONFIG_LORA_SX126X)
   # The air's UDP socket lives in the host-side runner (host libc).
   target_sources(native_simulator INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/sim_air_bottom.c)
 endif()
+
+if(CONFIG_STICKER_SIM_ST25DV)
+  zephyr_library_sources(emul_st25dv.c)
+  target_sources(native_simulator INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/sim_nfc_bottom.c)
+endif()

@@ -1,0 +1,15 @@
+#
+# Copyright (c) 2026 HARDWARIO a.s.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+description: |
+  STICKER simulator ST25DV04K NFC tag. One node per I2C device address of the
+  chip (0x53 user memory / dynamic registers / mailbox, 0x57 system area); the
+  nodes share one chip state. The application drives the chip directly over
+  I2C (app_nfc.c), so there is no Zephyr driver behind it.
+
+compatible: "hardwario,sim-st25dv"
+
+include: i2c-device.yaml

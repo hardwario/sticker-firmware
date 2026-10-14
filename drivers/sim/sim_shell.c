@@ -39,15 +39,15 @@ static const struct sim_pin m_pins[] = {
 	{"hall_r", GPIO_DT_SPEC_GET(DT_NODELABEL(hall_r), gpios)},
 	{"gp_a", GPIO_DT_SPEC_GET(DT_NODELABEL(gp_a), gpios)},
 	{"gp_b", GPIO_DT_SPEC_GET(DT_NODELABEL(gp_b), gpios)},
-	{"nfc_gpo", GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), nfc_gpo_gpios)},
 };
 
 /* Level each pin is driven to from outside (gpio_emul has no input getter).
- * Idle: hall sensors without a magnet and the GP inputs high, NFC GPO low.
+ * Idle: hall sensors without a magnet and the GP inputs high. The NFC GPO
+ * belongs to the ST25DV emulator (emul_st25dv.c).
  * The external source wins over the MCU pull: gpio_emul sets the input from
  * the pull flags on every configure, so a callback re-applies this level
  * (app_hall.c switches the pull between samples). */
-static int m_pin_level[ARRAY_SIZE(m_pins)] = {1, 1, 1, 1, 0};
+static int m_pin_level[ARRAY_SIZE(m_pins)] = {1, 1, 1, 1};
 static struct gpio_callback m_pin_cb[ARRAY_SIZE(m_pins)];
 
 static const struct sim_pin *find_pin(const char *name)
@@ -316,6 +316,32 @@ static int cmd_radio(const struct shell *sh, size_t argc, char **argv)
 }
 #endif
 
+#if defined(CONFIG_STICKER_SIM_ST25DV)
+static int cmd_nfc(const struct shell *sh, size_t argc, char **argv)
+{
+	bool field, vcc;
+	uint8_t ctrl, gpo;
+	uint32_t rf_puts, host_puts;
+
+	if (argc > 1) {
+		if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "off") == 0) {
+			sim_st25dv_field(strcmp(argv[1], "on") == 0);
+		} else {
+			shell_error(sh, "nfc [on|off]");
+			return -EINVAL;
+		}
+	}
+
+	sim_st25dv_status(&field, &vcc, &ctrl, &gpo, &rf_puts, &host_puts);
+	shell_print(sh,
+		    "nfc field %s, vcc %s, MB_CTRL 0x%02x, GPO_CTRL 0x%02x, rf msgs %u, "
+		    "host msgs %u",
+		    field ? "on" : "off", vcc ? "on" : "off", ctrl, gpo, rf_puts, host_puts);
+
+	return 0;
+}
+#endif
+
 static int sim_shell_init(void)
 {
 	k_work_init_delayable(&m_pulse.work, pulse_work);
@@ -336,13 +362,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(light, NULL, "OPT3001: light <lux> | on | off", cmd_light, 2, 0),
 	SHELL_CMD_ARG(battery, NULL, "Battery voltage: battery <V>", cmd_battery, 2, 0),
 	SHELL_CMD_ARG(analog, NULL, "GP input voltage: analog a|b <V>", cmd_analog, 3, 0),
-	SHELL_CMD_ARG(pin, NULL, "Physical pin level: pin hall_l|hall_r|gp_a|gp_b|nfc_gpo [0|1]",
-		      cmd_pin, 2, 1),
+	SHELL_CMD_ARG(pin, NULL, "Physical pin level: pin hall_l|hall_r|gp_a|gp_b [0|1]", cmd_pin,
+		      2, 1),
 	SHELL_CMD_ARG(pulse, NULL,
 		      "Pulse train: pulse <pin> <count> [width ms, default 50] [bounce toggles]",
 		      cmd_pulse, 3, 2),
 #if defined(CONFIG_LORA_SX126X)
 	SHELL_CMD_ARG(radio, NULL, "SX1262 emulator state.", cmd_radio, 1, 0),
+#endif
+#if defined(CONFIG_STICKER_SIM_ST25DV)
+	SHELL_CMD_ARG(nfc, NULL, "ST25DV emulator: nfc [on|off] (RF field)", cmd_nfc, 1, 1),
 #endif
 	SHELL_SUBCMD_SET_END);
 

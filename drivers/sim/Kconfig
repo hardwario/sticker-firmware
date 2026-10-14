@@ -12,3 +12,10 @@ config STICKER_SIM
 	  Emulated STICKER peripherals for the native_sim build of the
 	  application: an ADC, I2C sensor emulators and the `sim` shell
 	  command that sets their readings. See doc/simulator.md.
+
+config STICKER_SIM_ST25DV
+	bool
+	default y
+	depends on STICKER_SIM && DT_HAS_HARDWARIO_SIM_ST25DV_ENABLED
+	help
+	  ST25DV NFC tag emulator and its UDP phone link (emul_st25dv.c).

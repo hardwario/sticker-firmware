@@ -48,7 +48,7 @@ int sim_air_bottom_open(const char *peer)
 		return -EINVAL;
 	}
 
-	m_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	m_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (m_fd < 0) {
 		return -errno;
 	}

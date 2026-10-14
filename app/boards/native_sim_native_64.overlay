@@ -140,6 +140,17 @@
 			zephyr,deferred-init;
 		};
 
+		/* ST25DV04K NFC tag, both device addresses (emul_st25dv.c). */
+		st25dv_e0: st25dv@53 {
+			compatible = "hardwario,sim-st25dv";
+			reg = <0x53>;
+		};
+
+		st25dv_e1: st25dv@57 {
+			compatible = "hardwario,sim-st25dv";
+			reg = <0x57>;
+		};
+
 		ds2484: ds2484@18 {
 			compatible = "maxim,ds2484";
 			reg = <0x18>;

@@ -34,6 +34,11 @@ void sim_opt3001_get(float *lux, bool *present);
 /* SX1262 emulator state (emul_sx126x.c); mode = status-byte chip mode. */
 void sim_sx126x_status(uint32_t *freq_hz, uint8_t *mode, uint32_t *tx, uint32_t *rx, bool *peer);
 
+/* ST25DV emulator (emul_st25dv.c): RF field on/off and the chip state. */
+void sim_st25dv_field(bool on);
+void sim_st25dv_status(bool *field, bool *vcc, uint8_t *mb_ctrl, uint8_t *gpo_dyn,
+		       uint32_t *rf_puts, uint32_t *host_puts);
+
 #ifdef __cplusplus
 }
 #endif
