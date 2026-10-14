@@ -944,7 +944,7 @@ so PIR and inputs can no longer be enabled together).
 > Confirm `cap-gpio-mode inputs` and `cap-gpio-input-a`/`-b` `digital` (set and save if
 > needed, noting the change). Read the input counters, ask me to toggle each input, and
 > confirm the counters and flags update. Confirm via fPort 2 telemetry. For an S0 meter use
-> `s0` instead of `digital` (count only, no state flag; see AT-SEN-03b).
+> `pulse` instead of `digital` (count only, no state flag; see AT-SEN-03b).
 
 - [ ] Pass
 

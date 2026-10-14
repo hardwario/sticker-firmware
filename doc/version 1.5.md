@@ -29,7 +29,7 @@ technical detail.
 | **Every sensor value is a channel** | Each sensor type publishes its own channel table (`app_sensor_types.yaml`). Alarm rules, telemetry and history address a value as (slot, channel): two temperatures on one machine probe, the barometer temperature, any on-board value can be alarmed and recorded. A 1-Wire slot expects a sensor type; a different sensor raises a `sensor_mismatch` alarm. | §40 |
 | **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
 | **Analog inputs** | `cap-gpio-input-a` / `cap-gpio-input-b` `analog` measure 0–24 V on the external inputs A/B. The value is a sensor channel like any other: telemetry, history, threshold alarms, no-data watchdog. | §45, §48 |
-| **GP pin owner + S0 counter** | `cap-gpio-mode` gives GP_A/GP_B to the inputs, the PIR or the buzzer; each input is `digital`, `analog` or `s0` (pulse counter). A pin conflict can no longer be stored. | §48 |
+| **GP pin owner + pulse counter** | `cap-gpio-mode` gives GP_A/GP_B to the inputs, the PIR or the buzzer; each input is `digital`, `analog` or `pulse` (pulse counter, e.g. S0). A pin conflict can no longer be stored. | §48 |
 
 ### New configuration parameters
 
@@ -46,7 +46,7 @@ technical detail.
 | `sensor1-type`…`sensor4-type` | `0` (none) | type id: `2` dallas, `3` machine-probe | Sensor type a 1-Wire slot expects; set by teach/auto-enroll or by provisioning | §40 |
 | `history-channels` | onboard temperature + humidity | up to 24 (slot, channel) entries | Replaces `history-sensors` | §40 |
 | `cap-gpio-mode` | `none` | `none` / `inputs` / `pir` / `buzzer` | Owner of GP_A/GP_B; replaces `cap-input-a/-b`, `cap-pir-detector`, `cap-buzzer` | §48 |
-| `cap-gpio-input-a`, `cap-gpio-input-b` | `none` | `none` / `digital` / `analog` / `s0` | Mode of input A / B with `cap-gpio-mode inputs`; `analog` = 0–24 V (replaces `cap-analog-a/-b`, §45), `s0` = pulse counter | §48 |
+| `cap-gpio-input-a`, `cap-gpio-input-b` | `none` | `none` / `digital` / `analog` / `pulse` | Mode of input A / B with `cap-gpio-mode inputs`; `analog` = 0–24 V (replaces `cap-analog-a/-b`, §45), `pulse` = pulse counter (e.g. S0, either polarity) | §48 |
 
 ### New commands
 
@@ -399,7 +399,7 @@ config reply, bool fields decode as `0`/`1`):
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_light_sensor": 1,
                  "cap_barometer": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0,
-                 "cap_sht": 1, "cap_gpio_mode": "inputs", "cap_gpio_input_a": "s0",
+                 "cap_sht": 1, "cap_gpio_mode": "inputs", "cap_gpio_input_a": "pulse",
                  "cap_gpio_input_b": "none" },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
@@ -2666,7 +2666,7 @@ sent a Hello; a cell can sit at that knee for days.
   off. Not measured yet: 1.9 V boot and the Shutdown current without the probe. Procedure:
   AT-PWR-16 in `doc/automated-test-playbook.md`.
 
-## 48. GP pins: one owner, a mode per input, S0 counter (#498)
+## 48. GP pins: one owner, a mode per input, pulse counter (#498)
 
 GP_A (PB4) and GP_B (PA11) are shared by the digital inputs, the analog inputs (§45), the
 PIR and the buzzer HW variant. Six bool capabilities (`cap-input-a/-b`, `cap-analog-a/-b`,
@@ -2676,14 +2676,14 @@ conflict can no longer be configured:
 
 ```
 config cap-gpio-mode    <none|inputs|pir|buzzer>
-config cap-gpio-input-a <none|digital|analog|s0>
-config cap-gpio-input-b <none|digital|analog|s0>
+config cap-gpio-input-a <none|digital|analog|pulse>
+config cap-gpio-input-b <none|digital|analog|pulse>
 ```
 
 | Parameter | proto (`sensors`) | Default | Meaning |
 |---|:-:|---|---|
 | `cap-gpio-mode` | 27 | `none` | `pir` / `buzzer` take both pins; `inputs` hands each pin to its input mode |
-| `cap-gpio-input-a`, `cap-gpio-input-b` | 28, 29 | `none` | `digital` state + count (as before), `analog` 0–24 V (§45), `s0` pulse counter; used only with `cap-gpio-mode inputs` |
+| `cap-gpio-input-a`, `cap-gpio-input-b` | 28, 29 | `none` | `digital` state + count (as before), `analog` 0–24 V (§45), `pulse` counter (e.g. an S0 meter output); used only with `cap-gpio-mode inputs` |
 
 - **Stored vs effective.** The input modes are kept as set while the mode is `pir` /
   `buzzer`; they are just inactive. `app_sensor_init()` normalizes the runtime copy
@@ -2691,14 +2691,18 @@ config cap-gpio-input-b <none|digital|analog|s0>
   `pir` / `buzzer` off when the driver is not built in (`LOG_WRN` each). `GetConfig` /
   `config show` report the stored values; the settings dump (boot, `get_settings`) reports
   the effective ones.
-- **S0 (IEC 62053-31).** S0 pulses are ≥ 30 ms; the 100 ms input poll would miss most of
-  them. An `s0` pin counts on its asserting edge in a GPIO interrupt (EXTI 4 / 11, free on
-  this board), with a 20 ms debounce; the poll folds the ISR count into `input_x_count`. An
-  S0 pin always counts (`input-x-counter` is ignored), has no state, no state flag and no
-  input alarm edge. Each pulse wakes the CPU briefly; not measured.
+- **Pulse (e.g. S0, IEC 62053-31).** S0 pulses are ≥ 30 ms; the 100 ms input poll would
+  miss most of them. A `pulse` pin counts in a GPIO interrupt on both edges (EXTI 4 / 11,
+  free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
+  it high), so a pulse is a move away from the idle level: the level at init, re-learned by
+  the poll after 60 s without an edge (a pulse in progress at boot cannot stick). An edge
+  counts only when the pin was stable for 20 ms before it, so bounce on either edge of a
+  pulse counts once. The poll folds the ISR count into `input_x_count`. A pulse pin always
+  counts (`input-x-counter` is ignored), has no state, no state flag and no input alarm
+  edge. Each edge wakes the CPU briefly; not measured.
 - **Channels (§40).** `cap` in `app_sensor_types.yaml` can now name an enum parameter and the
   values that enable the channel: `input-a-state` = `cap_gpio_input_a=digital`,
-  `input-a-count` = `cap_gpio_input_a=digital|s0`, `input-a-voltage` =
+  `input-a-count` = `cap_gpio_input_a=digital|pulse`, `input-a-voltage` =
   `cap_gpio_input_a=analog` (B alike), `pir-motion` / `pir-count` = `cap_gpio_mode=pir`.
   sensorgen validates the values against `app_config.yml` and emits a `cap_mask`;
   `app_sensor_channel_cap_on()` is the one gate telemetry, history and alarms use. The
@@ -2706,28 +2710,24 @@ config cap-gpio-input-b <none|digital|analog|s0>
 - **Settings dump.** It now carries `cap_hall_left` / `cap_hall_right` and the three
   `cap_gpio_*` fields; `cap_analog_a/_b` were never in it (bug). Same size as before:
   the four bool caps (2 B each) and `cap_buzzer` (3 B) became three enums (3 B each).
-- **Upgrade.** The config schema version stays 4, so the old NVS keys are converted by a
-  hand-written hook (`app_config_legacy.c`, wired by the new configen `module.legacy_hook`):
-  `h_set` keeps the old bool values, `h_commit` maps them with the precedence the old
-  runtime applied (PIR > buzzer > digital > analog per pin; the input modes are cleared
-  when PIR / buzzer wins), and init persists the result and only then deletes the old keys.
-  A device keeps doing exactly what it did before the update. configen also rejects an enum
-  `default` that is not one of its values.
-- **Proto / decoder.** Old `sensors` ids 3, 4, 7, 19, 20, 21 are `reserved`. nanopb skips
-  them, so an old host's `SetParam` with a bool cap is accepted without effect; `ttn.js`
-  refuses to encode them. Enum values decode as names (`"inputs"`, `"s0"`).
+- **Upgrade: none.** No STICKER with the old caps is deployed, so the old NVS keys
+  (`cap-input-a`, …) are not converted: they stay unread in NVS and the new parameters
+  start at their defaults (`none`). Set `cap-gpio-mode` / `cap-gpio-input-x` after the
+  update. configen rejects an enum `default` that is not one of its values.
+- **Proto / decoder.** Old `sensors` ids 3, 4, 7, 19, 20, 21 are `reserved`. nanopb would
+  skip them, so the firmware scans a `SetParam.sensors` for them and answers `BAD_REQUEST`
+  (`fault_field` 300 + id, detail `removed field`), likewise a `GetParam` asking for them:
+  an old host gets an error, not an ACK for a no-op. `ttn.js` refuses to encode them. Enum
+  values decode as names (`"inputs"`, `"pulse"`).
 - **Buzzer.** `alarm-buzzer-mode` and the `ats buzzer` commands need `cap-gpio-mode buzzer`.
-- **Cost:** release 190 756 B flash (+672 B), 48 072 B RAM (+64 B); debug 240 528 B
-  (+1 144 B), 55 944 B RAM (±0), against `v1.5.0` `0ecf20fb`.
-- **Tests:** new `tests/config_legacy` suite (7 cases: the precedence rules, all-false,
-  unknown keys / bad length, cleanup deletes each loaded key once); `sensor_types` enum gates; `cmd` settings dump incl. hall and
-  the effective gpio fields; `compose` / `alarm_eval` on the new parameters; sensorgen enum-cap
-  validation and mask rendering; configen legacy-hook wiring (cleanup only after a
-  successful save) and enum defaults; `ttn.js`
-  round-trip of tags 27–29 and rejection of the removed caps. All 17 native suites, pytest
-  87, decoder 130, clang-format 22.1.5 clean.
-- **HIL:** not run yet (S0 timing, legacy-key upgrade from a v1.5.0 image with the old caps
-  set, PIR and buzzer variants).
+- **Cost:** release 190 780 B flash (+696 B), 48 072 B RAM (+64 B); debug 240 432 B
+  (+1 048 B), 55 944 B RAM (±0), against `v1.5.0` `0ecf20fb`.
+- **Tests:** `sensor_types` enum gates; `cmd` settings dump incl. hall and the effective gpio
+  fields, BAD_REQUEST for the removed ids (SetParam and GetParam); `compose` / `alarm_eval`
+  on the new parameters; sensorgen enum-cap validation and mask rendering; configen enum
+  defaults; `ttn.js` round-trip of tags 27–29 and rejection of the removed caps. All 16
+  native suites, pytest 86, decoder 130, clang-format 22.1.5 clean.
+- **HIL:** not run yet (pulse timing and bounce, both polarities; PIR and buzzer variants).
 
 ---
 

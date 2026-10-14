@@ -872,14 +872,17 @@ on release FW verify via the next fPort-2 telemetry (slower — prefer debug for
 - **Expect:** counts +3 per input; state reflects level while held (#352: `input_a`/`input_b` =
   `1` while shorted to GND, `0` idle — same polarity regression check as AT-SEN-02).
 
-### AT-SEN-03b — S0 pulse counter on input A (D, SA; #498)
-- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a s0`, save/reboot. Pulse source on GP_A:
-  an S0 meter output, or a generator / relay giving low-active pulses ≥ 30 ms.
+### AT-SEN-03b — pulse counter on input A (D, SA; #498)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a pulse`, save/reboot. Pulse source on
+  GP_A: an S0 meter output, or a generator / relay giving pulses ≥ 30 ms.
 - **Steps:** read `input-a-count`; apply 100 pulses of 30 ms at ≤ 10 Hz; read again. Then
-  20 pulses of 5 ms spaced ≥ 30 ms apart, and a burst of edges < 20 ms apart (contact bounce).
-- **Expect:** +100 for the 30 ms pulses (the 100 ms poll alone would miss most of them); a
-  bounce burst counts once (20 ms debounce). No `input-a-state` channel / state flag and no
-  input alarm edge in telemetry; `input_a_count` keeps counting while `input-a-counter` is off.
+  20 pulses of 5 ms spaced ≥ 30 ms apart, and a pulse with a burst of edges < 20 ms apart on
+  both its leading and trailing edge (contact bounce). Repeat the 100 pulses with the
+  opposite polarity (idle low, pulse high), rebooting with the line at its new idle level.
+- **Expect:** +100 for the 30 ms pulses in both polarities (the 100 ms poll alone would miss
+  most of them); a bounced pulse counts once (20 ms debounce from any edge). No
+  `input-a-state` channel / state flag and no input alarm edge in telemetry; `input_a_count`
+  keeps counting while `input-a-counter` is off.
 - **Evidence:** counts before/after, telemetry frame.
 
 ### AT-SEN-04 — PIR (D, SA; maps S5)
