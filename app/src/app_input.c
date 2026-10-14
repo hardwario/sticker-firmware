@@ -157,13 +157,18 @@ static int poll_impl(bool prime)
 
 	/* A pulse pin always counts: counting is all a pulse pin is for (input_x_counter only
 	 * gates the digital pin's edge counter). */
+	uint32_t a_pulses = 0;
+	uint32_t b_pulses = 0;
+
 	if (pulse_a) {
 		pulse_relearn(&m_pulse_a);
-		m_input_data.input_a_count += (uint32_t)atomic_clear(&m_pulse_a.pending);
+		a_pulses = (uint32_t)atomic_clear(&m_pulse_a.pending);
+		m_input_data.input_a_count += a_pulses;
 	}
 	if (pulse_b) {
 		pulse_relearn(&m_pulse_b);
-		m_input_data.input_b_count += (uint32_t)atomic_clear(&m_pulse_b.pending);
+		b_pulses = (uint32_t)atomic_clear(&m_pulse_b.pending);
+		m_input_data.input_b_count += b_pulses;
 	}
 
 	m_input_data.input_a_is_active = input_a_is_active;
@@ -200,6 +205,14 @@ static int poll_impl(bool prime)
 		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE, true);
 	} else if (b_fall) {
 		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_STATE, false);
+	}
+	/* A pulse pin has no state edge, but shows its pulses on the commissioning
+	 * event LED like a digital input does. */
+	if (a_pulses) {
+		app_alarm_activity(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT);
+	}
+	if (b_pulses) {
+		app_alarm_activity(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT);
 	}
 
 	return 0;

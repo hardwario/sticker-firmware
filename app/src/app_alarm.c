@@ -1524,6 +1524,21 @@ void app_alarm_event(uint8_t channel, bool active)
 	}
 }
 
+void app_alarm_activity(uint8_t channel)
+{
+	app_alarm_event_cb cb;
+	void *user_data;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	cb = m_event_cb;
+	user_data = m_event_cb_user_data;
+	k_mutex_unlock(&m_lock);
+
+	if (cb) {
+		cb(channel, true, user_data);
+	}
+}
+
 int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
