@@ -1356,8 +1356,8 @@ its own fire.
 **Prompt for Claude:**
 > Enable the sensor (`config cap-gpio-mode pir` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
-> `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — only
-> edge rules are accepted on these momentary channels. Ask me to trigger motion repeatedly; confirm the FIRST
+> `alarm set 0 mb pir-motion from 0 to 1 dwell <dwell>` (or `accel-motion`, note the value) — an
+> edge rule here is a one-shot with a dwell hold (`from 1 to 1` is the motion state, AT-ALM-12). Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
 > `dwell` seconds of it are suppressed, that it re-arms and fires again once `dwell` has elapsed, and
 > that a sustained burst produces only periodic reports (not a flood, not a stuck `active`). Report

@@ -286,28 +286,29 @@ ZTEST(alarm_rules, test_channel_validation)
 	zassert_false(app_alarm_rules_occupied(0));
 }
 
-/* A momentary channel (PIR / accelerometer motion) only takes edge rules. */
-ZTEST(alarm_rules, test_momentary_channel_edge_only)
+/* A momentary channel (PIR / accelerometer motion) takes edge rules and the
+ * 1 -> 1 motion-state level (#498), never the level 0 -> 0. */
+ZTEST(alarm_rules, test_momentary_channel_shapes)
 {
-	struct app_alarm_rule r = target(0, APP_SENSOR_TYPE_MOTHERBOARD,
-					 APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION);
+	struct app_alarm_rule r =
+		target(0, APP_SENSOR_TYPE_MOTHERBOARD, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION);
 
 	r.from_state = 1;
 	r.to_state = 1;
-	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "level rule on PIR motion");
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "motion-state rule on PIR motion");
 	r.from_state = 0;
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "edge rule on PIR motion");
 	r.channel = APP_SENSOR_CH_MOTHERBOARD_ACCEL_MOTION;
-	r.from_state = 1;
-	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "level rule on accel motion");
+	r.to_state = 0;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "level 0->0 on accel motion");
 }
 
 /* The 18 B blob: [0] flags, [1] slot, [2] channel, [3] sensor_type, [4] from,
  * [5] to, [6] lo, [10] hi, [14] dwell (little-endian floats). */
 ZTEST(alarm_rules, test_blob_layout_round_trip)
 {
-	struct app_alarm_rule r = target(2, APP_SENSOR_TYPE_MACHINE_PROBE,
-					 APP_SENSOR_CH_MACHINE_PROBE_TILT);
+	struct app_alarm_rule r =
+		target(2, APP_SENSOR_TYPE_MACHINE_PROBE, APP_SENSOR_CH_MACHINE_PROBE_TILT);
 	const uint8_t *f = app_config()->alarm_3;
 	float hi, dwell;
 
@@ -345,8 +346,8 @@ ZTEST(alarm_rules, test_blob_layout_round_trip)
  * set (the type may be provisioned later), kept by reload but counted. */
 ZTEST(alarm_rules, test_stale_rule_kept_and_counted)
 {
-	struct app_alarm_rule r = target(1, APP_SENSOR_TYPE_MACHINE_PROBE,
-					 APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
+	struct app_alarm_rule r =
+		target(1, APP_SENSOR_TYPE_MACHINE_PROBE, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
 
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "stale rule must be accepted by set");
 	zassert_equal(app_alarm_rules_stale_count(), 1, "untyped slot");
@@ -376,8 +377,8 @@ ZTEST(alarm_rules, test_armed)
 	r.enabled = 0;
 	zassert_false(app_alarm_rule_armed(&r), "disabled");
 
-	struct app_alarm_rule w = target(3, APP_SENSOR_TYPE_DALLAS,
-					 APP_SENSOR_CH_DALLAS_TEMPERATURE);
+	struct app_alarm_rule w =
+		target(3, APP_SENSOR_TYPE_DALLAS, APP_SENSOR_CH_DALLAS_TEMPERATURE);
 
 	zassert_true(app_alarm_rule_stale(&w));
 	zassert_false(app_alarm_rule_armed(&w), "stale: inert");

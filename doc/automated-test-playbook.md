@@ -1046,6 +1046,20 @@ still required before the next `alarm poll` will observe it as elapsed.
   its own fixed 0.3 V hysteresis, not `dwell`.)
 - **Evidence:** decoded alarm + before/after GetInfo.
 
+### AT-ALM-11 — RATE window = dwell (D, SA; #498)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a pulse`; `alarm set 0 mb input-a-count hi 100 dwell 15`.
+- **Steps:** apply 100 pulses within 10 s; keep ≥ 100 pulses per 15 s for 1 min; stop.
+- **Expect:** one AlarmReport (activate) within 3 s of the 100th pulse, none while the rate
+  stays over, one deactivate within one window (+3 s) after the pulses stop; a new burst fires again.
+- **Evidence:** alarm frames with timestamps.
+
+### AT-ALM-12 — PIR / accel motion state (D, SA; #498)
+- **Pre:** `cap-gpio-mode pir` (or `cap-accelerometer true` + sensitivity); `alarm set 0 mb pir-motion from 1 to 1 dwell 30`.
+- **Steps:** wave a hand every ~10 s for 1 min, then keep still 60 s.
+- **Expect:** one activate at the first motion, nothing during the minute, one deactivate
+  ~30 s after the last motion.
+- **Evidence:** alarm frames with timestamps.
+
 ### AT-ALM-08 — invalid rule rejected/sanitised (D, A; maps H-10, #203)
 - **Steps:** (a) via SetParam, attempt slot 15 with an inverted/collapsed THRESHOLD band
   (`hi <= lo`, e.g. `lo=20, hi=20`) — expect rejection, not silent acceptance (#348 replaces

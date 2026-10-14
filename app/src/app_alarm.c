@@ -860,26 +860,33 @@ static void eval_state(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 	}
 
 	if (rule_is_momentary(rule)) {
-		/* Pulse channel: each asserted event is a discrete, already-debounced
-		 * trigger (there is nothing to dwell-confirm) — fire immediately, then
-		 * hold for `dwell` seconds (re-arm window), suppressed while a previous
-		 * one is still latched so we emit at most one alarm per hold window
-		 * regardless of event rate. from/to are not meaningful for a source
-		 * that never reports a level, so edge (0->1) and level (1->1) behave
-		 * alike. */
-		/* Expire a lapsed one-shot here, in the event path, not only in the 3 s
-		 * app_alarm_poll: otherwise a hold shorter than the poll cadence is
-		 * silently clamped to it (a new event within ~3 s of the window
-		 * elapsing stays suppressed), so hold < 3 s was ineffective (#267). */
+		/* Pulse channel (PIR / accelerometer): each asserted event is a
+		 * discrete, already-debounced trigger (nothing to dwell-confirm).
+		 *  - edge rule (from != to): fire immediately, then hold for `dwell`
+		 *    seconds, suppressing further fires; the hold ends silently.
+		 *  - level rule (from == to, #498): motion state. The first event
+		 *    fires ("motion started"), every further event restarts the
+		 *    `dwell` quiet window, and the deactivation ("motion ended") is
+		 *    sent once `dwell` passes with no event — here or in the central
+		 *    sweep of app_alarm_poll(). */
+		/* Expire a lapsed window here too, in the event path, not only in the
+		 * 3 s app_alarm_poll: otherwise a hold shorter than the poll cadence is
+		 * silently clamped to it (#267). */
 		if (rt->active && rt->oneshot_expiry != 0 && k_uptime_get() >= rt->oneshot_expiry) {
 			rt->active = false;
 			rt->oneshot_expiry = 0;
+			if (!is_edge) {
+				*should_send = true;
+				alarm_collect(idx, rule, false, ALARM_TYPE_TRIGGER, true, 0);
+			}
 		}
 		if (cur && !rt->active) {
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + hold_ms;
 			*should_send = true;
 			alarm_collect(idx, rule, true, ALARM_TYPE_TRIGGER, true, cur_lvl);
+		} else if (cur && !is_edge) {
+			rt->oneshot_expiry = k_uptime_get() + hold_ms;
 		}
 		rt->have_prev_state = true;
 		rt->prev_state = cur_lvl;
@@ -1437,6 +1444,15 @@ bool app_alarm_poll(void)
 			continue;
 		}
 		if (m_rt[i].oneshot_expiry != 0 && now >= m_rt[i].oneshot_expiry) {
+			const struct app_alarm_rule *lr = &m_rt[i].last_rule;
+
+			/* A momentary level rule's quiet window elapsed: "motion ended"
+			 * is reported (#498); every other hold ends silently. */
+			if (m_rt[i].active && rule_is_momentary(lr) &&
+			    lr->from_state == lr->to_state) {
+				should_send = true;
+				alarm_collect(i, lr, false, ALARM_TYPE_TRIGGER, true, 0);
+			}
 			m_rt[i].active = false;
 			m_rt[i].oneshot_expiry = 0;
 		}

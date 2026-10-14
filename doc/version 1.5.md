@@ -2719,10 +2719,25 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   (`fault_field` 300 + id, detail `removed field`), likewise a `GetParam` asking for them:
   an old host gets an error, not an ACK for a no-op. `ttn.js` refuses to encode them. Enum
   values decode as names (`"inputs"`, `"pulse"`).
+- **RATE alarm window = `dwell`.** A RATE rule (any counter: hall, input, pulse) alarms when
+  the counter rises by ≥ `hi` within `dwell` seconds (`0` = `interval-report`, the old window).
+  It fires as soon as the window's count reaches `hi` (≤ 3 s poll), not at the window end. A
+  sustained rate is ONE alarm: it stays active while each closed window reaches `hi` and
+  deactivates (sent) on the first window that falls short; a new burst then fires again.
+  Before, the window was always `interval-report` and `dwell` only blocked a re-fire. Example:
+  `hi 100 dwell 15` = 100 pulses within 15 s.
+- **Motion state on PIR / accelerometer.** A momentary channel (`pir-motion`, `accel-motion`)
+  now also takes the level rule `from 1 to 1`: the first event fires ("motion started"),
+  every further event restarts the `dwell` quiet window, and the deactivation ("motion
+  ended") is sent once `dwell` passes with no event — one alarm per episode of motion. The
+  edge rule `from 0 to 1` keeps its behaviour (fire, then `dwell` blocks a re-fire, silent
+  end); `from 0 to 0` is still rejected.
 - **Buzzer.** `alarm-buzzer-mode` and the `ats buzzer` commands need `cap-gpio-mode buzzer`.
 - **Cost:** release 190 780 B flash (+696 B), 48 072 B RAM (+64 B); debug 240 432 B
   (+1 048 B), 55 944 B RAM (±0), against `v1.5.0` `0ecf20fb`.
-- **Tests:** `sensor_types` enum gates; `cmd` settings dump incl. hall and the effective gpio
+- **Tests:** `alarm_eval` RATE window = dwell (fire at once, one alarm until a short window,
+  dwell 0 = interval_report) and the PIR motion state; `alarm_rules` momentary rule shapes;
+  `sensor_types` enum gates; `cmd` settings dump incl. hall and the effective gpio
   fields, BAD_REQUEST for the removed ids (SetParam and GetParam); `compose` / `alarm_eval`
   on the new parameters; sensorgen enum-cap validation and mask rendering; configen enum
   defaults; `ttn.js` round-trip of tags 27–29 and rejection of the removed caps. All 16

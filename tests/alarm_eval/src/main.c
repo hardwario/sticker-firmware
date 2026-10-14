@@ -1570,3 +1570,43 @@ ZTEST(alarm_eval, test_w1_partly_reporting_part_alarms)
 	app_alarm_poll();
 	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1), 1, "recovered");
 }
+
+/* #498: a momentary level rule (from == to) is a motion state: the first event
+ * fires, further events restart the dwell quiet window (one alarm for sustained
+ * motion), and "motion ended" is sent once dwell passes with no event. */
+ZTEST(alarm_eval, test_momentary_level_rule_is_motion_state)
+{
+	flush_stale_alarms();
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 1,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION), "motion did not fire");
+
+	/* Events keep coming within dwell: still the same alarm, window restarts. */
+	for (int i = 0; i < 3; i++) {
+		k_sleep(K_MSEC(250));
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+		app_alarm_poll();
+		zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+			     "motion state ended while events kept coming");
+	}
+
+	k_sleep(K_MSEC(500)); /* dwell with no event */
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "motion state did not end after a quiet dwell");
+	k_sleep(K_MSEC(10)); /* let the batch work item run */
+	zassert_equal(count_events(0, 3, 1), 1, "one 'motion started' expected, got %zu",
+		      count_events(0, 3, 1));
+	zassert_equal(count_events(0, 3, 0), 1, "one 'motion ended' expected, got %zu",
+		      count_events(0, 3, 0));
+}
