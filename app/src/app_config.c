@@ -146,26 +146,19 @@ static int stale_key(const char *key)
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	int ret;
 	const char *next;
+	void *var;
+	size_t size;
+	int ret;
 
+	/* Each key only selects its variable; the size check and the read are
+	 * shared below (one copy instead of one per key, #503). */
 #define SETTINGS_SET(_key, _var, _size)                                                            \
 	do {                                                                                       \
 		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				LOG_WRN("Key %s is %zu B, expected %zu B: stale", key, len,        \
-					(size_t)(_size));                                          \
-				return stale_key(key);                                             \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			return 0;                                                                  \
+			var = (_var);                                                              \
+			size = (_size);                                                            \
+			goto found;                                                                \
 		}                                                                                  \
 	} while (0)
 
@@ -281,6 +274,21 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 #undef SETTINGS_SET
 
 	return stale_key(key);
+
+found:
+	if (len != size) {
+		/* A known key whose stored value has another size: stale. */
+		LOG_WRN("Key %s is %zu B, expected %zu B: stale", key, len, size);
+		return stale_key(key);
+	}
+
+	ret = read_cb(cb_arg, var, len);
+	if (ret < 0) {
+		LOG_ERR("Call `read_cb` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 /* Delete the stale keys h_set() recorded; a failure only means the key is

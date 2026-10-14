@@ -76,50 +76,55 @@ enum tlm_group {
 	G_COUNT,
 };
 
-/* Fields per group, indexed as in apply_field(). */
-static const uint8_t m_group_fields[G_COUNT] = {
-	[G_SYSTEM] = 2, [G_INTERNAL] = 2, [G_BAROMETER] = 2, [G_LIGHT] = 1,   [G_ACCEL] = 2,
-	[G_PIR] = 1,    [G_HALL_L] = 2,   [G_HALL_R] = 2,    [G_INPUT_A] = 3, [G_INPUT_B] = 3,
+/* Telemetry fields of all groups, in group order; every one is a 32-bit
+ * scalar with a has_ flag, so a field is just two offsets. Table-driven to
+ * keep the per-field code out of flash (#503). */
+struct tlm_field {
+	uint16_t val;
+	uint16_t has;
 };
+
+#define TLM_FIELD(_f) {offsetof(Telemetry, _f), offsetof(Telemetry, has_##_f)}
+
+static const struct tlm_field m_fields[] = {
+	TLM_FIELD(voltage),          TLM_FIELD(system_flags),       /* G_SYSTEM */
+	TLM_FIELD(temperature),      TLM_FIELD(humidity),           /* G_INTERNAL */
+	TLM_FIELD(pressure),         TLM_FIELD(altitude),           /* G_BAROMETER */
+	TLM_FIELD(illuminance),                                     /* G_LIGHT */
+	TLM_FIELD(orientation),      TLM_FIELD(accel_motion_count), /* G_ACCEL */
+	TLM_FIELD(motion_count),                                    /* G_PIR */
+	TLM_FIELD(hall_left_count),  TLM_FIELD(hall_left_flags),    /* G_HALL_L */
+	TLM_FIELD(hall_right_count), TLM_FIELD(hall_right_flags),   /* G_HALL_R */
+	TLM_FIELD(input_a_count),    TLM_FIELD(input_a_flags),      /* G_INPUT_A */
+	TLM_FIELD(input_a_voltage),  TLM_FIELD(input_b_count),
+	TLM_FIELD(input_b_flags), /* G_INPUT_B */
+	TLM_FIELD(input_b_voltage),
+};
+
+/* Index of each group's first field in m_fields[]; [G_COUNT] closes the last. */
+static const uint8_t m_group_first[G_COUNT + 1] = {0, 2, 4, 6, 7, 9, 10, 12, 14, 17, 20};
+
+BUILD_ASSERT(ARRAY_SIZE(m_fields) == 20, "m_group_first out of sync with m_fields");
+BUILD_ASSERT(sizeof(((Telemetry *)0)->voltage) == sizeof(uint32_t) &&
+		     sizeof(((Telemetry *)0)->temperature) == sizeof(uint32_t),
+	     "apply_field() copies 32-bit fields");
+
+#define GROUP_FIELDS(_g) (m_group_first[(_g) + 1] - m_group_first[_g])
 
 /* Copy (on=true) or clear (on=false) field `fi` of group `g` from src into dst.
  * With a frozen snapshot src this both selects a field into a frame and
  * reverts it. Returns whether the snapshot holds the field. */
 static bool apply_field(Telemetry *dst, const Telemetry *src, enum tlm_group g, uint8_t fi, bool on)
 {
-#define FIELD(_g, _fi, _field)                                                                     \
-	case ((_g) << 2) | (_fi):                                                                  \
-		dst->has_##_field = on && src->has_##_field;                                       \
-		if (on) {                                                                          \
-			dst->_field = src->_field;                                                 \
-		}                                                                                  \
-		return src->has_##_field
+	const struct tlm_field *f = &m_fields[m_group_first[g] + fi];
+	bool has = *((const bool *)((const uint8_t *)src + f->has));
 
-	switch (((unsigned int)g << 2) | fi) {
-		FIELD(G_SYSTEM, 0, voltage);
-		FIELD(G_SYSTEM, 1, system_flags);
-		FIELD(G_INTERNAL, 0, temperature);
-		FIELD(G_INTERNAL, 1, humidity);
-		FIELD(G_BAROMETER, 0, pressure);
-		FIELD(G_BAROMETER, 1, altitude);
-		FIELD(G_LIGHT, 0, illuminance);
-		FIELD(G_ACCEL, 0, orientation);
-		FIELD(G_ACCEL, 1, accel_motion_count);
-		FIELD(G_PIR, 0, motion_count);
-		FIELD(G_HALL_L, 0, hall_left_count);
-		FIELD(G_HALL_L, 1, hall_left_flags);
-		FIELD(G_HALL_R, 0, hall_right_count);
-		FIELD(G_HALL_R, 1, hall_right_flags);
-		FIELD(G_INPUT_A, 0, input_a_count);
-		FIELD(G_INPUT_A, 1, input_a_flags);
-		FIELD(G_INPUT_A, 2, input_a_voltage);
-		FIELD(G_INPUT_B, 0, input_b_count);
-		FIELD(G_INPUT_B, 1, input_b_flags);
-		FIELD(G_INPUT_B, 2, input_b_voltage);
-	default:
-		return false;
+	*((bool *)((uint8_t *)dst + f->has)) = on && has;
+	if (on) {
+		memcpy((uint8_t *)dst + f->val, (const uint8_t *)src + f->val, sizeof(uint32_t));
 	}
-#undef FIELD
+
+	return has;
 }
 
 /* apply_field() over every field of group `g` not in `skip` (fields already
@@ -127,7 +132,7 @@ static bool apply_field(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, bool on,
 			uint8_t skip)
 {
-	for (uint8_t fi = 0; fi < m_group_fields[g]; fi++) {
+	for (uint8_t fi = 0; fi < GROUP_FIELDS(g); fi++) {
 		if (!(skip & BIT(fi))) {
 			(void)apply_field(dst, src, g, fi, on);
 		}
@@ -480,7 +485,7 @@ static bool pack_split(Telemetry *f, struct tlm_cursor *c, size_t cap)
 		uint8_t sent = split_skip(c, g);
 		bool added = false;
 
-		for (uint8_t fi = 0; fi < m_group_fields[g]; fi++) {
+		for (uint8_t fi = 0; fi < GROUP_FIELDS(g); fi++) {
 			if (sent & BIT(fi)) {
 				continue;
 			}
@@ -501,7 +506,7 @@ static bool pack_split(Telemetry *f, struct tlm_cursor *c, size_t cap)
 			}
 		}
 
-		if (sent == BIT_MASK(m_group_fields[g])) {
+		if (sent == BIT_MASK(GROUP_FIELDS(g))) {
 			c->pending &= ~BIT(g);
 			c->split_g = 0;
 			c->split_sent = 0;
