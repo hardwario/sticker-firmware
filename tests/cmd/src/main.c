@@ -6,6 +6,8 @@
  * deferred-action contract. Vectors are current-schema DownlinkCommand frames.
  */
 
+#include <setjmp.h>
+
 #include "app_cmd.h"
 #include "app_version.h"
 #include "app_config.h"
@@ -3200,6 +3202,8 @@ extern const uint8_t *test_run_vendor_reset_key;
 extern int test_run_counters_save_calls;
 extern int test_run_rejoin_calls;
 extern int test_run_reset_link_calls;
+extern jmp_buf *test_reboot_jmp;
+extern int test_reboot_calls;
 
 static void run_action_reset(void)
 {
@@ -3215,6 +3219,23 @@ static void run_action_reset(void)
 	g_claim_active_calls = 0;
 }
 
+/* Run one action; returns how many reboots it reached (0 or 1). The stubs of
+ * the save/reset callees return instead of rebooting, so a rebooting action
+ * reaches the executor's own reboot, which unwinds back here. */
+static int run_action(enum app_cmd_action action)
+{
+	jmp_buf env;
+
+	test_reboot_calls = 0;
+	test_reboot_jmp = &env;
+	if (setjmp(env) == 0) {
+		app_cmd_run_action(action);
+	}
+	test_reboot_jmp = NULL;
+
+	return test_reboot_calls;
+}
+
 static int run_action_calls(void)
 {
 	return test_run_settings_save_calls + test_run_device_reset_calls +
@@ -3223,33 +3244,40 @@ static int run_action_calls(void)
 	       g_claim_active_calls;
 }
 
-/* Every action of the union table reaches its one callee, once. REBOOT and
- * LRW_RESET end in sys_reboot(), which the stub turns into a test failure, so
- * they are covered by the reboot classification below instead. */
+/* Every action of the union table reaches its one callee, once, and reboots
+ * unless it is one of the two that stay up. REBOOT and LRW_RESET have no
+ * callee to count; the reboot classification below covers them. */
 ZTEST(cmd, test_run_action_executes_each_action_once)
 {
 	static const struct {
 		enum app_cmd_action action;
 		int *calls;
+		int reboots;
 	} cases[] = {
-		{APP_CMD_ACTION_SETTINGS_SAVE, &test_run_settings_save_calls},
-		{APP_CMD_ACTION_SECRET_KEY_SAVE, &test_run_settings_save_calls},
-		{APP_CMD_ACTION_DEVICE_RESET, &test_run_device_reset_calls},
-		{APP_CMD_ACTION_FACTORY_RESET, &test_run_factory_reset_calls},
-		{APP_CMD_ACTION_VENDOR_RESET, &test_run_vendor_reset_calls},
-		{APP_CMD_ACTION_COUNTERS_SAVE, &test_run_counters_save_calls},
-		{APP_CMD_ACTION_LRW_JOIN, &test_run_rejoin_calls},
+		{APP_CMD_ACTION_SETTINGS_SAVE, &test_run_settings_save_calls, 1},
+		{APP_CMD_ACTION_SECRET_KEY_SAVE, &test_run_settings_save_calls, 1},
+		{APP_CMD_ACTION_DEVICE_RESET, &test_run_device_reset_calls, 1},
+		{APP_CMD_ACTION_FACTORY_RESET, &test_run_factory_reset_calls, 1},
+		{APP_CMD_ACTION_VENDOR_RESET, &test_run_vendor_reset_calls, 1},
+		{APP_CMD_ACTION_COUNTERS_SAVE, &test_run_counters_save_calls, 0},
+		{APP_CMD_ACTION_LRW_JOIN, &test_run_rejoin_calls, 0},
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
 		run_action_reset();
-		app_cmd_run_action(cases[i].action);
+		zassert_equal(run_action(cases[i].action), cases[i].reboots, "action %d: reboot",
+			      cases[i].action);
 		zassert_equal(*cases[i].calls, 1, "action %d: its callee once", cases[i].action);
 		zassert_equal(run_action_calls(), 1, "action %d: nothing else", cases[i].action);
 	}
 
+	zassert_equal(run_action(APP_CMD_ACTION_REBOOT), 1, "reboot reboots");
 	run_action_reset();
-	app_cmd_run_action(APP_CMD_ACTION_VENDOR_RESET);
+	zassert_equal(run_action(APP_CMD_ACTION_LRW_RESET), 1, "radio session reset reboots");
+	zassert_equal(test_run_reset_link_calls, 1, "after forgetting the link");
+
+	run_action_reset();
+	(void)run_action(APP_CMD_ACTION_VENDOR_RESET);
 	zassert_equal_ptr(test_run_vendor_reset_key, app_cmd_take_pending_vendor_secret_key(),
 			  "vendor_reset installs the key staged by its request");
 }
@@ -3258,7 +3286,7 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 {
 	run_action_reset();
 	g_app_config.calibration = false;
-	app_cmd_run_action(APP_CMD_ACTION_ENTER_CALIBRATION);
+	zassert_equal(run_action(APP_CMD_ACTION_ENTER_CALIBRATION), 1, "reboots");
 	zassert_true(g_app_config.calibration, "the staging config carries calibration=true");
 	zassert_equal(test_run_settings_save_calls, 1, "and is saved (+ reboot)");
 	g_app_config.calibration = false;
@@ -3267,7 +3295,7 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 	 * reboot (a second, no-op save). */
 	run_action_reset();
 	g_claim_active_saves_before = -1;
-	app_cmd_run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE);
+	zassert_equal(run_action(APP_CMD_ACTION_CLAIM_ACTIVE_SAVE), 1, "reboots");
 	zassert_equal(g_claim_active_calls, 1, "claim window re-opened");
 	zassert_equal(g_claim_active_saves_before, 1, "latch flips after the token save");
 	zassert_equal(test_run_settings_save_calls, 2, "then save + reboot");
@@ -3276,9 +3304,32 @@ ZTEST(cmd, test_run_action_calibration_and_claim)
 ZTEST(cmd, test_run_action_none_and_page_stream_do_nothing)
 {
 	run_action_reset();
-	app_cmd_run_action(APP_CMD_ACTION_NONE);
-	app_cmd_run_action(APP_CMD_ACTION_PAGE_STREAM);
+	zassert_equal(run_action(APP_CMD_ACTION_NONE), 0, "NONE stays up");
+	zassert_equal(run_action(APP_CMD_ACTION_PAGE_STREAM), 0, "PAGE_STREAM stays up");
 	zassert_equal(run_action_calls(), 0, "no callee for NONE / PAGE_STREAM");
+}
+
+/* #503: a save that fails still reboots, as the sender was promised, and a
+ * failed claim-token save never flips the claim latch. */
+ZTEST(cmd, test_run_action_failed_save_still_reboots)
+{
+	static const enum app_cmd_action saves[] = {
+		APP_CMD_ACTION_SETTINGS_SAVE,
+		APP_CMD_ACTION_SECRET_KEY_SAVE,
+		APP_CMD_ACTION_ENTER_CALIBRATION,
+		APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(saves); i++) {
+		run_action_reset();
+		test_run_settings_save_ret = -EIO;
+		zassert_equal(run_action(saves[i]), 1, "action %d: reboots anyway", saves[i]);
+		zassert_equal(test_run_settings_save_calls, 1, "action %d: one save attempt",
+			      saves[i]);
+		zassert_equal(g_claim_active_calls, 0, "action %d: latch untouched", saves[i]);
+	}
+
+	g_app_config.calibration = false;
 }
 
 /* NFC shows its LED result before exactly these: every action that ends in a
