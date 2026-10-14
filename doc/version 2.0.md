@@ -8,7 +8,7 @@ This document lists **only the changes introduced in firmware v2.0.0** relative 
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v2.0.0. The numbered sections below (§1–§45) carry the full
+moves from v1.4.x to v2.0.0. The numbered sections below (§1–§51) carry the full
 technical detail.
 
 ### Highlights
@@ -29,6 +29,8 @@ technical detail.
 | **Every sensor value is a channel** | Each sensor type publishes its own channel table (`app_sensor_types.yaml`). Alarm rules, telemetry and history address a value as (slot, channel): two temperatures on one machine probe, the barometer temperature, any on-board value can be alarmed and recorded. A 1-Wire slot expects a sensor type; a different sensor raises a `sensor_mismatch` alarm. | §40 |
 | **Replace all alarm rules at once** | `SetParam.alarms_replace` makes one message the complete alarm table, so rules deleted on the host are deleted on the device. | §17 |
 | **Analog inputs** | `cap-gpio-input-a` / `cap-gpio-input-b` `analog` measure 0–24 V on the external inputs A/B. The value is a sensor channel like any other: telemetry, history, threshold alarms, no-data watchdog. | §45, §48 |
+| **No boot loop on a dead cell** | Below 1.8 V at boot the STICKER blinks red, then switches itself off instead of brownout-looping (and burning flash and frame counters) until the battery is replaced. | §47 |
+| **Self-recovery from a crash** | A CPU fault reboots the device at once (before, it hung until the watchdog, or forever) and the next Info reports the fault reason, PC and LR. | §43 |
 | **GP pin owner + pulse counter** | `cap-gpio-mode` gives GP_A/GP_B to the inputs, the PIR or the buzzer; each input is `digital`, `analog` or `pulse` (pulse counter, e.g. S0). A pin conflict can no longer be stored. | §48 |
 
 ### New configuration parameters
@@ -97,6 +99,23 @@ technical detail.
 - **Duty cycle.** LoRaWAN holds a frame until the sliding hour has room for it, instead of
   retrying against the MAC's refusal. P2P takes its budget from the EU868 sub-band of
   `p2p-frequency` (§31).
+- **Reboot after a command.** A command that reboots (save, reset, reboot) first waits for
+  its answer, queued alarm frames and pending ACKs: re-checked every 8 s, at most 120 s after
+  the command, then it reboots anyway (§32, §50).
+- **Alarm batches.** An `alarm-limit` window holds up to 16 events (was 8) and is sent as
+  soon as it is full. One report takes at most 4 frames; the rest follows as the next report
+  (§46).
+- **RATE alarm window and motion states (#498).** A RATE rule counts within `dwell` seconds
+  (`0` = `interval-report`, the old window), fires as soon as the count is reached and stays one
+  alarm while the rate lasts. PIR / accelerometer motion also take level rules: "motion
+  started / ended" (`from 1 to 1`) and "stopped" (`from 0 to 0`) (§48).
+- **One paged answer at a time.** While a paged answer is going out, a second request that
+  needs pages gets `NOT_READY` with its `seq`; ask again once the first one is out (§46).
+- **Clock window.** `clock_sync`, network time and `clock set` accept only 2024-01-01 ..
+  2099-01-01; a time outside is refused (§46).
+- **Stale settings are cleaned up.** NVS keys of parameters that this firmware no longer has
+  are deleted at boot, up to 4 per boot. The `set-value failure ... error(-2)` boot errors
+  disappear (§51).
 
 ### Upgrading from v1.4.x — action required
 
@@ -118,6 +137,7 @@ technical detail.
    |---|---|---|
    | `lrw-deveui`, `lrw-appkey` | `radio-deveui`, `radio-appkey` | **kept** (§33) |
    | `lrw-link-check-interval`, `lrw-link-check-fail-rejoin` | `radio-link-check-interval`, `radio-link-check-fail-rejoin` | **not kept**: back to the defaults 5 / 5; set them again if you changed them (§26) |
+   | `cap-input-a/-b`, `cap-analog-a/-b`, `cap-pir-detector`, `cap-buzzer` | `cap-gpio-mode` + `cap-gpio-input-a/-b` | **not kept**: back to `none`; set the GP pin owner and the input modes again. A host that still sends the old fields gets `BAD_REQUEST` (§48) |
 
 5. **Decoder and integrations.** Use the v2.0.0 `ttn.js`. Integrations that read decoded
    keys must use `lorawan.radio_link_check_interval` / `radio_link_check_fail_rejoin`. A
@@ -127,7 +147,8 @@ technical detail.
    the hourly airtime. Ask only for the keys you need, do not re-request a missing page at
    once, and allow ≥ 1 h for page assembly at a low DR (§13).
 7. **Downgrade.** History pages written by v2.0.0 are not readable by older firmware: run
-   `history clear` after a downgrade (§21).
+   `history clear` after a downgrade (§21). v2.0.0 deletes the stored values of parameters it
+   does not have (§51), so after a downgrade those settings start at their defaults.
 8. **Re-provision alarms and history (#430).** The alarm rule blob, the 1-Wire type ids
    (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
    wire format changed with no migration. Rewrite the alarm rules and the history selection,
@@ -145,10 +166,17 @@ technical detail.
   refused there; the encoding is not trimmed yet (§40).
 - With `radio-alarm-ack false` (the default) an alarm frame lost on the air is not repeated;
   the alarm state still reaches the network in the next telemetry frame (§9, §30, §32).
+- An alarm batch held for the radio that collects more than 16 edges drops the rest; `total`
+  still counts them (§46).
+- The GP pulse counter (S0) and the buzzer with `cap-gpio-mode buzzer` are not HW-tested yet
+  (§48). The battery boot gate is not measured at 1.9 V (§47).
+- The Shutdown current floor is ~145 µA, not root-caused (likely the ST25DV while LPD is low)
+  (§46).
 
 ### For developers
 
-- Builds need the `sticker-zephyr` `v4.3.0-sticker2-branch` fork (`west update`) and the
+- Builds need the `sticker-zephyr` `v4.3.0-sticker2-branch` fork (`west update`; it carries the
+  FSK driver, sticker-zephyr#5, and the ds2484 bus-lock fix, sticker-zephyr#6, §44, §46) and the
   `loramac-node` patch (`west patch apply`, re-run after every `west update`). A LoRaWAN
   build without the patch fails on purpose (§5, §10).
 - `debug.conf` ships a lean default (1-Wire, accelerometer, buzzer and PIR off). Re-enable
@@ -157,6 +185,11 @@ technical detail.
   Debug log levels are compile-time only (`CONFIG_LOG_RUNTIME_FILTERING=n`). Thread stacks
   were cut to measured high-water marks + margin. A new deep call path on a thread needs a
   re-measure (§39).
+- CI stamps the version: a tag build uses the tag, a branch/PR build is type DEV with the
+  version from `app/CMakeLists.txt` (2.0.0). Bump it when a branch starts the next release.
+  The release build fails below 8 KiB free flash or RAM (§46, §49).
+- `app_config.c` is generated from `scripts/west_commands/templates/config.c.j2`; the
+  stale-key cleanup lives there (§51).
 
 ---
 
@@ -205,6 +238,16 @@ technical detail.
 | Sensors / alarms / history | **Changed (breaking)** — sensor channel model (#430, PR #431): a per-type channel registry `app_sensor_types.yaml` (`west sensorgen` → C tables + `ttn.js`); alarm rules, telemetry `SensorReading` and history address `(slot, channel)`; expected 1-Wire type per slot with a `sensor_mismatch` alarm; 1-Wire no-data per part and per device. Non-migratable config and wire changes. See §40. |
 | Build | **Changed (internal)** — flash/RAM trim (#479): release FLASH 182 164 → 174 140 B, RAM 55 076 → 46 884 B; debug FLASH 236 104 → 224 872 B, RAM 63 860 → 55 412 B (was 97.4 % RAM). Release drops `printk` and the fault-dump text, debug drops runtime log filtering, the generated config ingest is ~5 KB smaller, and thread stacks are sized from measured high-water marks. No behaviour change. See §39 (radio WQ stack: #481). |
 | Radio: P2P | **Changed (wire, flag day)** — P2P speaks the **TOWER radio protocol** over LoRa (#470): TOWER frames (14 B header, AES-CCM, 8 B tag, 96 B MTU — the TOWER MTU on every PHY profile, #486), a confirmed send is up to 3 byte-identical transmissions with a local gateway ACK, downlinks follow an ACK with PENDING; the join, Capabilities / Hello, LinkCheck and Time travel in a `0x91` control envelope, STICKER payloads in `0x81`. New `p2p-modulation` (`lora`; `fsk` = TOWER GFSK with TOWER OTA pairing toward a stock TOWER gateway, #490). No power control, no SF change. Supersedes the wire of §28 and the `FCtrl` time request of §34. See §41 and `doc/p2p.md`. |
+| Telemetry | **Changed** — a missing onboard reading (NaN temperature, humidity, pressure, altitude, illuminance) is omitted instead of sent as a 5 B sentinel (#483). See §42. |
+| Robustness | **Fix** — v2.0.0 review (#485, PR #489): history survives a boot layout change, one failed onboard read is held, machine probe without its accelerometer, 1-Wire probe plugged in after boot, CPU fault record + immediate reboot (Info fields 20–22), two commands in one downlink window, a duty-held report goes out late. See §43. |
+| Radio: P2P | **Changed** — one TOWER protocol on both PHY profiles (#486): MTU 96 / 74 B payload on `lora` and `fsk`, control commands DevStatus / Backoff / HomeGateway / PendingInfo (#487), `fsk` toward a stock TOWER gateway (#490). See §44. |
+| Sensors | **New** — analog voltage 0–24 V on the external inputs A/B (#396): sensor channels `input-a-voltage` / `input-b-voltage` with telemetry, history, alarms and no-data. See §45. |
+| Robustness | **Fix** — review leftovers and HIL findings (#485, PR #494): config int range checks, alarm rule checks, locking, IWDG during 1-Wire scans, clock window 2024..2099, alarm `fault_field`, buzzer final beep, one page stream at a time (`NOT_READY`), duty hold vs M-2, alarm batch of 16 with a 4-frame report cap, ds2484 bus lock. See §46. |
+| Power | **New** — battery boot gate (#496): below 1.8 V at boot the device blinks red and goes to Shutdown instead of boot-looping. See §47. |
+| Sensors / alarms | **Changed (breaking)** — GP pins (#498): `cap-gpio-mode` (none / inputs / pir / buzzer) and `cap-gpio-input-a/-b` (none / digital / analog / pulse) replace six bool caps; new pulse counter (S0); RATE window = `dwell`; motion / stillness level rules. See §48. |
+| Build | **Fixed** — CI stamps branch/PR builds with the version of `app/CMakeLists.txt` (type DEV), tag builds with the tag. See §49. |
+| Radio | **Changed** — a deferred post-command action waits up to 120 s for undelivered frames (was ~56 s). See §50. |
+| Config | **Fix** — NVS keys of removed parameters are deleted at boot; no more `set-value failure` boot errors. See §51. |
 
 ---
 
@@ -1765,7 +1808,7 @@ Found in the Nodes test E6 (2026-09-28): six rules toggled by one `SetParam{…,
 - **Problem 1, a full alarm queue.** `alarm-limit 0` sends every edge as its own batch. The radio's alarm queue holds 4 frames, so a burst of more edges than that dropped the rest (`Alarm queue full; dropped`).
 - **Problem 2, the reboot.** A deferred command action (doc/p2p.md, §30) waited only for the command's answer and a pending Ack retry. Alarm frames still queued, and a batch still collecting in its `alarm-limit` window, died in the reboot.
 - **Fix, back-pressure.** A batch whose pages do not fit the free alarm slots waits, held like a batch waiting for the link or the boot announce. Later edges join it, so the burst leaves in fewer, fuller frames. Each alarm frame the radio takes from the queue releases it to try again. An empty queue takes a batch of any size, because no queued frame is left to release it.
-- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged here: 8 s steps, at most 6 deferrals, then the action runs anyway (raised to 120 s in §49).
+- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged here: 8 s steps, at most 6 deferrals, then the action runs anyway (raised to 120 s in §50).
 - Not in scope: an unconfirmed alarm frame lost on the air (`radio-alarm-ack false`, §30) is still not repeated.
 - Tests: `tests/alarm_eval` (burst hold, all pages must fit, empty queue, the early send of a collecting window, a batch held for the link), `tests/radio_common` (the action waits for queued alarm frames and for a collecting batch; taking an alarm frame releases a held batch).
 
@@ -2712,8 +2755,8 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   `cap_gpio_*` fields; `cap_analog_a/_b` were never in it (bug). Same size as before:
   the four bool caps (2 B each) and `cap_buzzer` (3 B) became three enums (3 B each).
 - **Upgrade: none.** No STICKER with the old caps is deployed, so the old NVS keys
-  (`cap-input-a`, …) are not converted: they stay unread in NVS and the new parameters
-  start at their defaults (`none`). Set `cap-gpio-mode` / `cap-gpio-input-x` after the
+  (`cap-input-a`, …) are not converted: the first boots delete them from NVS (§51) and the
+  new parameters start at their defaults (`none`). Set `cap-gpio-mode` / `cap-gpio-input-x` after the
   update. configen rejects an enum `default` that is not one of its values.
 - **Proto / decoder.** Old `sensors` ids 3, 4, 7, 19, 20, 21 are `reserved`. nanopb would
   skip them, so the firmware scans a `SetParam.sensors` for them and answers `BAD_REQUEST`
@@ -2745,13 +2788,10 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   on the new parameters; sensorgen enum-cap validation and mask rendering; configen enum
   defaults; `ttn.js` round-trip of tags 27–29 and rejection of the removed caps. All 16
   native suites, pytest 86, decoder 130, clang-format 22.1.5 clean.
-- **HIL:** not run yet (pulse timing and bounce, both polarities; PIR and buzzer variants).
+- **HIL:** PIR variant on STICKER 2162164074 ("Test nodes", 2026-10-14) before the merge
+  (`408eeaf2`). Not run yet: pulse timing and bounce in both polarities, the buzzer variant.
 
----
-
-*Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
-
-## 48. CI version stamping
+## 49. CI version stamping
 
 Branch and PR builds in CI used to bake the latest git tag as the firmware version, so
 `v2.0.0` artifacts reported fw 1.4.0 and Portal refused the features it gates on fw ≥ 1.5.0
@@ -2761,7 +2801,7 @@ the version in `app/CMakeLists.txt`, the release the branch builds towards. Loca
 type 2 (CUSTOM) with the same version. Bump `app/CMakeLists.txt` when a branch starts the
 next release.
 
-## 49. Post-command action waits up to 120 s
+## 50. Post-command action waits up to 120 s
 
 A command that reboots (settings save, reset, reboot) runs its action only after its answer has
 left. The wait was 8 s re-checked at most 6 times (~56 s); a DR0 duty-cycle hold lasts longer,
@@ -2780,7 +2820,7 @@ on the radio work queue. The action was deferred every 8 s ("112 s left" … "7 
 reboot came exactly 120.0 s after the command. A join attempt in between shifted the 8 s steps
 but did not move the deadline.
 
-## 50. Stale NVS config keys are removed
+## 51. Stale NVS config keys are removed
 
 Keys of parameters that an older release removed or renamed (for example
 `config/alarm-notif-time`, `config/history-sensors`) stayed in NVS forever, and every boot
@@ -2795,3 +2835,7 @@ firmware no longer has. The first boot after the flash still logged 3 `set-value
 (the 4 recorded keys were removed, the rest were over the per-boot limit); the second boot
 removed the rest, and from then on no boot logged any. Config values, identity and LoRaWAN
 credentials were unchanged.
+
+---
+
+*Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
