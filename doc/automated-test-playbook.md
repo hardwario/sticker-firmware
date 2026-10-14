@@ -8,7 +8,7 @@ when it must stop and ask the human operator for a physical action.
 It complements — does not replace — [`manual-test-plan.md`](manual-test-plan.md) (the
 authoritative per-feature manual plan, IDs G/L/S/H/A/C/K/N/F). Every scenario here maps back
 to one or more manual-plan IDs in the coverage matrix (§21). Behavioural reference:
-[`version 1.4.md`](<version 1.4.md>). Power baseline: [`power-consumption.md`](power-consumption.md).
+[`version 1.4.md`](<version 1.4.md>), for v2.0.0 together with [`version 2.0.md`](<version 2.0.md>). Power baseline: [`power-consumption.md`](power-consumption.md).
 
 Values in `{CURLY_BRACES}` are **bench placeholders** — never guess them; resolve every one
 of them in Step 0 before doing anything else.
@@ -59,7 +59,7 @@ After intake, the agent MUST:
 
 **Goals.** Exercise the firmware on real hardware across four axes:
 
-- **Functionality** — features behave as specified (`version 1.4.md`, manual plan).
+- **Functionality** — features behave as specified (`version 1.4.md` + `version 2.0.md`, manual plan).
 - **Quality/robustness** — malformed input, races, resets, power loss, RF loss (§16).
 - **Resource cost ("náročnost")** — power draw, flash/RAM budget, payload efficiency, timing (§15, §6).
 - **Improvement discovery** — every run should end with a ranked list of observations that

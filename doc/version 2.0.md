@@ -228,8 +228,8 @@ to the full description.
   delays the boot (§3).
 - **LSE crystal.** It is driven at the highest strength, at a cost of +0.45 µA idle (§38).
 - **Stale settings are cleaned up.** NVS keys of parameters this firmware no longer has are
-  deleted at boot, up to 4 per boot, so the `set-value failure ... error(-2)` boot errors
-  disappear (§51).
+  deleted at boot, up to 8 per boot, and so is a known key whose stored value has another size
+  (the v1.4 `alarm-N` blobs), so the `set-value failure` boot errors disappear (§51, §53).
 
 ### Upgrading from v1.4.x — action required
 
@@ -260,13 +260,17 @@ to the full description.
 6. **Host duty-cycle etiquette at low DR.** A full `GetConfig` at SF12 takes a large part of
    the hourly airtime. Ask only for the keys you need, do not re-request a missing page at
    once, and allow ≥ 1 h for page assembly at a low DR (§13).
-7. **Downgrade.** History pages written by v2.0.0 are not readable by older firmware: run
-   `history clear` after a downgrade (§21). v2.0.0 deletes the stored values of parameters it
-   does not have (§51), so after a downgrade those settings start at their defaults.
+7. **Stored history restarts.** v2.0.0 does not mount the history pages of v1.4.x: the ring
+   starts empty after the upgrade (no corruption, nothing is replayed from before it). Read
+   out what you need before upgrading (§21). There is no supported downgrade from v2.0.0.
 8. **Re-provision alarms and history (#430).** The alarm rule blob, the 1-Wire type ids
    (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
    wire format changed with no migration. Rewrite the alarm rules and the history selection,
-   and update the Hub/Portal decoder (§40).
+   and update the Hub/Portal decoder (§40). The old 17 B `alarm-N` values are deleted on the
+   first boots (one or two boots, §53).
+10. **One payload version for both releases.** `APP_PROTO_VERSION` stays `0x01`, but the alarm
+   and 1-Wire encodings changed (§40). A decoder serving a mixed v1.4.x / v2.0.0 fleet must pick
+   the format by the firmware version from `Info`, not by the payload.
 9. **P2P deployments only:** P2P now speaks the TOWER protocol (flag day, no fallback). Nodes
    and the Hub (Northbridge + central) must be updated together, and every node joins afresh
    (§41).
@@ -362,6 +366,7 @@ to the full description.
 | Build | **Fixed** — CI stamps branch/PR builds with the version of `app/CMakeLists.txt` (type DEV), tag builds with the tag. See §49. |
 | Radio | **Changed** — a deferred post-command action waits up to 120 s for undelivered frames (was ~56 s). See §50. |
 | Config | **Fix** — NVS keys of removed parameters are deleted at boot; no more `set-value failure` boot errors. See §51. |
+| Robustness | **Fix** — release review (#503): stillness rule armed only with its capability, RATE on live counters, 11 B tier telemetry never over budget, wrong-size config values cleaned up, pulse settle timer, reboot after a failed save, exact release tags, Zephyr pinned by SHA. See §53. |
 
 ---
 
@@ -1563,12 +1568,14 @@ A split (halt, stall, RTC step) additionally leaves the rest of that page unused
 reboots already did. Flash writes per record are unchanged; the fix-up double word
 is one extra program per page recorded without RTC.
 
-### Upgrade / downgrade
+### Upgrade
 
-Upgrading keeps the stored history (v1 pages are read as before). A **downgrade**
-to an earlier firmware does not recognise v2 pages: it mounts whatever v1 pages are
-left from before the upgrade (stale records) — run `history clear` after a
-downgrade.
+The stored history does **not** survive the upgrade from v1.4.x. Since #431 (§40) a page
+is mounted only when its layout check word matches the current channel layout; the v1
+`mask` word never does, so no v1 page mounts and the ring starts empty (nothing is
+corrupted). An earlier version of this section
+said v1 pages were kept; that was true before #431. Losing history on a firmware update is
+accepted: history only bridges radio outages. There is no supported downgrade.
 
 ### Tests
 
@@ -1808,8 +1815,7 @@ prefix (ProXimos decision #22):
   `link_check_interval` / `link_check_fail_rejoin` in a SetParam for one release.
 - **No NVS migration.** A value stored under the old settings key is not
   carried over: after the update both parameters run on their defaults (5 / 5)
-  until set again, and the old key stays unused in NVS. A downgrade to v1.4.x
-  likewise reads its defaults.
+  until set again. The old key is deleted at boot (§51).
 
 ## 27. P2P retry backoff and a per-node uplink phase (F-P2P-4 / F-P2P-5)
 
@@ -2407,9 +2413,9 @@ Hub/Portal follow-up: proximos/proximos-v2#119. The Manager-App needs the new ru
 history selection from `app_sensor_types.yaml`.
 
 **Known limitation.** At the 11 B tier (US915 DR0 / AU915 DR2) a dallas frame is 14 B with
-the version byte (was exactly 11 B). The composer sends it alone and the MAC refuses it.
-Not decided yet: accept it, or trim the encoding (for example, omit `valid` when every
-channel is present).
+the version byte (was exactly 11 B). It does not fit an empty page, so the composer skips it
+with a warning and sends the rest (§53); a 1-Wire reading never goes out at that tier.
+Trimming the encoding (for example, omitting `valid` when every channel is present) is #482.
 
 **Cost** (on v2.0.0 `0fa29dea`): release 179 644 B flash / 47 524 B RAM (+5.5 KB / +640 B),
 debug 231 680 B / 56 180 B (94.3 % / 85.7 %), debug + W1 214 484 B / 52 148 B (`LOG=n`).
@@ -2880,9 +2886,9 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
   it high), so a pulse is a move away from the idle level: the level at init, never
   re-learned (a long pulse would count twice). If init caught a pulse in progress, every
-  pulse counts on its trailing edge instead — still exactly once. An edge
-  counts only when the pin was stable for 20 ms before it, so bounce on either edge of a
-  pulse counts once. The poll folds the ISR count into `input_x_count`. A pulse pin always
+  pulse counts on its trailing edge instead — still exactly once. Each edge restarts a
+  10 ms settle timer; when it expires the level is read and a change away from idle counts one
+  pulse, so bounce on either edge of a pulse counts once (§53). The poll folds the ISR count into `input_x_count`. A pulse pin always
   counts (`input-x-counter` is ignored), has no state, no state flag and no input alarm
   edge. Each edge wakes the CPU briefly; not measured.
 - **Channels (§40).** `cap` in `app_sensor_types.yaml` can now name an enum parameter and the
@@ -2966,10 +2972,10 @@ but did not move the deadline.
 Keys of parameters that an older release removed or renamed (for example
 `config/alarm-notif-time`, `config/history-sensors`) stayed in NVS forever, and every boot
 logged `<err> settings: set-value failure. key: config/... error(-2)` for each. The config
-loader (generated from `config.c.j2`) now records an unknown `config/*` key, up to 4 per boot,
-and deletes it once the subtree has loaded without error (`Stale key ... removed`). If a load
-fails, nothing is deleted. A firmware downgrade drops the newer firmware's extra keys the same
-way: those settings return to their defaults after upgrading again.
+loader (generated from `config.c.j2`) now records an unknown `config/*` key, up to 8 per boot,
+and deletes it once the subtree has loaded without error (`Stale key ... removed`). Since §53
+a known key whose stored value has another size counts as stale too. If a load fails, nothing
+is deleted. Keys over the per-boot limit go on the next boot.
 
 HIL PASS (2026-10-14, STICKER 2162165132, J-Link 801053709, debug build): NVS held 7 keys this
 firmware no longer has. The first boot after the flash still logged 3 `set-value failure` lines
@@ -3017,6 +3023,41 @@ again, at the extreme of the wire type, as the Bluetooth SIG "value is not known
   `ttn.js` decodes all four to `null`, temperature/humidity/illuminance are real values. The
   Hub decoded `pressure`/`altitude` to `null` (Portal "–"); it still needed the sentinel
   check for fields 8/30/31 (Hub fix 5ce440f6, proximos-v2 !179).
+
+## 53. Release review fixes (#503)
+
+Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION` (`0x01`) and
+`APP_CONFIG_VERSION` are unchanged.
+
+| # | Fix | Before |
+|---|---|---|
+| D1 | A stillness rule (`from 0 to 0` on PIR / accelerometer motion) is armed only while its channel's capability is on (`app_alarm_rule_armed()`, as every other rule). | With the capability off the rule latched one activation about `dwell` after boot and never cleared (red LED, buzzer). |
+| D2 | RATE rules on the hall and input counters read the live totalizers. | They read the sample cache, refreshed once per `interval-sample`: with `dwell` shorter than that, one activate/deactivate pair per sample. |
+| D3 | Telemetry at the 11 B tier (US915 DR0 / AU915 DR2, 10 B of protobuf): the system group (battery, alarm bits) goes first; a group that does not fit an empty page is sent field by field; a field or 1-Wire reading that fits no page is skipped with a warning; `page_count` counts only the pages that go out. | A group over the page budget (two NA sentinels, 12 B; the barometer; the system group on a page with page fields) was handed to the MAC, refused with `-EMSGSIZE`, and lost every report. |
+| D6 | A stored config value whose size differs from the current one is a stale key: deleted after the load (§51), the parameter starts at its default. Up to 8 stale keys per boot (was 4). | The 16 v1.4 `alarm-N` blobs (17 B, now 18 B) logged `set-value failure ... error(-22)` on every boot until the first manual save. |
+| D7 | Pulse inputs: each edge restarts a 10 ms settle timer, and the settled level decides (a change away from idle = one pulse). | An edge counted only after 20 ms of quiet and the rejected edge moved the reference, so bounce could drop the real edge and chatter under 20 ms never counted. |
+| M1 | CI builds a release only from a tag that is exactly `vX.Y.Z`; any other `v*` tag fails the job. | `v2.0.0-rc1` built a MAIN image stamped 2.0.0. |
+| M2 | `west.yml` pins the Zephyr fork by SHA (`79067560`, head of `v4.3.0-sticker2-branch`). | A tag rebuild took whatever the branch head was that day. |
+| M3 | A command action that reboots (settings / secret-key / claim save, calibration, reset tiers) reboots even when its save fails. | A failed save left the unit running on staged values the sender had been told were applied. |
+| M4 | Comments: `app_version.h` (branch builds keep the CMake version), `app_alarm_rules.h` (RATE window), `main.c` (the battery gate runs after the settings load). | — |
+| M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, §48 settle timer, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
+
+Not changed, by decision: the payload version stays `0x01` (Upgrading item 10); no downgrade
+from v2.0.0 is supported, so the stale-key cleanup may delete keys of a newer release; a TOWER
+`JOIN_RESP` is bound only to type and destination (the pairing key is public by TOWER design,
+see `doc/p2p.md`); NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
+
+- **Flash / RAM** (vs the PR #503 head `059ac313`): release 192 940 B / 48 456 B (+64 B /
+  +256 B, ≥ 8 KiB free kept), debug 241 248 B / 56 328 B (+200 B / +192 B). The config loader
+  shares one size check and read for all keys and the composer copies fields through an offset
+  table, so the fixes cost almost no code.
+- **Tests:** `alarm_eval` `test_stillness_rule_inert_without_capability`,
+  `test_rate_reads_live_counter_not_sample_cache` (RATE tests drive the live counter);
+  `compose` `test_na_sentinels_at_11_byte_tier`, `test_group_split_at_11_byte_tier`,
+  `test_w1_at_11_byte_tier` and `test_w1_reading_bigger_than_page_skipped`; `cmd`
+  `test_run_action_failed_save_still_reboots` (every executor test now checks its reboot).
+  All 16 native suites, 86 configen/proto tests and 131 decoder tests pass.
+- **HIL:** pending; procedure H1–H8 in `doc/plan/509 - v2.0.0 release review fixes.md`.
 
 ---
 
