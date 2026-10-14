@@ -72,11 +72,16 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="v${GITHUB_REF#refs/tags/v}"
             BUILD_TYPE=0
-            if [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-              VERSION_ARGS="-DAPP_VERSION_MAJOR=${BASH_REMATCH[1]}"
-              VERSION_ARGS+=" -DAPP_VERSION_MINOR=${BASH_REMATCH[2]}"
-              VERSION_ARGS+=" -DAPP_VERSION_PATCH=${BASH_REMATCH[3]}"
+            # Release tags are exactly vX.Y.Z: anything else (v2.0.0-rc1,
+            # v2.0.0.1, ...) would otherwise ship as a release build with only
+            # the leading numbers baked in (#503).
+            if [[ ! "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::Tag $VERSION is not vX.Y.Z"
+              exit 1
             fi
+            VERSION_ARGS="-DAPP_VERSION_MAJOR=${BASH_REMATCH[1]}"
+            VERSION_ARGS+=" -DAPP_VERSION_MINOR=${BASH_REMATCH[2]}"
+            VERSION_ARGS+=" -DAPP_VERSION_PATCH=${BASH_REMATCH[3]}"
           else
             VERSION="$(git rev-parse --short HEAD)"
             BUILD_TYPE=1
