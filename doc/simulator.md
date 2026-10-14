@@ -44,6 +44,7 @@ in real time by default; `--no-rt` runs as fast as possible.
 | `--nfc_port=<port>` | UDP port of the NFC phone link on 127.0.0.1, default 47801 |
 | `--nfc_off` | No phone link; the RF field is switched by `sim nfc` only |
 | `--stop_at=<s>` | Exit after the given simulated time |
+| `--pin_low=<names>` | GP / hall pins held low from power-on, comma-separated (`gp_a,gp_b`); the default level is high |
 
 `sys_reboot()` (for example after `settings save`) re-executes the simulator
 with the same arguments. The flash file survives the reboot, but the
@@ -75,8 +76,8 @@ Several STICKERs can share the air: give each its own `--flash` and
 | ST25DV04K NFC tag | I2C 0x53/0x57 | `emul_st25dv.c` | `sim nfc [on\|off]` (RF field), phone link over UDP |
 | SX1262 radio | SPI | `emul_sx126x.c` | `sim radio` (state); the air is `sim_air.py` |
 | Battery, analog inputs A/B | ADC | `sim_adc.c` | `sim battery <V>`, `sim analog a\|b <V>` |
-| Hall sensors, GP pins | GPIO | `gpio_emul` | `sim pin <name> [0\|1]`, `sim pulse <pin> <count> [ms] [bounce]` |
-| Flash (history, NVS) | — | flash simulator | `--flash=<file>` |
+| Hall sensors, GP pins | GPIO | `gpio_emul` | `sim pin <name> [0\|1]` (also counts the edges an output drives), `sim pulse <pin> <count> [ms] [bounce]` |
+| Flash (history, NVS) | — | flash simulator | `--flash=<file>`; `sim nvs write <key> <hex>`, `sim nvs delete <key>` (raw settings values, e.g. an old firmware's) |
 
 `sim status` prints every value. The defaults are 23 °C / 45 %RH, 250 lux,
 1013.25 hPa, a STICKER lying flat (0, 0, 9.81 m/s²), DS18B20 #0 and #1
@@ -162,6 +163,26 @@ The CI job *Simulator smoke test (native_sim)* in
 `.github/workflows/build.yml` builds the simulator and runs this test on
 every PR, and uploads the logs when it fails.
 
+## v2.0.0 HIL plan
+
+`scripts/sim/hil_v200.py` runs steps H1–H7 of the v2.0.0 HIL plan
+([plan](plan/509%20-%20v2.0.0%20release%20review%20fixes.md)) on the simulator:
+pulse counter at both idle levels and with bounce, RATE alarms on live
+counters, stillness rules with the capability off and on, the 11 B tier
+(decoded with `ttn.js`), settings save over NFC and the radio, the v1.4
+stale-key upgrade, buzzer and PIR modes. About 20 minutes; name steps to run a
+subset.
+
+```bash
+west build -p always -b native_sim/native/64 -d build-sim-hil -- \
+  -DCONFIG_LOG_MODE_IMMEDIATE=y -DCONFIG_LOG_BACKEND_UART=y
+python scripts/sim/hil_v200.py --exe app/build-sim-hil/zephyr/zephyr.exe --log-dir /tmp/sim-hil h1 h6
+```
+
+The two log options make the boot-time log of the settings load visible (the
+shell log backend starts after it); H6 needs them. Stop2, on-air US915 and the
+release soak stay on hardware.
+
 ## Limitations
 
 - **Timing**: the kernel tick matches the board (10 kHz), but CPU time is
@@ -171,7 +192,9 @@ every PR, and uploads the logs when it fails.
 - **Power**: no PM (`CONFIG_PM=n`), no current model, no Stop2. Power work
   needs the PPK2 on HW.
 - **Not emulated**: the FSK P2P profile (stock TOWER gateway, OTA pairing),
-  DS28E17 machine probes, the PIR sensor, the buzzer (it drives a GPIO only),
+  DS28E17 machine probes, the PIR sensor (its data line is the `gp_a` pin: high =
+  motion, held high it reports motion on every 100 ms poll), the buzzer (it
+  drives a GPIO only, `sim pin gp_b` counts the edges),
   the watchdog, the RTC calibration and the hardware AES (the soft-SE AES is
   used).
 - **Reboot**: the flash file persists; the emulated chips start from their

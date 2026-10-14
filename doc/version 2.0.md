@@ -3023,7 +3023,8 @@ again, at the extreme of the wire type, as the Bluetooth SIG "value is not known
 The application builds for `native_sim/native/64` with emulated peripherals
 (SHT40, OPT3001, MPL3115A2, LIS2DH12, DS2484 + DS18B20, ST25DV04K, SX1262,
 ADC, GPIO, flash). `scripts/sim/` holds a LoRaWAN LNS and P2P hub
-(`sim_air.py`), an NFC phone (`sim_nfc.py`) and the CI smoke test. No
+(`sim_air.py`), an NFC phone (`sim_nfc.py`), the CI smoke test and a runner
+of the v2.0.0 HIL plan H1–H7 (`hil_v200.py`, found the §53 stale-key log). No
 firmware behaviour changes. See [simulator.md](simulator.md) (PR #510).
 
 ---
