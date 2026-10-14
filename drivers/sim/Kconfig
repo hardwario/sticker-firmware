@@ -1,0 +1,14 @@
+#
+# Copyright (c) 2026 HARDWARIO a.s.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+config STICKER_SIM
+	bool "STICKER simulator peripherals"
+	depends on ARCH_POSIX
+	select EMUL
+	help
+	  Emulated STICKER peripherals for the native_sim build of the
+	  application: an ADC, I2C sensor emulators and the `sim` shell
+	  command that sets their readings. See doc/simulator.md.

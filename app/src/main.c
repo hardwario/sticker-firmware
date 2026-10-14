@@ -307,8 +307,15 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	m_fault.magic = FAULT_MAGIC;
 	m_fault.reason = reason;
+#if defined(CONFIG_CPU_CORTEX_M)
 	m_fault.pc = esf ? esf->basic.pc : 0;
 	m_fault.lr = esf ? esf->basic.lr : 0;
+#else
+	/* native_sim (simulator) has no exception frame */
+	ARG_UNUSED(esf);
+	m_fault.pc = 0;
+	m_fault.lr = 0;
+#endif
 	m_fault.check = fault_check(&m_fault);
 
 	LOG_PANIC();
