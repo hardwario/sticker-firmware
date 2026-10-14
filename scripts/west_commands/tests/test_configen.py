@@ -454,7 +454,7 @@ def test_stored_as_keeps_the_nvs_key_of_a_renamed_param(workdir):
         assert f'SETTINGS_SET("{old}", m_app_config.{new},' in c
         assert f'EXPORT_FUNC("{old}", m_app_config.{new},' in c
         assert f"SHELL_CMD_ARG({new.replace('_', '-')}, NULL," in c
-        assert f'"{new.replace("_", "-")}"' not in c.split("h_set")[1].split("return -ENOENT")[0]
+        assert f'"{new.replace("_", "-")}"' not in c.split("static int h_set")[1].split("return stale_key(key)")[0]
         assert f" {field} = {num};" in proto
     # A param without stored_as is stored under its own shell name.
     assert 'SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui,' in c

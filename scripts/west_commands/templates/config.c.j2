@@ -452,7 +452,9 @@ static int stale_key(const char *key)
 		return 0;
 	}
 
-	return -ENOENT;
+	/* List full: skip the key quietly, it is recorded on a later boot. An
+	 * error here would make the settings core log a set-value failure. */
+	return 0;
 }
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
