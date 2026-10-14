@@ -2674,3 +2674,13 @@ Branch and PR builds in CI used to bake the latest git tag as the firmware versi
 the version in `app/CMakeLists.txt`, the release the branch builds towards. Local builds are
 type 2 (CUSTOM) with the same version. Bump `app/CMakeLists.txt` when a branch starts the
 next release.
+
+## 50. Stale NVS config keys are removed
+
+Keys of parameters that an older release removed or renamed (for example
+`config/alarm-notif-time`, `config/history-sensors`) stayed in NVS forever, and every boot
+logged `<err> settings: set-value failure. key: config/... error(-2)` for each. The config
+loader (generated from `config.c.j2`) now records an unknown `config/*` key, up to 4 per boot,
+and deletes it once the subtree has loaded without error (`Stale key ... removed`). If a load
+fails, nothing is deleted. A firmware downgrade drops the newer firmware's extra keys the same
+way: those settings return to their defaults after upgrading again.
