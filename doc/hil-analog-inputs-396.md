@@ -1,7 +1,7 @@
 # HIL Test Report — Analog inputs GP_A/GP_B (#396)
 
 > Target firmware: **v1.5.0**, PR #407. Feature spec:
-> [`version 1.5.md` §45](version%201.5.md).
+> [`version 2.0.md` §45](version%202.0.md).
 >
 > **Two firmware layouts.** The executed tests T1–T4 below ran on 2026-08-26 against
 > the first implementation (branch head `ec25fff`), which used Telemetry fields 28/29,
@@ -164,7 +164,7 @@ Not covered by the session above; ordered roughly by value.
    omitted (telemetry, §42) / `0xFFFF` (history) and a `no_data` alarm (R5).
 9. **Pin-sharing mutual exclusion on HW.** Enable `cap-input-a` + `cap-analog-a`
    (and PIR/buzzer combinations) and confirm the runtime resolution order and the
-   `LOG_WRN`, matching `version 1.5.md` §45 (R8).
+   `LOG_WRN`, matching `version 2.0.md` §45 (R8).
 10. **Dynamic signals.** One-shot sampling against a slowly varying / pulsed input
     — characterize aliasing and the effective sample instant.
 11. **Alarm dwell & hysteresis.** Non-zero `dwell` on an analog threshold rule

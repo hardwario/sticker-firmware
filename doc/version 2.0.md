@@ -1,14 +1,14 @@
-# HARDWARIO STICKER — Firmware v1.5.0 — What's New
+# HARDWARIO STICKER — Firmware v2.0.0 — What's New
 
-This document lists **only the changes introduced in firmware v1.5.0** relative to the v1.4.0 series. Existing v1.4.0 behaviour is unchanged unless noted.
+This document lists **only the changes introduced in firmware v2.0.0** relative to the v1.4.0 series. Existing v1.4.0 behaviour is unchanged unless noted.
 
 ---
 
-## What's new in v1.5.0 — summary for users
+## What's new in v2.0.0 — summary for users
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v1.5.0. The numbered sections below (§1–§45) carry the full
+moves from v1.4.x to v2.0.0. The numbered sections below (§1–§45) carry the full
 technical detail.
 
 ### Highlights
@@ -100,33 +100,33 @@ technical detail.
 
 ### Upgrading from v1.4.x — action required
 
-1. **Manager-App: update together with the firmware.** v1.5.0 answers on the NFC mailbox
-   only. An older app cannot configure a v1.5.0 device. The app must also read
+1. **Manager-App: update together with the firmware.** v2.0.0 answers on the NFC mailbox
+   only. An older app cannot configure a v2.0.0 device. The app must also read
    `Response.page_count`, accept `claim_info` as the answer to `claim_active`, send
    `claim_done` after a claim, and read the link state with `get_radio_state`
    (§13, §18, §19, §24, §35).
 2. **NFC needs a powered device.** Battery-less configuration, configuration staged into a
    switched-off unit, and Android tap-to-launch are gone. A generic NFC reader, or a unit
    with a dead battery, shows a blank tag (§18).
-3. **Wipe the old NDEF records once.** v1.5.0 never writes the NFC EEPROM, so a unit
+3. **Wipe the old NDEF records once.** v2.0.0 never writes the NFC EEPROM, so a unit
    upgraded from v1.4.x keeps its old records, including the plaintext `hio.stck:clm` claim
    token. Clear them with `nfc clear` on a debug build or by writing an empty NDEF message
    from the phone (§18, §35).
 4. **Renamed shell parameters** (no aliases; update production and bench scripts):
 
-   | v1.4.x | v1.5.0 | Stored value after the upgrade |
+   | v1.4.x | v2.0.0 | Stored value after the upgrade |
    |---|---|---|
    | `lrw-deveui`, `lrw-appkey` | `radio-deveui`, `radio-appkey` | **kept** (§33) |
    | `lrw-link-check-interval`, `lrw-link-check-fail-rejoin` | `radio-link-check-interval`, `radio-link-check-fail-rejoin` | **not kept**: back to the defaults 5 / 5; set them again if you changed them (§26) |
 
-5. **Decoder and integrations.** Use the v1.5.0 `ttn.js`. Integrations that read decoded
+5. **Decoder and integrations.** Use the v2.0.0 `ttn.js`. Integrations that read decoded
    keys must use `lorawan.radio_link_check_interval` / `radio_link_check_fail_rejoin`. A
    consumer that wants a whole paged answer merges the pages by (DevEUI, fPort, `seq`).
    The deprecated `ConfigDump.page_*` fields are no longer set (§13, §26).
 6. **Host duty-cycle etiquette at low DR.** A full `GetConfig` at SF12 takes a large part of
    the hourly airtime. Ask only for the keys you need, do not re-request a missing page at
    once, and allow ≥ 1 h for page assembly at a low DR (§13).
-7. **Downgrade.** History pages written by v1.5.0 are not readable by older firmware: run
+7. **Downgrade.** History pages written by v2.0.0 are not readable by older firmware: run
    `history clear` after a downgrade (§21).
 8. **Re-provision alarms and history (#430).** The alarm rule blob, the 1-Wire type ids
    (2 = dallas, 3 = machine-probe), `history-channels` and the alarm / telemetry / history
@@ -284,8 +284,8 @@ removed again. All three LEDs are plain GPIO, as in v1.4.0.
 
   | Image | Flash | RAM |
   |---|---|---|
-  | Release, `v1.5.0` (53966b92) | −1944 B (165428 → 163484) | −64 B |
-  | Debug, `v1.5.0` (53966b92) | −3712 B (223888 → 220176) | −64 B |
+  | Release, `v2.0.0` (53966b92) | −1944 B (165428 → 163484) | −64 B |
+  | Debug, `v2.0.0` (53966b92) | −3712 B (223888 → 220176) | −64 B |
   | Release, `feat-p2p` (647acf21) | −1960 B (182916 → 180956) | 0 |
 
 - **It did not work on release builds.** Release runs with `CONFIG_PM=y`, and every
@@ -459,7 +459,7 @@ reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
 - Cost: about 400–480 B flash, 64 B RAM.
 
 **HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):** T1–T8 PASS. The key results:
-- **A/B:** `lorawan_join()` after link-check / device-time confirms returned after **26 ms** on v1.5.0 (stale
+- **A/B:** `lorawan_join()` after link-check / device-time confirms returned after **26 ms** on v2.0.0 (stale
   result) versus **8305 ms** with #421 (the real JoinAccept).
 - **Fault injection:** a dropped confirm returned `-ETIMEDOUT` after 20 s with no wedge and no watchdog reset.
 - **Stress:** about 68 k locked MIB reads during chained downlinks, with no hang.
@@ -697,7 +697,7 @@ US915/AU915/AS923 gateway): the 11 B budget tier of §9 and AS923 on air. See th
 
 ## 12. Faster link-loss recovery (#424)
 
-When the network disappears (gateway off, or the device moved out of reach of its ADR-optimised data rate), v1.5.0 recovers faster and, where possible, without a rejoin.
+When the network disappears (gateway off, or the device moved out of reach of its ADR-optimised data rate), v2.0.0 recovers faster and, where possible, without a rejoin.
 
 | | Before | After |
 |---|---|---|
@@ -873,7 +873,7 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 - GetConfig (6 pages at DR0, 14 with 8 rules), `page=N` resume, stream cancel, GetParam, paged GetInfo with active
   alarms, AlarmReport pages, history frames, release image and coexistence with #424 all PASS.
 - The first run found a `m_work_q` stack overflow on a paged GetInfo. It was a regression of this change (A/B
-  against the previous `v1.5.0` was clean) and is fixed before merge.
+  against the previous `v2.0.0` was clean) and is fixed before merge.
 - Not HW-tested: the 11 B tier and AU915 (no 915 MHz gateway), and P2P (#426).
 - See §10 of `doc/plan/425 - Universal response paging.md`.
 
@@ -905,7 +905,7 @@ the autonomous dump from an answer. Decoders need no change: the answer is a nor
 `config_dump` bytes are identical to the boot settings-info of the same boot. See
 `doc/manual-test-plan.md` scenario **L4c**.
 Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
-`GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
+`GetSettings` and completes on the one-frame answer. A v2.0.0 image without this command
 answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
 Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
 
@@ -1092,7 +1092,7 @@ list to fit, as it already does on a tight LoRaWAN frame.
 
 ### Identity: no NDEF record — `get_basic_info` instead
 
-v1.5.0 removes the `hio.stck:inf` record too: the tag holds **no NDEF at all**.
+v2.0.0 removes the `hio.stck:inf` record too: the tag holds **no NDEF at all**.
 A phone reads the serial, the anti-replay nonce high-water and the config/FW
 version from the plaintext `get_basic_info` command over the mailbox (channel
 `0x03`), right after enabling it — so a generic NFC reader or a
@@ -1107,7 +1107,7 @@ stall or wedge i2c1 — the poll thread now only ever serves the mailbox.
 - **All NDEF records.** The command channel (`hio.stck:cmd` / `hio.stck:rsp` /
   `hio.stck:ack`, the vendor `hio.stck:vnd`) AND the resting identity record
   (`hio.stck:inf`) and the `hio.stck:clm` claim record are gone — the tag holds
-  no NDEF. Firmware v1.5.0 answers only over the mailbox; the Manager-App must
+  no NDEF. Firmware v2.0.0 answers only over the mailbox; the Manager-App must
   use it (lockstep release). An old app's `hio.stck:cmd` left on the tag is
   ignored, never executed.
 - **Battery-less configuration / boot-staged provisioning** (v1.4.0 §10
@@ -1263,7 +1263,7 @@ returns `NOT_READY "transport not allowed"`.
 
 ## 20. Last-downlink link quality in the NFC GetInfo (#409 A2)
 
-> **Superseded before v1.5.0 shipped (#446, §24).** The three fields below and
+> **Superseded before v2.0.0 shipped (#446, §24).** The three fields below and
 > `lrw_state` (12) are no longer part of Info (all four are `reserved`); the
 > same data, and much more, is read with the `get_radio_state` command. The
 > section is kept for the history of the design.
@@ -1299,7 +1299,7 @@ Cost: release +160 B flash, +0 B RAM.
 ## 21. History timestamps follow the RTC (F27, F28, H-4)
 
 A history record carries no time of its own: its time is implicit, `base +
-ordinal × interval_report`. v1.5.0 before this change assumed every record came
+ordinal × interval_report`. v2.0.0 before this change assumed every record came
 exactly one interval after the previous one and none was ever missing. On the
 bench (unit 0413) that failed in four ways:
 
@@ -1630,7 +1630,7 @@ Link supervision (periodic link check, `WARNING` after 3 misses, re-link after
 N more) is one policy for both radios, so its two parameters drop the `lrw-`
 prefix (ProXimos decision #22):
 
-| Before (v1.4.x) | v1.5.0 | Default | Meaning |
+| Before (v1.4.x) | v2.0.0 | Default | Meaning |
 |---|---|---|---|
 | `lrw-link-check-interval` | `radio-link-check-interval` | 5 | Link check every N-th report (0 = off) |
 | `lrw-link-check-fail-rejoin` | `radio-link-check-fail-rejoin` | 5 | Failures while `WARNING` before the link is re-established (LoRaWAN: OTAA rejoin) |
@@ -1778,7 +1778,7 @@ Hardware (0413, P2P, Hub c60, E6 replay 2026-09-28 06:15Z, `alarm-limit 0`). Bot
 
 The DevEUI and the AppKey are not LoRaWAN-only any more. P2P builds its JoinRequest, its session-key KDF (#417) and its uplink phase from them. They are renamed like the link-check parameters (§26), but without losing the stored value:
 
-| v1.4 / before | v1.5 | NVS key | proto (`lorawan` group) |
+| v1.4 / before | v2.0 | NVS key | proto (`lorawan` group) |
 |---|---|---|---|
 | `lrw-deveui` | `radio-deveui` | `config/lrw-deveui` (unchanged) | `deveui = 6` (unchanged) |
 | `lrw-appkey` | `radio-appkey` | `config/lrw-appkey` (unchanged) | `appkey = 9` (unchanged) |
@@ -1919,7 +1919,7 @@ did. `device_reset` keeps both.
 
 ### Upgrade from v1.4.x: wipe the old `hio.stck:clm` record
 
-v1.5.0 never writes the NFC user EEPROM (§18), so a unit upgraded from v1.4.x
+v2.0.0 never writes the NFC user EEPROM (§18), so a unit upgraded from v1.4.x
 keeps the old plaintext `hio.stck:clm` NDEF record (serial + `claim_token`),
 readable without power even after `claim_done`. Part of the upgrade: wipe the
 NDEF area once, with `nfc clear` on a debug build or by writing an empty NDEF
@@ -2040,7 +2040,7 @@ reboots.
 - **HIL so far** (2026-10-09, STICKER 2162190413, LoRaWAN EU868, PR #472 head):
   boot announce Info → settings-info → telemetry, then the first periodic
   announce after `interval-announce 1` carrying a staged `interval-sample`.
-- **Not covered yet:** the full L4d run on the `v1.5.0` head (link-down defer,
+- **Not covered yet:** the full L4d run on the `v2.0.0` head (link-down defer,
   `interval-announce 0`) and P2P.
 
 
@@ -2085,7 +2085,7 @@ LoRaWAN RX windows, but it adds ~1.8 s/day of wall-clock drift between time sync
 
 ## 39. Flash and RAM trim (#479, #481)
 
-v1.5.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
+v2.0.0 had grown to 85.5 % flash / 84.0 % RAM (release) and 96.1 % flash / **97.4 % RAM**
 (debug, 1.7 KB free). #479 frees space without changing behaviour.
 
 | Variant | FLASH before → after | RAM before → after |
@@ -2157,7 +2157,7 @@ erase.
 Native ztest suites and `pytest scripts/west_commands/tests` pass.
 
 **Not fixed here.** The `debug.conf;debug-history-flash.conf` variant already overflowed FLASH on
-`v1.5.0` (by 7 916 B). It now overflows by ~1.7 KB. CI does not build it.
+`v2.0.0` (by 7 916 B). It now overflows by ~1.7 KB. CI does not build it.
 
 **Further levers (measured, not applied).**
 
@@ -2254,7 +2254,7 @@ the version byte (was exactly 11 B). The composer sends it alone and the MAC ref
 Not decided yet: accept it, or trim the encoding (for example, omit `valid` when every
 channel is present).
 
-**Cost** (on v1.5.0 `0fa29dea`): release 179 644 B flash / 47 524 B RAM (+5.5 KB / +640 B),
+**Cost** (on v2.0.0 `0fa29dea`): release 179 644 B flash / 47 524 B RAM (+5.5 KB / +640 B),
 debug 231 680 B / 56 180 B (94.3 % / 85.7 %), debug + W1 214 484 B / 52 148 B (`LOG=n`).
 
 **Tests.** native_sim 16/16 suites (new `sensor_types`, `w1_slots`; `alarm_rules`,
@@ -2341,7 +2341,7 @@ transport.md`; node behaviour: `doc/p2p.md`.
   verbatim. The
   `tests/p2p` gw-sim firmware (old wire only) is removed.
 - **Decoder:** `app/decoder/p2p.js` parses TOWER frames and both envelopes.
-- **Cost:** release 183 060 B flash / 48 636 B RAM merged with v1.5.0 `60d982dc` (+3.2 KB /
+- **Cost:** release 183 060 B flash / 48 636 B RAM merged with v2.0.0 `60d982dc` (+3.2 KB /
   +1.1 KB vs that head); 185 556 B / 56 036 B on `feat-p2p` before the #479 trim. About +2.3 KB of it is the new
   config param: LTO inlines every `apply_*` into `app_cmd_handle_set_param`.
 - **Tests:**
@@ -2370,15 +2370,15 @@ is a fifth of the frame and can push a report onto a second page (§13).
   1-Wire `SensorReading` valid mask is unchanged.
 - **Decoder:** `ttn.js` still maps the old sentinels to `null`, so frames from older
   firmware decode as before. Hub decoder: proximos/proximos-v2#119.
-- **Cost:** release 183 004 B flash / 48 636 B RAM (−56 B flash, 0 RAM vs v1.5.0
+- **Cost:** release 183 004 B flash / 48 636 B RAM (−56 B flash, 0 RAM vs v2.0.0
   `73c0b802`).
 - **Tests:** `tests/compose` `test_omit_absent_analog` (cap-barometer + light on, all
   NaN → no field), `test_system_always_present` updated; `ttn.test.js` "omitted analog
   readings stay absent".
 
-## 43. v1.5.0 review fixes (#485, PR #489)
+## 43. v2.0.0 review fixes (#485, PR #489)
 
-Fixes for the bugs confirmed in the v1.5.0 code review. Every claim was checked against
+Fixes for the bugs confirmed in the v2.0.0 code review. Every claim was checked against
 `72ef088b` first; the ones that were not bugs are listed in #485.
 
 - **History kept across a boot layout change (S1).** The 1-Wire rebind (auto-enroll, a
@@ -2443,7 +2443,7 @@ and the data are the same on both (Hynek, 2026-10-12). Plan:
   afresh. Needs hardwario/sticker-zephyr#5 (`LORA_FSK`, merged `f21ab9d6`); run
   `west update`. `doc/p2p.md` §15.
 - **Cost:** release 187 916 B flash (88.23 %), 49 096 B RAM (74.91 %) merged with
-  `v1.5.0` `ed577d0c` (+3 192 B / +248 B vs that head).
+  `v2.0.0` `ed577d0c` (+3 192 B / +248 B vs that head).
 - **Tests:** all 16 native suites pass (`p2p_logic` 91, `radio_common` 213), configen /
   proto pytest 80, JS decoder 128, clang-format 22.1.5 clean.
 - **HIL (2026-10-12, STICKER 5722):** control commands and MTU 96 against Hubs 182 / 158,
@@ -2501,7 +2501,7 @@ The hall pins (PA3/PA7) are not ADC-capable and stay digital.
 - **Power:** one ADC conversion per enabled input per `interval-sample`, the same
   resume/suspend pattern as the battery read. Idle current not re-measured.
 - **Cost:** release 186 508 B flash (87.57 %), 48 904 B RAM (74.62 %); debug 237 560 B
-  (96.66 %), 56 392 B (86.05 %), on `v1.5.0` `c7c6485a`.
+  (96.66 %), 56 392 B (86.05 %), on `v2.0.0` `c7c6485a`.
 - **Tests:** `tests/compose` `test_input_analog_voltage` (capability gating, mV rounding,
   omit without a reading); `ttn.test.js` (fields 30/31, history channels 11/14,
   `set_param` / `config_dump` of the capabilities); configen / sensorgen round-trip.
@@ -2514,10 +2514,10 @@ The hall pins (PA3/PA7) are not ADC-capable and stay digital.
   fault path, buzzer variant, GP_B, 13.5–24 V, idle power. The first implementation's
   GP_B sweep (2026-08-26) is in the same report.
 
-## 46. v1.5.0 review leftovers (#485)
+## 46. v2.0.0 review leftovers (#485)
 
 Second pass over the #485 findings that PR #489 left open. Each item was re-checked against
-`v1.5.0` `2098aa5c` before the fix.
+`v2.0.0` `2098aa5c` before the fix.
 
 - **C2 — narrow config ints.** protobuf has no 8/16-bit scalar, so `sensorN_type` stays
   `uint32` on the wire (a varint: values < 128 take 1 byte). configen now range-checks every
@@ -2749,4 +2749,14 @@ config cap-gpio-input-b <none|digital|analog|pulse>
 
 ---
 
-*Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
+*Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
+
+## 48. CI version stamping
+
+Branch and PR builds in CI used to bake the latest git tag as the firmware version, so
+`v2.0.0` artifacts reported fw 1.4.0 and Portal refused the features it gates on fw ≥ 1.5.0
+(alarm table, `history_channels`). Now only a tag build passes its numbers
+(`-DAPP_VERSION_*`, build type 0 MAIN); a branch/PR build passes build type 1 (DEV) and keeps
+the version in `app/CMakeLists.txt`, the release the branch builds towards. Local builds are
+type 2 (CUSTOM) with the same version. Bump `app/CMakeLists.txt` when a branch starts the
+next release.
