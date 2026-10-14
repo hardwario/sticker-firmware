@@ -1762,7 +1762,7 @@ Found in the Nodes test E6 (2026-09-28): six rules toggled by one `SetParam{…,
 - **Problem 1, a full alarm queue.** `alarm-limit 0` sends every edge as its own batch. The radio's alarm queue holds 4 frames, so a burst of more edges than that dropped the rest (`Alarm queue full; dropped`).
 - **Problem 2, the reboot.** A deferred command action (doc/p2p.md, §30) waited only for the command's answer and a pending Ack retry. Alarm frames still queued, and a batch still collecting in its `alarm-limit` window, died in the reboot.
 - **Fix, back-pressure.** A batch whose pages do not fit the free alarm slots waits, held like a batch waiting for the link or the boot announce. Later edges join it, so the burst leaves in fewer, fuller frames. Each alarm frame the radio takes from the queue releases it to try again. An empty queue takes a batch of any size, because no queued frame is left to release it.
-- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged: 8 s steps, at most 6 deferrals, then the action runs anyway.
+- **Fix, the drain.** The deferred action also waits while alarm frames are queued or in flight. It sends a batch that is still collecting at once instead of at the end of its window. Its bound is unchanged here: 8 s steps, at most 6 deferrals, then the action runs anyway (raised to 120 s in §49).
 - Not in scope: an unconfirmed alarm frame lost on the air (`radio-alarm-ack false`, §30) is still not repeated.
 - Tests: `tests/alarm_eval` (burst hold, all pages must fit, empty queue, the early send of a collecting window, a batch held for the link), `tests/radio_common` (the action waits for queued alarm frames and for a collecting batch; taking an alarm frame releases a held batch).
 
@@ -2674,3 +2674,13 @@ Branch and PR builds in CI used to bake the latest git tag as the firmware versi
 the version in `app/CMakeLists.txt`, the release the branch builds towards. Local builds are
 type 2 (CUSTOM) with the same version. Bump `app/CMakeLists.txt` when a branch starts the
 next release.
+
+## 49. Post-command action waits up to 120 s
+
+A command that reboots (settings save, reset, reboot) runs its action only after its answer has
+left. The wait was 8 s re-checked at most 6 times (~56 s); a DR0 duty-cycle hold lasts longer,
+so the reboot dropped the RAM-only answer the host was waiting for ("Test nodes" HIL).
+The wait is now a deadline: re-checked every 8 s while answers, alarm frames or an ACK are still
+undelivered, and the action runs at the latest **120 s** after the first pending command. A later
+command merges into the pending action and does not move the deadline. Test:
+`radio_common` `action_waits_120_s_at_most` (both profiles).
