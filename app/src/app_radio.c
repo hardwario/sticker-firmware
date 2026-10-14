@@ -1542,11 +1542,11 @@ static void tlm_step(void)
 		m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry went out */
 		break;
 	case -EMSGSIZE:
-		/* M-10: app_compose sends one group or 1-Wire reading that is bigger
-		 * than the budget on its own (US915/AU915 DR0, 11 B, with a machine
-		 * probe of ~25-30 B). Retrying it burns the retries every report on
-		 * data that cannot fit: drop it and go on with the rest of the report;
-		 * it fits again once the DR rises. */
+		/* M-10: a frame over the budget. app_compose skips what cannot fit
+		 * an empty page (#503), so this is only a guard (e.g. the budget
+		 * shrank between the layout and this frame). Retrying it would burn
+		 * the retries on data that cannot fit: drop it and go on with the
+		 * rest of the report. */
 		LOG_ERR("Telemetry frame %zu B over budget %u B; dropped (raise DR)", m_tlm_len,
 			res.budget);
 		break;
