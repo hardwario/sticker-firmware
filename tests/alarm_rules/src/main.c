@@ -287,7 +287,7 @@ ZTEST(alarm_rules, test_channel_validation)
 }
 
 /* A momentary channel (PIR / accelerometer motion) takes edge rules and the
- * 1 -> 1 motion-state level (#498), never the level 0 -> 0. */
+ * 1 -> 1 motion / 0 -> 0 stillness levels (#498). */
 ZTEST(alarm_rules, test_momentary_channel_shapes)
 {
 	struct app_alarm_rule r =
@@ -300,7 +300,7 @@ ZTEST(alarm_rules, test_momentary_channel_shapes)
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "edge rule on PIR motion");
 	r.channel = APP_SENSOR_CH_MOTHERBOARD_ACCEL_MOTION;
 	r.to_state = 0;
-	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "level 0->0 on accel motion");
+	zassert_equal(app_alarm_rules_set(1, &r), 0, "stillness rule on accel motion");
 }
 
 /* The 18 B blob: [0] flags, [1] slot, [2] channel, [3] sensor_type, [4] from,

@@ -135,18 +135,6 @@ bool app_alarm_rule_armed(const struct app_alarm_rule *r)
 	       *(const bool *)((const char *)&g_app_config + c->cap_off);
 }
 
-/* A STATE rule on a momentary channel (PIR / accelerometer motion): those
- * channels only ever assert, so an edge (from != to) is a one-shot with a dwell
- * hold, and the level 1 -> 1 is the motion state (#498: ends after a quiet
- * dwell). A level 0 -> 0 can never match — reject it so the misconfiguration
- * surfaces (#203). */
-static bool rule_state_shape_valid(const struct app_alarm_rule *r,
-				   const struct app_sensor_channel *c)
-{
-	return !(c->kind == APP_SENSOR_KIND_STATE && (c->flags & APP_SENSOR_F_MOMENTARY) &&
-		 r->from_state == 0 && r->to_state == 0);
-}
-
 /* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
  * that uses it — bound it to a sane range regardless of kind (same cap as the
  * old alarm_light_confirm_delay it replaces). */
@@ -190,9 +178,8 @@ static bool rule_valid(const struct app_alarm_rule *r)
 {
 	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
 
-	return c != NULL && rule_state_shape_valid(r, c) && rule_dwell_range_valid(r) &&
-	       rule_threshold_band_valid(r, c) && rule_state_levels_valid(r, c) &&
-	       rule_rate_limit_valid(r, c);
+	return c != NULL && rule_dwell_range_valid(r) && rule_threshold_band_valid(r, c) &&
+	       rule_state_levels_valid(r, c) && rule_rate_limit_valid(r, c);
 }
 
 /* ---- app_config storage (per-rule bytes) -------------------------------- */

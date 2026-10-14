@@ -831,6 +831,12 @@ static inline bool rule_is_momentary(const struct app_alarm_rule *rule)
 	return c != NULL && (c->flags & APP_SENSOR_F_MOMENTARY);
 }
 
+/* Momentary level rule 0 -> 0 (#498): alarm while no event came for `dwell`. */
+static inline bool rule_is_stillness(const struct app_alarm_rule *rule)
+{
+	return rule->from_state == 0 && rule->to_state == 0;
+}
+
 /* STATE rule: from/to over a digital level (#348). from != to is an edge: the
  * raw from->to transition arms a confirm dwell (`dwell` seconds, continuously
  * at to_state) before it fires, then the SAME duration holds the alarm active
@@ -859,12 +865,30 @@ static void eval_state(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 		return;
 	}
 
+	if (rule_is_momentary(rule) && rule_is_stillness(rule)) {
+		/* 0 -> 0 (#498): stillness state. Every event restarts the `dwell`
+		 * quiet deadline (confirm_deadline) and ends an active stillness alarm
+		 * ("moving again", sent). The activation ("stopped") is raised by the
+		 * sweep in app_alarm_poll() once the deadline passes with no event. */
+		if (cur) {
+			rt->confirm_deadline = k_uptime_get() + hold_ms;
+			if (rt->active) {
+				rt->active = false;
+				*should_send = true;
+				alarm_collect(idx, rule, false, ALARM_TYPE_TRIGGER, true, 1);
+			}
+		}
+		rt->have_prev_state = true;
+		rt->prev_state = cur_lvl;
+		return;
+	}
+
 	if (rule_is_momentary(rule)) {
 		/* Pulse channel (PIR / accelerometer): each asserted event is a
 		 * discrete, already-debounced trigger (nothing to dwell-confirm).
 		 *  - edge rule (from != to): fire immediately, then hold for `dwell`
 		 *    seconds, suppressing further fires; the hold ends silently.
-		 *  - level rule (from == to, #498): motion state. The first event
+		 *  - level rule 1 -> 1 (#498): motion state. The first event
 		 *    fires ("motion started"), every further event restarts the
 		 *    `dwell` quiet window, and the deactivation ("motion ended") is
 		 *    sent once `dwell` passes with no event — here or in the central
@@ -1443,13 +1467,27 @@ bool app_alarm_poll(void)
 		if (!m_rt[i].used) {
 			continue;
 		}
+		/* Stillness (0 -> 0 momentary, #498): arm the quiet deadline on first
+		 * sight, raise "stopped" once it passes with no event. */
+		if (m_rt[i].last_rule.enabled && rule_is_momentary(&m_rt[i].last_rule) &&
+		    rule_is_stillness(&m_rt[i].last_rule) && !m_rt[i].active) {
+			if (m_rt[i].confirm_deadline == 0) {
+				m_rt[i].confirm_deadline = now + rule_hold_ms(&m_rt[i].last_rule);
+			} else if (now >= m_rt[i].confirm_deadline) {
+				m_rt[i].confirm_deadline = 0;
+				m_rt[i].active = true;
+				should_send = true;
+				alarm_collect(i, &m_rt[i].last_rule, true, ALARM_TYPE_TRIGGER, true,
+					      0);
+			}
+		}
 		if (m_rt[i].oneshot_expiry != 0 && now >= m_rt[i].oneshot_expiry) {
 			const struct app_alarm_rule *lr = &m_rt[i].last_rule;
 
 			/* A momentary level rule's quiet window elapsed: "motion ended"
 			 * is reported (#498); every other hold ends silently. */
-			if (m_rt[i].active && rule_is_momentary(lr) &&
-			    lr->from_state == lr->to_state) {
+			if (m_rt[i].active && rule_is_momentary(lr) && lr->from_state == 1 &&
+			    lr->to_state == 1) {
 				should_send = true;
 				alarm_collect(i, lr, false, ALARM_TYPE_TRIGGER, true, 0);
 			}

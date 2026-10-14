@@ -2694,8 +2694,9 @@ config cap-gpio-input-b <none|digital|analog|pulse>
 - **Pulse (e.g. S0, IEC 62053-31).** S0 pulses are ≥ 30 ms; the 100 ms input poll would
   miss most of them. A `pulse` pin counts in a GPIO interrupt on both edges (EXTI 4 / 11,
   free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
-  it high), so a pulse is a move away from the idle level: the level at init, re-learned by
-  the poll after 60 s without an edge (a pulse in progress at boot cannot stick). An edge
+  it high), so a pulse is a move away from the idle level: the level at init, never
+  re-learned (a long pulse would count twice). If init caught a pulse in progress, every
+  pulse counts on its trailing edge instead — still exactly once. An edge
   counts only when the pin was stable for 20 ms before it, so bounce on either edge of a
   pulse counts once. The poll folds the ISR count into `input_x_count`. A pulse pin always
   counts (`input-x-counter` is ignored), has no state, no state flag and no input alarm
@@ -2731,12 +2732,14 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   every further event restarts the `dwell` quiet window, and the deactivation ("motion
   ended") is sent once `dwell` passes with no event — one alarm per episode of motion. The
   edge rule `from 0 to 1` keeps its behaviour (fire, then `dwell` blocks a re-fire, silent
-  end); `from 0 to 0` is still rejected.
+  end). The level rule `from 0 to 0` (was rejected) is the stillness state: it is raised
+  ("stopped") once `dwell` passes with no event and ends (sent) on the next event — e.g. a
+  machine that always vibrates and must report when it stops.
 - **Buzzer.** `alarm-buzzer-mode` and the `ats buzzer` commands need `cap-gpio-mode buzzer`.
 - **Cost:** release 190 780 B flash (+696 B), 48 072 B RAM (+64 B); debug 240 432 B
   (+1 048 B), 55 944 B RAM (±0), against `v1.5.0` `0ecf20fb`.
 - **Tests:** `alarm_eval` RATE window = dwell (fire at once, one alarm until a short window,
-  dwell 0 = interval_report) and the PIR motion state; `alarm_rules` momentary rule shapes;
+  dwell 0 = interval_report), the PIR motion and stillness states; `alarm_rules` momentary rule shapes;
   `sensor_types` enum gates; `cmd` settings dump incl. hall and the effective gpio
   fields, BAD_REQUEST for the removed ids (SetParam and GetParam); `compose` / `alarm_eval`
   on the new parameters; sensorgen enum-cap validation and mask rendering; configen enum

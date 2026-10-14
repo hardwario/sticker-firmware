@@ -1610,3 +1610,45 @@ ZTEST(alarm_eval, test_momentary_level_rule_is_motion_state)
 	zassert_equal(count_events(0, 3, 0), 1, "one 'motion ended' expected, got %zu",
 		      count_events(0, 3, 0));
 }
+
+/* #498: a momentary 0 -> 0 rule is a stillness state: raised once `dwell`
+ * passes with no event ("stopped"), ended (sent) by the next event. */
+ZTEST(alarm_eval, test_momentary_zero_level_rule_is_stillness)
+{
+	flush_stale_alarms();
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 0,
+		.to_state = 0,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	/* Vibrating: events keep coming faster than dwell -> never "stopped". */
+	app_alarm_poll(); /* arms the quiet deadline */
+	for (int i = 0; i < 4; i++) {
+		k_sleep(K_MSEC(250));
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+		app_alarm_poll();
+		zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+			      "stillness raised while events kept coming");
+	}
+
+	k_sleep(K_MSEC(500)); /* quiet for dwell */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		     "stillness not raised after a quiet dwell");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true); /* moving again */
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "stillness not ended by a new event");
+	app_alarm_poll();
+	k_sleep(K_MSEC(10));
+	zassert_equal(count_events(0, 3, 1), 1, "one 'stopped' expected, got %zu",
+		      count_events(0, 3, 1));
+	zassert_equal(count_events(0, 3, 0), 1, "one 'moving again' expected, got %zu",
+		      count_events(0, 3, 0));
+}

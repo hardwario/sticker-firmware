@@ -36,15 +36,16 @@ K_MUTEX_DEFINE(m_input_data_mutex);
  * The 100 ms poll would miss short pulses, so a pulse pin counts in the GPIO
  * interrupt. The pulse polarity is unknown (a meter may pull the line low or
  * drive it high), so the pin interrupts on both edges and a pulse is a move
- * AWAY from the idle level, whichever level that is. The idle level is the
- * level at init and is re-learned by the poll once the pin has been quiet for
- * PULSE_IDLE_RELEARN_MS (a pulse in progress at boot cannot stick). An edge is
- * counted only if the pin was stable for PULSE_DEBOUNCE_MS before it: bounce on
- * either edge of a pulse lands within that window of the previous edge. The ISR
- * only bumps m_pulse_x.pending; the poll work folds it into m_input_data under
- * the mutex. */
-#define PULSE_DEBOUNCE_MS     20
-#define PULSE_IDLE_RELEARN_MS 60000
+ * AWAY from the idle level, i.e. the level at init. If init caught a pulse in
+ * progress, the idle level is the pulse level: then every pulse counts on its
+ * trailing edge instead of its leading one — still exactly once, and the
+ * pulse caught at init counts on its release. The idle level is never
+ * re-learned: a long pulse would otherwise count twice. An edge is counted
+ * only if the pin was stable for PULSE_DEBOUNCE_MS before it: bounce on either
+ * edge of a pulse lands within that window of the previous edge. The ISR only
+ * bumps m_pulse_x.pending; the poll work folds it into m_input_data under the
+ * mutex. */
+#define PULSE_DEBOUNCE_MS 20
 
 struct pulse_state {
 	const struct gpio_dt_spec *spec;
@@ -69,21 +70,6 @@ static void pulse_handler(const struct device *port, struct gpio_callback *cb, u
 	}
 	if (level != (int)atomic_get(&st->idle_level)) {
 		atomic_inc(&st->pending);
-	}
-}
-
-/* Re-learn the idle level of a pulse pin that has been quiet for a while. */
-static void pulse_relearn(struct pulse_state *st)
-{
-	uint32_t quiet = k_uptime_get_32() - (uint32_t)atomic_get(&st->last_edge_ms);
-	int level;
-
-	if (quiet < PULSE_IDLE_RELEARN_MS) {
-		return;
-	}
-	level = gpio_pin_get_raw(st->spec->port, st->spec->pin);
-	if (level >= 0) {
-		atomic_set(&st->idle_level, level);
 	}
 }
 
@@ -161,12 +147,10 @@ static int poll_impl(bool prime)
 	uint32_t b_pulses = 0;
 
 	if (pulse_a) {
-		pulse_relearn(&m_pulse_a);
 		a_pulses = (uint32_t)atomic_clear(&m_pulse_a.pending);
 		m_input_data.input_a_count += a_pulses;
 	}
 	if (pulse_b) {
-		pulse_relearn(&m_pulse_b);
 		b_pulses = (uint32_t)atomic_clear(&m_pulse_b.pending);
 		m_input_data.input_b_count += b_pulses;
 	}

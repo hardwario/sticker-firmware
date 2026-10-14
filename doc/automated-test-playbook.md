@@ -1059,6 +1059,9 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Expect:** one activate at the first motion, nothing during the minute, one deactivate
   ~30 s after the last motion.
 - **Evidence:** alarm frames with timestamps.
+- **Variant 0 → 0 (stillness):** `alarm set 0 mb accel-motion from 0 to 0 dwell 30`; shake
+  the device continuously, then put it down. **Expect:** nothing while shaking, one activate
+  ~30 s after it was put down, one deactivate at the next shake.
 
 ### AT-ALM-08 — invalid rule rejected/sanitised (D, A; maps H-10, #203)
 - **Steps:** (a) via SetParam, attempt slot 15 with an inverted/collapsed THRESHOLD band
