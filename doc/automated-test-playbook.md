@@ -648,10 +648,10 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-06 — downlink command matrix (DR, A; maps L10, C1–C7, G4b, G5)
 - **Steps:** over ChirpStack enqueue, one at a time, each command: get_info, sample,
   set_param(+readback), get_param, get_config, settings_save, reboot, reset_counters,
-  force_send, clock_sync, lrw_reset, lrw_join, enter_calibration, w1_scan, **device_reset**
-  (unlike `factory_reset`/`set_secret_key`, `device_reset`'s dispatch in `app_cmd.c` has no
-  transport gate — it IS reachable over a LoRaWAN downlink, and hasn't been tried that way);
-  after each, trigger an uplink and capture the fPort-85 response.
+  force_send, clock_sync, lrw_join, w1_scan; after each, trigger an uplink and capture the
+  fPort-85 response. `device_reset`, `lrw_reset` and `enter_calibration` are `[nfc, shell]`
+  only (v2.0.0 security review R-3 / C-1): over LRW each must answer `Error NOT_READY`, and
+  `set_param{application{calibration=true}}` must answer `NOT_WRITABLE`.
 - Also deliberately try **`factory_reset`**, **`set_secret_key`**, and **`req_history_page`**
   over this same LRW path — `app_cmd.c` gates all three to `[nfc, shell]`/`[nfc, shell,
   vendor]`/`[nfc]` respectively, so the expected result is

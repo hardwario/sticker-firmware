@@ -3040,12 +3040,16 @@ Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION`
 | M2 | `west.yml` pins the Zephyr fork by SHA (`79067560`, head of `v4.3.0-sticker2-branch`). | A tag rebuild took whatever the branch head was that day. |
 | M3 | A command action that reboots (settings / secret-key / claim save, calibration, reset tiers) reboots even when its save fails. | A failed save left the unit running on staged values the sender had been told were applied. |
 | M4 | Comments: `app_version.h` (branch builds keep the CMake version), `app_alarm_rules.h` (RATE window), `main.c` (the battery gate runs after the settings load). | — |
+| S1 | `lrw_reset` is `[nfc, shell]` only (security review R-3). | Reachable over a LoRaWAN / P2P downlink; it resets the OTAA DevNonce, so a 1.0.4 network server refused the following joins. |
+| S2 | `enter_calibration` and `SetParam.application.calibration` are NFC / shell only (security review C-1). | Reachable over a LoRaWAN downlink; calibration mode uplinks under the public, fleet-shared ABP keys. |
 | M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, §48 settle timer, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
 
 Not changed, by decision: the payload version stays `0x01` (Upgrading item 10); no downgrade
 from v2.0.0 is supported, so the stale-key cleanup may delete keys of a newer release; a TOWER
 `JOIN_RESP` is bound only to type and destination (the pairing key is public by TOWER design,
-see `doc/p2p.md`); NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
+see `doc/p2p.md`), and the `fsk` profile with its public pairing key stays in release images; the
+vendor token may change `secret_key` without `vendor_reset_allow`; the P2P gateway replay lane
+stays RAM-only; NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
 
 - **Flash / RAM** (vs the PR #503 head `059ac313`): release 192 940 B / 48 456 B (+64 B /
   +256 B, ≥ 8 KiB free kept), debug 241 248 B / 56 328 B (+200 B / +192 B). The config loader
@@ -3055,7 +3059,8 @@ see `doc/p2p.md`); NA readings are still dropped at the 11 B tier (each sentinel
   `test_rate_reads_live_counter_not_sample_cache` (RATE tests drive the live counter);
   `compose` `test_na_sentinels_at_11_byte_tier`, `test_group_split_at_11_byte_tier`,
   `test_w1_at_11_byte_tier` and `test_w1_reading_bigger_than_page_skipped`; `cmd`
-  `test_run_action_failed_save_still_reboots` (every executor test now checks its reboot).
+  `test_run_action_failed_save_still_reboots` (every executor test now checks its reboot),
+  `test_lrw_reset_and_calibration_not_over_radio`.
   All 16 native suites, 86 configen/proto tests and 131 decoder tests pass.
 - **HIL:** pending; procedure H1–H8 in `doc/plan/509 - v2.0.0 release review fixes.md`.
 
