@@ -156,14 +156,14 @@ int app_analog_init(void)
 {
 	int ret;
 
-	if (g_app_config.cap_analog_a) {
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		ret = set_analog(&m_pin_a);
 		if (ret) {
 			return ret;
 		}
 	}
 
-	if (g_app_config.cap_analog_b) {
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		ret = set_analog(&m_pin_b);
 		if (ret) {
 			return ret;

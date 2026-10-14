@@ -49,7 +49,6 @@ static void before(void *unused)
 	test_hall = (struct app_hall_data){0};
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
-	g_app_config.cap_buzzer = false;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
@@ -63,7 +62,8 @@ static void before(void *unused)
 	g_app_config.cap_sht = true;
 	g_app_config.cap_barometer = true;
 	g_app_config.cap_hall_left = true;
-	g_app_config.cap_pir_detector = true;
+	/* PIR owns the GP pins here; the buzzer cases switch them to buzzer. */
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
 	g_app_config.sensor1_type = 0;
 	g_app_config.sensor2_type = 0;
 	memset(test_w1_configured, 0, sizeof(test_w1_configured));
@@ -144,7 +144,8 @@ ZTEST(alarm_eval, test_state_edge_fires_after_confirm_via_poll)
 		      "spuriously active before any transition");
 
 	test_hall.left_is_active = true;
-	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE, true); /* raw 0->1 transition: arms confirm */
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE,
+			true); /* raw 0->1 transition: arms confirm */
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE),
 		      "edge fired before the confirm dwell elapsed");
 
@@ -170,7 +171,8 @@ ZTEST(alarm_eval, test_state_edge_reverse_direction_fires_after_confirm)
 		      "spuriously active before any transition");
 
 	test_hall.left_is_active = false;
-	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE, false); /* raw 1->0 transition: arms confirm */
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE,
+			false); /* raw 1->0 transition: arms confirm */
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE),
 		      "edge fired before the confirm dwell elapsed");
 
@@ -249,11 +251,13 @@ ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true); /* pulse: fires on this same call */
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+			true); /* pulse: fires on this same call */
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
 		     "momentary source did not fire immediately");
 
-	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true); /* a second pulse within the hold */
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+			true); /* a second pulse within the hold */
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
 		     "held pulse dropped active early");
 
@@ -263,38 +267,90 @@ ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
 		      "momentary source never re-armed after the hold elapsed");
 }
 
-/* RATE (count): fires when the counter delta within one interval_report
- * window reaches `hi`, then holds/re-arm-blocks for `dwell` seconds — same
- * hold/re-arm role as a momentary source. Not HIL-tested in the #348
- * session. */
-ZTEST(alarm_eval, test_rate_count_fires_after_window_then_holds)
+/* RATE (count, #498): the window is `dwell`; the alarm fires as soon as the
+ * delta in the window reaches hi (no wait for the window end), stays active
+ * (one alarm) while each closed window reaches hi and deactivates on the first
+ * closed window that falls short. */
+ZTEST(alarm_eval, test_rate_count_window_is_dwell_one_alarm_until_drop)
 {
-	g_app_config.interval_report = 1; /* 1 s tumbling window */
+	g_app_config.interval_report = 300; /* must not matter with dwell > 0 */
 	struct app_alarm_rule r = {
 		.slot = 0,
 		.channel = APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT,
 		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
 		.enabled = 1,
-		.hi = 2, /* alarm when the window's delta >= 2 */
-		.dwell = 0.3f,
+		.hi = 3,       /* alarm when the window's delta >= 3 */
+		.dwell = 0.5f, /* 0.5 s window */
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
 	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
-	app_alarm_poll(); /* first poll only seeds the baseline + window start */
-	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		      "spuriously active before any window elapsed");
+	app_alarm_poll(); /* seeds the baseline + window start */
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "active at seed");
 
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3; /* 3 pulses within this window */
-	k_sleep(K_MSEC(1100));                                    /* past the 1 s window */
+	/* Under the limit within the window: nothing. */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 2;
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "fired under hi");
+
+	/* Reaching hi mid-window fires at once. */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3;
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		     "rate alarm never fired after an over-limit window elapsed");
+		     "did not fire as soon as the window delta reached hi");
 
-	k_sleep(K_MSEC(400)); /* past the hold, but still within the SAME 1 s window */
+	/* Sustained rate: the next closed window reaches hi again -> still active,
+	 * no new alarm. */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 7;
+	k_sleep(K_MSEC(600));
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
+		     "dropped active while the rate stayed over hi");
+
+	/* A closed window under hi deactivates (sent). */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 8;
+	k_sleep(K_MSEC(600));
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		      "rate alarm never re-armed after the hold elapsed");
+		      "did not deactivate on a window under hi");
+
+	/* A new over-limit burst fires again (not blocked). */
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 11;
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
+		     "a new burst after the drop did not fire");
+}
+
+/* RATE with dwell 0 keeps the pre-#498 window, interval_report. */
+ZTEST(alarm_eval, test_rate_count_dwell_zero_uses_interval_report)
+{
+	g_app_config.interval_report = 1;
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.hi = 2,
+		.dwell = 0,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
+	app_alarm_poll();
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 1;
+	k_sleep(K_MSEC(1100)); /* window closes under hi */
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "fired under hi");
+
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3; /* +2 in the new window */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
+		     "did not fire on hi within the interval_report window");
+
+	k_sleep(K_MSEC(1100)); /* next window closes with no pulses */
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
+		      "did not deactivate after an idle interval_report window");
 }
 
 /* THRESHOLD (onboard temperature): dwell before activating outside [lo, hi],
@@ -405,81 +461,6 @@ ZTEST(alarm_eval, test_rt_sync_resets_latch_on_same_source_rule_edit)
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE),
 		     "stale latch from before the rule edit blocked firing under the new dwell "
 		     "(rt_sync did not reset on a same-slot/channel edit)");
-}
-
-/* Bug B regression (today's PR#349 same-day finding): eval_count()'s one-shot-
- * then-hold guarantee ("fires and then holds for dwell seconds ... before it
- * can fire again", app_alarm_rules.h) had no `!rt->active` gate on the firing
- * condition, so a counter that stays over the per-window rate limit across
- * MULTIPLE consecutive interval_report windows kept re-triggering every
- * window and re-extending oneshot_expiry indefinitely, instead of holding for
- * a single `dwell` period from the FIRST fire and then re-arming.
- *
- * Demonstrated by choosing dwell (1.5 s) longer than interval_report (1 s), so
- * a second over-threshold window lands while the first fire's hold is still
- * running: with the bug, that second window re-extends the hold so it never
- * naturally expires as long as the condition keeps holding; fixed, the second
- * window is suppressed (no re-extension) and the ORIGINAL hold expires on
- * schedule — observed via an intermediate poll (not itself a window
- * boundary) that only exercises the central oneshot-expiry sweep. A third,
- * later window then re-arms and fires again, proving the hold isn't just
- * suppressing forever but genuinely re-arms. */
-ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
-{
-	g_app_config.interval_report = 1; /* 1 s tumbling window */
-	struct app_alarm_rule r = {
-		.slot = 0,
-		.channel = APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT,
-		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
-		.enabled = 1,
-		.hi = 2,       /* alarm when the window's delta >= 2 */
-		.dwell = 1.5f, /* hold LONGER than the 1 s window, so it spans window 2 */
-	};
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
-
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
-	app_alarm_poll(); /* seeds the baseline + window start, no rule evaluated yet */
-	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		      "spuriously active before any window elapsed");
-
-	/* Window 1: over-threshold delta (3 >= hi 2) -> first fire. */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3;
-	k_sleep(K_MSEC(1100));
-	app_alarm_poll();
-	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		     "rate alarm never fired after the first over-limit window elapsed");
-
-	/* Window 2: STILL over-threshold (another delta of 3) while window 1's
-	 * 1.5 s hold is still running (only ~1.1 s elapsed). Bug: this
-	 * unconditionally re-fires and pushes oneshot_expiry another 1.5 s out.
-	 * Fixed: the `!rt->active` gate suppresses this re-fire, so the hold set
-	 * by window 1 is left untouched. */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 6;
-	k_sleep(K_MSEC(1100));
-	app_alarm_poll();
-	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		     "alarm dropped active mid-hold (unexpected)");
-
-	/* Intermediate poll, deliberately NOT at a window boundary (only ~0.5 s
-	 * into the new 1 s window, so eval_count's own window-hold check returns
-	 * early and does not touch the latch) — this isolates app_alarm_poll()'s
-	 * central oneshot-expiry sweep, which fires purely off oneshot_expiry vs.
-	 * now. Only the FIXED code's un-extended window-1 expiry (~2.6 s from
-	 * start) has elapsed by here (~2.7 s from start); the buggy code's
-	 * window-2-extended expiry (~3.7 s from start) has not. */
-	k_sleep(K_MSEC(500));
-	app_alarm_poll();
-	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		      "hold from window 1 never expired — a still-over-threshold window 2 "
-		      "re-extended it instead of being suppressed by the one-shot-then-hold gate");
-
-	/* Window 3: still over-threshold -> having genuinely gone inactive above,
-	 * the rule must re-arm and fire again (not just suppress forever). */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 9;
-	k_sleep(K_MSEC(600)); /* 500 + 600 = 1.1 s since window 2's re-baseline: window elapsed */
-	app_alarm_poll();
-	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
-		     "rate alarm never re-armed after the hold genuinely expired");
 }
 
 /* Deactivate edge on rule removal/disable/edit (2026-08-18 final-review fix):
@@ -601,8 +582,8 @@ ZTEST(alarm_eval, test_alarm_burst_waits_for_queue_room)
 ZTEST(alarm_eval, test_alarm_batch_waits_until_all_pages_fit)
 {
 	g_app_config.alarm_limit = 0;
-	test_alarm_max_events = 1;     /* one event per page */
-	test_radio_data_hold_ms = -1;  /* collect two edges first */
+	test_alarm_max_events = 1;    /* one event per page */
+	test_radio_data_hold_ms = -1; /* collect two edges first */
 	activate_threshold_slot0();
 	zassert_equal(app_alarm_rules_clear(0), 0, "rule clear rejected");
 	app_alarm_poll();
@@ -829,19 +810,19 @@ ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
  * than real GPIO/thread behavior — that side is covered by tests/buzzer's
  * real app_buzzer.c + gpio_emul. */
 
-ZTEST(alarm_eval, test_buzzer_suppressed_without_cap_buzzer)
+ZTEST(alarm_eval, test_buzzer_suppressed_without_gpio_buzzer)
 {
-	g_app_config.cap_buzzer = false;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
 
-	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap_buzzer");
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap-gpio-mode buzzer");
 }
 
 ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 
 	activate_threshold_slot0();
@@ -851,7 +832,7 @@ ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
 
 ZTEST(alarm_eval, test_buzzer_plays_alarm_melody_on_activation)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
@@ -879,7 +860,7 @@ ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
 		{APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7, 30},
 	};
 
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
 		g_app_config.alarm_buzzer_mode = cases[i].mode;
@@ -901,7 +882,7 @@ ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
 
 ZTEST(alarm_eval, test_buzzer_does_not_retrigger_while_still_active)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
@@ -921,7 +902,7 @@ ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
 	 * bool) — in every non-off mode, here demonstrated with `once`, whose
 	 * repeat_s=0 means the replay could not come from the engine's own
 	 * repeat cycle. */
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ONCE;
 
 	activate_threshold_slot0(); /* alarm #1: onboard temperature, slot 0 */
@@ -999,7 +980,7 @@ ZTEST(alarm_eval, test_active_mask_and_activation_seq)
 
 ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
 {
-	g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
 
 	activate_threshold_slot0();
@@ -1099,8 +1080,7 @@ static size_t count_onboard_nodata(uint8_t edge)
 	for (size_t i = 0; i < test_alarm_event_count; i++) {
 		const struct app_cmd_alarm_event *e = &test_alarm_events[i];
 
-		if (e->slot == APP_ALARM_SLOT_MB && e->type == 4 /* no_data */ &&
-		    e->edge == edge &&
+		if (e->slot == APP_ALARM_SLOT_MB && e->type == 4 /* no_data */ && e->edge == edge &&
 		    (e->channel == APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE ||
 		     e->channel == APP_SENSOR_CH_MOTHERBOARD_HUMIDITY)) {
 			n++;
@@ -1589,4 +1569,86 @@ ZTEST(alarm_eval, test_w1_partly_reporting_part_alarms)
 	test_alarm_event_count = 0;
 	app_alarm_poll();
 	zassert_equal(count_nodata(1, APP_SENSOR_CH_MACHINE_PROBE_TILT, 1), 1, "recovered");
+}
+
+/* #498: a momentary level rule (from == to) is a motion state: the first event
+ * fires, further events restart the dwell quiet window (one alarm for sustained
+ * motion), and "motion ended" is sent once dwell passes with no event. */
+ZTEST(alarm_eval, test_momentary_level_rule_is_motion_state)
+{
+	flush_stale_alarms();
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 1,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION), "motion did not fire");
+
+	/* Events keep coming within dwell: still the same alarm, window restarts. */
+	for (int i = 0; i < 3; i++) {
+		k_sleep(K_MSEC(250));
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+		app_alarm_poll();
+		zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+			     "motion state ended while events kept coming");
+	}
+
+	k_sleep(K_MSEC(500)); /* dwell with no event */
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "motion state did not end after a quiet dwell");
+	k_sleep(K_MSEC(10)); /* let the batch work item run */
+	zassert_equal(count_events(0, 3, 1), 1, "one 'motion started' expected, got %zu",
+		      count_events(0, 3, 1));
+	zassert_equal(count_events(0, 3, 0), 1, "one 'motion ended' expected, got %zu",
+		      count_events(0, 3, 0));
+}
+
+/* #498: a momentary 0 -> 0 rule is a stillness state: raised once `dwell`
+ * passes with no event ("stopped"), ended (sent) by the next event. */
+ZTEST(alarm_eval, test_momentary_zero_level_rule_is_stillness)
+{
+	flush_stale_alarms();
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 0,
+		.to_state = 0,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	/* Vibrating: events keep coming faster than dwell -> never "stopped". */
+	app_alarm_poll(); /* arms the quiet deadline */
+	for (int i = 0; i < 4; i++) {
+		k_sleep(K_MSEC(250));
+		app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+		app_alarm_poll();
+		zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+			      "stillness raised while events kept coming");
+	}
+
+	k_sleep(K_MSEC(500)); /* quiet for dwell */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		     "stillness not raised after a quiet dwell");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true); /* moving again */
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "stillness not ended by a new event");
+	app_alarm_poll();
+	k_sleep(K_MSEC(10));
+	zassert_equal(count_events(0, 3, 1), 1, "one 'stopped' expected, got %zu",
+		      count_events(0, 3, 1));
+	zassert_equal(count_events(0, 3, 0), 1, "one 'moving again' expected, got %zu",
+		      count_events(0, 3, 0));
 }

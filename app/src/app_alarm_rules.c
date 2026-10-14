@@ -130,20 +130,9 @@ bool app_alarm_rule_armed(const struct app_alarm_rule *r)
 		return false;
 	}
 	/* A motherboard rule may be provisioned before its capability is on; it
-	 * stays inert until then. */
-	return c->cap_off == APP_SENSOR_NO_CAP ||
-	       *(const bool *)((const char *)&g_app_config + c->cap_off);
-}
-
-/* A STATE rule on a momentary channel (PIR / accelerometer motion) is only
- * meaningful as an edge (from != to): those channels only ever assert — they
- * never report a steady level — so a level rule (from == to) could never
- * deactivate. Reject it so the misconfiguration surfaces (#203). */
-static bool rule_state_shape_valid(const struct app_alarm_rule *r,
-				   const struct app_sensor_channel *c)
-{
-	return !(c->kind == APP_SENSOR_KIND_STATE && (c->flags & APP_SENSOR_F_MOMENTARY) &&
-		 r->from_state == r->to_state);
+	 * stays inert until then. An enum cap (cap_gpio_mode) is matched against
+	 * cap_mask, not read as a bool. */
+	return app_sensor_channel_cap_on(c);
 }
 
 /* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
@@ -189,9 +178,8 @@ static bool rule_valid(const struct app_alarm_rule *r)
 {
 	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
 
-	return c != NULL && rule_state_shape_valid(r, c) && rule_dwell_range_valid(r) &&
-	       rule_threshold_band_valid(r, c) && rule_state_levels_valid(r, c) &&
-	       rule_rate_limit_valid(r, c);
+	return c != NULL && rule_dwell_range_valid(r) && rule_threshold_band_valid(r, c) &&
+	       rule_state_levels_valid(r, c) && rule_rate_limit_valid(r, c);
 }
 
 /* ---- app_config storage (per-rule bytes) -------------------------------- */

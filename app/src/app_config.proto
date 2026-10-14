@@ -83,13 +83,30 @@ message AppConfigMessage {
             HIGH = 3;
         }
 
+        enum GpioMode {
+            NONE = 0;
+            INPUTS = 1;
+            PIR = 2;
+            BUZZER = 3;
+        }
+
+        enum GpioInput {
+            DISABLED = 0;
+            DIGITAL = 1;
+            ANALOG = 2;
+            PULSE = 3;
+        }
+
+        reserved 3;
+        reserved 4;
+        reserved 7;
+        reserved 19;
+        reserved 20;
+        reserved 21;
         optional bool cap_hall_left = 1;
         optional bool cap_hall_right = 2;
-        optional bool cap_input_a = 3;
-        optional bool cap_input_b = 4;
         optional bool cap_light_sensor = 5;
         optional bool cap_barometer = 6;
-        optional bool cap_pir_detector = 7;
         optional bool cap_w1_sensors = 8;
         optional bool cap_accelerometer = 9;
         optional MotionSensitivity accel_motion_sensitivity = 10;
@@ -101,14 +118,14 @@ message AppConfigMessage {
         optional bool hall_right_counter = 16;
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
-        optional bool cap_buzzer = 19;
-        optional bool cap_analog_a = 20;
-        optional bool cap_analog_b = 21;
         optional bool cap_sht = 22;
         optional uint32 sensor1_type = 23;
         optional uint32 sensor2_type = 24;
         optional uint32 sensor3_type = 25;
         optional uint32 sensor4_type = 26;
+        optional GpioMode cap_gpio_mode = 27;
+        optional GpioInput cap_gpio_input_a = 28;
+        optional GpioInput cap_gpio_input_b = 29;
     }
 
     message Alarms {
@@ -353,7 +370,7 @@ message Command {
 
     // The boot settings-info ConfigDump (#412) on request: application
     // interval_sample / interval_report / history_enable, every sensors
-    // cap_* flag incl. cap_buzzer + cap_sht (#465), and the runtime
+    // cap_* flag incl. cap_gpio_* (#498, effective use) + cap_sht (#465), and the runtime
     // w1_slot_type. The answer carries this command's seq (the autonomous
     // boot dump has seq 0); over LoRaWAN it is paged with the Response
     // envelope (#425) when it does not fit one frame.
@@ -716,7 +733,7 @@ message Telemetry {
     optional uint32 illuminance      = 7;   // lux  /2
     // accelerometer
     optional uint32 orientation      = 8;   // 1..6
-    // pir (cap_pir_detector)
+    // pir (cap_gpio_mode = pir)
     optional uint32 motion_count     = 9;
     // 1-wire sensors: per-slot flat fields 10-17 replaced by the repeated
     // w1_sensors (field 27, self-describing slot+type). Old ids retired.
@@ -727,10 +744,10 @@ message Telemetry {
     // hall right (cap_hall_right)
     optional uint32 hall_right_count = 20;
     optional uint32 hall_right_flags = 21;
-    // input A (cap_input_a)
+    // input A (cap_gpio_input_a = digital or pulse; pulse never sets the active bit, #498)
     optional uint32 input_a_count    = 22;
     optional uint32 input_a_flags    = 23;  // bit0 notify_act, bit1 notify_deact, bit2 active
-    // input B (cap_input_b)
+    // input B (cap_gpio_input_b = digital or pulse)
     optional uint32 input_b_count    = 24;
     optional uint32 input_b_flags    = 25;
     // accelerometer any-motion (LIS2DH) event counter
@@ -746,7 +763,7 @@ message Telemetry {
     // out alone. Absent = the whole report is in this frame.
     uint32 page_index = 28;
     uint32 page_count = 29;
-    // input A / B analog voltage (cap_analog_a / cap_analog_b, #396): the
+    // input A / B analog voltage (cap_gpio_input_a / _b = analog, #396): the
     // input-referred voltage at the connector, mV (motherboard channels 11 /
     // 14, wire scale 1000). Same pin as the digital input of the group, so
     // never sent together with input_a/b_count. Omitted without a valid sample.

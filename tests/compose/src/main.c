@@ -313,8 +313,9 @@ ZTEST(compose, test_input_analog_voltage)
 
 	/* cap on -> mV; 4.113 V must not truncate to 4112 */
 	set_clean();
-	g_app_config.cap_analog_a = true;
-	g_app_config.cap_analog_b = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
+	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_ANALOG;
 	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, 4.113f);
 	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, 24.0f);
 	run_report(fr, 8, &n);
@@ -336,8 +337,9 @@ ZTEST(compose, test_input_analog_voltage)
 
 	/* cap on, no valid sample (NaN or out of the registry range) -> omitted */
 	set_clean();
-	g_app_config.cap_analog_a = true;
-	g_app_config.cap_analog_b = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
+	g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_ANALOG;
 	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE, NAN);
 	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, 100.0f);
 	run_report(fr, 8, &n);

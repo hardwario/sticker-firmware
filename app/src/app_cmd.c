@@ -413,6 +413,15 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	}
 }
 
+/* #498: sensors ids of the caps folded into cap_gpio_mode / cap_gpio_input_a/_b
+ * (cap_input_a/_b 3/4, cap_pir_detector 7, cap_buzzer 19, cap_analog_a/_b
+ * 20/21). They are reserved in the proto, so nanopb would silently drop them;
+ * an old host must get BAD_REQUEST instead of an ACK for a no-op. */
+static bool removed_sensor_id(uint32_t tag)
+{
+	return tag == 3 || tag == 4 || tag == 7 || tag == 19 || tag == 20 || tag == 21;
+}
+
 static void make_error(Response *resp, Response_Error_Code code, const char *detail)
 {
 	resp->which_body = Response_error_tag;
@@ -638,17 +647,14 @@ static const struct {
 	{DUMP_SECTION_APPLICATION, 8, 3, false, false},
 	{DUMP_SECTION_SENSORS, 1, 2, false, false},
 	{DUMP_SECTION_SENSORS, 2, 2, false, false},
-	{DUMP_SECTION_SENSORS, 3, 2, false, false},
-	{DUMP_SECTION_SENSORS, 4, 2, false, false},
 	{DUMP_SECTION_SENSORS, 5, 2, false, false},
 	{DUMP_SECTION_SENSORS, 6, 2, false, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false, false},
-	{DUMP_SECTION_SENSORS, 19, 3, false, false},
 	{DUMP_SECTION_SENSORS, 22, 3, false, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false, false},
 	{DUMP_SECTION_SENSORS, 9, 2, false, false},
-	{DUMP_SECTION_SENSORS, 20, 3, false, false},
-	{DUMP_SECTION_SENSORS, 21, 3, false, false},
+	{DUMP_SECTION_SENSORS, 27, 3, false, false},
+	{DUMP_SECTION_SENSORS, 28, 3, false, false},
+	{DUMP_SECTION_SENSORS, 29, 3, false, false},
 	{DUMP_SECTION_SENSORS, 10, 2, false, false},
 	{DUMP_SECTION_SENSORS, 11, 10, false, true},
 	{DUMP_SECTION_SENSORS, 23, 7, false, false},
@@ -855,6 +861,14 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 
 	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
 	 * equals the index here (0..4). */
+	for (size_t j = 0; j < gp->sensors_field_count; j++) {
+		if (removed_sensor_id(gp->sensors_field[j])) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "removed field");
+			resp->body.error.fault_field = 300 + gp->sensors_field[j];
+			return;
+		}
+	}
+
 	const uint32_t *req_ids[5] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
 				      gp->alarms_field, gp->p2p_field};
 	const size_t req_n[5] = {gp->lorawan_field_count, gp->application_field_count,
@@ -2078,15 +2092,34 @@ static void stream_busy(Response *resp, uint32_t seq)
 
 /* application: interval_sample, interval_report, history_enable */
 static const uint32_t cs_app_ids[] = {2, 3, 4};
-/* sensors: every cap_* flag — cap_hall_left..cap_accelerometer (1..9),
- * cap_buzzer (19, effective value: app_sensor_init() clears it when
- * cap_pir_detector is also set) and cap_sht (22, #465) */
-static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 22};
+/* sensors: every cap_* flag — cap_hall_left/_right (1/2), cap_light_sensor (5),
+ * cap_barometer (6), cap_w1_sensors (8), cap_accelerometer (9), cap_sht (22,
+ * #465) and the GP pin use cap_gpio_mode / cap_gpio_input_a / _b (27..29,
+ * #498; effective values, see gpio_effective()). */
+static const uint32_t cs_sensor_ids[] = {1, 2, 5, 6, 8, 9, 22, 27, 28, 29};
 #if defined(APP_CMD_HAVE_W1)
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids) + 1)
 #else
 #define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids))
 #endif
+
+/* #498: report the GP pin use the device actually runs (g_app_config, as
+ * normalized by app_sensor_init(): pin modes cleared unless cap_gpio_mode is
+ * inputs, functions not built in dropped) rather than the stored config. */
+static void gpio_effective(AppConfigMessage_Sensors *s)
+{
+	if (s->has_cap_gpio_mode) {
+		s->cap_gpio_mode = (AppConfigMessage_Sensors_GpioMode)g_app_config.cap_gpio_mode;
+	}
+	if (s->has_cap_gpio_input_a) {
+		s->cap_gpio_input_a =
+			(AppConfigMessage_Sensors_GpioInput)g_app_config.cap_gpio_input_a;
+	}
+	if (s->has_cap_gpio_input_b) {
+		s->cap_gpio_input_b =
+			(AppConfigMessage_Sensors_GpioInput)g_app_config.cap_gpio_input_b;
+	}
+}
 
 /* Fill a settings-info ConfigDump with the items in `mask` (bit i = item i:
  * application ids, then sensor ids, then the w1_slot_type block). `seq` is 0 for
@@ -2122,6 +2155,7 @@ static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint
 	if (n > 0) {
 		cd->has_sensors = true;
 		app_config_fill_sensors(&cd->sensors, ids, n);
+		gpio_effective(&cd->sensors);
 	}
 
 #if defined(APP_CMD_HAVE_W1)
@@ -2984,6 +3018,56 @@ static uint32_t peek_seq(const uint8_t *in, size_t in_len)
 	return 0;
 }
 
+/* #498: first removed sensors id (see removed_sensor_id()) in the raw
+ * SetParam.sensors submessage of a Command, 0 if none. */
+static uint32_t peek_removed_set_sensor(const uint8_t *in, size_t in_len)
+{
+	pb_istream_t s = pb_istream_from_buffer(in, in_len);
+	pb_wire_type_t wt;
+	uint32_t tag;
+	bool eof;
+
+	while (pb_decode_tag(&s, &wt, &tag, &eof)) {
+		if (tag != Command_set_param_tag || wt != PB_WT_STRING) {
+			if (!pb_skip_field(&s, wt)) {
+				return 0;
+			}
+			continue;
+		}
+		pb_istream_t sp;
+
+		if (!pb_make_string_substream(&s, &sp)) {
+			return 0;
+		}
+		while (pb_decode_tag(&sp, &wt, &tag, &eof)) {
+			if (tag == Command_SetParam_sensors_tag && wt == PB_WT_STRING) {
+				pb_istream_t se;
+
+				if (!pb_make_string_substream(&sp, &se)) {
+					return 0;
+				}
+				while (pb_decode_tag(&se, &wt, &tag, &eof)) {
+					if (removed_sensor_id(tag)) {
+						return tag;
+					}
+					if (!pb_skip_field(&se, wt)) {
+						break;
+					}
+				}
+				if (!pb_close_string_substream(&sp, &se)) {
+					return 0;
+				}
+			} else if (!pb_skip_field(&sp, wt)) {
+				break;
+			}
+		}
+		if (!pb_close_string_substream(&s, &sp)) {
+			return 0;
+		}
+	}
+	return 0;
+}
+
 /* Decode + dispatch in their own frame, so the ~550 B Command is gone again
  * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
  * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
@@ -3002,6 +3086,16 @@ static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport
 		resp->seq = peek_seq(in, in_len);
 		make_error(resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 		return 0;
+	}
+	if (cmd.which_body == Command_set_param_tag) {
+		uint32_t removed = peek_removed_set_sensor(in, in_len);
+
+		if (removed) {
+			resp->seq = cmd.seq;
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "removed field");
+			resp->body.error.fault_field = 300 + removed;
+			return cmd.which_body;
+		}
 	}
 	app_cmd_dispatch(transport, &cmd, resp, act);
 	if (cmd.which_body == Command_get_info_tag && cmd.body.get_info.has_page) {

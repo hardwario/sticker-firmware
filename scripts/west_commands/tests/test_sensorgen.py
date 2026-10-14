@@ -30,8 +30,12 @@ def _caps():
     return sensorgen.load_caps(APP_CONFIG)
 
 
+def _enum_caps():
+    return sensorgen.load_enum_caps(APP_CONFIG)
+
+
 def _errors(reg):
-    return sensorgen.validate(reg, _caps())
+    return sensorgen.validate(reg, _caps(), _enum_caps())
 
 
 def _run(workdir):
@@ -250,7 +254,45 @@ def test_pending_cap_must_be_removed_once_it_exists():
 
 def test_every_motherboard_cap_exists_or_is_pending():
     reg = _registry()
-    known = _caps() | set(reg.get("pending_caps") or [])
+    enum_caps = _enum_caps()
+    known = _caps() | set(enum_caps) | set(reg.get("pending_caps") or [])
     for c in _type(reg, "motherboard")["channels"]:
         if "cap" in c:
-            assert c["cap"] in known, c["name"]
+            name, values = sensorgen.parse_cap(c["cap"])
+            assert name in known, c["name"]
+            for v in values:
+                assert v in enum_caps[name], c["name"]
+
+
+# --- enum capabilities (#498) ---------------------------------------------
+
+def _mb_channel(reg, name):
+    return next(c for c in _type(reg, "motherboard")["channels"] if c["name"] == name)
+
+
+def test_enum_cap_unknown_value_is_rejected():
+    def f(reg):
+        _mb_channel(reg, "input-a-state")["cap"] = "cap_gpio_input_a=bogus"
+    ok, e = _has(_mutated(f), "'bogus' is not a value of 'cap_gpio_input_a'")
+    assert ok, e
+
+
+def test_enum_cap_unknown_param_is_rejected():
+    def f(reg):
+        _mb_channel(reg, "input-a-state")["cap"] = "cap_nope=digital"
+    ok, e = _has(_mutated(f), "unknown enum capability 'cap_nope'")
+    assert ok, e
+
+
+def test_enum_cap_without_values_is_rejected():
+    def f(reg):
+        _mb_channel(reg, "input-a-state")["cap"] = "cap_gpio_input_a="
+    ok, e = _has(_mutated(f), "needs values")
+    assert ok, e
+
+
+def test_enum_cap_renders_a_value_mask(workdir):
+    _run(workdir)
+    c_src = (workdir / "app_sensor_types.c").read_text()
+    flat = " ".join(c_src.split())  # clang-format may wrap the mask
+    assert "BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) | BIT(APP_CONFIG_GPIO_INPUT_PULSE)" in flat

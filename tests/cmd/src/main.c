@@ -244,7 +244,8 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 	 * and interval_report=200 lands in the staging struct; the forced dropped
 	 * count then rolls the whole batch back. */
 	test_alarm_reload_dropped = 1;
-	const char *hex = "0805121b120318c8012a141a12010006" "000000000000000000000000000000";
+	const char *hex = "0805121b120318c8012a141a12010006"
+			  "000000000000000000000000000000";
 	enum app_cmd_action a = handle(hex, &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
@@ -735,8 +736,11 @@ ZTEST(cmd, test_build_config_status)
 	zassert_true(r.body.config_dump.sensors.has_cap_barometer,
 		     "cap_barometer must be explicit");
 	zassert_false(r.body.config_dump.sensors.cap_barometer, "cap_barometer default false");
-	/* #465: cap_buzzer (19) and cap_sht (22) complete the capability picture. */
-	zassert_true(r.body.config_dump.sensors.has_cap_buzzer, "cap_buzzer must be explicit");
+	/* #465/#498: cap_sht (22) and the GP pin use (27..29) complete the picture. */
+	zassert_true(r.body.config_dump.sensors.has_cap_gpio_mode,
+		     "cap_gpio_mode must be explicit");
+	zassert_true(r.body.config_dump.sensors.has_cap_gpio_input_a, "cap_gpio_input_a missing");
+	zassert_true(r.body.config_dump.sensors.has_cap_gpio_input_b, "cap_gpio_input_b missing");
 	zassert_true(r.body.config_dump.sensors.has_cap_sht, "cap_sht missing");
 	zassert_true(r.body.config_dump.sensors.cap_sht, "cap_sht value");
 
@@ -750,7 +754,7 @@ ZTEST(cmd, test_build_config_status)
 /* #465: worst case of the boot settings-info — every cap_* true (a false bool
  * costs the same 2-3 B, so this is about values, not flags) and the widest
  * in-range interval varints — still fits one EU868 DR0 frame (51 B), so adding
- * cap_buzzer/cap_sht does not make the boot dump page there. */
+ * cap_sht and the GP pin use (#498) does not make the boot dump page there. */
 ZTEST(cmd, test_build_config_status_worst_case_dr0)
 {
 	uint8_t out[51];
@@ -762,9 +766,9 @@ ZTEST(cmd, test_build_config_status_worst_case_dr0)
 	g_app_config.interval_report = 86400; /* yml max */
 	g_app_config.history_enable = true;
 	g_app_config.cap_hall_left = g_app_config.cap_hall_right = true;
-	g_app_config.cap_input_a = g_app_config.cap_input_b = true;
 	g_app_config.cap_light_sensor = g_app_config.cap_barometer = true;
-	g_app_config.cap_pir_detector = g_app_config.cap_buzzer = true;
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	g_app_config.cap_gpio_input_a = g_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_PULSE;
 	g_app_config.cap_w1_sensors = g_app_config.cap_accelerometer = true;
 	g_app_config.cap_sht = true;
 
@@ -2026,14 +2030,14 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
-	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
-						     900, sizeof(out));
+	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						     &layout3, 900, sizeof(out));
 	zassert_true(cap > 0 && cap < sizeof(out), "cap %zu out of range", cap);
 
 	/* Exactly `cap` samples must encode within out_cap. */
-	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
-					      /*time_synced*/ true, samples, cap, out, sizeof(out),
-					      &out_len);
+	int ret = app_cmd_build_history_frame(
+		200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3, 900,
+		/*time_synced*/ true, samples, cap, out, sizeof(out), &out_len);
 	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
 
@@ -2044,13 +2048,13 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 	zassert_equal(ret, -EMSGSIZE, "cap+1 samples should overflow (ret %d)", ret);
 
 	/* A tighter budget yields a strictly smaller (or zero) capacity. */
-	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
-						       900, 32);
+	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						       &layout3, 900, 32);
 	zassert_true(tight < cap, "tight cap %zu not below %zu", tight, cap);
 
 	/* A budget below the fixed overhead yields zero. */
-	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, &layout3,
-						      900, 8),
+	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						      &layout3, 900, 8),
 		      0, "tiny budget should give 0");
 }
 
@@ -2552,14 +2556,14 @@ static void visit_settings_page(const uint8_t *buf, size_t len, const Response *
 	g_seen_cfg_fields += cd->application.has_interval_sample +
 			     cd->application.has_interval_report +
 			     cd->application.has_history_enable + cd->sensors.has_cap_hall_left +
-			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_input_a +
-			     cd->sensors.has_cap_input_b + cd->sensors.has_cap_light_sensor +
-			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_pir_detector +
-			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer +
-			     cd->sensors.has_cap_buzzer + cd->sensors.has_cap_sht;
+			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_light_sensor +
+			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_w1_sensors +
+			     cd->sensors.has_cap_accelerometer + cd->sensors.has_cap_sht +
+			     cd->sensors.has_cap_gpio_mode + cd->sensors.has_cap_gpio_input_a +
+			     cd->sensors.has_cap_gpio_input_b;
 }
 
-/* #425: settings-info that does not fit is paged; all 14 settings arrive. */
+/* #425: settings-info that does not fit is paged; all 13 settings arrive. */
 ZTEST(cmd, test_settings_info_paged_at_small_budget)
 {
 	uint8_t out[64];
@@ -2573,12 +2577,12 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	zassert_true(more, "expected more pages at 16 B");
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 0, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 13, "%u of 13 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings: the boot settings-info content on request. At the EU868 DR0
  * budget it is one frame, carries the command's seq (not the boot dump's 0) and
- * the same 14 settings; no page fields, no stream. */
+ * the same 13 settings; no page fields, no stream. */
 ZTEST(cmd, test_get_settings_one_frame)
 {
 	uint8_t in[8], out[64], boot[64];
@@ -2605,7 +2609,7 @@ ZTEST(cmd, test_get_settings_one_frame)
 	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left");
 	g_seen_cfg_fields = 0;
 	visit_settings_page(out, out_len, &r);
-	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 13, "%u of 13 settings", g_seen_cfg_fields);
 
 	/* Same bytes as the autonomous boot dump apart from the seq field
 	 * (08 07 right after the version byte). */
@@ -2635,7 +2639,7 @@ ZTEST(cmd, test_get_settings_paged)
 	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 42, visit_settings_page);
-	zassert_equal(g_seen_cfg_fields, 14, "%u of 14 settings", g_seen_cfg_fields);
+	zassert_equal(g_seen_cfg_fields, 13, "%u of 13 settings", g_seen_cfg_fields);
 }
 
 /* GetSettings over NFC: one frame with the seq, never a radio page stream. */
@@ -2766,9 +2770,9 @@ static Response busy_probe(const char *hex, size_t cap)
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, cap, &out_len,
-				     &action),
-		      0, "handle %s", hex);
+	zassert_equal(
+		app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, cap, &out_len, &action), 0,
+		"handle %s", hex);
 	zassert_equal(action, APP_CMD_ACTION_NONE, "%s armed a stream (%d)", hex, action);
 	return decode_resp(out, out_len);
 }
@@ -2797,7 +2801,7 @@ ZTEST(cmd, test_running_stream_survives_other_answers)
 	g_app_config.interval_report = 900;
 	g_app_config.interval_sample = 60;
 	g_app_config.serial_number = 1234567890;
-	test_set_active_alarm_count(2); /* an Info that needs pages at 20 B */
+	test_set_active_alarm_count(2);             /* an Info that needs pages at 20 B */
 	in_len = unhex("08402a00", in, sizeof(in)); /* seq64 get_config{} */
 	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, 51, &out_len, &action),
 		      0, "get_config");
@@ -3312,12 +3316,27 @@ ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
 ZTEST(cmd, test_alarm_report_sensor_type_only_for_slot_events)
 {
 	const struct app_cmd_alarm_event ev[] = {
-		{.rule = 0xFF, .slot = 2, .channel = 0, .type = 5, .sensor_type = 3,
-		 .has_value = true, .value = 2},
-		{.rule = 3, .slot = 0, .channel = 1, .type = 2, .sensor_type = 1,
-		 .has_value = true, .value = 133},
-		{.rule = 4, .slot = 1, .channel = 2, .type = 1, .sensor_type = 3,
-		 .has_value = true, .value = -500},
+		{.rule = 0xFF,
+		 .slot = 2,
+		 .channel = 0,
+		 .type = 5,
+		 .sensor_type = 3,
+		 .has_value = true,
+		 .value = 2},
+		{.rule = 3,
+		 .slot = 0,
+		 .channel = 1,
+		 .type = 2,
+		 .sensor_type = 1,
+		 .has_value = true,
+		 .value = 133},
+		{.rule = 4,
+		 .slot = 1,
+		 .channel = 2,
+		 .type = 1,
+		 .sensor_type = 3,
+		 .has_value = true,
+		 .value = -500},
 	};
 	uint8_t out[64];
 	size_t len = 0;
@@ -3355,4 +3374,47 @@ ZTEST(cmd, test_alarm_report_rejects_more_events_than_it_holds)
 	zassert_equal(app_cmd_build_alarm_report(0, 9, true, ev, 9, 0, 1, out, sizeof(out), &len),
 		      -EMSGSIZE);
 	zassert_ok(app_cmd_build_alarm_report(0, 8, true, ev, 8, 0, 1, out, sizeof(out), &len));
+}
+
+/* #498: the sensors ids folded into cap_gpio_mode / cap_gpio_input_a/_b
+ * (3/4/7/19/20/21) are reserved; an old host's SetParam / GetParam on them gets
+ * BAD_REQUEST with fault_field 300 + id, not a silent no-op ACK. */
+ZTEST(cmd, test_removed_sensor_ids_are_bad_request)
+{
+	static const uint8_t ids[] = {3, 4, 7, 19, 20, 21};
+	Response r;
+	char hex[32];
+
+	for (size_t i = 0; i < ARRAY_SIZE(ids); i++) {
+		reset_cfg();
+		/* seq5 set_param{sensors{<id>: 1}} */
+		unsigned int key = ids[i] << 3; /* varint field key, wire type 0 */
+
+		if (key < 0x80) {
+			snprintf(hex, sizeof(hex), "080512042202%02x01", key);
+		} else {
+			snprintf(hex, sizeof(hex), "080512052203%02x%02x01", (key & 0x7f) | 0x80,
+				 key >> 7);
+		}
+		handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+		zassert_equal(r.seq, 5, "id %u seq", ids[i]);
+		zassert_equal(r.which_body, Response_error_tag, "set id %u not rejected", ids[i]);
+		zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "set id %u",
+			      ids[i]);
+		zassert_equal(r.body.error.fault_field, 300 + ids[i], "set id %u fault", ids[i]);
+
+		/* seq5 get_param{sensors_field: <id>} */
+		snprintf(hex, sizeof(hex), "08051a0218%02x", ids[i]);
+		handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+		zassert_equal(r.which_body, Response_error_tag, "get id %u not rejected", ids[i]);
+		zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "get id %u",
+			      ids[i]);
+		zassert_equal(r.body.error.fault_field, 300 + ids[i], "get id %u fault", ids[i]);
+	}
+
+	/* The replacement fields still work: set cap_gpio_input_a (28) = pulse (3). */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "080512052203e00103", &r);
+	zassert_not_equal(r.which_body, Response_error_tag, "id 28 rejected");
+	zassert_equal(g_app_config.cap_gpio_input_a, APP_CONFIG_GPIO_INPUT_PULSE, "id 28 not set");
 }

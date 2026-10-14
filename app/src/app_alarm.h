@@ -43,6 +43,11 @@ bool app_alarm_poll(void);
  * level). Driven by the GPIO/poll handlers in app_hall/app_input/app_sensor. */
 void app_alarm_event(uint8_t channel, bool active);
 
+/* Report activity on a motherboard channel that has no state edge (a pulse
+ * input, #498): only the event callback (commissioning LED) sees it, no alarm
+ * rule is evaluated. */
+void app_alarm_activity(uint8_t channel);
+
 int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data);
 
 /* Aggregated alarm state as an APP_DEVICE_STATUS_ALARM_* bitmask, read-only:

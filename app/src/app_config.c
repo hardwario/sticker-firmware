@@ -49,6 +49,9 @@ static const struct app_config m_app_config_defaults = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.cap_sht = true,
+	.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE,
+	.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED,
+	.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -90,6 +93,9 @@ static struct app_config m_app_config = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.cap_sht = true,
+	.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE,
+	.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED,
+	.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -195,22 +201,21 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
 		     sizeof(m_app_config.cap_hall_right));
-	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
 	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
 		     sizeof(m_app_config.cap_light_sensor));
 	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
 		     sizeof(m_app_config.cap_barometer));
-	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
-		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
 	SETTINGS_SET("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
-	SETTINGS_SET("cap-analog-a", &m_app_config.cap_analog_a, sizeof(m_app_config.cap_analog_a));
-	SETTINGS_SET("cap-analog-b", &m_app_config.cap_analog_b, sizeof(m_app_config.cap_analog_b));
+	SETTINGS_SET("cap-gpio-mode", &m_app_config.cap_gpio_mode,
+		     sizeof(m_app_config.cap_gpio_mode));
+	SETTINGS_SET("cap-gpio-input-a", &m_app_config.cap_gpio_input_a,
+		     sizeof(m_app_config.cap_gpio_input_a));
+	SETTINGS_SET("cap-gpio-input-b", &m_app_config.cap_gpio_input_b,
+		     sizeof(m_app_config.cap_gpio_input_b));
 	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -407,6 +412,15 @@ static int h_commit(void)
 	if (m_app_config.radio_link_check_fail_rejoin > 255) {
 		m_app_config.radio_link_check_fail_rejoin = 255;
 	}
+	if ((int)m_app_config.cap_gpio_mode < 0 || (int)m_app_config.cap_gpio_mode > 3) {
+		m_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE;
+	}
+	if ((int)m_app_config.cap_gpio_input_a < 0 || (int)m_app_config.cap_gpio_input_a > 3) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
+	}
+	if ((int)m_app_config.cap_gpio_input_b < 0 || (int)m_app_config.cap_gpio_input_b > 3) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED;
+	}
 	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 	}
@@ -493,22 +507,21 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
 		    sizeof(m_app_config.cap_hall_right));
-	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
 	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
 		    sizeof(m_app_config.cap_light_sensor));
 	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
 		    sizeof(m_app_config.cap_barometer));
-	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
-		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
 	EXPORT_FUNC("cap-sht", &m_app_config.cap_sht, sizeof(m_app_config.cap_sht));
 	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
-	EXPORT_FUNC("cap-analog-a", &m_app_config.cap_analog_a, sizeof(m_app_config.cap_analog_a));
-	EXPORT_FUNC("cap-analog-b", &m_app_config.cap_analog_b, sizeof(m_app_config.cap_analog_b));
+	EXPORT_FUNC("cap-gpio-mode", &m_app_config.cap_gpio_mode,
+		    sizeof(m_app_config.cap_gpio_mode));
+	EXPORT_FUNC("cap-gpio-input-a", &m_app_config.cap_gpio_input_a,
+		    sizeof(m_app_config.cap_gpio_input_a));
+	EXPORT_FUNC("cap-gpio-input-b", &m_app_config.cap_gpio_input_b,
+		    sizeof(m_app_config.cap_gpio_input_b));
 	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -974,18 +987,6 @@ static void print_cap_hall_right(const struct shell *shell)
 		    m_app_config.cap_hall_right ? "true" : "false");
 }
 
-static void print_cap_input_a(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-a %s",
-		    m_app_config.cap_input_a ? "true" : "false");
-}
-
-static void print_cap_input_b(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-b %s",
-		    m_app_config.cap_input_b ? "true" : "false");
-}
-
 static void print_cap_light_sensor(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-light-sensor %s",
@@ -996,18 +997,6 @@ static void print_cap_barometer(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-barometer %s",
 		    m_app_config.cap_barometer ? "true" : "false");
-}
-
-static void print_cap_pir_detector(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-pir-detector %s",
-		    m_app_config.cap_pir_detector ? "true" : "false");
-}
-
-static void print_cap_buzzer(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-buzzer %s",
-		    m_app_config.cap_buzzer ? "true" : "false");
 }
 
 static void print_cap_sht(const struct shell *shell)
@@ -1027,16 +1016,73 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
-static void print_cap_analog_a(const struct shell *shell)
+static void print_cap_gpio_mode(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-analog-a %s",
-		    m_app_config.cap_analog_a ? "true" : "false");
+	const char *str;
+	switch (m_app_config.cap_gpio_mode) {
+	case APP_CONFIG_GPIO_MODE_NONE:
+		str = "none";
+		break;
+	case APP_CONFIG_GPIO_MODE_INPUTS:
+		str = "inputs";
+		break;
+	case APP_CONFIG_GPIO_MODE_PIR:
+		str = "pir";
+		break;
+	case APP_CONFIG_GPIO_MODE_BUZZER:
+		str = "buzzer";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " cap-gpio-mode %s", str);
 }
 
-static void print_cap_analog_b(const struct shell *shell)
+static void print_cap_gpio_input_a(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-analog-b %s",
-		    m_app_config.cap_analog_b ? "true" : "false");
+	const char *str;
+	switch (m_app_config.cap_gpio_input_a) {
+	case APP_CONFIG_GPIO_INPUT_DISABLED:
+		str = "none";
+		break;
+	case APP_CONFIG_GPIO_INPUT_DIGITAL:
+		str = "digital";
+		break;
+	case APP_CONFIG_GPIO_INPUT_ANALOG:
+		str = "analog";
+		break;
+	case APP_CONFIG_GPIO_INPUT_PULSE:
+		str = "pulse";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " cap-gpio-input-a %s", str);
+}
+
+static void print_cap_gpio_input_b(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.cap_gpio_input_b) {
+	case APP_CONFIG_GPIO_INPUT_DISABLED:
+		str = "none";
+		break;
+	case APP_CONFIG_GPIO_INPUT_DIGITAL:
+		str = "digital";
+		break;
+	case APP_CONFIG_GPIO_INPUT_ANALOG:
+		str = "analog";
+		break;
+	case APP_CONFIG_GPIO_INPUT_PULSE:
+		str = "pulse";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " cap-gpio-input-b %s", str);
 }
 
 static void print_alarm_buzzer_mode(const struct shell *shell)
@@ -1238,17 +1284,14 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_radio_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
-	print_cap_input_a(shell);
-	print_cap_input_b(shell);
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
-	print_cap_pir_detector(shell);
-	print_cap_buzzer(shell);
 	print_cap_sht(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
-	print_cap_analog_a(shell);
-	print_cap_analog_b(shell);
+	print_cap_gpio_mode(shell);
+	print_cap_gpio_input_a(shell);
+	print_cap_gpio_input_b(shell);
 	print_alarm_buzzer_mode(shell);
 	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
@@ -1717,16 +1760,6 @@ static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **arg
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right, print_cap_hall_right);
 }
 
-static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_a, print_cap_input_a);
-}
-
-static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_b, print_cap_input_b);
-}
-
 static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor, print_cap_light_sensor);
@@ -1735,16 +1768,6 @@ static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **a
 static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_barometer, print_cap_barometer);
-}
-
-static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
-}
-
-static int cmd_cap_buzzer(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_buzzer, print_cap_buzzer);
 }
 
 static int cmd_cap_sht(const struct shell *shell, size_t argc, char **argv)
@@ -1763,14 +1786,109 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 			print_cap_accelerometer);
 }
 
-static int cmd_cap_analog_a(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_gpio_mode(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_analog_a, print_cap_analog_a);
+	if (argc == 1) {
+		print_cap_gpio_mode(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: none, inputs, pir, buzzer");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "none")) {
+		m_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE;
+	} else if (!strcmp(argv[1], "inputs")) {
+		m_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	} else if (!strcmp(argv[1], "pir")) {
+		m_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_PIR;
+	} else if (!strcmp(argv[1], "buzzer")) {
+		m_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_BUZZER;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: none, inputs, pir, buzzer");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
-static int cmd_cap_analog_b(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_gpio_input_a(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_analog_b, print_cap_analog_b);
+	if (argc == 1) {
+		print_cap_gpio_input_a(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: none, digital, analog, pulse");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "none")) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
+	} else if (!strcmp(argv[1], "digital")) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DIGITAL;
+	} else if (!strcmp(argv[1], "analog")) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
+	} else if (!strcmp(argv[1], "pulse")) {
+		m_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_PULSE;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: none, digital, analog, pulse");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_gpio_input_b(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_gpio_input_b(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: none, digital, analog, pulse");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "none")) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED;
+	} else if (!strcmp(argv[1], "digital")) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DIGITAL;
+	} else if (!strcmp(argv[1], "analog")) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_ANALOG;
+	} else if (!strcmp(argv[1], "pulse")) {
+		m_app_config.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_PULSE;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: none, digital, analog, pulse");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **argv)
@@ -2262,14 +2380,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set hall right capability (true/false).",
 	              cmd_cap_hall_right, 1, 1),
 
-	SHELL_CMD_ARG(cap-input-a, NULL,
-	              "Get/Set input A capability (true/false).",
-	              cmd_cap_input_a, 1, 1),
-
-	SHELL_CMD_ARG(cap-input-b, NULL,
-	              "Get/Set input B capability (true/false).",
-	              cmd_cap_input_b, 1, 1),
-
 	SHELL_CMD_ARG(cap-light-sensor, NULL,
 	              "Get/Set light sensor capability (true/false).",
 	              cmd_cap_light_sensor, 1, 1),
@@ -2277,14 +2387,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-barometer, NULL,
 	              "Get/Set barometer capability (true/false).",
 	              cmd_cap_barometer, 1, 1),
-
-	SHELL_CMD_ARG(cap-pir-detector, NULL,
-	              "Get/Set PIR detector capability (true/false).",
-	              cmd_cap_pir_detector, 1, 1),
-
-	SHELL_CMD_ARG(cap-buzzer, NULL,
-	              "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled).",
-	              cmd_cap_buzzer, 1, 1),
 
 	SHELL_CMD_ARG(cap-sht, NULL,
 	              "Get/Set onboard SHT4x temperature/humidity capability (true/false).",
@@ -2298,16 +2400,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
 
-	SHELL_CMD_ARG(cap-analog-a, NULL,
-	              "Get/Set input A analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_A, ADC1_IN3). Mutually exclusive with cap_input_a / cap_pir_detector / cap_buzzer (those win).",
-	              cmd_cap_analog_a, 1, 1),
+	SHELL_CMD_ARG(cap-gpio-mode, NULL,
+	              "Get/Set GP_A/GP_B pin owner (none/inputs/pir/buzzer): pir and buzzer take both pins, inputs hands each pin to cap-gpio-input-a/-b.",
+	              cmd_cap_gpio_mode, 1, 1),
 
-	SHELL_CMD_ARG(cap-analog-b, NULL,
-	              "Get/Set input B analog voltage capability — 0-24 V at the connector via the 33k/1k divider (GP_B, ADC1_IN7). Mutually exclusive with cap_input_b / cap_pir_detector / cap_buzzer (those win).",
-	              cmd_cap_analog_b, 1, 1),
+	SHELL_CMD_ARG(cap-gpio-input-a, NULL,
+	              "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
+	              cmd_cap_gpio_input_a, 1, 1),
+
+	SHELL_CMD_ARG(cap-gpio-input-b, NULL,
+	              "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
+	              cmd_cap_gpio_input_b, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
-	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
+	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap-gpio-mode buzzer.",
 	              cmd_alarm_buzzer_mode, 1, 1),
 
 	SHELL_CMD_ARG(radio-alarm-ack, NULL,

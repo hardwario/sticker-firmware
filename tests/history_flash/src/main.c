@@ -355,7 +355,7 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 }
 
 /* #485 S1: app_history_init() runs before app_sensor_init(), which can still
- * change a layout input at boot (a 1-Wire slot typed by the rebind, cap_input_*
+ * change a layout input at boot (a 1-Wire slot typed by the rebind, cap_gpio_input_*
  * dropped on a PIR/buzzer pin conflict). Model it with cap_sht: off while init
  * mounts, on again before the first capture. The capture must remount against
  * its own layout instead of restarting the ring over the stored records, and

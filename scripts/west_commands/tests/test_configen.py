@@ -183,6 +183,16 @@ def test_normalize_access_rejects_bad_transport():
         configen.normalize_access(cfg)
 
 
+def test_enum_default_must_name_an_enum_value():
+    enums = {"mode": [{"name": "DISABLED", "value": 0, "shell": "none"}]}
+    ok = [{"name": "x", "type": "enum", "enum": "mode", "default": "disabled"}]
+    configen.check_enum_defaults(ok, enums)
+    # The shell spelling is not the C enumerator name.
+    bad = [{"name": "x", "type": "enum", "enum": "mode", "default": "none"}]
+    with pytest.raises(SystemExit):
+        configen.check_enum_defaults(bad, enums)
+
+
 def test_build_proto_model_structure():
     model = configen.build_proto_model(_load_config())
     assert model["message"] == "AppConfigMessage"

@@ -170,9 +170,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = 0,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U8,
-				.cap_off = offsetof(struct app_config, cap_input_a),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_a),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -185,9 +186,11 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_COUNTER,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U32,
-				.cap_off = offsetof(struct app_config, cap_input_a),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_a),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) |
+					    BIT(APP_CONFIG_GPIO_INPUT_PULSE),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -200,9 +203,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_LIVENESS | APP_SENSOR_F_RANGE,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U16,
-				.cap_off = offsetof(struct app_config, cap_analog_a),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_a),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_ANALOG),
 				.wire_scale = 1000.0f,
 				.hist_scale = 1000.0f,
 				.range_min = 0.0f,
@@ -215,9 +219,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = 0,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U8,
-				.cap_off = offsetof(struct app_config, cap_input_b),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_b),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -230,9 +235,11 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_COUNTER,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U32,
-				.cap_off = offsetof(struct app_config, cap_input_b),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_b),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_DIGITAL) |
+					    BIT(APP_CONFIG_GPIO_INPUT_PULSE),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -245,9 +252,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_LIVENESS | APP_SENSOR_F_RANGE,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U16,
-				.cap_off = offsetof(struct app_config, cap_analog_b),
+				.cap_off = offsetof(struct app_config, cap_gpio_input_b),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_INPUT_ANALOG),
 				.wire_scale = 1000.0f,
 				.hist_scale = 1000.0f,
 				.range_min = 0.0f,
@@ -260,9 +268,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_MOMENTARY,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U8,
-				.cap_off = offsetof(struct app_config, cap_pir_detector),
+				.cap_off = offsetof(struct app_config, cap_gpio_mode),
 				.pulses_ch = APP_SENSOR_CH_MOTHERBOARD_PIR_COUNT,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_MODE_PIR),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -275,9 +284,10 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.flags = APP_SENSOR_F_COUNTER,
 				.wire_type = APP_SENSOR_WIRE_UINT32,
 				.hist_enc = APP_SENSOR_HIST_U32,
-				.cap_off = offsetof(struct app_config, cap_pir_detector),
+				.cap_off = offsetof(struct app_config, cap_gpio_mode),
 				.pulses_ch = APP_SENSOR_NO_CH,
 				.part = APP_SENSOR_NO_PART,
+				.cap_mask = BIT(APP_CONFIG_GPIO_MODE_PIR),
 				.wire_scale = 1.0f,
 				.hist_scale = 1.0f,
 				.range_min = 0.0f,
@@ -520,9 +530,31 @@ static const struct app_sensor_channel m_ch_machine_probe[] = {
 BUILD_ASSERT(ARRAY_SIZE(m_ch_motherboard) <= APP_SENSOR_MB_CH_MAX, "motherboard channel limit");
 BUILD_ASSERT(ARRAY_SIZE(m_ch_dallas) <= APP_SENSOR_W1_CH_MAX, "dallas channel limit");
 BUILD_ASSERT(ARRAY_SIZE(m_ch_machine_probe) <= APP_SENSOR_W1_CH_MAX, "machine-probe channel limit");
+/* app_sensor_channel_cap_on() reads an enum cap through its first byte. */
+BUILD_ASSERT(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "enum cap read assumes little endian");
 /* cap_off must not collide with the APP_SENSOR_NO_CAP marker. */
 BUILD_ASSERT(sizeof(struct app_config) < APP_SENSOR_NO_CAP,
 	     "struct app_config too large for cap_off");
+
+bool app_sensor_channel_cap_on(const struct app_sensor_channel *c)
+{
+	if (c->cap_off == APP_SENSOR_NO_CAP) {
+		return true;
+	}
+
+	const void *p = (const char *)&g_app_config + c->cap_off;
+
+	if (c->cap_mask == 0) {
+		return *(const bool *)p;
+	}
+
+	/* An enum cap may be 1 byte (arm-zephyr-eabi short enums) or 4 (native_sim);
+	 * values stay < 8, so the first byte holds the value on these
+	 * little-endian targets. */
+	uint8_t v = *(const uint8_t *)p;
+
+	return v < 8 && (c->cap_mask & BIT(v)) != 0;
+}
 
 static const struct app_sensor_type m_types[] = {
 	{

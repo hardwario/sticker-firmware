@@ -551,8 +551,8 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "  %-16s count=%u active=%s",
 		    "input-b:", APP_SENSOR_MB_U(d, INPUT_B_COUNT),
 		    APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f ? "true" : "false");
-	/* #396: input-referred (divider-corrected); nan with cap_analog_a/b off or
-	 * the pin owned by the digital input / PIR / buzzer. */
+	/* #396: input-referred (divider-corrected); nan unless the pin mode is
+	 * analog (cap-gpio-input-a/-b, #498). */
 	print_float(shell, "input-a-voltage:", APP_SENSOR_MB_F(d, INPUT_A_VOLTAGE), "V");
 	print_float(shell, "input-b-voltage:", APP_SENSOR_MB_F(d, INPUT_B_VOLTAGE), "V");
 
@@ -1351,17 +1351,17 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
 
 /* Debug control surface for the HW variant with a CMI-9605IC-0380T buzzer wired
  * directly across the former PIR pins (app_buzzer.c, #338). Only meaningful with
- * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
- * cap_pir_detector owns the pins, or neither capability is on) and driving the
- * GPIOs here would race whatever else configured them. */
+ * cap-gpio-mode buzzer — otherwise app_buzzer_init() was never called (PIR or
+ * the inputs own the pins, or nothing does) and driving the GPIOs here would
+ * race whatever else configured them. */
 #if defined(CONFIG_APP_BUZZER)
 static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	if (!g_app_config.cap_buzzer) {
-		shell_error(sh, "cap_buzzer is not enabled");
+	if (!app_sensor_gpio_buzzer()) {
+		shell_error(sh, "cap-gpio-mode is not buzzer");
 		return -ENODEV;
 	}
 
@@ -1378,8 +1378,8 @@ static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_buzzer_beep(const struct shell *sh, size_t argc, char **argv)
 {
-	if (!g_app_config.cap_buzzer) {
-		shell_error(sh, "cap_buzzer is not enabled");
+	if (!app_sensor_gpio_buzzer()) {
+		shell_error(sh, "cap-gpio-mode is not buzzer");
 		return -ENODEV;
 	}
 
@@ -1400,8 +1400,8 @@ static int cmd_buzzer_beep(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
 {
-	if (!g_app_config.cap_buzzer) {
-		shell_error(sh, "cap_buzzer is not enabled");
+	if (!app_sensor_gpio_buzzer()) {
+		shell_error(sh, "cap-gpio-mode is not buzzer");
 		return -ENODEV;
 	}
 

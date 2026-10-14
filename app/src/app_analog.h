@@ -24,10 +24,9 @@ extern "C" {
  * their RESUME/SUSPEND pairs. */
 int app_analog_read_mv(uint8_t channel_id, int32_t *mv);
 
-/* Put the GP_A / GP_B pins whose cap_analog_a / cap_analog_b is set into
- * analog mode. Call from app_sensor_init() after the pin-sharing conflicts are
- * resolved and after app_input_init(), which configures both pins as digital
- * inputs. */
+/* Put the GP_A / GP_B pins whose cap_gpio_input_a / _b is analog into analog
+ * mode. Call from app_sensor_init() after the pin use is resolved (#498) and
+ * after app_input_init(), which configures both pins as digital inputs. */
 int app_analog_init(void);
 
 /* Input-referred voltage at the connector (V), divider-corrected (x34, see

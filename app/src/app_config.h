@@ -64,6 +64,20 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
+enum app_config_gpio_mode {
+	APP_CONFIG_GPIO_MODE_NONE = 0,
+	APP_CONFIG_GPIO_MODE_INPUTS = 1,
+	APP_CONFIG_GPIO_MODE_PIR = 2,
+	APP_CONFIG_GPIO_MODE_BUZZER = 3,
+};
+
+enum app_config_gpio_input {
+	APP_CONFIG_GPIO_INPUT_DISABLED = 0,
+	APP_CONFIG_GPIO_INPUT_DIGITAL = 1,
+	APP_CONFIG_GPIO_INPUT_ANALOG = 2,
+	APP_CONFIG_GPIO_INPUT_PULSE = 3,
+};
+
 enum app_config_alarm_buzzer_mode {
 	APP_CONFIG_ALARM_BUZZER_MODE_OFF = 0,
 	APP_CONFIG_ALARM_BUZZER_MODE_ONCE = 1,
@@ -111,17 +125,14 @@ struct app_config {
 	int radio_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
-	bool cap_input_a;
-	bool cap_input_b;
 	bool cap_light_sensor;
 	bool cap_barometer;
-	bool cap_pir_detector;
-	bool cap_buzzer;
 	bool cap_sht;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
-	bool cap_analog_a;
-	bool cap_analog_b;
+	enum app_config_gpio_mode cap_gpio_mode;
+	enum app_config_gpio_input cap_gpio_input_a;
+	enum app_config_gpio_input cap_gpio_input_b;
 	uint8_t alarm_0[18];
 	uint8_t alarm_1[18];
 	uint8_t alarm_2[18];

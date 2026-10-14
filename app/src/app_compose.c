@@ -271,7 +271,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	}
 
 	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
-	if (g_app_config.cap_pir_detector) {
+	if (app_sensor_gpio_pir()) {
 		t->has_motion_count = true;
 		t->motion_count = APP_SENSOR_MB_U(&d, PIR_COUNT);
 	}
@@ -327,10 +327,12 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->hall_right_flags = f;
 	}
 
-	/* input A / B */
-	if (g_app_config.cap_input_a) {
+	/* input A / B — digital or S0 (#498). An S0 pin's level is not a state,
+	 * so it never sets the active flag. */
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_a)) {
 		uint32_t f = 0;
-		if (input.input_a_is_active) {
+		if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_DIGITAL &&
+		    input.input_a_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
 		t->has_input_a_count = true;
@@ -338,9 +340,10 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->has_input_a_flags = true;
 		t->input_a_flags = f;
 	}
-	if (g_app_config.cap_input_b) {
+	if (app_sensor_gpio_is_input(g_app_config.cap_gpio_input_b)) {
 		uint32_t f = 0;
-		if (input.input_b_is_active) {
+		if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_DIGITAL &&
+		    input.input_b_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
 		t->has_input_b_count = true;
@@ -351,7 +354,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 
 	/* input A / B analog voltage (#396) — sent when enabled and read, scaled
 	 * by the registry (mV). */
-	if (g_app_config.cap_analog_a &&
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG &&
 	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE))) {
 		t->has_input_a_voltage = true;
 		t->input_a_voltage = (uint32_t)app_sensor_wire_value(
@@ -359,7 +362,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 					       APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE),
 			d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE]);
 	}
-	if (g_app_config.cap_analog_b &&
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG &&
 	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE))) {
 		t->has_input_b_voltage = true;
 		t->input_b_voltage = (uint32_t)app_sensor_wire_value(

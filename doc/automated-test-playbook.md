@@ -866,12 +866,27 @@ on release FW verify via the next fPort-2 telemetry (slower — prefer debug for
   counters +3 each; no cross-talk (left magnet must not count on right).
 
 ### AT-SEN-03 — inputs A/B (D, SA; maps S9)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a digital`, `cap-gpio-input-b digital`
+  (#498; PIR / buzzer own both pins, so the inputs are inactive with any other mode).
 - **Steps:** assist: "short input A to GND 3×, then input B". Watch check/sample.
 - **Expect:** counts +3 per input; state reflects level while held (#352: `input_a`/`input_b` =
   `1` while shorted to GND, `0` idle — same polarity regression check as AT-SEN-02).
 
+### AT-SEN-03b — pulse counter on input A (D, SA; #498)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a pulse`, save/reboot. Pulse source on
+  GP_A: an S0 meter output, or a generator / relay giving pulses ≥ 30 ms.
+- **Steps:** read `input-a-count`; apply 100 pulses of 30 ms at ≤ 10 Hz; read again. Then
+  20 pulses of 5 ms spaced ≥ 30 ms apart, and a pulse with a burst of edges < 20 ms apart on
+  both its leading and trailing edge (contact bounce). Repeat the 100 pulses with the
+  opposite polarity (idle low, pulse high), rebooting with the line at its new idle level.
+- **Expect:** +100 for the 30 ms pulses in both polarities (the 100 ms poll alone would miss
+  most of them); a bounced pulse counts once (20 ms debounce from any edge). No
+  `input-a-state` channel / state flag and no input alarm edge in telemetry; `input_a_count`
+  keeps counting while `input-a-counter` is off.
+- **Evidence:** counts before/after, telemetry frame.
+
 ### AT-SEN-04 — PIR (D, SA; maps S5)
-- **Pre:** `cap-pir-detector` on.
+- **Pre:** `cap-gpio-mode pir` (#498, was `cap-pir-detector`).
 - **Steps:** keep the bench still 60 s (baseline: no events) → assist: "wave a hand 30 cm
   above the device 3×".
 - **Expect:** motion events only during the waves; none during the still window (false
@@ -1031,6 +1046,23 @@ still required before the next `alarm poll` will observe it as elapsed.
   its own fixed 0.3 V hysteresis, not `dwell`.)
 - **Evidence:** decoded alarm + before/after GetInfo.
 
+### AT-ALM-11 — RATE window = dwell (D, SA; #498)
+- **Pre:** `cap-gpio-mode inputs`, `cap-gpio-input-a pulse`; `alarm set 0 mb input-a-count hi 100 dwell 15`.
+- **Steps:** apply 100 pulses within 10 s; keep ≥ 100 pulses per 15 s for 1 min; stop.
+- **Expect:** one AlarmReport (activate) within 3 s of the 100th pulse, none while the rate
+  stays over, one deactivate within one window (+3 s) after the pulses stop; a new burst fires again.
+- **Evidence:** alarm frames with timestamps.
+
+### AT-ALM-12 — PIR / accel motion state (D, SA; #498)
+- **Pre:** `cap-gpio-mode pir` (or `cap-accelerometer true` + sensitivity); `alarm set 0 mb pir-motion from 1 to 1 dwell 30`.
+- **Steps:** wave a hand every ~10 s for 1 min, then keep still 60 s.
+- **Expect:** one activate at the first motion, nothing during the minute, one deactivate
+  ~30 s after the last motion.
+- **Evidence:** alarm frames with timestamps.
+- **Variant 0 → 0 (stillness):** `alarm set 0 mb accel-motion from 0 to 0 dwell 30`; shake
+  the device continuously, then put it down. **Expect:** nothing while shaking, one activate
+  ~30 s after it was put down, one deactivate at the next shake.
+
 ### AT-ALM-08 — invalid rule rejected/sanitised (D, A; maps H-10, #203)
 - **Steps:** (a) via SetParam, attempt slot 15 with an inverted/collapsed THRESHOLD band
   (`hi <= lo`, e.g. `lo=20, hi=20`) — expect rejection, not silent acceptance (#348 replaces
@@ -1048,7 +1080,7 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Cleanup:** clear slot 15.
 
 ### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)
-- **Pre:** `cap-buzzer true` (buzzer HW variant fitted), `alarm-buzzer-mode normal`,
+- **Pre:** `cap-gpio-mode buzzer` (buzzer HW variant fitted; #498, was `cap-buzzer`), `alarm-buzzer-mode normal`,
   save/reboot (#154, config save reboots). One armed rule, e.g. AT-ALM-01's
   onboard-temperature slot 0.
 - **Steps:** cross the threshold to activate the rule (same assist as AT-ALM-01); assist:
@@ -1063,7 +1095,7 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Expect:** melody starts on each newly activated alarm, replays per the mode's interval
   (`once` = never, `slow`/`normal`/`fast` = 120/30/10 s, `continuous` ≈ every 2.4 s) while
   any alarm stays active, stops immediately once the last one clears. Negative case:
-  `alarm-buzzer-mode off` (or `cap-buzzer false`) → same rule activation produces the red
+  `alarm-buzzer-mode off` (or `cap-gpio-mode none`) → same rule activation produces the red
   LED as normal but stays silent.
 - **Evidence:** operator confirmation of beep timing per mode + the negative (silent) case.
 - **Cleanup:** clear the rules; `alarm-buzzer-mode off` (factory default).

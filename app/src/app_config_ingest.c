@@ -448,20 +448,11 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	if (src->has_cap_hall_right) {
 		config->cap_hall_right = src->cap_hall_right;
 	}
-	if (src->has_cap_input_a) {
-		config->cap_input_a = src->cap_input_a;
-	}
-	if (src->has_cap_input_b) {
-		config->cap_input_b = src->cap_input_b;
-	}
 	if (src->has_cap_light_sensor) {
 		config->cap_light_sensor = src->cap_light_sensor;
 	}
 	if (src->has_cap_barometer) {
 		config->cap_barometer = src->cap_barometer;
-	}
-	if (src->has_cap_pir_detector) {
-		config->cap_pir_detector = src->cap_pir_detector;
 	}
 	if (src->has_cap_w1_sensors) {
 		config->cap_w1_sensors = src->cap_w1_sensors;
@@ -506,15 +497,6 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	if (src->has_input_b_counter) {
 		config->input_b_counter = src->input_b_counter;
 	}
-	if (src->has_cap_buzzer) {
-		config->cap_buzzer = src->cap_buzzer;
-	}
-	if (src->has_cap_analog_a) {
-		config->cap_analog_a = src->cap_analog_a;
-	}
-	if (src->has_cap_analog_b) {
-		config->cap_analog_b = src->cap_analog_b;
-	}
 	if (src->has_cap_sht) {
 		config->cap_sht = src->cap_sht;
 	}
@@ -554,6 +536,29 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 			FAULT(26);
 		}
 	}
+	if (src->has_cap_gpio_mode) {
+		if ((int)src->cap_gpio_mode >= 0 && (int)src->cap_gpio_mode <= 3) {
+			config->cap_gpio_mode = (enum app_config_gpio_mode)src->cap_gpio_mode;
+		} else {
+			FAULT(27);
+		}
+	}
+	if (src->has_cap_gpio_input_a) {
+		if ((int)src->cap_gpio_input_a >= 0 && (int)src->cap_gpio_input_a <= 3) {
+			config->cap_gpio_input_a =
+				(enum app_config_gpio_input)src->cap_gpio_input_a;
+		} else {
+			FAULT(28);
+		}
+	}
+	if (src->has_cap_gpio_input_b) {
+		if ((int)src->cap_gpio_input_b >= 0 && (int)src->cap_gpio_input_b <= 3) {
+			config->cap_gpio_input_b =
+				(enum app_config_gpio_input)src->cap_gpio_input_b;
+		} else {
+			FAULT(29);
+		}
+	}
 	return ret;
 }
 
@@ -569,14 +574,6 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 		dst->has_cap_hall_right = true;
 		dst->cap_hall_right = c->cap_hall_right;
 	}
-	if (requested(ids, n, 3)) {
-		dst->has_cap_input_a = true;
-		dst->cap_input_a = c->cap_input_a;
-	}
-	if (requested(ids, n, 4)) {
-		dst->has_cap_input_b = true;
-		dst->cap_input_b = c->cap_input_b;
-	}
 	if (requested(ids, n, 5)) {
 		dst->has_cap_light_sensor = true;
 		dst->cap_light_sensor = c->cap_light_sensor;
@@ -584,10 +581,6 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 6)) {
 		dst->has_cap_barometer = true;
 		dst->cap_barometer = c->cap_barometer;
-	}
-	if (requested(ids, n, 7)) {
-		dst->has_cap_pir_detector = true;
-		dst->cap_pir_detector = c->cap_pir_detector;
 	}
 	if (requested(ids, n, 8)) {
 		dst->has_cap_w1_sensors = true;
@@ -634,18 +627,6 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 		dst->has_input_b_counter = true;
 		dst->input_b_counter = c->input_b_counter;
 	}
-	if (requested(ids, n, 19)) {
-		dst->has_cap_buzzer = true;
-		dst->cap_buzzer = c->cap_buzzer;
-	}
-	if (requested(ids, n, 20)) {
-		dst->has_cap_analog_a = true;
-		dst->cap_analog_a = c->cap_analog_a;
-	}
-	if (requested(ids, n, 21)) {
-		dst->has_cap_analog_b = true;
-		dst->cap_analog_b = c->cap_analog_b;
-	}
 	if (requested(ids, n, 22)) {
 		dst->has_cap_sht = true;
 		dst->cap_sht = c->cap_sht;
@@ -665,6 +646,18 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 26)) {
 		dst->has_sensor4_type = true;
 		dst->sensor4_type = c->sensor4_type;
+	}
+	if (requested(ids, n, 27)) {
+		dst->has_cap_gpio_mode = true;
+		dst->cap_gpio_mode = (AppConfigMessage_Sensors_GpioMode)c->cap_gpio_mode;
+	}
+	if (requested(ids, n, 28)) {
+		dst->has_cap_gpio_input_a = true;
+		dst->cap_gpio_input_a = (AppConfigMessage_Sensors_GpioInput)c->cap_gpio_input_a;
+	}
+	if (requested(ids, n, 29)) {
+		dst->has_cap_gpio_input_b = true;
+		dst->cap_gpio_input_b = (AppConfigMessage_Sensors_GpioInput)c->cap_gpio_input_b;
 	}
 }
 

@@ -136,16 +136,24 @@ var _APP_HEX_ENC = { history_channels: 9 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
 
+// 3/4/7/19/20/21 were the bool GP caps cap_input_a/_b, cap_pir_detector,
+// cap_buzzer, cap_analog_a/_b — replaced by cap_gpio_mode / cap_gpio_input_a/_b
+// (27..29, #498).
 var _SEN_NAMES = {
-  1: "cap_hall_left", 2: "cap_hall_right", 3: "cap_input_a", 4: "cap_input_b",
-  5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
+  1: "cap_hall_left", 2: "cap_hall_right",
+  5: "cap_light_sensor", 6: "cap_barometer",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer",
-  20: "cap_analog_a", 21: "cap_analog_b", 22: "cap_sht",
-  23: "sensor1_type", 24: "sensor2_type", 25: "sensor3_type", 26: "sensor4_type"
+  17: "input_a_counter", 18: "input_b_counter", 22: "cap_sht",
+  23: "sensor1_type", 24: "sensor2_type", 25: "sensor3_type", 26: "sensor4_type",
+  27: "cap_gpio_mode", 28: "cap_gpio_input_a", 29: "cap_gpio_input_b"
 };
-var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
+var _SEN_ENUMS = {
+  10: ["off", "low", "medium", "high"],
+  27: ["none", "inputs", "pir", "buzzer"],
+  28: ["none", "digital", "analog", "pulse"],
+  29: ["none", "digital", "analog", "pulse"]
+};
 var _SEN_FLOAT = {};
 var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "sensor4_rom" };
 var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_rom: 14 };
