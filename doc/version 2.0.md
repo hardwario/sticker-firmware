@@ -2684,3 +2684,12 @@ The wait is now a deadline: re-checked every 8 s while answers, alarm frames or 
 undelivered, and the action runs at the latest **120 s** after the first pending command. A later
 command merges into the pending action and does not move the deadline. Test:
 `radio_common` `action_waits_120_s_at_most` (both profiles).
+
+The 120 s is an upper bound, not a fixed delay: once nothing is left undelivered, the action
+runs at the next 8 s check.
+
+HIL PASS (2026-10-14, STICKER 2162165132, J-Link 801053709, debug build): the node was not
+joined, so the answer could not leave. A Reboot command was fed through `app_radio_downlink()`
+on the radio work queue. The action was deferred every 8 s ("112 s left" … "7 s left") and the
+reboot came exactly 120.0 s after the command. A join attempt in between shifted the 8 s steps
+but did not move the deadline.
