@@ -292,9 +292,142 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	for (size_t i = 0; i < ARRAY_SIZE(m_pins); i++) {
 		shell_print(sh, "pin %-8s %d", m_pins[i].name, pin_get(&m_pins[i]));
 	}
+#if defined(CONFIG_MPL3115A2)
+	float p, bt;
+	bool baro;
+
+	sim_mpl3115a2_get(&p, &bt, &baro);
+	shell_print(sh, "baro     %s %.2f hPa %.2f °C", baro ? "on" : "off", (double)p, (double)bt);
+#endif
+#if defined(CONFIG_LIS2DH)
+	float a[3];
+	bool acc;
+	uint32_t ev[2];
+
+	sim_lis2dh_get(a, &acc, ev);
+	shell_print(sh, "accel    %s %.2f %.2f %.2f m/s^2, int1 events %u, int2 events %u",
+		    acc ? "on" : "off", (double)a[0], (double)a[1], (double)a[2], ev[0], ev[1]);
+#endif
+#if defined(CONFIG_W1_DS2484)
+	bool bus;
+	uint32_t resets;
+
+	sim_w1_bus(&bus, &resets);
+	shell_print(sh, "w1 bus   %s, %u resets", bus ? "on" : "off", resets);
+	for (int i = 0; i < SIM_W1_SENSORS; i++) {
+		float wt;
+		bool on;
+		uint8_t rom[8];
+
+		sim_w1_get(i, &wt, &on, rom);
+		shell_print(sh, "w1 %d     %s %.2f °C rom %02x%02x%02x%02x%02x%02x%02x%02x", i,
+			    on ? "on" : "off", (double)wt, rom[7], rom[6], rom[5], rom[4], rom[3],
+			    rom[2], rom[1], rom[0]);
+	}
+#endif
 
 	return 0;
 }
+
+#if defined(CONFIG_MPL3115A2)
+static int cmd_baro(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2 && (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "on") == 0)) {
+		sim_mpl3115a2_set_present(strcmp(argv[1], "on") == 0);
+		return 0;
+	}
+
+	float p, t, old_p;
+	bool present;
+
+	sim_mpl3115a2_get(&old_p, &t, &present);
+	if (parse_float(sh, argv[1], &p) || (argc > 2 && parse_float(sh, argv[2], &t))) {
+		return -EINVAL;
+	}
+	sim_mpl3115a2_set(p, t);
+	sim_mpl3115a2_set_present(true);
+
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_LIS2DH)
+static int cmd_accel(const struct shell *sh, size_t argc, char **argv)
+{
+	float a[3];
+
+	if (argc == 2 && (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "on") == 0)) {
+		sim_lis2dh_set_present(strcmp(argv[1], "on") == 0);
+		return 0;
+	}
+	if (argc == 2 && strcmp(argv[1], "flat") == 0) {
+		sim_lis2dh_set(0.0f, 0.0f, 9.81f);
+		return 0;
+	}
+	if (argc == 2 && strcmp(argv[1], "freefall") == 0) {
+		sim_lis2dh_set(0.0f, 0.0f, 0.0f);
+		return 0;
+	}
+	if (argc == 2 && strcmp(argv[1], "shake") == 0) {
+		/* A jolt along X, then back at rest: one any-motion event. */
+		float rest[3];
+		bool present;
+		uint32_t events[2];
+
+		sim_lis2dh_get(rest, &present, events);
+		sim_lis2dh_set(rest[0] + 15.0f, rest[1], rest[2]);
+		sim_lis2dh_set(rest[0], rest[1], rest[2]);
+		return 0;
+	}
+	if (argc != 4) {
+		shell_error(sh, "usage: sim accel <x> <y> <z> (m/s^2) | flat | shake | freefall | "
+				"on | off");
+		return -EINVAL;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (parse_float(sh, argv[1 + i], &a[i])) {
+			return -EINVAL;
+		}
+	}
+	sim_lis2dh_set(a[0], a[1], a[2]);
+
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_W1_DS2484)
+static int cmd_w1(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 2 && (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "on") == 0)) {
+		sim_w1_set_present(-1, strcmp(argv[1], "on") == 0);
+		return 0;
+	}
+	if (argc != 3) {
+		shell_error(sh, "usage: sim w1 <0..%d> <°C> | <0..%d> on|off | on|off",
+			    SIM_W1_SENSORS - 1, SIM_W1_SENSORS - 1);
+		return -EINVAL;
+	}
+
+	int idx = atoi(argv[1]);
+	float t;
+
+	if (idx < 0 || idx >= SIM_W1_SENSORS) {
+		shell_error(sh, "sensor index 0..%d", SIM_W1_SENSORS - 1);
+		return -EINVAL;
+	}
+	if (strcmp(argv[2], "off") == 0 || strcmp(argv[2], "on") == 0) {
+		sim_w1_set_present(idx, strcmp(argv[2], "on") == 0);
+		return 0;
+	}
+	if (parse_float(sh, argv[2], &t)) {
+		return -EINVAL;
+	}
+	sim_w1_set(idx, t);
+	sim_w1_set_present(idx, true);
+
+	return 0;
+}
+#endif
 
 #if defined(CONFIG_LORA_SX126X)
 static int cmd_radio(const struct shell *sh, size_t argc, char **argv)
@@ -367,6 +500,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(pulse, NULL,
 		      "Pulse train: pulse <pin> <count> [width ms, default 50] [bounce toggles]",
 		      cmd_pulse, 3, 2),
+#if defined(CONFIG_MPL3115A2)
+	SHELL_CMD_ARG(baro, NULL, "MPL3115A2: baro <hPa> [°C] | on | off", cmd_baro, 2, 1),
+#endif
+#if defined(CONFIG_LIS2DH)
+	SHELL_CMD_ARG(accel, NULL,
+		      "LIS2DH12: accel <x> <y> <z> (m/s^2) | flat | shake | freefall | on | off",
+		      cmd_accel, 2, 2),
+#endif
+#if defined(CONFIG_W1_DS2484)
+	SHELL_CMD_ARG(w1, NULL, "DS18B20 on 1-Wire: w1 <0..3> <°C>|on|off | w1 on|off", cmd_w1, 2,
+		      1),
+#endif
 #if defined(CONFIG_LORA_SX126X)
 	SHELL_CMD_ARG(radio, NULL, "SX1262 emulator state.", cmd_radio, 1, 0),
 #endif

@@ -57,6 +57,16 @@
 		status = "okay";
 	};
 
+	/* LIS2DH12 INT1/INT2 (sim_gpio.c): real-edge interrupts only, as the
+	 * Zephyr LIS2DH driver and the app share INT1. */
+	gpiod: gpiod {
+		compatible = "hardwario,sim-gpio";
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <2>;
+		status = "okay";
+	};
+
 	sticker_leds {
 		compatible = "gpio-leds";
 
@@ -135,7 +145,7 @@
 			reg = <0x19>;
 			anym-mode = <LIS2DH_DT_ANYM_OR_COMBINATION>;
 			int2-gpio-config = <LIS2DH_DT_GPIO_INT_EDGE_RISING>;
-			irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>, <&gpioa 2 GPIO_ACTIVE_HIGH>;
+			irq-gpios = <&gpiod 0 GPIO_ACTIVE_HIGH>, <&gpiod 1 GPIO_ACTIVE_HIGH>;
 			disconnect-sdo-sa0-pull-up;
 			zephyr,deferred-init;
 		};

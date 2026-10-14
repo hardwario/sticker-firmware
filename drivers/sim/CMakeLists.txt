@@ -10,8 +10,12 @@
 zephyr_library()
 zephyr_include_directories(.)
 zephyr_library_sources(sim_adc.c sim_shell.c)
+zephyr_library_sources_ifdef(CONFIG_STICKER_SIM_GPIO sim_gpio.c)
 zephyr_library_sources_ifdef(CONFIG_SHT4X emul_sht4x.c)
 zephyr_library_sources_ifdef(CONFIG_OPT3001 emul_opt3001.c)
+zephyr_library_sources_ifdef(CONFIG_MPL3115A2 emul_mpl3115a2.c)
+zephyr_library_sources_ifdef(CONFIG_LIS2DH emul_lis2dh.c)
+zephyr_library_sources_ifdef(CONFIG_W1_DS2484 emul_ds2484.c)
 
 if(CONFIG_LORA_SX126X)
   zephyr_library_sources(emul_sx126x.c)

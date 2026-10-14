@@ -1,0 +1,23 @@
+#
+# Copyright (c) 2026 HARDWARIO a.s.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+description: |
+  STICKER simulator input-only GPIO port for interrupt lines driven by an
+  emulator (sim_gpio.c). Unlike zephyr,gpio-emul it does not run the pin
+  callbacks on every configure, so a driver that shares a pin with the
+  application sees only real edges, as on the STM32 EXTI.
+
+compatible: "hardwario,sim-gpio"
+
+include: [gpio-controller.yaml, base.yaml]
+
+properties:
+  "#gpio-cells":
+    const: 2
+
+gpio-cells:
+  - pin
+  - flags
