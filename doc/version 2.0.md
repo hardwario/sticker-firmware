@@ -3018,6 +3018,14 @@ again, at the extreme of the wire type, as the Bluetooth SIG "value is not known
   Hub decoded `pressure`/`altitude` to `null` (Portal "–"); it still needed the sentinel
   check for fields 8/30/31 (Hub fix 5ce440f6, proximos-v2 !179).
 
+## 53. Local simulator (native_sim)
+
+The application builds for `native_sim/native/64` with emulated peripherals
+(SHT40, OPT3001, MPL3115A2, LIS2DH12, DS2484 + DS18B20, ST25DV04K, SX1262,
+ADC, GPIO, flash). `scripts/sim/` holds a LoRaWAN LNS and P2P hub
+(`sim_air.py`), an NFC phone (`sim_nfc.py`) and the CI smoke test. No
+firmware behaviour changes. See [simulator.md](simulator.md) (PR #510).
+
 ---
 
 *Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
