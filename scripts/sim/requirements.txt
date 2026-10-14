@@ -1,0 +1,5 @@
+# STICKER simulator host tools (sim_air.py, sim_p2p.py, sim_nfc.py, smoke_test.py)
+cryptography>=41
+pycryptodome>=3.19
+protobuf>=5.26.1
+grpcio-tools>=1.68.0

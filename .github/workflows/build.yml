@@ -221,6 +221,57 @@ jobs:
         working-directory: sticker
         run: bash tests/run_native.sh
 
+  # The whole application on native_sim with emulated peripherals, end to end
+  # against the simulated LNS / P2P hub and NFC phone (doc/simulator.md).
+  simulator:
+    name: Simulator smoke test (native_sim)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          path: sticker
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Zephyr project
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: sticker
+          toolchains: arm-zephyr-eabi
+
+      - name: Apply module patches
+        working-directory: sticker
+        run: west patch apply
+
+      - name: Install simulator tool deps
+        run: pip install -r sticker/scripts/sim/requirements.txt
+
+      - name: Build the simulator
+        working-directory: sticker/app
+        run: west build -p always -b native_sim/native/64 -d build-sim
+
+      - name: Smoke test
+        working-directory: sticker
+        run: python scripts/sim/smoke_test.py --exe app/build-sim/zephyr/zephyr.exe --log-dir sim-logs
+
+      - name: Upload simulator logs
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: simulator-logs
+          path: sticker/sim-logs
+
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
