@@ -3042,6 +3042,7 @@ Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION`
 | M4 | Comments: `app_version.h` (branch builds keep the CMake version), `app_alarm_rules.h` (RATE window), `main.c` (the battery gate runs after the settings load). | — |
 | S1 | `lrw_reset` is `[nfc, shell]` only (security review R-3). | Reachable over a LoRaWAN / P2P downlink; it resets the OTAA DevNonce, so a 1.0.4 network server refused the following joins. |
 | S2 | `enter_calibration` and `SetParam.application.calibration` are NFC / shell only (security review C-1). | Reachable over a LoRaWAN downlink; calibration mode uplinks under the public, fleet-shared ABP keys. |
+| S3 | CI: every GitHub Action pinned to a commit SHA, Dependabot for the bumps; a release carries `SHA256SUMS` of its hex files (security review B-2). | Actions followed mutable tags, incl. the release upload with `contents: write`. |
 | M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, §48 settle timer, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
 
 Not changed, by decision: the payload version stays `0x01` (Upgrading item 10); no downgrade
@@ -3049,7 +3050,8 @@ from v2.0.0 is supported, so the stale-key cleanup may delete keys of a newer re
 `JOIN_RESP` is bound only to type and destination (the pairing key is public by TOWER design,
 see `doc/p2p.md`), and the `fsk` profile with its public pairing key stays in release images; the
 vendor token may change `secret_key` without `vendor_reset_allow`; the P2P gateway replay lane
-stays RAM-only; NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
+stays RAM-only (a downlink is accepted only after a fresh ACK, which lifts the lane above every
+recorded frame); NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
 
 - **Flash / RAM** (vs the PR #503 head `059ac313`): release 192 940 B / 48 456 B (+64 B /
   +256 B, ≥ 8 KiB free kept), debug 241 248 B / 56 328 B (+200 B / +192 B). The config loader
