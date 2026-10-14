@@ -595,6 +595,18 @@ test("fPort-2 telemetry decodes input_a_voltage/input_b_voltage (fields 30/31, #
   assert.equal(got.input_b_voltage, 3.3);
 });
 
+// An enabled sensor without a valid sample arrives as the NA sentinel (INT32_MIN
+// for sint32, UINT32_MAX for uint32) and decodes to null; an absent key means the
+// capability is off.
+test("fPort-2 telemetry: NA sentinels decode to null", () => {
+  const got = codec.decodeUplink({ bytes: hex("0118ffffffff0f20ffffffff0f28ffffffff0f30ffffffff0f38ffffffff0f40ffffffff0ff001ffffffff0ff801ffffffff0f"), fPort: 2 }).data;
+  for (const k of ["temperature", "humidity", "pressure", "altitude", "illuminance",
+                   "orientation", "input_a_voltage", "input_b_voltage"]) {
+    assert.ok(k in got, k + " missing");
+    assert.equal(got[k], null, k);
+  }
+});
+
 // #92: pin the numeric scaling of barometer/light fields — these were never
 // asserted, which is why the pressure unit could drift 10x. Frame: version 01,
 // pressure (field 5, tag 0x28) raw 10135 -> 1013.5 hPa (hPa x10),

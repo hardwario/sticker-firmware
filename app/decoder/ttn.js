@@ -911,11 +911,12 @@ function _decodeSensorReading(bytes, start, end) {
 // firmware always sends the system group and every enabled-sensor group whole,
 // so boolean fields (boot, *_is_active, *_notify_*, tilt) are surfaced as
 // explicit true/false rather than set-only-when-true.
-// "Value not available" sentinels sent by firmware before #483 for a NaN
-// onboard analog reading; they still decode to null. Since #483 the firmware
-// omits the field instead, so an absent key means "not measured".
+// "Value not available" sentinels (mirror app_compose.c): an enabled scalar
+// sensor is always on the wire, a NaN reading arrives as the sentinel and
+// decodes to null. An absent key means the capability is off.
 var _TM_S32_NA = -2147483648; // INT32_MIN (sint32: temperature, altitude)
-var _TM_U32_NA = 4294967295;  // UINT32_MAX (uint32: humidity, pressure, illuminance)
+var _TM_U32_NA = 4294967295;  // UINT32_MAX (uint32: humidity, pressure, illuminance,
+                              // orientation, input_a/b_voltage)
 
 function decodeTelemetry(bytes) {
   var d = {};
@@ -960,7 +961,7 @@ function decodeTelemetry(bytes) {
       // light
       case 7:  d.illuminance = (v.value === _TM_U32_NA) ? null : v.value * 2; break;
       // accel
-      case 8:  d.orientation = v.value; break;
+      case 8:  d.orientation = (v.value === _TM_U32_NA) ? null : v.value; break;
       // pir
       case 9:  d.motion_count = v.value; break;
       // 1-wire slots are repeated SensorReading (field 27, handled above).
@@ -1000,8 +1001,8 @@ function decodeTelemetry(bytes) {
       case 28: d.page_index = v.value; break;
       case 29: d.page_count = v.value; break;
       // input A / B analog voltage (#396), mV -> V
-      case 30: d.input_a_voltage = v.value / 1000; break;
-      case 31: d.input_b_voltage = v.value / 1000; break;
+      case 30: d.input_a_voltage = (v.value === _TM_U32_NA) ? null : v.value / 1000; break;
+      case 31: d.input_b_voltage = (v.value === _TM_U32_NA) ? null : v.value / 1000; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }

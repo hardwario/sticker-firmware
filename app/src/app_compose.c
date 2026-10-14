@@ -33,10 +33,17 @@
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
-/* A NaN onboard analog reading (sensor absent or failed) is omitted from the
- * wire (#483). The former 5-byte NA sentinels cost 10 B per uplink for a
- * missing barometer; the failure is still reported by device_status / the
- * no_data alarm, and the enabled capability by settings-info / GetConfig. */
+/* "Value not available" sentinels (mirrored in ttn.js -> null). An enabled
+ * scalar sensor is always on the wire, so a missing key means "capability off"
+ * and null means "enabled, no valid sample" (sensor absent, failed or out of
+ * range) - no host state needed to tell them apart. The extreme of the wire
+ * type, as the Bluetooth SIG "value is not known" values: 5-6 B per field, paid
+ * only while the reading is missing. Reverts #483 (which omitted the field);
+ * 1-Wire keeps its per-channel `valid` mask, which decodes to the same null. */
+/* sint32 fields: temperature, altitude */
+#define TM_S32_NA INT32_MIN
+/* uint32 fields: humidity, pressure, illuminance, orientation, input_a/b_voltage */
+#define TM_U32_NA UINT32_MAX
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
 #define SYSTEM_FLAG_BOOT        BIT(0)
@@ -223,44 +230,43 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal — onboard SHT4x, sent when enabled (#465 cap_sht) and read. */
+	/* internal — onboard SHT4x, sent whenever enabled (#465 cap_sht); a NaN
+	 * reading as the sentinel. */
 	if (g_app_config.cap_sht) {
-		if (!isnan(temperature)) {
-			t->has_temperature = true;
-			t->temperature = (int32_t)(temperature * 100.0f);
-		}
-		if (!isnan(humidity)) {
-			t->has_humidity = true;
-			/* Clamp before the unsigned cast: the SHT4x formula can yield a
-			 * slightly negative %RH, and a negative float->uint cast is UB. */
-			t->humidity = (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
-		}
+		t->has_temperature = true;
+		t->temperature = isnan(temperature) ? TM_S32_NA : (int32_t)(temperature * 100.0f);
+		t->has_humidity = true;
+		/* Clamp before the unsigned cast: the SHT4x formula can yield a
+		 * slightly negative %RH, and a negative float->uint cast is UB. */
+		t->humidity = isnan(humidity) ? TM_U32_NA
+					      : (uint32_t)CLAMP(humidity * 2.0f, 0.0f, 200.0f);
 	}
 
-	/* barometer — sent when enabled and read. */
+	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
-		if (!isnan(pressure)) {
-			t->has_pressure = true;
-			/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
-			t->pressure = (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
-		}
-		if (!isnan(altitude)) {
-			t->has_altitude = true;
-			t->altitude = (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
-						     (float)INT16_MAX);
-		}
+		t->has_pressure = true;
+		/* The pressure channel is hPa; the wire unit is hPa x10 (0.1 hPa). */
+		t->pressure = isnan(pressure) ? TM_U32_NA
+					      : (uint32_t)CLAMP(pressure * 10.0f, 0.0f, 200000.0f);
+		t->has_altitude = true;
+		t->altitude = isnan(altitude) ? TM_S32_NA
+					      : (int32_t)CLAMP(altitude * 10.0f, (float)INT16_MIN,
+							       (float)INT16_MAX);
 	}
 
-	/* light — sent when enabled and read. */
-	if (g_app_config.cap_light_sensor && !isnan(illuminance)) {
+	/* light — sent whenever enabled (sentinel on NaN). */
+	if (g_app_config.cap_light_sensor) {
 		t->has_illuminance = true;
-		t->illuminance = (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
+		t->illuminance = isnan(illuminance)
+					 ? TM_U32_NA
+					 : (uint32_t)CLAMP(illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
-	/* accel (gated by the accelerometer capability) */
-	if (g_app_config.cap_accelerometer && !isnan(orientation)) {
+	/* accel (gated by the accelerometer capability); sentinel on NaN */
+	if (g_app_config.cap_accelerometer) {
 		t->has_orientation = true;
-		t->orientation = (uint32_t)((int)orientation & 0xf);
+		t->orientation =
+			isnan(orientation) ? TM_U32_NA : (uint32_t)((int)orientation & 0xf);
 	}
 	/* Always send the count when the accelerometer is enabled (0 included) —
 	 * the #78/#80 "whole group every report" policy that the other digital
@@ -352,23 +358,29 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->input_b_flags = f;
 	}
 
-	/* input A / B analog voltage (#396) — sent when enabled and read, scaled
-	 * by the registry (mV). */
-	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG &&
-	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE))) {
+	/* input A / B analog voltage (#396) — sent whenever enabled, scaled by the
+	 * registry (mV); the sentinel when the sample is missing or out of range. */
+	if (g_app_config.cap_gpio_input_a == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		t->has_input_a_voltage = true;
-		t->input_a_voltage = (uint32_t)app_sensor_wire_value(
-			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
-					       APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE),
-			d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE]);
+		t->input_a_voltage =
+			(d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE))
+				? (uint32_t)app_sensor_wire_value(
+					  app_sensor_channel_get(
+						  APP_SENSOR_TYPE_MOTHERBOARD,
+						  APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE),
+					  d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_A_VOLTAGE])
+				: TM_U32_NA;
 	}
-	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG &&
-	    (d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE))) {
+	if (g_app_config.cap_gpio_input_b == APP_CONFIG_GPIO_INPUT_ANALOG) {
 		t->has_input_b_voltage = true;
-		t->input_b_voltage = (uint32_t)app_sensor_wire_value(
-			app_sensor_channel_get(APP_SENSOR_TYPE_MOTHERBOARD,
-					       APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE),
-			d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE]);
+		t->input_b_voltage =
+			(d.mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE))
+				? (uint32_t)app_sensor_wire_value(
+					  app_sensor_channel_get(
+						  APP_SENSOR_TYPE_MOTHERBOARD,
+						  APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE),
+					  d.mb.v[APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE])
+				: TM_U32_NA;
 	}
 }
 
