@@ -31,6 +31,9 @@ void sim_opt3001_set(float lux);
 void sim_opt3001_set_present(bool present);
 void sim_opt3001_get(float *lux, bool *present);
 
+/* SX1262 emulator state (emul_sx126x.c); mode = status-byte chip mode. */
+void sim_sx126x_status(uint32_t *freq_hz, uint8_t *mode, uint32_t *tx, uint32_t *rx, bool *peer);
+
 #ifdef __cplusplus
 }
 #endif

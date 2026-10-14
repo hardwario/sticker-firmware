@@ -296,6 +296,26 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_LORA_SX126X)
+static int cmd_radio(const struct shell *sh, size_t argc, char **argv)
+{
+	static const char *const modes[] = {"sleep", "?",  "stby_rc", "stby_xosc",
+					    "fs",    "rx", "tx",      "?"};
+	uint32_t freq, tx, rx;
+	uint8_t mode;
+	bool peer;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	sim_sx126x_status(&freq, &mode, &tx, &rx, &peer);
+	shell_print(sh, "radio %s, %u Hz, tx %u, rx %u, air peer %s", modes[mode & 7], freq, tx, rx,
+		    peer ? "up" : "silent");
+
+	return 0;
+}
+#endif
+
 static int sim_shell_init(void)
 {
 	k_work_init_delayable(&m_pulse.work, pulse_work);
@@ -321,6 +341,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(pulse, NULL,
 		      "Pulse train: pulse <pin> <count> [width ms, default 50] [bounce toggles]",
 		      cmd_pulse, 3, 2),
+#if defined(CONFIG_LORA_SX126X)
+	SHELL_CMD_ARG(radio, NULL, "SX1262 emulator state.", cmd_radio, 1, 0),
+#endif
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(sim, &sub_sim, "STICKER simulator peripherals.", NULL);
