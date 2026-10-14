@@ -27,10 +27,12 @@ LOG_MODULE_REGISTER(app_analog, LOG_LEVEL_DBG);
 #define ADC_CHANNEL_B 7
 
 /* External divider on the GP_A/GP_B front-end (JP11): series 33k (R2/R3),
- * shunt 1k (R5/R7) to GND. It scales the 0..24 V input into the pin's 0..VDD
- * range; the reported value is input-referred, V_in = V_pin * 34. Both
- * channels are populated identically (R8/R9 DNP). The ~6 mV pin offset of the
- * 560k bias to VDD (R4/R6) is left uncompensated, like the battery path. */
+ * shunt 1k (R5/R7) to GND, both selected by DIP switch S1 (1+2 for A, 7+8 for
+ * B; the 560k pull-up R4/R6 is off in this position). It scales the 0..24 V
+ * input into the pin's 0..VDD range; the reported value is input-referred,
+ * V_in = V_pin * 34. Both channels are populated identically (R8/R9 DNP). The
+ * firmware cannot read S1: in any other position the pin floats or is pulled
+ * up and the reading is meaningless (version 2.0.md §48). */
 #define R_SERIES_KOHM 33
 #define R_SHUNT_KOHM  1
 

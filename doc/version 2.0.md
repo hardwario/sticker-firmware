@@ -2851,6 +2851,30 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   `pir` / `buzzer` off when the driver is not built in (`LOG_WRN` each). `GetConfig` /
   `config show` report the stored values; the settings dump (boot, `get_settings`) reports
   the effective ones.
+- **Wiring: DIP switch S1 (STICKER Input).** The external connector JP11 (`DQ1` = A,
+  `DQ2` = B) reaches GP_A/GP_B or the 1-Wire bus only through the 8-way DIP switch S1 of
+  the STICKER Input variant. The firmware cannot read the switch: the input mode and the
+  switch must match. Source: [STICKER Input Wiring](https://docs.hardwario.com/sticker/sticker-input-wiring/sticker-input-wiring/).
+
+  | S1 switch (A / B) | Connects |
+  |:-:|---|
+  | 1 / 8 | 1k shunt to GND (R5 / R7) on `A_IN` / `B_IN` |
+  | 2 / 7 | 33k series resistor (R2 / R3) `DQ1` → `A_IN` / `DQ2` → `B_IN` |
+  | 3 / 6 | `DQ1` / `DQ2` → 1-Wire `DQ` |
+  | 4 / 5 | 560k pull-up to VDD (R4 / R6) on `A_IN` / `B_IN` |
+
+  | Use of the pin | Parameters | S1 ON for A / B (rest OFF) |
+  |---|---|---|
+  | 1-Wire (dallas, machine probe) | `cap-w1-sensors true`, `cap-gpio-input-x none` | 3 / 6 |
+  | Analog 0–24 V (33k / 1k divider, §45) | `cap-gpio-mode inputs`, `cap-gpio-input-x analog` | 1+2 / 7+8 |
+  | Dry contact (560k pull-up, 33k series) | `cap-gpio-mode inputs`, `cap-gpio-input-x digital` or `pulse` | 2+4 / 5+7 |
+
+  With the switch in the 1-Wire position `A_IN` / `B_IN` float with only the 10 nF filter
+  capacitor (C2 / C3). An `analog` input then reads drifting garbage. HIL on 5722
+  (2026-10-14): 1-Wire switch position, `input_a_voltage` sent 27.98 V once, then only
+  values above the 30 V plausibility limit, so `null` + `no_data` (§52). On a 1-Wire unit
+  set `cap-gpio-mode none` (or the PIR / buzzer variant). The pin owner of the PIR variant
+  (main board solder jumpers S1/S2 on GP_B/GP_A) is a different part from this DIP switch.
 - **Pulse (e.g. S0, IEC 62053-31).** S0 pulses are ≥ 30 ms; the 100 ms input poll would
   miss most of them. A `pulse` pin counts in a GPIO interrupt on both edges (EXTI 4 / 11,
   free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
