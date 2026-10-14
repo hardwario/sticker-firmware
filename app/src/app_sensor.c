@@ -731,11 +731,6 @@ void app_sensor_sample(void)
 	/* Track I2C sensor reads this sweep to detect a wedged bus. */
 	int i2c_tried = 0, i2c_failed = 0;
 
-	/* #340 M18: set false only when SHT4x rejects a CRC-valid, comm-successful
-	 * reading as outside its plausible window (-ERANGE) - see below. Stays
-	 * true (write-through, same as today) whenever CONFIG_SHT4X is off. */
-	bool sht4x_valid = true;
-
 	/* #485 S2: which onboard sensor's read failed this sweep (comm error). */
 	bool failed[MB_SRC_COUNT] = {false};
 
@@ -786,16 +781,13 @@ void app_sensor_sample(void)
 		ret = app_sht4x_read(&temperature, &humidity);
 		if (ret == -ERANGE) {
 			/* #340 M18: comm succeeded and the CRC was valid - this is a
-			 * plausibility rejection, not a bus failure. Don't count it
-			 * toward the wedged-bus streak below (a real, working bus that
-			 * just returned one implausible-but-valid sample isn't
-			 * "wedged"), and don't let the NaN temperature/humidity locals
-			 * overwrite the last known-good reading further down - that
-			 * would otherwise trip the no-data alarm (APP_ALARM_NO_DATA_MS)
-			 * off one implausible sample, exactly like a genuinely
-			 * disconnected sensor. */
-			sht4x_valid = false;
-			LOG_WRN("SHT4x reading rejected as implausible; keeping last value");
+			 * plausibility rejection, not a bus failure, so it stays out
+			 * of the wedged-bus streak below. It is a miss like a failed
+			 * read (#485 S2): one sweep keeps the last known-good reading,
+			 * a second one in a row goes NaN (null on the wire + no_data)
+			 * instead of freezing the last value forever. */
+			failed[MB_SRC_SHT] = true;
+			LOG_WRN("SHT4x reading rejected as implausible");
 		} else {
 			i2c_tried++;
 			if (ret) {
@@ -946,8 +938,8 @@ void app_sensor_sample(void)
 	struct app_sensor_mb *g = &g_app_sensor_data.mb;
 
 	/* Keep the last known-good reading instead of this sweep's NaN locals:
-	 * - #340 M18: on an SHT4x plausibility reject (always);
-	 * - #485 S2: on a failed read, for APP_SENSOR_MISS_HOLD sweeps. A single
+	 * - #485 S2: on a failed read or an SHT4x plausibility reject (#340
+	 *   M18), for APP_SENSOR_MISS_HOLD sweeps. A single
 	 *   transient I2C error would otherwise leave NaN for a whole sample
 	 *   interval (900 s by default), long past the no-data window, and raise
 	 *   no_data plus a DEACTIVATE/ACTIVATE pair on every threshold rule of the
@@ -961,7 +953,7 @@ void app_sensor_sample(void)
 				BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE_BARO) |
 				BIT(APP_SENSOR_CH_MOTHERBOARD_ALTITUDE),
 	};
-	uint32_t keep = sht4x_valid ? 0 : src_mask[MB_SRC_SHT];
+	uint32_t keep = 0;
 
 	for (int i = 0; i < MB_SRC_COUNT; i++) {
 		keep |= app_sensor_miss_hold(&m_mb_miss[i], failed[i], src_mask[i]);

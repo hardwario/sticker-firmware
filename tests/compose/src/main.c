@@ -14,6 +14,8 @@
 #include "app_input.h"
 #include "app_w1_slots.h"
 
+#include <limits.h>
+
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include "src/app_config.pb.h"
@@ -245,10 +247,10 @@ ZTEST(compose, test_capability_gating)
 	zassert_true(seen, "pressure missing with cap on");
 }
 
-/* #483: an enabled but absent/failed barometer or light sensor (NaN) sends no
- * field at all instead of the former 5-byte NA sentinels (10 B for the
- * barometer alone). */
-ZTEST(compose, test_omit_absent_analog)
+/* An enabled but absent/failed scalar sensor (NaN) is sent as the NA sentinel
+ * (decoded to null), so "enabled, no sample" differs from "capability off"
+ * (field absent). Reverts #483's omission. */
+ZTEST(compose, test_na_sentinel_absent_analog)
 {
 	Telemetry fr[8];
 	size_t n;
@@ -256,16 +258,45 @@ ZTEST(compose, test_omit_absent_analog)
 	set_clean();
 	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = NAN;
 	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = NAN;
+	g_app_config.cap_sht = true;
 	g_app_config.cap_barometer = true;
 	g_app_config.cap_light_sensor = true;
+	g_app_config.cap_accelerometer = true;
 	run_report(fr, 8, &n);
 
-	zassert_equal(n, 1, "expected one frame, got %zu", n);
-	zassert_false(fr[0].has_pressure, "absent pressure must be omitted");
-	zassert_false(fr[0].has_altitude, "absent altitude must be omitted");
-	zassert_false(fr[0].has_illuminance, "absent illuminance must be omitted");
-	zassert_false(fr[0].has_temperature, "absent temperature must be omitted");
-	zassert_false(fr[0].has_humidity, "absent humidity must be omitted");
+	bool t = false, h = false, p = false, a = false, l = false, o = false;
+
+	for (size_t i = 0; i < n; i++) {
+		if (fr[i].has_temperature) {
+			t = true;
+			zassert_equal(fr[i].temperature, INT32_MIN, "temperature %d",
+				      fr[i].temperature);
+		}
+		if (fr[i].has_humidity) {
+			h = true;
+			zassert_equal(fr[i].humidity, UINT32_MAX, "humidity %u", fr[i].humidity);
+		}
+		if (fr[i].has_pressure) {
+			p = true;
+			zassert_equal(fr[i].pressure, UINT32_MAX, "pressure %u", fr[i].pressure);
+		}
+		if (fr[i].has_altitude) {
+			a = true;
+			zassert_equal(fr[i].altitude, INT32_MIN, "altitude %d", fr[i].altitude);
+		}
+		if (fr[i].has_illuminance) {
+			l = true;
+			zassert_equal(fr[i].illuminance, UINT32_MAX, "illuminance %u",
+				      fr[i].illuminance);
+		}
+		if (fr[i].has_orientation) {
+			o = true;
+			zassert_equal(fr[i].orientation, UINT32_MAX, "orientation %u",
+				      fr[i].orientation);
+		}
+	}
+	zassert_true(t && h && p && a && l && o, "NA field missing: t%d h%d p%d a%d l%d o%d", t,
+		     h, p, a, l, o);
 }
 
 /* #465: cap_sht off drops the onboard temperature/humidity from the wire, even
@@ -296,7 +327,7 @@ static void mb_put(uint8_t ch, float v)
 }
 
 /* #396: input A/B analog voltage — cap-gated, mV on the wire (registry wire
- * scale, rounded), omitted without a valid sample (#483). The test name must
+ * scale, rounded), the NA sentinel without a valid sample. The test name must
  * sort after test_boot_internal (ztest runs a suite alphabetically). */
 ZTEST(compose, test_input_analog_voltage)
 {
@@ -335,7 +366,7 @@ ZTEST(compose, test_input_analog_voltage)
 	zassert_true(seen_a, "input_a_voltage missing with cap on");
 	zassert_true(seen_b, "input_b_voltage missing with cap on");
 
-	/* cap on, no valid sample (NaN or out of the registry range) -> omitted */
+	/* cap on, no valid sample (NaN or out of the registry range) -> NA sentinel */
 	set_clean();
 	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
 	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_ANALOG;
@@ -344,8 +375,10 @@ ZTEST(compose, test_input_analog_voltage)
 	mb_put(APP_SENSOR_CH_MOTHERBOARD_INPUT_B_VOLTAGE, 100.0f);
 	run_report(fr, 8, &n);
 	zassert_equal(n, 1, "expected one frame, got %zu", n);
-	zassert_false(fr[0].has_input_a_voltage, "absent input_a_voltage must be omitted");
-	zassert_false(fr[0].has_input_b_voltage, "out-of-range input_b_voltage must be omitted");
+	zassert_true(fr[0].has_input_a_voltage && fr[0].input_a_voltage == UINT32_MAX,
+		     "absent input_a_voltage must be the NA sentinel");
+	zassert_true(fr[0].has_input_b_voltage && fr[0].input_b_voltage == UINT32_MAX,
+		     "out-of-range input_b_voltage must be the NA sentinel");
 }
 
 ZTEST(compose, test_counter_flags)
@@ -692,10 +725,12 @@ ZTEST(compose, test_system_always_present)
 	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
 	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u",
 		      fr[0].system_flags);
-	/* #483: an absent (NaN) onboard analog reading is omitted, not sent as a
-	 * 5-byte sentinel; the fault surfaces via device_status / no_data. */
-	zassert_false(fr[0].has_temperature, "absent temperature must be omitted");
-	zassert_false(fr[0].has_humidity, "absent humidity must be omitted");
+	/* An absent (NaN) reading of an enabled sensor (cap_sht) is the NA
+	 * sentinel, decoded to null. */
+	zassert_true(fr[0].has_temperature && fr[0].temperature == INT32_MIN,
+		     "absent temperature must be the NA sentinel");
+	zassert_true(fr[0].has_humidity && fr[0].humidity == UINT32_MAX,
+		     "absent humidity must be the NA sentinel");
 	/* Capability-gated / external groups still don't leak in when absent. */
 	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");
 }

@@ -713,8 +713,10 @@ message AlarmEvent {
 // atomic unit. A group is sent whenever its sensor is enabled (capability on),
 // as a whole, every report — its fields are present even when 0/false (e.g. a
 // hall counter at 0, or boot=false). The system group (voltage, system_flags)
-// is always present. Digital fields carry their real value (0 is valid); analog
-// scalars are omitted only when there is no valid sample yet (NaN). The composer
+// is always present. Digital fields carry their real value (0 is valid); an
+// enabled analog scalar without a valid sample (NaN: sensor absent, failed or
+// out of range) carries the NA sentinel - INT32_MIN for sint32, UINT32_MAX for
+// uint32 (voltage keeps 0) - which decoders map to null. The composer
 // packs whole groups by priority into one or more frames to fit the LoRaWAN
 // payload budget (split, never drop); all frames of a report carry the same
 // snapshot. Scalars are scaled-int varints. The same message is emitted for
@@ -766,7 +768,7 @@ message Telemetry {
     // input A / B analog voltage (cap_gpio_input_a / _b = analog, #396): the
     // input-referred voltage at the connector, mV (motherboard channels 11 /
     // 14, wire scale 1000). Same pin as the digital input of the group, so
-    // never sent together with input_a/b_count. Omitted without a valid sample.
+    // never sent together with input_a/b_count. NA sentinel without a valid sample.
     optional uint32 input_a_voltage = 30;  // mV
     optional uint32 input_b_voltage = 31;  // mV
     // New sensors append at field >= 32 as new groups; never renumber.
