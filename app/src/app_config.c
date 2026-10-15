@@ -122,34 +122,45 @@ void app_config_unlock(void)
 }
 
 /* Keys found in NVS that this firmware no longer has (a parameter removed or
- * renamed in an older release). Recorded while loading, deleted after it: the
- * settings core would log a set-value failure for each on every boot. */
-#define STALE_KEYS_MAX     4
+ * renamed in an older release), or has with a different size (a value whose
+ * layout changed, e.g. the v1.4 17 B alarm-N blobs, #503). Recorded while
+ * loading, deleted after it: the settings core would log a set-value failure
+ * for each on every boot. A wrong-size value cannot be read anyway, so the
+ * parameter keeps its default either way. More than STALE_KEYS_MAX keys are
+ * cleaned over the next boots. */
+#define STALE_KEYS_MAX     8
 #define STALE_KEY_NAME_MAX 32
 
 static char m_stale_keys[STALE_KEYS_MAX][STALE_KEY_NAME_MAX];
 static uint8_t m_stale_key_count;
 
+static int stale_key(const char *key)
+{
+	if (m_stale_key_count < STALE_KEYS_MAX && strlen(key) < STALE_KEY_NAME_MAX) {
+		strcpy(m_stale_keys[m_stale_key_count++], key);
+		return 0;
+	}
+
+	/* List full: skip the key quietly, it is recorded on a later boot. An
+	 * error here would make the settings core log a set-value failure. */
+	return 0;
+}
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	int ret;
 	const char *next;
+	void *var;
+	size_t size;
+	int ret;
 
+	/* Each key only selects its variable; the size check and the read are
+	 * shared below (one copy instead of one per key, #503). */
 #define SETTINGS_SET(_key, _var, _size)                                                            \
 	do {                                                                                       \
 		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				return -EINVAL;                                                    \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			return 0;                                                                  \
+			var = (_var);                                                              \
+			size = (_size);                                                            \
+			goto found;                                                                \
 		}                                                                                  \
 	} while (0)
 
@@ -264,12 +275,22 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 
 #undef SETTINGS_SET
 
-	if (m_stale_key_count < STALE_KEYS_MAX && strlen(key) < STALE_KEY_NAME_MAX) {
-		strcpy(m_stale_keys[m_stale_key_count++], key);
-		return 0;
+	return stale_key(key);
+
+found:
+	if (len != size) {
+		/* A known key whose stored value has another size: stale. */
+		LOG_WRN("Key %s is %zu B, expected %zu B: stale", key, len, size);
+		return stale_key(key);
 	}
 
-	return -ENOENT;
+	ret = read_cb(cb_arg, var, len);
+	if (ret < 0) {
+		LOG_ERR("Call `read_cb` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 /* Delete the stale keys h_set() recorded; a failure only means the key is

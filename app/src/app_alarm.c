@@ -669,12 +669,43 @@ static float read_value(uint8_t slot, uint8_t ch, uint8_t sensor_type)
 }
 
 /* Current counter of a RATE rule (a motherboard counter channel). Caller holds
- * the data lock. */
+ * the data lock. Hall and input totalizers are read live from their drivers,
+ * like read_poll_state() does for their levels: the g_app_sensor_data copy is
+ * refreshed only by app_sensor_sample(), so a window shorter than
+ * interval_sample saw a whole tick's pulses at once and then none, and raised
+ * an activate/deactivate pair per tick under a steady rate (#503). The PIR and
+ * accelerometer counters are written by their event handlers and are live. */
 static bool read_counter(const struct app_alarm_rule *rule, const struct app_sensor_channel *c,
 			 uint32_t *out)
 {
 	if (rule->slot != APP_ALARM_SLOT_MB || !(c->flags & APP_SENSOR_F_COUNTER)) {
 		return false;
+	}
+	switch (rule->channel) {
+	case APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT:
+	case APP_SENSOR_CH_MOTHERBOARD_HALL_RIGHT_COUNT: {
+		struct app_hall_data hd;
+
+		if (app_hall_get_data(&hd)) {
+			return false;
+		}
+		*out = rule->channel == APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT ? hd.left_count
+										  : hd.right_count;
+		return true;
+	}
+	case APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT:
+	case APP_SENSOR_CH_MOTHERBOARD_INPUT_B_COUNT: {
+		struct app_input_data id;
+
+		if (app_input_get_data(&id)) {
+			return false;
+		}
+		*out = rule->channel == APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT ? id.input_a_count
+										: id.input_b_count;
+		return true;
+	}
+	default:
+		break;
 	}
 	*out = g_app_sensor_data.mb.v[rule->channel].u;
 	return true;
@@ -1468,8 +1499,12 @@ bool app_alarm_poll(void)
 			continue;
 		}
 		/* Stillness (0 -> 0 momentary, #498): arm the quiet deadline on first
-		 * sight, raise "stopped" once it passes with no event. */
-		if (m_rt[i].last_rule.enabled && rule_is_momentary(&m_rt[i].last_rule) &&
+		 * sight, raise "stopped" once it passes with no event. Only while the
+		 * rule is armed: last_rule keeps the stored `enabled`, so a rule whose
+		 * capability is off (no PIR / accelerometer, so no event ever comes)
+		 * would otherwise latch "stopped" once per boot and never clear (#503). */
+		if (app_alarm_rule_armed(&m_rt[i].last_rule) &&
+		    rule_is_momentary(&m_rt[i].last_rule) &&
 		    rule_is_stillness(&m_rt[i].last_rule) && !m_rt[i].active) {
 			if (m_rt[i].confirm_deadline == 0) {
 				m_rt[i].confirm_deadline = now + rule_hold_ms(&m_rt[i].last_rule);

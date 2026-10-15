@@ -1,7 +1,10 @@
-# Manual Test Plan — STICKER firmware v1.4.0
+# Manual Test Plan — STICKER firmware
 
-> Target firmware: **v1.4.0**. The scenarios below cover the v1.4.0 feature set
+> Written for **v1.4.0**: the scenarios below cover the v1.4.0 feature set
 > (remote control protocol, protobuf telemetry/alarms, RTC sync, history store-and-forward).
+> For **v2.0.0** the per-feature HIL procedures and results are in each section of
+> [`version 2.0.md`](<version 2.0.md>); where they differ (NFC mailbox, alarm table, P2P),
+> those win over the scenarios here.
 
 A canonical, versioned checklist of manual / hardware test scenarios for release
 verification. Each task carries a ready-to-use **prompt for Claude**: copy it into a

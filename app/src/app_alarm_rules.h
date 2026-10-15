@@ -39,8 +39,9 @@
  *    level (dwell = time before activating; deactivate is immediate once
  *    state != to). A momentary channel (PIR / accelerometer motion) fires
  *    immediately on each pulse and uses dwell as the post-fire hold only.
- *  - RATE: hi = max counter increase allowed per report interval; dwell =
- *    hold/re-arm window after firing.
+ *  - RATE: fires once the counter grows by >= hi within one window; the
+ *    window is dwell, or interval_report when dwell is 0. The alarm clears at
+ *    the end of a window that grew by less.
  */
 
 #include "app_sensor_types.h"

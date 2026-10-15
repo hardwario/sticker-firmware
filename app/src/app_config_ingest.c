@@ -335,7 +335,11 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 		*fault_field = 0;
 	}
 
-	if (src->has_calibration) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_calibration && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				     tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(1);
+	} else if (src->has_calibration) {
 		config->calibration = src->calibration;
 	}
 	if (src->has_interval_sample) {

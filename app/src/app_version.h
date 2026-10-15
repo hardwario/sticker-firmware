@@ -18,8 +18,8 @@ extern "C" {
  *   1) version + source ("where the build came from") — injected by CI via
  *      -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see app/CMakeLists.txt):
  *        tag v1.3.4 -> 1/3/4, build type MAIN
- *        branch/PR  -> 0/0/0, build type DEV
- *        local      -> 0/0/0, build type CUSTOM (CMake default)
+ *        branch/PR  -> version from app/CMakeLists.txt, build type DEV
+ *        local      -> version from app/CMakeLists.txt, build type CUSTOM
  *   2) configuration debug vs release — from CONFIG_FW_DEBUG (debug.conf sets
  *      it y, release leaves it n), see app_version_is_debug().
  * The fallbacks below keep IDE/standalone tooling happy. */

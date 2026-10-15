@@ -1338,16 +1338,23 @@ void app_cmd_run_action(enum app_cmd_action action)
 		/* Join again now on whichever radio runs (#109), no reboot. */
 		LOG_INF("Command: forced rejoin");
 		app_radio_rejoin();
-		break;
+		return;
 	case APP_CMD_ACTION_COUNTERS_SAVE:
 		/* Persist the (reset) pulse totalizers, no reboot. */
 		LOG_INF("Command: saving counters");
 		app_counters_save(true);
-		break;
+		return;
 	default:
 		/* NONE, and PAGE_STREAM, which the radio's page stream consumes. */
-		break;
+		return;
 	}
+
+	/* Every action that breaks out of the switch reboots on success, so getting
+	 * here means its save or reset failed. Reboot anyway (#503): the sender was
+	 * told "done, rebooting", and the unit restarts from what is on flash
+	 * instead of running on with staged values nothing persisted. */
+	LOG_WRN_REBOOTING("command action failed");
+	sys_reboot(SYS_REBOOT_COLD);
 }
 
 /* force_send is LRW-only (transports: [lrw] in the YAML); the generated dispatch
@@ -1813,10 +1820,8 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
 	case Command_lrw_reset_tag:
-		/* transports: [lrw, p2p, nfc, shell, vendor] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P &&
-		    tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG &&
-		    tp != APP_CMD_TRANSPORT_VENDOR) {
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
@@ -1833,8 +1838,8 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_lrw_join(tp, cmd, resp, action);
 		break;
 	case Command_enter_calibration_tag:
-		/* transports: [lrw, nfc] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}

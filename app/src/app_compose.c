@@ -59,78 +59,84 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 #define CNT_FLAG_ACTIVE         BIT(2)
 
 /* Sensor groups, in priority order (packed into frames first → last). A group
- * is the atomic unit: all its fields go into one frame, or none. */
+ * is the unit of consistency: all its fields go into one frame when they fit
+ * one. G_SYSTEM leads so battery + alarm bits (the only alarm state that gets
+ * through the 11 B tier, #409 A5a) always ride on the first page (#503). */
 enum tlm_group {
-	G_INTERNAL = 0, /* temperature, humidity */
-	G_SYSTEM,       /* voltage, system_flags */
-	G_BAROMETER,    /* pressure, altitude */
-	G_LIGHT,        /* illuminance */
-	G_ACCEL,        /* orientation */
-	G_PIR,          /* motion_count */
-	G_HALL_L,       /* hall_left_count, hall_left_flags */
-	G_HALL_R,       /* hall_right_count, hall_right_flags */
-	G_INPUT_A,      /* input_a_count, input_a_flags, input_a_voltage */
-	G_INPUT_B,      /* input_b_count, input_b_flags, input_b_voltage */
+	G_SYSTEM = 0, /* voltage, system_flags */
+	G_INTERNAL,   /* temperature, humidity */
+	G_BAROMETER,  /* pressure, altitude */
+	G_LIGHT,      /* illuminance */
+	G_ACCEL,      /* orientation, accel_motion_count */
+	G_PIR,        /* motion_count */
+	G_HALL_L,     /* hall_left_count, hall_left_flags */
+	G_HALL_R,     /* hall_right_count, hall_right_flags */
+	G_INPUT_A,    /* input_a_count, input_a_flags, input_a_voltage */
+	G_INPUT_B,    /* input_b_count, input_b_flags, input_b_voltage */
 	G_COUNT,
 };
 
-/* Copy (on=true) or clear (on=false) a group's fields from src into dst. With a
- * frozen snapshot src this both selects a group into a frame and reverts it. */
-static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, bool on)
-{
-#define SEL(field)                                                                                 \
-	do {                                                                                       \
-		dst->has_##field = on && src->has_##field;                                         \
-		if (on) {                                                                          \
-			dst->field = src->field;                                                   \
-		}                                                                                  \
-	} while (0)
+/* Telemetry fields of all groups, in group order; every one is a 32-bit
+ * scalar with a has_ flag, so a field is just two offsets. Table-driven to
+ * keep the per-field code out of flash (#503). */
+struct tlm_field {
+	uint16_t val;
+	uint16_t has;
+};
 
-	switch (g) {
-	case G_INTERNAL:
-		SEL(temperature);
-		SEL(humidity);
-		break;
-	case G_SYSTEM:
-		SEL(voltage);
-		SEL(system_flags);
-		break;
-	case G_BAROMETER:
-		SEL(pressure);
-		SEL(altitude);
-		break;
-	case G_LIGHT:
-		SEL(illuminance);
-		break;
-	case G_ACCEL:
-		SEL(orientation);
-		SEL(accel_motion_count);
-		break;
-	case G_PIR:
-		SEL(motion_count);
-		break;
-	case G_HALL_L:
-		SEL(hall_left_count);
-		SEL(hall_left_flags);
-		break;
-	case G_HALL_R:
-		SEL(hall_right_count);
-		SEL(hall_right_flags);
-		break;
-	case G_INPUT_A:
-		SEL(input_a_count);
-		SEL(input_a_flags);
-		SEL(input_a_voltage);
-		break;
-	case G_INPUT_B:
-		SEL(input_b_count);
-		SEL(input_b_flags);
-		SEL(input_b_voltage);
-		break;
-	default:
-		break;
+#define TLM_FIELD(_f) {offsetof(Telemetry, _f), offsetof(Telemetry, has_##_f)}
+
+static const struct tlm_field m_fields[] = {
+	TLM_FIELD(voltage),          TLM_FIELD(system_flags),       /* G_SYSTEM */
+	TLM_FIELD(temperature),      TLM_FIELD(humidity),           /* G_INTERNAL */
+	TLM_FIELD(pressure),         TLM_FIELD(altitude),           /* G_BAROMETER */
+	TLM_FIELD(illuminance),                                     /* G_LIGHT */
+	TLM_FIELD(orientation),      TLM_FIELD(accel_motion_count), /* G_ACCEL */
+	TLM_FIELD(motion_count),                                    /* G_PIR */
+	TLM_FIELD(hall_left_count),  TLM_FIELD(hall_left_flags),    /* G_HALL_L */
+	TLM_FIELD(hall_right_count), TLM_FIELD(hall_right_flags),   /* G_HALL_R */
+	TLM_FIELD(input_a_count),    TLM_FIELD(input_a_flags),      /* G_INPUT_A */
+	TLM_FIELD(input_a_voltage),  TLM_FIELD(input_b_count),
+	TLM_FIELD(input_b_flags), /* G_INPUT_B */
+	TLM_FIELD(input_b_voltage),
+};
+
+/* Index of each group's first field in m_fields[]; [G_COUNT] closes the last. */
+static const uint8_t m_group_first[G_COUNT + 1] = {0, 2, 4, 6, 7, 9, 10, 12, 14, 17, 20};
+
+BUILD_ASSERT(ARRAY_SIZE(m_fields) == 20, "m_group_first out of sync with m_fields");
+BUILD_ASSERT(sizeof(((Telemetry *)0)->voltage) == sizeof(uint32_t) &&
+		     sizeof(((Telemetry *)0)->temperature) == sizeof(uint32_t),
+	     "apply_field() copies 32-bit fields");
+
+#define GROUP_FIELDS(_g) (m_group_first[(_g) + 1] - m_group_first[_g])
+
+/* Copy (on=true) or clear (on=false) field `fi` of group `g` from src into dst.
+ * With a frozen snapshot src this both selects a field into a frame and
+ * reverts it. Returns whether the snapshot holds the field. */
+static bool apply_field(Telemetry *dst, const Telemetry *src, enum tlm_group g, uint8_t fi, bool on)
+{
+	const struct tlm_field *f = &m_fields[m_group_first[g] + fi];
+	bool has = *((const bool *)((const uint8_t *)src + f->has));
+
+	*((bool *)((uint8_t *)dst + f->has)) = on && has;
+	if (on) {
+		memcpy((uint8_t *)dst + f->val, (const uint8_t *)src + f->val, sizeof(uint32_t));
 	}
-#undef SEL
+
+	return has;
+}
+
+/* apply_field() over every field of group `g` not in `skip` (fields already
+ * sent by a split group, see pack_split()). */
+static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, bool on,
+			uint8_t skip)
+{
+	for (uint8_t fi = 0; fi < GROUP_FIELDS(g); fi++) {
+		if (!(skip & BIT(fi))) {
+			(void)apply_field(dst, src, g, fi, on);
+		}
+	}
 }
 
 /* True if a group carries any data in the snapshot (any of its fields present). */
@@ -141,7 +147,7 @@ static bool group_present(const Telemetry *s, enum tlm_group g)
 	static Telemetry probe;
 
 	memset(&probe, 0, sizeof(probe));
-	apply_group(&probe, s, g, true);
+	apply_group(&probe, s, g, true, 0);
 
 	/* Re-encode the probe: empty (no has_ set) → 0 bytes. */
 	size_t sz = 0;
@@ -158,8 +164,10 @@ static Telemetry m_snapshot;
 #define PAGE_COUNT_BOUND 127
 
 struct tlm_cursor {
-	uint16_t pending; /* bitmask of enum tlm_group still to send */
-	pb_size_t w1;     /* next w1_sensors reading of the snapshot */
+	uint16_t pending;   /* bitmask of enum tlm_group still to send */
+	pb_size_t w1;       /* next w1_sensors reading of the snapshot */
+	uint8_t split_g;    /* group being sent field by field + 1 (0 = none) */
+	uint8_t split_sent; /* its fields already sent (or skipped) */
 };
 
 static struct tlm_cursor m_cur;
@@ -454,88 +462,149 @@ static bool frame_fits(const Telemetry *f, size_t cap)
 	return sz <= cap;
 }
 
+/* Fields of group `g` already sent by a split, i.e. not to add again. */
+static uint8_t split_skip(const struct tlm_cursor *c, enum tlm_group g)
+{
+	return c->split_g == g + 1 ? c->split_sent : 0;
+}
+
+/* Last resort when no whole group and no 1-Wire reading fits the page: send
+ * the first pending group field by field (#503). A field that does not fit an
+ * otherwise empty page can never be sent at this budget (e.g. a 6 B NA
+ * sentinel next to the 6 B of page fields at the 11 B tier): it is skipped,
+ * so the radio is never handed a frame over the budget and page_count stays
+ * the number of pages that actually go out. Only the first pending group can
+ * be split: every group before it is done. Returns true if `f` got a field. */
+static bool pack_split(Telemetry *f, struct tlm_cursor *c, size_t cap)
+{
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (!(c->pending & BIT(g))) {
+			continue;
+		}
+
+		uint8_t sent = split_skip(c, g);
+		bool added = false;
+
+		for (uint8_t fi = 0; fi < GROUP_FIELDS(g); fi++) {
+			if (sent & BIT(fi)) {
+				continue;
+			}
+			if (!apply_field(f, &m_snapshot, g, fi, true)) {
+				sent |= BIT(fi); /* not in the snapshot */
+				continue;
+			}
+			if (frame_fits(f, cap)) {
+				sent |= BIT(fi);
+				added = true;
+				continue;
+			}
+			(void)apply_field(f, &m_snapshot, g, fi, false);
+			if (!added) {
+				LOG_WRN("Group %d field %u exceeds budget %zuB, skipped", (int)g,
+					(unsigned)fi, cap);
+				sent |= BIT(fi);
+			}
+		}
+
+		if (sent == BIT_MASK(GROUP_FIELDS(g))) {
+			c->pending &= ~BIT(g);
+			c->split_g = 0;
+			c->split_sent = 0;
+		} else {
+			c->split_g = g + 1;
+			c->split_sent = sent;
+		}
+		if (added) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Fill `f` with the next page from cursor `c` and advance it: whole pending
  * groups first (highest priority first), then whole 1-Wire readings in order.
- * A reading that does not fit beside other content waits for the next page; a
- * single unit bigger than the budget is sent alone so the report never stalls.
+ * A reading that does not fit beside other content waits for the next page.
+ * When nothing fits whole, a group is split (pack_split()); a 1-Wire reading
+ * bigger than an empty page is skipped, never sent over the budget (#503).
  * `paged` reserves the page_index / page_count fields (index exact, count at
- * its one-byte bound) so the layout matches the frames sent later. */
-static void pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged, uint8_t index)
+ * its one-byte bound) so the layout matches the frames sent later. Returns
+ * false if the page stayed empty (everything left was skipped). */
+static bool pack_page(Telemetry *f, struct tlm_cursor *c, size_t cap, bool paged, uint8_t index)
 {
-	uint16_t frame_groups = 0;
-	pb_size_t w1_added = 0;
-
 	memset(f, 0, sizeof(*f));
 	if (paged) {
 		f->page_index = index;
 		f->page_count = PAGE_COUNT_BOUND;
 	}
 
-	for (enum tlm_group g = 0; g < G_COUNT; g++) {
-		if (!(c->pending & BIT(g))) {
-			continue;
-		}
-		apply_group(f, &m_snapshot, g, true); /* tentatively add */
-		if (frame_fits(f, cap)) {
-			frame_groups |= BIT(g);
-		} else {
-			apply_group(f, &m_snapshot, g, false); /* revert */
-		}
-	}
+	while (!cursor_done(c)) {
+		uint16_t frame_groups = 0;
+		pb_size_t w1_added = 0;
 
-	while (c->w1 < m_snapshot.w1_sensors_count) {
-		pb_size_t at = f->w1_sensors_count;
-
-		f->w1_sensors[at] = m_snapshot.w1_sensors[c->w1];
-		f->w1_sensors_count = at + 1;
-		if (frame_fits(f, cap)) {
-			c->w1++;
-			w1_added++;
-			continue;
-		}
-		f->w1_sensors_count = at; /* revert; keep order */
-		break;
-	}
-
-	if (frame_groups == 0 && w1_added == 0) {
 		for (enum tlm_group g = 0; g < G_COUNT; g++) {
-			if (c->pending & BIT(g)) {
-				apply_group(f, &m_snapshot, g, true);
-				frame_groups = BIT(g);
-				LOG_WRN("Group %d exceeds budget %zuB, sending alone", (int)g, cap);
-				break;
+			if (!(c->pending & BIT(g))) {
+				continue;
+			}
+			uint8_t skip = split_skip(c, g);
+
+			apply_group(f, &m_snapshot, g, true, skip); /* tentatively add */
+			if (frame_fits(f, cap)) {
+				frame_groups |= BIT(g);
+			} else {
+				apply_group(f, &m_snapshot, g, false, skip); /* revert */
 			}
 		}
-	}
+		c->pending &= ~frame_groups;
+		if (c->split_g != 0 && (frame_groups & BIT(c->split_g - 1))) {
+			c->split_g = 0;
+			c->split_sent = 0;
+		}
 
-	if (frame_groups == 0 && w1_added == 0 && c->w1 < m_snapshot.w1_sensors_count) {
-		f->w1_sensors[0] = m_snapshot.w1_sensors[c->w1++];
-		f->w1_sensors_count = 1;
-		LOG_WRN("w1 slot=%u exceeds budget %zuB, sending alone",
-			(unsigned)f->w1_sensors[0].slot, cap);
-	}
+		while (c->w1 < m_snapshot.w1_sensors_count) {
+			pb_size_t at = f->w1_sensors_count;
 
-	c->pending &= ~frame_groups;
+			f->w1_sensors[at] = m_snapshot.w1_sensors[c->w1];
+			f->w1_sensors_count = at + 1;
+			if (frame_fits(f, cap)) {
+				c->w1++;
+				w1_added++;
+				continue;
+			}
+			f->w1_sensors_count = at; /* revert; keep order */
+			break;
+		}
+
+		if (frame_groups != 0 || w1_added != 0 || pack_split(f, c, cap)) {
+			return true;
+		}
+		if (c->pending == 0 && c->w1 < m_snapshot.w1_sensors_count) {
+			LOG_WRN("w1 slot=%u exceeds budget %zuB, skipped",
+				(unsigned)m_snapshot.w1_sensors[c->w1].slot, cap);
+			c->w1++;
+		}
+	}
+	return false;
 }
 
 /* Lay the report out for `cap` (#425 paging, as AlarmReport / Response): the
- * number of pages, or 1 when everything fits one frame without page fields.
- * `probe` is scratch space for the trial pages. */
+ * number of pages, 1 when everything fits one frame without page fields, or 0
+ * when nothing fits at all. `probe` is scratch space for the trial pages. */
 static uint8_t layout_pages(Telemetry *probe, size_t cap)
 {
 	struct tlm_cursor c = m_cur;
+	bool any = pack_page(probe, &c, cap, false, 0);
 
-	pack_page(probe, &c, cap, false, 0);
 	if (cursor_done(&c)) {
-		return 1;
+		return any ? 1 : 0;
 	}
 
 	uint8_t pages = 0;
 
 	c = m_cur;
 	while (!cursor_done(&c) && pages < PAGE_COUNT_BOUND) {
-		pack_page(probe, &c, cap, true, pages);
-		pages++;
+		if (pack_page(probe, &c, cap, true, pages)) {
+			pages++;
+		}
 	}
 	return pages;
 }
@@ -583,7 +652,13 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 	bool paged = m_page_count > 1;
 
-	pack_page(&frame, &m_cur, m_cap, paged, m_page_index);
+	if (!pack_page(&frame, &m_cur, m_cap, paged, m_page_index)) {
+		/* Whatever was left exceeds the budget on its own and was skipped. */
+		*len = 0;
+		*more = false;
+		m_active = false;
+		return 0;
+	}
 	if (paged) {
 		frame.page_index = m_page_index;
 		frame.page_count = m_page_count;
@@ -599,7 +674,9 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 	m_page_index++;
 	*len = os.bytes_written + 1;
-	*more = !cursor_done(&m_cur);
+	/* The layout is final: what it could not place (skipped units) never gets
+	 * an extra frame, which would also break the page numbering. */
+	*more = m_page_index < m_page_count && !cursor_done(&m_cur);
 	if (!*more) {
 		m_active = false;
 	}

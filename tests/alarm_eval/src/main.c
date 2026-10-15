@@ -18,6 +18,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
+#include "app_input.h"
 #include "app_radio.h"
 #include "app_sensor.h"
 #include "app_sensor_types.h"
@@ -30,6 +31,7 @@
 #include <zephyr/ztest.h>
 
 extern struct app_hall_data test_hall;
+extern struct app_input_data test_input;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
@@ -42,11 +44,16 @@ extern enum app_w1_slot_state test_w1_state[APP_W1_SLOT_COUNT];
 extern uint8_t test_w1_expected[APP_W1_SLOT_COUNT];
 extern uint8_t test_w1_detected[APP_W1_SLOT_COUNT];
 
+static void flush_stale_alarms(void);
+static size_t count_events(uint8_t slot, uint8_t type, uint8_t edge);
+
 static void before(void *unused)
 {
 	ARG_UNUSED(unused);
 	app_alarm_rules_clear_all();
 	test_hall = (struct app_hall_data){0};
+	test_input = (struct app_input_data){0};
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
@@ -284,41 +291,79 @@ ZTEST(alarm_eval, test_rate_count_window_is_dwell_one_alarm_until_drop)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
+	test_hall.left_count = 0;
 	app_alarm_poll(); /* seeds the baseline + window start */
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "active at seed");
 
 	/* Under the limit within the window: nothing. */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 2;
+	test_hall.left_count = 2;
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "fired under hi");
 
 	/* Reaching hi mid-window fires at once. */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3;
+	test_hall.left_count = 3;
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
 		     "did not fire as soon as the window delta reached hi");
 
 	/* Sustained rate: the next closed window reaches hi again -> still active,
 	 * no new alarm. */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 7;
+	test_hall.left_count = 7;
 	k_sleep(K_MSEC(600));
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
 		     "dropped active while the rate stayed over hi");
 
 	/* A closed window under hi deactivates (sent). */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 8;
+	test_hall.left_count = 8;
 	k_sleep(K_MSEC(600));
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
 		      "did not deactivate on a window under hi");
 
 	/* A new over-limit burst fires again (not blocked). */
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 11;
+	test_hall.left_count = 11;
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
 		     "a new burst after the drop did not fire");
+}
+
+/* #503 defect 2: RATE reads the live totalizer, not the interval_sample copy in
+ * g_app_sensor_data. A steady pulse rate over hi stays ONE alarm across
+ * windows shorter than interval_sample, while the cached copy never moves. */
+ZTEST(alarm_eval, test_rate_reads_live_counter_not_sample_cache)
+{
+	flush_stale_alarms();
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_INPUTS;
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_PULSE;
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.hi = 3,
+		.dwell = 0.3f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	APP_SENSOR_MB_U(&g_app_sensor_data, INPUT_A_COUNT) = 0; /* stale sample copy */
+	test_input.input_a_count = 100;
+	app_alarm_poll(); /* seeds the window */
+
+	for (int w = 0; w < 4; w++) {
+		test_input.input_a_count += 4; /* over hi in every window */
+		k_sleep(K_MSEC(350));
+		app_alarm_poll();
+		zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_INPUT_A_COUNT),
+			     "window %d: rate over hi not active", w);
+	}
+	k_sleep(K_MSEC(10));
+	zassert_equal(count_events(0, 3, 0), 1, "one activate expected, got %zu",
+		      count_events(0, 3, 0));
+	zassert_equal(count_events(0, 3, 1), 0, "no deactivate expected, got %zu",
+		      count_events(0, 3, 1));
+
+	g_app_config.cap_gpio_input_a = APP_CONFIG_GPIO_INPUT_DISABLED;
 }
 
 /* RATE with dwell 0 keeps the pre-#498 window, interval_report. */
@@ -335,14 +380,14 @@ ZTEST(alarm_eval, test_rate_count_dwell_zero_uses_interval_report)
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
+	test_hall.left_count = 0;
 	app_alarm_poll();
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 1;
+	test_hall.left_count = 1;
 	k_sleep(K_MSEC(1100)); /* window closes under hi */
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT), "fired under hi");
 
-	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 3; /* +2 in the new window */
+	test_hall.left_count = 3; /* +2 in the new window */
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_COUNT),
 		     "did not fire on hi within the interval_report window");
@@ -1608,6 +1653,35 @@ ZTEST(alarm_eval, test_momentary_level_rule_is_motion_state)
 	zassert_equal(count_events(0, 3, 1), 1, "one 'motion started' expected, got %zu",
 		      count_events(0, 3, 1));
 	zassert_equal(count_events(0, 3, 0), 1, "one 'motion ended' expected, got %zu",
+		      count_events(0, 3, 0));
+}
+
+/* #503 defect 1: a stillness rule whose capability is off never fires. With
+ * neither PIR nor the accelerometer on, no motion event can ever end the
+ * alarm, so a latch here would hold for the whole boot. */
+ZTEST(alarm_eval, test_stillness_rule_inert_without_capability)
+{
+	flush_stale_alarms();
+	g_app_config.cap_gpio_mode = APP_CONFIG_GPIO_MODE_NONE;
+	g_app_config.cap_accelerometer = false;
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 0,
+		.to_state = 0,
+		.dwell = 0.2f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_poll();
+	k_sleep(K_MSEC(300));
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "stillness fired with the PIR capability off");
+	k_sleep(K_MSEC(10));
+	zassert_equal(count_events(0, 3, 0), 0, "no 'stopped' expected, got %zu",
 		      count_events(0, 3, 0));
 }
 
