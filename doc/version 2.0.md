@@ -366,7 +366,7 @@ to the full description.
 | Build | **Fixed** — CI stamps branch/PR builds with the version of `app/CMakeLists.txt` (type DEV), tag builds with the tag. See §49. |
 | Radio | **Changed** — a deferred post-command action waits up to 120 s for undelivered frames (was ~56 s). See §50. |
 | Config | **Fix** — NVS keys of removed parameters are deleted at boot; no more `set-value failure` boot errors. See §51. |
-| Robustness | **Fix** — release review (#503): stillness rule armed only with its capability, RATE on live counters, 11 B tier telemetry never over budget, wrong-size config values cleaned up, pulse settle timer, reboot after a failed save, exact release tags, Zephyr pinned by SHA. See §53. |
+| Robustness | **Fix** — release review (#503): stillness rule armed only with its capability, RATE on live counters, 11 B tier telemetry never over budget, wrong-size config values cleaned up, reboot after a failed save, exact release tags, Zephyr pinned by SHA. See §53. |
 
 ---
 
@@ -2886,9 +2886,9 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
   it high), so a pulse is a move away from the idle level: the level at init, never
   re-learned (a long pulse would count twice). If init caught a pulse in progress, every
-  pulse counts on its trailing edge instead — still exactly once. Each edge restarts a
-  10 ms settle timer; when it expires the level is read and a change away from idle counts one
-  pulse, so bounce on either edge of a pulse counts once (§53). The poll folds the ISR count into `input_x_count`. A pulse pin always
+  pulse counts on its trailing edge instead — still exactly once. An edge
+  counts only when the pin was stable for 20 ms before it, so bounce on either edge of a
+  pulse counts once. The poll folds the ISR count into `input_x_count`. A pulse pin always
   counts (`input-x-counter` is ignored), has no state, no state flag and no input alarm
   edge. Each edge wakes the CPU briefly; not measured.
 - **Channels (§40).** `cap` in `app_sensor_types.yaml` can now name an enum parameter and the
@@ -3035,7 +3035,6 @@ Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION`
 | D2 | RATE rules on the hall and input counters read the live totalizers. | They read the sample cache, refreshed once per `interval-sample`: with `dwell` shorter than that, one activate/deactivate pair per sample. |
 | D3 | Telemetry at the 11 B tier (US915 DR0 / AU915 DR2, 10 B of protobuf): the system group (battery, alarm bits) goes first; a group that does not fit an empty page is sent field by field; a field or 1-Wire reading that fits no page is skipped with a warning; `page_count` counts only the pages that go out. | A group over the page budget (two NA sentinels, 12 B; the barometer; the system group on a page with page fields) was handed to the MAC, refused with `-EMSGSIZE`, and lost every report. |
 | D6 | A stored config value whose size differs from the current one is a stale key: deleted after the load (§51), the parameter starts at its default. Up to 8 stale keys per boot (was 4). | The 16 v1.4 `alarm-N` blobs (17 B, now 18 B) logged `set-value failure ... error(-22)` on every boot until the first manual save. |
-| D7 | Pulse inputs: each edge restarts a 10 ms settle timer, and the settled level decides (a change away from idle = one pulse). | An edge counted only after 20 ms of quiet and the rejected edge moved the reference, so bounce could drop the real edge and chatter under 20 ms never counted. |
 | M1 | CI builds a release only from a tag that is exactly `vX.Y.Z`; any other `v*` tag fails the job. | `v2.0.0-rc1` built a MAIN image stamped 2.0.0. |
 | M2 | `west.yml` pins the Zephyr fork by SHA (`79067560`, head of `v4.3.0-sticker2-branch`). | A tag rebuild took whatever the branch head was that day. |
 | M3 | A command action that reboots (settings / secret-key / claim save, calibration, reset tiers) reboots even when its save fails. | A failed save left the unit running on staged values the sender had been told were applied. |
@@ -3043,7 +3042,7 @@ Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION`
 | S1 | `lrw_reset` is `[nfc, shell]` only (security review R-3). | Reachable over a LoRaWAN / P2P downlink; it resets the OTAA DevNonce, so a 1.0.4 network server refused the following joins. |
 | S2 | `enter_calibration` and `SetParam.application.calibration` are NFC / shell only (security review C-1). | Reachable over a LoRaWAN downlink; calibration mode uplinks under the public, fleet-shared ABP keys. |
 | S3 | CI: every GitHub Action pinned to a commit SHA, Dependabot for the bumps; a release carries `SHA256SUMS` of its hex files (security review B-2). | Actions followed mutable tags, incl. the release upload with `contents: write`. |
-| M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, §48 settle timer, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
+| M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
 
 Not changed, by decision: the payload version stays `0x01` (Upgrading item 10); no downgrade
 from v2.0.0 is supported, so the stale-key cleanup may delete keys of a newer release; a TOWER
@@ -3053,8 +3052,8 @@ vendor token may change `secret_key` without `vendor_reset_allow`; the P2P gatew
 stays RAM-only (a downlink is accepted only after a fresh ACK, which lifts the lane above every
 recorded frame); NA readings are still dropped at the 11 B tier (each sentinel is 6 B).
 
-- **Flash / RAM** (vs the PR #503 head `059ac313`): release 192 940 B / 48 456 B (+64 B /
-  +256 B, ≥ 8 KiB free kept), debug 241 248 B / 56 328 B (+200 B / +192 B). The config loader
+- **Flash / RAM** (vs the PR #503 head `059ac313`): release 192 796 B / 48 328 B (−80 B /
+  +128 B, ≥ 8 KiB free kept), debug 241 144 B / 56 264 B (+96 B / +128 B). The config loader
   shares one size check and read for all keys and the composer copies fields through an offset
   table, so the fixes cost almost no code.
 - **Tests:** `alarm_eval` `test_stillness_rule_inert_without_capability`,
@@ -3065,11 +3064,12 @@ recorded frame); NA readings are still dropped at the 11 B tier (each sentinel i
   `test_lrw_reset_and_calibration_not_over_radio`.
   All 16 native suites, 86 configen/proto tests and 131 decoder tests pass.
 - **Simulator run** (PR #510, `native_sim`, this branch merged on the simulator branch):
-  H1.1–6, H2 (sample 60 and 0), H3, H4.1–3, H5, H6, H7 and H9 pass. It found one defect,
-  fixed here: with more than 8 stale keys the overflow keys logged `set-value failure ...
-  error(-2)` on the first boot (now skipped quietly and removed on the next boot). Not
-  covered by the simulator: H1.7 (Stop2), H4.4 (US915 on air), H8 (release soak, IWDG).
-- **HIL:** pending for H1.7, H4.4, H8; procedure in `doc/plan/509 - v2.0.0 release review fixes.md`.
+  H2 (sample 60 and 0), H3, H4.1–3, H5, H6, H7 and H9 pass. It found one defect, fixed
+  here: with more than 8 stale keys the overflow keys logged `set-value failure ...
+  error(-2)` on the first boot (now skipped quietly and removed on the next boot).
+- **Deferred to v2.1.0** (need hardware not available for this release): the pulse settle
+  timer (D7, its Stop2 wake-up cannot be checked without HW; branch
+  `hynek/v210-pulse-settle`) and the release soak (H8). H4.4 (US915 on air) stays open.
 
 ---
 
