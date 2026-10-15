@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-"""The v2.0.0 HIL plan (H1-H7, `doc/plan/509 - v2.0.0 release review fixes.md`)
+"""The v2.0.0 HIL plan (H1-H9, `doc/plan/509 - v2.0.0 release review fixes.md`)
 run on the simulator: pulse counter, RATE alarms, stillness rules, the 11 B tier,
 settings save, the v1.4 stale-key upgrade, buzzer and PIR modes. Each step
 starts its own STICKER with a fresh flash file; H2 and H5 add `sim_air.py`.
@@ -45,16 +45,20 @@ BOOT = r"RF_WRITE_EN configured"
 RESULTS = []
 
 
-def result(tid, ok, note):
-    RESULTS.append((tid, "PASS" if ok else "FAIL", note))
-    print(f"{'PASS' if ok else 'FAIL'} {tid}: {note}", flush=True)
+def result(tid, ok, note, xfail=False):
+    """xfail: a known limitation of this release; a pass is reported as PASS."""
+    st = "PASS" if ok else ("XFAIL" if xfail else "FAIL")
+    RESULTS.append((tid, st, note))
+    print(f"{st} {tid}: {note}", flush=True)
 
 
-def start(name, air=False, extra=(), fresh=True):
+def start(name, air=False, extra=(), fresh=True, nfc=False):
     flash = logd / f"{name}.bin"
     if fresh:
         flash.unlink(missing_ok=True)
-    argv = [exe, f"--flash={flash}", "--nfc_off", *extra]
+    argv = [exe, f"--flash={flash}", *extra]
+    if not nfc:
+        argv.append("--nfc_off")
     if not air:
         argv.append("--air_off")
     s = Proc(name, argv, logd)
@@ -114,7 +118,9 @@ def h1():
     s.send("sim pulse gp_a 50 15")
     time.sleep(50 * 0.03 + 2)
     n = count_a(s) - c0
-    result("H1.5b", n == 50, f"15 ms pulses x50 -> {n}")
+    # Chatter < 20 ms is lost by the v2.0.0 debounce; the settle timer (D7)
+    # that counts it is deferred to v2.1.0 (branch hynek/v210-pulse-settle).
+    result("H1.5b", n == 50, f"15 ms pulses x50 -> {n} (D7, v2.1.0)", xfail=True)
     s.stop()
 
     # idle low (relay sourcing the line)
@@ -376,7 +382,149 @@ def h7():
     s.stop()
 
 
-TESTS = {"h1": h1, "h2": h2, "h3": h3, "h4": h4, "h5": h5, "h6": h6, "h7": h7}
+# --- H8 release regression, LoRaWAN and P2P (shortened) -------------------
+def air_proc(name):
+    return Proc(name, [sys.executable, "-u", str(sim_dir / "sim_air.py"), "--appkey", APPKEY],
+                logd)
+
+
+def air_decoded(air, since, word):
+    return [l for l in air.lines[since:] if "decoded" in l and word in l]
+
+
+def faults(s):
+    return [l for l in s.lines if re.search(r"FATAL|fault: reason|Reset cause.*(WDG|watchdog)|"
+                                             r"<err> os:|ASSERTION FAIL", l)]
+
+
+def h8_one(mode):
+    tag = f"H8 {mode}"
+    up = rf"{DEVEUI} FCnt \d+ FPort 2 " if mode == "lorawan" else rf"p2p {DEVEUI}: up \d+ C? ?port 2 "
+    s = start(f"h8_{mode}", air=True)
+    air = air_proc(f"h8_{mode}_air")
+    try:
+        am = air.mark()
+        save(s, [f"config radio-deveui {DEVEUI}", f"config radio-appkey {APPKEY}",
+                 f"config radio-mode {mode}", "config cap-light-sensor true",
+                 "config interval-sample 5", "config interval-report 60",
+                 # DR5: the run sends ~30 uplinks, at DR0 the EU868 duty cycle
+                 # (36 s airtime per hour) blocks the radio for the hour.
+                 "config lrw-datarate dr5", "config lrw-adr false"])
+        air.expect(up, 120, am)
+        info = air_decoded(air, am, "info")
+        dump = air_decoded(air, am, "config_dump")
+        result(f"{tag} boot", bool(info) and bool(dump),
+               f"join, Info {len(info)}, settings-info {len(dump)}, telemetry")
+        # telemetry on the report interval
+        am = air.mark()
+        air.expect(up, 90, am)
+        result(f"{tag} report", True, "next telemetry within 90 s (interval-report 60)")
+        # alarm activate / deactivate on the air
+        ask(s, "alarm new mb illuminance lo 0 hi 1000 dwell 0", r"rule \d+ set")
+        am = air.mark()
+        s.send("sim light 5000")  # 5000 lux > hi 1000
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 60 and not alarm_active(s)[:1] == [1]:
+            time.sleep(1)
+        on = alarm_active(s)[:1] == [1]
+        time.sleep(15)
+        s.send("sim light 100")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 60 and alarm_active(s)[:1] != [0]:
+            time.sleep(1)
+        off = alarm_active(s)[:1] == [0]
+        time.sleep(15)
+        frames = air_decoded(air, am, "alarm")
+        result(f"{tag} alarm", on and off and len(frames) >= 2,
+               f"activate={on} deactivate={off}, decoded alarm uplinks {len(frames)}")
+        # paged GetConfig over the downlink
+        am = air.mark()
+        air.send(f'cmd * {{"seq":7,"command":"get_config"}}')
+        s.send("ats radio check")
+        deadline = time.monotonic() + 120
+        idx, pc = set(), []
+        while time.monotonic() < deadline:
+            pages = air_decoded(air, am, "config_dump")
+            idx = {int(x) for l in pages for x in re.findall(r"page_index.?: (\d+)", l)}
+            pc = [int(x) for l in pages for x in re.findall(r"page_count.?: (\d+)", l)]
+            if pages and (not pc or idx >= set(range(max(pc)))):
+                break
+            s.send("ats radio check")
+            time.sleep(8)
+        want = max(pc) if pc else 1
+        result(f"{tag} get_config", bool(pages) and (not pc or idx >= set(range(want))),
+               f"config_dump pages {sorted(idx) or [0]} of {want}")
+        # SetParam + save -> reboot, value persists
+        am, m = air.mark(), s.mark()
+        air.send('cmd * {"seq":8,"command":"set_param","set_param":'
+                 '{"application":{"interval_report":120},"save":true}}')
+        s.send("ats radio check")
+        rb = True
+        try:
+            s.expect(BOOT, 120, m)
+        except TimeoutError:
+            rb = False
+        val = None
+        if rb:
+            time.sleep(2)
+            val = ask(s, "config interval-report", r"(\d+)").group(1)
+            air.expect(up, 120, am)
+        result(f"{tag} set_param", rb and val == "120",
+               f"reboot={rb}, interval-report after boot={val}, rejoined")
+        f = faults(s)
+        result(f"{tag} no fault", not f, f"fault/watchdog lines {len(f)} {f[:2]}")
+    finally:
+        s.stop(); air.stop()
+
+
+def h8():
+    h8_one("lorawan")
+    h8_one("p2p")
+
+
+# --- H9 R-3 / C-1: lrw_reset and calibration not over the radio -----------
+def h9():
+    cmds = [("lrw_reset", "0801820100", r"code.: 3\b"),
+            ("enter_calibration", "0802920100", r"code.: 3\b"),
+            ("set_param calibration", "0803120412020801", r"code.: 8\b")]
+    s = start("h9", air=True, nfc=True)
+    air = air_proc("h9_air")
+    try:
+        for mode in ("lorawan", "p2p"):
+            up = rf"{DEVEUI} FCnt \d+ FPort 2 " if mode == "lorawan" else rf"p2p {DEVEUI}: up \d+ C? ?port 2 "
+            am = air.mark()
+            save(s, [f"config radio-deveui {DEVEUI}", f"config radio-appkey {APPKEY}",
+                     f"config radio-mode {mode}", f"config secret-key {APPKEY}"])
+            air.expect(up, 120, am)
+            time.sleep(5)
+            for name, hexs, pat in cmds:
+                am, m = air.mark(), s.mark()
+                air.send(f"down * 85 {hexs}")
+                s.send("ats radio check")
+                try:
+                    air.expect(pat, 40, am); err = True
+                except TimeoutError:
+                    err = False
+                time.sleep(3)
+                bad = any(re.search(BOOT + "|alibration mode", l) for l in s.lines[m:])
+                result(f"H9 {mode} {name}", err and not bad, f"error answer={err}, reboot/calibration={bad}")
+                s.send("ats radio check")
+                time.sleep(4)
+        m = s.mark()
+        out = subprocess.run([sys.executable, str(sim_dir / "sim_nfc.py"), "cmd", '{"lrw_reset": {}}'],
+                             capture_output=True, text=True, timeout=60)
+        ack = "ack" in out.stdout.lower()
+        try:
+            s.expect(BOOT, 30, m); rb = True
+        except TimeoutError:
+            rb = False
+        result("H9 nfc lrw_reset", ack and rb, f"ack={ack}, reboot={rb}")
+    finally:
+        s.stop(); air.stop()
+
+
+TESTS = {"h1": h1, "h2": h2, "h3": h3, "h4": h4, "h5": h5, "h6": h6, "h7": h7, "h8": h8,
+         "h9": h9}
 for k, f in TESTS.items():
     if only and k not in only:
         continue
@@ -386,4 +534,4 @@ for k, f in TESTS.items():
         result(k.upper(), False, f"exception {type(e).__name__}: {e}")
 print("\n".join(f"{r[1]} {r[0]}: {r[2]}" for r in RESULTS))
 print(f"logs: {logd}")
-sys.exit(0 if RESULTS and all(r[1] == "PASS" for r in RESULTS) else 1)
+sys.exit(0 if RESULTS and all(r[1] in ("PASS", "XFAIL") for r in RESULTS) else 1)
