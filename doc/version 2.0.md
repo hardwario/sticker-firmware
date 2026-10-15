@@ -3071,6 +3071,15 @@ recorded frame); NA readings are still dropped at the 11 B tier (each sentinel i
   timer (D7, its Stop2 wake-up cannot be checked without HW; branch
   `hynek/v210-pulse-settle`) and the release soak (H8). H4.4 (US915 on air) stays open.
 
+## 54. Local simulator (native_sim)
+
+The application builds for `native_sim/native/64` with emulated peripherals
+(SHT40, OPT3001, MPL3115A2, LIS2DH12, DS2484 + DS18B20, ST25DV04K, SX1262,
+ADC, GPIO, flash). `scripts/sim/` holds a LoRaWAN LNS and P2P hub
+(`sim_air.py`), an NFC phone (`sim_nfc.py`), the CI smoke test and a runner
+of the v2.0.0 HIL plan H1–H9 (`hil_v200.py`, found the §53 stale-key log). No
+firmware behaviour changes. See [simulator.md](simulator.md) (PR #510).
+
 ---
 
 *Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*

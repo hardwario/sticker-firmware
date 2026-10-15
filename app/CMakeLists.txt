@@ -118,9 +118,12 @@ target_sources(app PRIVATE src/app_ccm.c)
 # disabled (CONFIG_APP_CCM_HW_AES=n, e.g. the variant-A soft fallback) the CCM
 # layer uses the LoRaMac soft-SE AES instead — pull that source + its prekeyed
 # API in (the HW build needs neither).
+# With LoRaWAN on, the loramac-node library already links that aes.c.
 if(NOT CONFIG_APP_CCM_HW_AES)
   set(SOFT_SE_DIR ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/peripherals/soft-se)
-  target_sources(app PRIVATE ${SOFT_SE_DIR}/aes.c)
+  if(NOT CONFIG_HAS_SEMTECH_SOFT_SE)
+    target_sources(app PRIVATE ${SOFT_SE_DIR}/aes.c)
+  endif()
   target_include_directories(app PRIVATE ${SOFT_SE_DIR})
   set_source_files_properties(src/app_ccm.c ${SOFT_SE_DIR}/aes.c
     PROPERTIES COMPILE_DEFINITIONS "AES_ENC_PREKEYED")
