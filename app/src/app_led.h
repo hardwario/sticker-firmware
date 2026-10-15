@@ -7,6 +7,8 @@
 #ifndef APP_LED_H_
 #define APP_LED_H_
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +59,12 @@ int app_led_init(void);
 void app_led_set(enum app_led_channel channel, int state);
 int app_led_blink(const struct app_led_blink_req *req);
 int app_led_play(const struct app_led_play_req *req);
+
+/* Hand the indicator to a direct app_led_set() owner (the NFC interaction LED)
+ * or give it back. While held, a running blink/play is cut short, queued ones are
+ * dropped and new ones return -EBUSY, so only the holder drives the pins; the
+ * holder writes under irq_lock. Safe from ISR, timer and thread context. */
+void app_led_hold(bool hold);
 
 #ifdef __cplusplus
 }

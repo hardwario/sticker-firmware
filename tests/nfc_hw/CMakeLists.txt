@@ -33,7 +33,6 @@ target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${APP_SRC_DIR
 target_sources(app PRIVATE
   ${proto_srcs}
   ${APP_SRC_DIR}/src/app_nfc.c
-  ${APP_SRC_DIR}/src/app_nfc_parser.c   # real NDEF parsing (proven standalone in tests/ndef)
   ${APP_SRC_DIR}/src/app_ccm.c          # real AES-CCM (proven standalone in tests/ccm)
   ${SOFT_SE_DIR}/aes.c
   ${APP_SRC_DIR}/src/app_cmd.c          # real command dispatch (proven standalone in tests/cmd)

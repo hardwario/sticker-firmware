@@ -4,20 +4,26 @@
  *
  * Minimal environment for app_alarm.c host tests (#348 dwell/confirm/hold
  * state machine): the config store, sensor-data globals, and the hall/input/
- * clock/report call surface app_alarm.c uses. CONFIG_LORAWAN and CONFIG_SHELL
- * are off in this test's prj.conf, so the LoRaWAN send path and the shell
- * commands (and their extra dependencies, e.g. app_sensor_sample()) are
- * compiled out entirely — only what's left is stubbed here.
+ * clock/report call surface app_alarm.c uses. CONFIG_SHELL is off in this
+ * test's prj.conf, so the shell commands (and their extra dependencies, e.g.
+ * app_sensor_sample()) are compiled out entirely — only what's left is
+ * stubbed here. app_alarm.c's transport calls (app_radio_*,
+ * app_report_trigger()) are transport-agnostic and NOT CONFIG_LORAWAN-gated
+ * (#118 phase 2 -- a prior stale guard here compiled out all alarm TX on a
+ * LoRaWAN-off build, fixed), so they always link and need stubs regardless
+ * of this test's Kconfig.
  */
 
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_report.h"
 #include "app_sensor.h"
+#include "app_radio.h"
 #include "app_w1_slots.h"
 
 #include <zephyr/kernel.h>
@@ -61,13 +67,33 @@ int app_input_get_data(struct app_input_data *data)
 	return 0;
 }
 
-/* ---- 1-Wire slots (no-data sweep gate; short-circuited by
- * g_app_config.cap_w1_sensors == false, but must exist to link). ---- */
+/* ---- 1-Wire slots: no-data sweep gate + sensor-mismatch watchdog (#430).
+ * Short-circuited by g_app_config.cap_w1_sensors == false; cases set these. */
+
+bool test_w1_configured[APP_W1_SLOT_COUNT];
+enum app_w1_slot_state test_w1_state[APP_W1_SLOT_COUNT];
+uint8_t test_w1_expected[APP_W1_SLOT_COUNT];
+uint8_t test_w1_detected[APP_W1_SLOT_COUNT];
 
 bool app_w1_slot_is_configured(int slot)
 {
-	(void)slot;
-	return false;
+	return slot >= 0 && slot < APP_W1_SLOT_COUNT && test_w1_configured[slot];
+}
+
+enum app_w1_slot_state app_w1_slot_get_state(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_state[slot]
+						       : APP_W1_SLOT_STATE_NONE;
+}
+
+uint8_t app_w1_slot_get_expected_type(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_expected[slot] : 0;
+}
+
+uint8_t app_w1_slot_get_detected_type(int slot)
+{
+	return (slot >= 0 && slot < APP_W1_SLOT_COUNT) ? test_w1_detected[slot] : 0;
 }
 
 /* ---- clock: report "not synced" so alarm timestamps stay uptime-relative,
@@ -79,20 +105,47 @@ int app_clock_get_unix(uint32_t *unix_s)
 	return -1;
 }
 
-/* ---- LoRaWAN (CONFIG_LORAWAN is off, so alarm_lrw_send() compiles to an
- * empty function and never calls these — kept only so the batch-flush code,
- * which is NOT LoRaWAN-gated, links). ---- */
+/* ---- transport (app_radio_ calls and app_report_trigger() are
+ * transport-agnostic and always linked, #118 phase 2 -- see this file's
+ * header comment). Test assertions never inspect what would have gone over
+ * the air. ---- */
 
-uint8_t app_lrw_get_max_payload(void)
+uint8_t app_radio_get_max_payload(void)
 {
 	return 51;
 }
 
-int app_lrw_send_alarm(const uint8_t *buf, size_t len)
+/* Boot/join order hold (app_radio_data_hold_ms()): 0 = send, -1 = link down,
+ * > 0 = announce still going out. Cases set it; default 0. */
+int32_t test_radio_data_hold_ms;
+
+int32_t app_radio_data_hold_ms(void)
+{
+	return test_radio_data_hold_ms;
+}
+
+/* Free alarm slots in app_radio's queue (#462); APP_RADIO_TX_QUEUE_DEPTH = the
+ * queue is empty. Cases set it; before() restores it. */
+uint32_t test_radio_alarm_free = APP_RADIO_TX_QUEUE_DEPTH;
+
+uint32_t app_radio_tx_alarm_free(void)
+{
+	return test_radio_alarm_free;
+}
+
+/* Frames handed to the radio. */
+size_t test_alarm_frames;
+
+int app_radio_send_alarm(const uint8_t *buf, size_t len)
 {
 	(void)buf;
 	(void)len;
+	test_alarm_frames++;
 	return 0;
+}
+
+void app_report_trigger(void)
+{
 }
 
 /* ---- alarm-report encoding: alarm_batch_flush() calls this unconditionally
@@ -104,18 +157,28 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len)
 
 struct app_cmd_alarm_event test_alarm_events[16];
 size_t test_alarm_event_count;
+/* Max events one encoded frame may hold (#409 3b): more -> -EMSGSIZE, like a
+ * small DR budget. 0 = not even one fits (the 11 B tier). */
+size_t test_alarm_max_events = SIZE_MAX;
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len)
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len)
 {
 	(void)base_time;
 	(void)total;
 	(void)time_synced;
+	/* #425: alarm_batch_flush() lays pages out first (pass 1, worst-case page
+	 * numbers = 127) and then encodes them — capture only the real pass. */
+	bool layout_pass = (page_index == 127 && page_count == 127);
 	if (!out || !out_len || out_cap == 0) {
 		return -EINVAL;
 	}
-	for (size_t i = 0; i < n_events; i++) {
+	if (n_events > test_alarm_max_events) {
+		return -EMSGSIZE;
+	}
+	for (size_t i = 0; i < n_events && !layout_pass; i++) {
 		if (test_alarm_event_count < ARRAY_SIZE(test_alarm_events)) {
 			test_alarm_events[test_alarm_event_count++] = events[i];
 		}
@@ -123,4 +186,30 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	out[0] = 0;
 	*out_len = 1;
 	return 0;
+}
+
+/* ---- buzzer (#397): app_alarm_poll() drives the local buzzer as a side
+ * effect (alarm_buzzer_sync() in app_alarm.c). Track every call so cases can
+ * assert on the alarm-event -> melody trigger/stop plumbing without a real
+ * GPIO thread. ---- */
+
+int g_buzzer_play_calls;
+uint32_t g_buzzer_play_last_kind;
+uint16_t g_buzzer_play_last_repeat_s;
+
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
+{
+	g_buzzer_play_calls++;
+	g_buzzer_play_last_kind = kind;
+	g_buzzer_play_last_repeat_s = repeat_s;
+	return 0;
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

@@ -24,7 +24,8 @@ LOG_MODULE_REGISTER(app_wdog, LOG_LEVEL_DBG);
 
 /* Software liveness layer on top of the hardware IWDG (#182). The IWDG is fed
  * from the main loop every few seconds and so cannot, on its own, catch a worker
- * thread that has wedged (e.g. m_work_q blocked forever in lorawan_send(), #181).
+ * thread that has wedged (e.g. m_work_q blocked in lorawan_send() - now bounded by
+ * CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS, #181 - or any other stuck work item).
  * Each monitored worker registers a channel and pings it as it makes progress;
  * app_wdog_feed() withholds the IWDG feed once any channel goes stale, so a
  * permanent wedge resets the SoC (which then rejoins on a clean boot). Timeouts

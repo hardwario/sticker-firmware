@@ -34,6 +34,8 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 			     uint32_t *fault_field);
 int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Alarms *src,
 			    uint32_t *fault_field);
+int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *src,
+			 uint32_t *fault_field);
 
 /* Populate dst with only the requested fields (by proto field tag in ids[0..n))
  * from the staging config, setting their has_* flags. Secret keys are not dumped. */
@@ -41,6 +43,7 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 void app_config_fill_application(AppConfigMessage_Application *dst, const uint32_t *ids, size_t n);
 void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids, size_t n);
 void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, size_t n);
+void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t n);
 
 /* True when alarms dump field `tag` (3..18 -> alarm_0..15) is an unconfigured
  * (all-zero) slot. Such slots are omitted from a ConfigDump; the get_config

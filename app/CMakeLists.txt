@@ -6,22 +6,49 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+# Debug build (debug.conf in EXTRA_CONF_FILE): also apply debug.overlay, which
+# locks the MSI to the LSE (msi-pll-mode). debug.conf sets CONFIG_PM=n, so the
+# kernel tick is SysTick on the free-running MSI (~1.2 % off) instead of LPTIM
+# on the LSE. Kconfig cannot add a devicetree overlay, and Kconfig is not
+# parsed yet here, so key on the fragment name before find_package(Zephyr).
+if(EXTRA_CONF_FILE MATCHES "(^|;|/)debug\\.conf(;|$)")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/debug.overlay)
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
+
+# Module patches (zephyr/patches.yml, applied by `west patch apply`). A LoRaWAN
+# image built without them silently misses the fix, so refuse to build instead.
+# Each patch leaves a "STICKER-<issue>" marker in the patched source. Checked at
+# configure time and again on every build: `west update` resets the module and
+# an incremental build (incl. the one `west flash` runs) does not reconfigure.
+if(CONFIG_LORAWAN AND DEFINED ZEPHYR_LORAMAC_NODE_MODULE_DIR AND NOT STICKER_ALLOW_UNPATCHED_MODULES)
+  set(FILE ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c)
+  set(MARKER STICKER-419)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake)
+  add_custom_target(sticker_module_patch_check ALL
+    COMMAND ${CMAKE_COMMAND} -DFILE=${FILE} -DMARKER=${MARKER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake
+    COMMENT "Checking STICKER module patches")
+  add_dependencies(app sticker_module_patch_check)
+endif()
 
 # Firmware version + source baked into the image (logged at boot, reported by
 # the GetInfo command). CI passes the numeric version components and build type
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
 #   tag v1.3.4 -> 1/3/4, type 0 (MAIN)
-#   branch/PR  -> 0/0/0, type 1 (DEV)
-# Local builds (no override) use the hardcoded development version below and are
-# always type 2 (CUSTOM). The debug/release config is a separate axis
-# (CONFIG_FW_DEBUG), not set here.
+#   branch/PR  -> the version below, type 1 (DEV)
+# Local builds (no override) use the version below and are type 2 (CUSTOM).
+# Keep it at the release this branch builds towards. The debug/release config
+# is a separate axis (CONFIG_FW_DEBUG), not set here.
 if(NOT DEFINED APP_VERSION_MAJOR)
-  set(APP_BUILD_TYPE 2) # CUSTOM
-  set(APP_VERSION_MAJOR 1)
-  set(APP_VERSION_MINOR 4)
+  set(APP_VERSION_MAJOR 2)
+  set(APP_VERSION_MINOR 0)
   set(APP_VERSION_PATCH 0)
+endif()
+if(NOT DEFINED APP_BUILD_TYPE)
+  set(APP_BUILD_TYPE 2) # CUSTOM
 endif()
 add_compile_definitions(
   APP_VERSION_MAJOR=${APP_VERSION_MAJOR}
@@ -41,11 +68,20 @@ include(nanopb)
 # extensions, same stem — no clash.
 zephyr_nanopb_sources(app src/app_config.proto)
 
+target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_analog.c)
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
+target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_radio_p2p.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
+target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_radio_lrw.c)
+# app_report.c owns the periodic sample/history cadence via app_radio, not
+# just the LoRaWAN uplink -- compiled unconditionally so sampling,
+# history capture and store-and-forward keep working with no radio linked in
+# at all. Two independent reasons converge here: #395's CONFIG_RADIO_LORAWAN=n
+# debug variant, and #118's P2P bench overlay (CONFIG_RADIO_LORAWAN=n +
+# CONFIG_RADIO_P2P=y). Its own app_radio_* calls route to whichever transport
+# is compiled in, and app_radio.c handles "neither" itself.
+target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
@@ -53,6 +89,7 @@ target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/boards
 )
 target_sources_ifdef(CONFIG_OPT3001 app PRIVATE src/app_opt3001.c)
+target_sources_ifdef(CONFIG_MPL3115A2 app PRIVATE src/app_mpl3115a2.c)
 target_sources_ifdef(CONFIG_POWEROFF app PRIVATE src/app_power.c)
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_ats.c)
 target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht4x.c)
@@ -60,22 +97,19 @@ target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1_slots.c)
 target_sources_ifdef(CONFIG_WATCHDOG app PRIVATE src/app_wdog.c)
+target_sources_ifdef(CONFIG_APP_BUZZER app PRIVATE src/app_buzzer.c)
+target_sources_ifdef(CONFIG_APP_CALIBRATION app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_alarm.c)
 target_sources(app PRIVATE src/app_alarm_rules.c)
-target_sources(app PRIVATE src/app_buzzer.c)
-target_sources(app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_clock.c)
 target_sources(app PRIVATE src/app_cmd.c)
 target_sources(app PRIVATE src/app_compose.c)
 target_sources(app PRIVATE src/app_config.c)
 target_sources(app PRIVATE src/app_counters.c)
-target_sources(app PRIVATE src/app_sensor_read.c)
 target_sources(app PRIVATE src/app_hall.c)
 target_sources(app PRIVATE src/app_history.c)
 target_sources(app PRIVATE src/app_input.c)
 target_sources(app PRIVATE src/app_led.c)
-target_sources(app PRIVATE src/app_mpl3115a2.c)
-target_sources(app PRIVATE src/app_nfc_parser.c)
 target_sources(app PRIVATE src/app_config_ingest.c)
 target_sources(app PRIVATE src/app_nfc.c)
 target_sources(app PRIVATE src/app_ccm.c)
@@ -84,14 +118,21 @@ target_sources(app PRIVATE src/app_ccm.c)
 # disabled (CONFIG_APP_CCM_HW_AES=n, e.g. the variant-A soft fallback) the CCM
 # layer uses the LoRaMac soft-SE AES instead — pull that source + its prekeyed
 # API in (the HW build needs neither).
+# With LoRaWAN on, the loramac-node library already links that aes.c.
 if(NOT CONFIG_APP_CCM_HW_AES)
   set(SOFT_SE_DIR ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/peripherals/soft-se)
-  target_sources(app PRIVATE ${SOFT_SE_DIR}/aes.c)
+  if(NOT CONFIG_HAS_SEMTECH_SOFT_SE)
+    target_sources(app PRIVATE ${SOFT_SE_DIR}/aes.c)
+  endif()
   target_include_directories(app PRIVATE ${SOFT_SE_DIR})
   set_source_files_properties(src/app_ccm.c ${SOFT_SE_DIR}/aes.c
     PROPERTIES COMPILE_DEFINITIONS "AES_ENC_PREKEYED")
 endif()
-target_sources(app PRIVATE src/app_pyq1648.c)
+target_sources_ifdef(CONFIG_APP_PYQ1648 app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
+# Generated by `west sensorgen` from src/app_sensor_types.yaml (#430).
+target_sources(app PRIVATE src/app_sensor_types.c)
 target_sources(app PRIVATE src/app_settings.c)
+target_sources(app PRIVATE src/app_radio.c)
+target_sources(app PRIVATE src/app_slot.c)
 target_sources(app PRIVATE src/main.c)

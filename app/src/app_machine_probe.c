@@ -728,17 +728,26 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 		}
 	}
 	if (ret) {
-		LOG_DBG("Skipping serial number: %llu", serial_number);
-		return 0;
-	}
-
-	/* Arm tilt detection here, on every scan (incl. runtime re-scan/enroll).
-	 * lis2dh12_init just BOOTed CTRL_REG5 and wiped the INT1 config, so arming
-	 * only from app_sensor_init would silently disable tilt after any later
-	 * `w1 scan`. Non-fatal: register the probe even if arming fails. */
-	ret = lis2dh12_enable_alert(m_sensors[m_count].dev, MP_TILT_THRESHOLD, MP_TILT_DURATION);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
+		/* #485 S3: register the probe anyway. Dropping it lost its SHT, TMP112
+		 * and OPT3001 channels too and left the slot ABSENT until a reboot,
+		 * while #431 promises per-part reporting. The accelerometer channels
+		 * read NaN instead; a LIS2DH12 that answers later in its power-down
+		 * default is re-initialized by the -ENODATA path of
+		 * app_machine_probe_read_accelerometer(). */
+		LOG_WRN("Machine probe %llu: LIS2DH12 init failed (%d), registering without "
+			"accelerometer",
+			serial_number, ret);
+	} else {
+		/* Arm tilt detection here, on every scan (incl. runtime re-scan/enroll).
+		 * lis2dh12_init just BOOTed CTRL_REG5 and wiped the INT1 config, so
+		 * arming only from app_sensor_init would silently disable tilt after
+		 * any later `w1 scan`. Non-fatal: register the probe even if arming
+		 * fails. */
+		ret = lis2dh12_enable_alert(m_sensors[m_count].dev, MP_TILT_THRESHOLD,
+					    MP_TILT_DURATION);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
+		}
 	}
 
 	/* Re-detect the SHT variant on every (re)scan: the cached sht_type is only
@@ -1175,6 +1184,25 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 
 	if (!res) {
 		ret = lis2dh12_read(m_sensors[index].dev, accel_x, accel_y, accel_z);
+		if (ret == -ENODATA) {
+			/* The chip answers but does not sample: it lost power (probe
+			 * unplugged and plugged back, brownout) and is back in its
+			 * power-down default, with the tilt alert disarmed too. The
+			 * scan-time setup does not run again for a bound slot, so redo
+			 * it here; the next sample reads again. */
+			LOG_WRN("Machine probe idx %d: LIS2DH12 not sampling, re-initializing",
+				index);
+			ret = lis2dh12_init(m_sensors[index].dev);
+			if (!ret) {
+				ret = lis2dh12_enable_alert(m_sensors[index].dev, MP_TILT_THRESHOLD,
+							    MP_TILT_DURATION);
+			}
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("lis2dh12 re-init", ret);
+			}
+			res = -ENODATA;
+			goto error;
+		}
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_read", ret);
 			res = ret;

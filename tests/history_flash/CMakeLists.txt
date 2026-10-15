@@ -14,6 +14,7 @@ set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../app)
 target_include_directories(app PRIVATE ${APP_DIR}/src)
 target_sources(app PRIVATE
   ${APP_DIR}/src/app_history.c
+  ${APP_DIR}/src/app_sensor_types.c
   src/main.c
   src/stubs.c
 )

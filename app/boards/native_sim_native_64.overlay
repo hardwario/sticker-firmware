@@ -1,0 +1,265 @@
+/*
+ * Copyright (c) 2026 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* STICKER simulator (native_sim/native/64): the board's nodes, under the same
+ * labels the application uses, on emulated buses. Sensors answer from the
+ * emulators in drivers/sim; their values are set with the `sim` shell command.
+ * See doc/simulator.md. */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+#include <zephyr/dt-bindings/sensor/lis2dh.h>
+
+/ {
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		/delete-property/ zephyr,code-partition;
+	};
+
+	gpioa: gpioa {
+		compatible = "zephyr,gpio-emul";
+		rising-edge;
+		falling-edge;
+		high-level;
+		low-level;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+		status = "okay";
+	};
+
+	gpiob: gpiob {
+		compatible = "zephyr,gpio-emul";
+		rising-edge;
+		falling-edge;
+		high-level;
+		low-level;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+		status = "okay";
+	};
+
+	/* Radio control lines of the emulated SX1262 (reset, busy, DIO1). */
+	gpioc: gpioc {
+		compatible = "zephyr,gpio-emul";
+		rising-edge;
+		falling-edge;
+		high-level;
+		low-level;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <4>;
+		status = "okay";
+	};
+
+	/* LIS2DH12 INT1/INT2 (sim_gpio.c): real-edge interrupts only, as the
+	 * Zephyr LIS2DH driver and the app share INT1. */
+	gpiod: gpiod {
+		compatible = "hardwario,sim-gpio";
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <2>;
+		status = "okay";
+	};
+
+	sticker_leds {
+		compatible = "gpio-leds";
+
+		led_r: led_r {
+			gpios = <&gpioa 5 GPIO_ACTIVE_LOW>;
+		};
+
+		led_g: led_g {
+			gpios = <&gpioa 6 GPIO_ACTIVE_LOW>;
+		};
+
+		led_y: led_y {
+			gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		hall_l: hall_l {
+			gpios = <&gpioa 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+
+		hall_r: hall_r {
+			gpios = <&gpioa 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+
+		gp_a: gp_a {
+			gpios = <&gpiob 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+
+		gp_b: gp_b {
+			gpios = <&gpioa 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+	};
+
+	lpd: lpd {
+		compatible = "power-switch";
+		gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+	};
+
+	adc1: adc1 {
+		compatible = "hardwario,sim-adc";
+		#io-channel-cells = <1>;
+		status = "okay";
+	};
+
+	i2c1: i2c@1100 {
+		compatible = "zephyr,i2c-emul-controller";
+		reg = <0x1100 4>;
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		sht40: sht40@44 {
+			compatible = "sensirion,sht4x";
+			reg = <0x44>;
+			repeatability = <2>;
+		};
+
+		opt3001: opt3001@45 {
+			compatible = "ti,opt3001";
+			reg = <0x45>;
+			zephyr,deferred-init;
+		};
+
+		mpl3115a2: mpl3115a2@60 {
+			compatible = "nxp,mpl3115a2";
+			reg = <0x60>;
+			zephyr,deferred-init;
+		};
+
+		lis2dh12: lis2dh12@19 {
+			compatible = "st,lis2dh";
+			reg = <0x19>;
+			anym-mode = <LIS2DH_DT_ANYM_OR_COMBINATION>;
+			int2-gpio-config = <LIS2DH_DT_GPIO_INT_EDGE_RISING>;
+			irq-gpios = <&gpiod 0 GPIO_ACTIVE_HIGH>, <&gpiod 1 GPIO_ACTIVE_HIGH>;
+			disconnect-sdo-sa0-pull-up;
+			zephyr,deferred-init;
+		};
+
+		/* ST25DV04K NFC tag, both device addresses (emul_st25dv.c). */
+		st25dv_e0: st25dv@53 {
+			compatible = "hardwario,sim-st25dv";
+			reg = <0x53>;
+		};
+
+		st25dv_e1: st25dv@57 {
+			compatible = "hardwario,sim-st25dv";
+			reg = <0x57>;
+		};
+
+		ds2484: ds2484@18 {
+			compatible = "maxim,ds2484";
+			reg = <0x18>;
+			slpz-gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
+			active-pullup;
+			zephyr,deferred-init;
+
+			ds18b20_0: ds18b20_0 {
+				compatible = "maxim,ds18b20";
+				resolution = <12>;
+				family-code = <0x28>;
+				zephyr,deferred-init;
+			};
+
+			ds18b20_1: ds18b20_1 {
+				compatible = "maxim,ds18b20";
+				resolution = <12>;
+				family-code = <0x28>;
+				zephyr,deferred-init;
+			};
+
+			machine_probe_0: machine_probe_0 {
+				compatible = "maxim,ds28e17";
+				family-code = <0x19>;
+				zephyr,deferred-init;
+			};
+
+			machine_probe_1: machine_probe_1 {
+				compatible = "maxim,ds28e17";
+				family-code = <0x19>;
+				zephyr,deferred-init;
+			};
+		};
+	};
+
+	spi1: spi@1200 {
+		compatible = "zephyr,spi-emul-controller";
+		reg = <0x1200 4>;
+		clock-frequency = <1000000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		lora: radio@0 {
+			compatible = "semtech,sx1262";
+			reg = <0>;
+			spi-max-frequency = <1000000>;
+			reset-gpios = <&gpioc 0 GPIO_ACTIVE_LOW>;
+			busy-gpios = <&gpioc 1 GPIO_ACTIVE_HIGH>;
+			dio1-gpios = <&gpioc 2 GPIO_ACTIVE_HIGH>;
+			dio2-tx-enable;
+			dio3-tcxo-voltage = <SX126X_DIO3_TCXO_3V3>;
+			tcxo-power-startup-delay-ms = <5>;
+		};
+	};
+
+	aliases {
+		led0 = &led_r;
+		led1 = &led_g;
+		led2 = &led_y;
+		lora0 = &lora;
+		sw0 = &hall_l;
+		sw1 = &hall_r;
+		sw2 = &gp_a;
+		sw3 = &gp_b;
+	};
+
+	zephyr,user {
+		pir-si-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
+		pir-dl-gpios = <&gpiob 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		nfc-gpo-gpios = <&gpiob 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+	};
+};
+
+/* The STICKER flash map: history ring + settings, 2 KB pages as on the STM32WL. */
+&flashcontroller0 {
+	erase-value = <0xff>;
+};
+
+&flash0 {
+	reg = <0x00000000 DT_SIZE_K(256)>;
+	erase-block-size = <2048>;
+	write-block-size = <8>;
+
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		history_partition: partition@34000 {
+			label = "history";
+			reg = <0x00034000 DT_SIZE_K(32)>;
+		};
+
+		storage_partition: partition@3c000 {
+			label = "storage";
+			reg = <0x0003c000 DT_SIZE_K(16)>;
+		};
+	};
+};

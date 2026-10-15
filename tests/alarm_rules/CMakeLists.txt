@@ -8,11 +8,13 @@ project(test_app_alarm_rules)
 
 set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../app)
 
-# app_alarm_rules.c packs/unpacks raw bytes — no protobuf. It only needs the
-# config struct (for the alarm_N slot fields) which the stubs provide.
+# app_alarm_rules.c packs/unpacks raw bytes — no protobuf. It needs the config
+# struct (alarm_N rule fields, sensorN_type, cap_*) which the stubs provide,
+# and the sensor type registry for target validation (#430).
 target_include_directories(app PRIVATE ${APP_DIR}/src)
 target_sources(app PRIVATE
   ${APP_DIR}/src/app_alarm_rules.c
+  ${APP_DIR}/src/app_sensor_types.c
   src/main.c
   src/stubs.c
 )

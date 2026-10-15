@@ -1,0 +1,28 @@
+#
+# Copyright (c) 2026 HARDWARIO a.s.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+config STICKER_SIM
+	bool "STICKER simulator peripherals"
+	depends on ARCH_POSIX
+	select EMUL
+	help
+	  Emulated STICKER peripherals for the native_sim build of the
+	  application: an ADC, I2C sensor emulators and the `sim` shell
+	  command that sets their readings. See doc/simulator.md.
+
+config STICKER_SIM_ST25DV
+	bool
+	default y
+	depends on STICKER_SIM && DT_HAS_HARDWARIO_SIM_ST25DV_ENABLED
+	help
+	  ST25DV NFC tag emulator and its UDP phone link (emul_st25dv.c).
+
+config STICKER_SIM_GPIO
+	bool
+	default y
+	depends on STICKER_SIM && DT_HAS_HARDWARIO_SIM_GPIO_ENABLED
+	help
+	  Input-only GPIO port for emulator-driven interrupt lines (sim_gpio.c).

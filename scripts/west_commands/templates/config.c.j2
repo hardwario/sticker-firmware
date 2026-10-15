@@ -432,26 +432,46 @@ void {{ module.name }}_unlock(void)
 	k_mutex_unlock(&m_{{ module.name }}_lock);
 }
 
+/* Keys found in NVS that this firmware no longer has (a parameter removed or
+ * renamed in an older release), or has with a different size (a value whose
+ * layout changed, e.g. the v1.4 17 B alarm-N blobs, #503). Recorded while
+ * loading, deleted after it: the settings core would log a set-value failure
+ * for each on every boot. A wrong-size value cannot be read anyway, so the
+ * parameter keeps its default either way. More than STALE_KEYS_MAX keys are
+ * cleaned over the next boots. */
+#define STALE_KEYS_MAX     8
+#define STALE_KEY_NAME_MAX 32
+
+static char m_stale_keys[STALE_KEYS_MAX][STALE_KEY_NAME_MAX];
+static uint8_t m_stale_key_count;
+
+static int stale_key(const char *key)
+{
+	if (m_stale_key_count < STALE_KEYS_MAX && strlen(key) < STALE_KEY_NAME_MAX) {
+		strcpy(m_stale_keys[m_stale_key_count++], key);
+		return 0;
+	}
+
+	/* List full: skip the key quietly, it is recorded on a later boot. An
+	 * error here would make the settings core log a set-value failure. */
+	return 0;
+}
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	int ret;
 	const char *next;
+	void *var;
+	size_t size;
+	int ret;
 
+	/* Each key only selects its variable; the size check and the read are
+	 * shared below (one copy instead of one per key, #503). */
 #define SETTINGS_SET(_key, _var, _size)                                                            \
 	do {                                                                                       \
 		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				return -EINVAL;                                                    \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			return 0;                                                                  \
+			var = (_var);                                                              \
+			size = (_size);                                                            \
+			goto found;                                                                \
 		}                                                                                  \
 	} while (0)
 
@@ -461,16 +481,50 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 {% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
-	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+	SETTINGS_SET("{{ param | nvs_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% else %}
-	SETTINGS_SET("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+	SETTINGS_SET("{{ param | nvs_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
 		     sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}
 
 #undef SETTINGS_SET
 
-	return -ENOENT;
+	return stale_key(key);
+
+found:
+	if (len != size) {
+		/* A known key whose stored value has another size: stale. */
+		LOG_WRN("Key %s is %zu B, expected %zu B: stale", key, len, size);
+		return stale_key(key);
+	}
+
+	ret = read_cb(cb_arg, var, len);
+	if (ret < 0) {
+		LOG_ERR("Call `read_cb` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/* Delete the stale keys h_set() recorded; a failure only means the key is
+ * reported again on the next boot. */
+static void remove_stale_keys(void)
+{
+	char path[sizeof(SETTINGS_PFX) + STALE_KEY_NAME_MAX];
+
+	for (uint8_t i = 0; i < m_stale_key_count; i++) {
+		snprintf(path, sizeof(path), SETTINGS_PFX "/%s", m_stale_keys[i]);
+		int ret = settings_delete(path);
+
+		if (ret) {
+			LOG_WRN("Stale key %s not removed: %d", path, ret);
+		} else {
+			LOG_INF("Stale key %s removed", path);
+		}
+	}
+	m_stale_key_count = 0;
 }
 
 static int h_commit(void)
@@ -539,9 +593,9 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+	EXPORT_FUNC("{{ param | nvs_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% else %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+	EXPORT_FUNC("{{ param | nvs_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
 		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}
@@ -878,6 +932,8 @@ static int {{ module.name }}_init(void)
 		 * running rather than dead. */
 		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
 		m_{{ module.name }}_load_failed = true;
+	} else {
+		remove_stale_keys();
 	}
 
 {% if module.version is defined %}

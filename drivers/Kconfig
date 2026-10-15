@@ -8,5 +8,6 @@ menu "Drivers"
 
 rsource "sensor/Kconfig"
 rsource "w1/Kconfig"
+rsource "sim/Kconfig"
 
 endmenu

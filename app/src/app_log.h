@@ -8,6 +8,7 @@
 #define APP_LOG_H_
 
 /* Zephyr includes */
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 #ifdef __cplusplus
@@ -21,6 +22,23 @@ extern "C" {
 	LOG_ERR("Call `" func "` failed (" ctx "): %d", val)
 #define LOG_ERR_CALL_FAILED_CTX_STR(func, ctx, val)                                                \
 	LOG_ERR("Call `" func "` failed (" ctx "): %s", val)
+
+/* Say why the device is about to reboot, and give the log backend time to drain.
+ *
+ * `Reset cause: 0x%08x` cannot tell a sys_reboot() from an NRST -- both read
+ * PIN|SOFTWARE (0x03) -- so a reboot that logs nothing is indistinguishable
+ * afterwards from a fault or a hand on the reset line. Two unexplained resets
+ * on the 2026-09-10 bench could not be attributed for exactly that reason.
+ *
+ * WRN, not INF, so the line survives debug.conf's CONFIG_LOG_MAX_LEVEL=2. The
+ * 100 ms sleep is the flush app_power_suspend() already takes before
+ * sys_poweroff(): the bench image is CONFIG_LOG_MODE_DEFERRED, so without it
+ * the message can still be in the ring when the core goes down. */
+#define LOG_WRN_REBOOTING(reason)                                                                  \
+	do {                                                                                       \
+		LOG_WRN("Rebooting: " reason);                                                     \
+		k_sleep(K_MSEC(100));                                                              \
+	} while (0)
 
 /* Print a float without CONFIG_CBPRINTF_FP_SUPPORT: scale to fixed decimals and
  * emit sign + integer + zero-padded fraction as plain %d args. Match the decimal
