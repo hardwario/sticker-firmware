@@ -3041,7 +3041,7 @@ Fixes from the v2.0.0 release review (PR #503). Wire format, `APP_PROTO_VERSION`
 | M4 | Comments: `app_version.h` (branch builds keep the CMake version), `app_alarm_rules.h` (RATE window), `main.c` (the battery gate runs after the settings load). | — |
 | S1 | `lrw_reset` is `[nfc, shell]` only (security review R-3). | Reachable over a LoRaWAN / P2P downlink; it resets the OTAA DevNonce, so a 1.0.4 network server refused the following joins. |
 | S2 | `enter_calibration` and `SetParam.application.calibration` are NFC / shell only (security review C-1). | Reachable over a LoRaWAN downlink; calibration mode uplinks under the public, fleet-shared ABP keys. |
-| S3 | CI: every GitHub Action pinned to a commit SHA, Dependabot for the bumps; a release carries `SHA256SUMS` of its hex files (security review B-2). | Actions followed mutable tags, incl. the release upload with `contents: write`. |
+| S3 | CI: every GitHub Action pinned to a commit SHA, bumped by hand; a release carries `SHA256SUMS` of its hex files (security review B-2). | Actions followed mutable tags, incl. the release upload with `contents: write`. |
 | M5 | Docs: §21 / Upgrading (history restarts), §26 / §51 (old keys are deleted, no downgrade), §40 limitation, `doc/p2p.md` TX power 2..14, README, test-plan headers. | — |
 
 Not changed, by decision: the payload version stays `0x01` (Upgrading item 10); no downgrade
