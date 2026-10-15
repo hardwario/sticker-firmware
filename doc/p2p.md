@@ -287,7 +287,7 @@ JoinAccept (38 B)   Data, src = net_id, dest = low32(DevEUI), counter = the Join
    The value is stored and reported (`ats radio info`) but drives no window: the
    JoinAccept window opens after the default 1 s, before any JoinAccept is known,
    and the data windows follow the turnaround above.
-4. **Apply the TX power.** `tx_power_dbm` in 2..22 is applied as the session TX
+4. **Apply the TX power.** `tx_power_dbm` in 2..14 (the RFO_LP limit, `P2P_TX_POWER_MAX_DBM`) is applied as the session TX
    power. 0 means none, and a value out of range is ignored; either way the node
    still pairs.
 5. **Derive and persist.** The node derives `session_key`, then persists `net_id`,

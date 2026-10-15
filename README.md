@@ -48,30 +48,35 @@ STICKER platform highlights (hardware + firmware):
 
 ---
 
-## Firmware Capabilities (v1.4.0)
+## Firmware Capabilities (v2.0.0)
 
 Beyond the hardware highlights above, the current firmware adds:
 
-* **Remote control over LoRaWAN** — configure and query the device via downlink/uplink commands
-  (fPort 85: `set_param`/`get_param`/`get_config`/`get_info`, LoRaWAN reset/join, factory/vendor
-  reset), no NFC tap or physical access required
+* **Two radios** — LoRaWAN (EU868, US915, AU915, AS923) or a raw-LoRa P2P link to a HARDWARIO
+  Hub on the TOWER protocol, one `radio-mode` switch, the same commands and telemetry on both
+* **Remote control over the radio** — configure and query the device via downlink/uplink commands
+  (`set_param`/`get_param`/`get_config`/`get_settings`/`get_info`, link reset/join, reset tiers),
+  with paged answers for the low data rates, no NFC tap or physical access required
 * **Device info on join** — an `Info` uplink (serial, firmware version, reset cause, claim token,
   radio mode, battery) is sent automatically on every join and clock sync
 - **Real-time clock**, synced from the LoRaWAN network and readable/settable over NFC or LoRaWAN
 * **Sensor history (store-and-forward)** — samples are captured on a fixed cadence and buffered
   (RAM or flash ring, depending on build) so a temporary LoRaWAN outage doesn't lose data; replay
   on request
-* **Alarm engine** — per-channel threshold/state/rate rules with hysteresis, rate-limiting, a
-  no-data watchdog, and a low-battery alarm, reported on fPort 3
-* **Encrypted local access over NFC** — a phone can read/write configuration and send commands via
-  an AES-CCM encrypted channel (`hio.stck:cmd`/`hio.stck:rsp`), with a separate anti-replay nonce
-  and a vendor-token-authenticated channel for factory/claim operations
+* **Alarm engine** — a table of up to 16 threshold/state/rate rules over the sensor channels
+  (onboard, 1-Wire, GP inputs), a no-data watchdog and a low-battery alarm, with buzzer melodies
+* **GP inputs** — one owner per GP pin pair (inputs, PIR, buzzer); each input digital, pulse
+  counter (S0 meters) or analog voltage up to 30 V
+* **Encrypted local access over NFC** — a phone reads/writes configuration and sends commands
+  through the ST25DV fast-transfer mailbox (powered device), AES-CCM encrypted with an anti-replay
+  nonce, plus a vendor-token-authenticated channel for factory/claim operations
 * **Claim-token provisioning** — a write-once claim token ties a physical unit to its first
   claiming backend without requiring a LoRaWAN join first
 * **LED signalling scheme** — a unified severity-ordered heartbeat (join state, alarms, radio
   mode) plus one-shot patterns for NFC interaction and input events
 
-See [`doc/version 1.4.md`](doc/version%201.4.md) for the full changelog and wire-level detail, and
+See [`doc/version 2.0.md`](doc/version%202.0.md) for the v2.0.0 changes and upgrade notes
+([`doc/version 1.4.md`](doc/version%201.4.md) for the v1.4.0 base), and
 [`doc/manual-test-plan.md`](doc/manual-test-plan.md) /
 [`doc/automated-test-playbook.md`](doc/automated-test-playbook.md) for how each of these is
 verified.

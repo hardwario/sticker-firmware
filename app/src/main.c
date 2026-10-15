@@ -380,8 +380,9 @@ int main(void)
 #if defined(CONFIG_POWEROFF)
 	/* #496: a depleted cell stays off instead of boot-looping on brownout.
 	 * Measured before anything loads the cell; the boot carousel still plays,
-	 * then the low-battery indication, then Shutdown -- before anything writes
-	 * flash or keys up the radio. */
+	 * then the low-battery indication, then Shutdown -- before history, alarm
+	 * rules or the radio start. Not before every flash write: app_config_init()
+	 * already loaded settings and deleted stale keys at SYS_INIT. */
 	const bool battery_low = app_power_boot_battery_low();
 #endif /* defined(CONFIG_POWEROFF) */
 

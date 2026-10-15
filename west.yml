@@ -6,7 +6,9 @@ manifest:
   projects:
     - name: sticker-zephyr
       remote: hardwario
-      revision: v4.3.0-sticker2-branch
+      # Pinned to the head of v4.3.0-sticker2-branch so a release tag always
+      # rebuilds the same Zephyr; bump the SHA together with the fork (#503).
+      revision: 79067560f3fc9c1688d70fd7e7c4f6c8d3e10504
       path: zephyr
       import: true
   self:

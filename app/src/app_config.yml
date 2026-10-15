@@ -257,13 +257,18 @@ commands:
     - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}
     # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
     # which reject the (re)join while unsaved LoRaWAN staging changes exist.
-    - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack}
+    # Security review R-3: nfc/shell only, like device_reset/factory_reset. It
+    # deletes the LoRaWAN NVM including the OTAA DevNonce, so a remote reset
+    # would get every later JoinRequest refused by a 1.0.4 NS (seen DevNonce).
+    - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack, transports: [nfc, shell]}
     - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
     # #395: handler (not plain action) so the dispatch calls
     # app_cmd_handle_enter_calibration, which reports NOT_SUPPORTED when the
     # calibration mode isn't compiled in (CONFIG_APP_CALIBRATION=n) instead of
     # ACKing and persisting a calibration flag nothing would ever consume.
-    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: handler, response: ack, transports: [lrw, nfc]}
+    # Security review C-1: never over a radio. Calibration mode uplinks under
+    # the fleet-shared public ABP keys of app_calibration.c.
+    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: handler, response: ack, transports: [nfc, shell]}
     - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [radio, nfc]}
     # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
@@ -429,6 +434,7 @@ parameters:
   - name: calibration
     proto_group: application
     proto_id: 1
+    writable: [shell, nfc]  # never over a radio: calibration uplinks use public ABP keys (security review C-1)
     type: bool
     help: "Get/Set calibration mode (true/false)."
 

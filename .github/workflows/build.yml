@@ -12,6 +12,8 @@ on:
   workflow_dispatch:
 
 # Least privilege: only the release job writes (it creates the GitHub release).
+# Every action is pinned to a commit SHA (the tag in the comment), so a moved
+# tag cannot change what runs here; Dependabot proposes the bumps (B-2).
 permissions:
   contents: read
 
@@ -72,11 +74,16 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="v${GITHUB_REF#refs/tags/v}"
             BUILD_TYPE=0
-            if [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-              VERSION_ARGS="-DAPP_VERSION_MAJOR=${BASH_REMATCH[1]}"
-              VERSION_ARGS+=" -DAPP_VERSION_MINOR=${BASH_REMATCH[2]}"
-              VERSION_ARGS+=" -DAPP_VERSION_PATCH=${BASH_REMATCH[3]}"
+            # Release tags are exactly vX.Y.Z: anything else (v2.0.0-rc1,
+            # v2.0.0.1, ...) would otherwise ship as a release build with only
+            # the leading numbers baked in (#503).
+            if [[ ! "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error::Tag $VERSION is not vX.Y.Z"
+              exit 1
             fi
+            VERSION_ARGS="-DAPP_VERSION_MAJOR=${BASH_REMATCH[1]}"
+            VERSION_ARGS+=" -DAPP_VERSION_MINOR=${BASH_REMATCH[2]}"
+            VERSION_ARGS+=" -DAPP_VERSION_PATCH=${BASH_REMATCH[3]}"
           else
             VERSION="$(git rev-parse --short HEAD)"
             BUILD_TYPE=1
@@ -294,6 +301,12 @@ jobs:
           pattern: hio-sticker-*
           merge-multiple: true
 
+      # Checksums next to the images, so a downloaded hex can be checked
+      # against what CI built (security review B-2).
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum *.hex > SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -301,3 +314,4 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.hex
+            artifacts/SHA256SUMS

@@ -6,6 +6,7 @@
  * (so range validation is exercised); everything else app_cmd reaches is stubbed.
  */
 
+#include <setjmp.h>
 #include <string.h>
 
 #include "app_alarm.h"
@@ -504,9 +505,18 @@ void app_radio_reset_link(void)
 	test_run_reset_link_calls++;
 }
 
-/* The executor tests run only the actions that return; a reboot fails them. */
+/* A reboot unwinds to the executor test that armed test_reboot_jmp (see
+ * run_action() in main.c); anywhere else it fails the test. */
+jmp_buf *test_reboot_jmp;
+int test_reboot_calls;
+
 FUNC_NORETURN void sys_reboot(int type)
 {
+	if (test_reboot_jmp != NULL) {
+		test_reboot_calls++;
+		longjmp(*test_reboot_jmp, 1);
+	}
+
 	printk("unexpected sys_reboot(%d)\n", type);
 	ztest_test_fail();
 	for (;;) {

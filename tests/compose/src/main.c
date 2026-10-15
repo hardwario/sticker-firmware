@@ -48,7 +48,7 @@ static void set_clean(void)
 	g_app_config.cap_sht = true; /* #465: the yml default */
 	memset(&test_hall, 0, sizeof(test_hall));
 	memset(&test_input, 0, sizeof(test_input));
-	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
+	memset(test_w1_types, 0, sizeof(test_w1_types));   /* all slots empty */
 	memset(test_w1_states, 0, sizeof(test_w1_states)); /* = OK */
 	test_budget = 200;
 	test_alarm_flags = 0;
@@ -295,8 +295,8 @@ ZTEST(compose, test_na_sentinel_absent_analog)
 				      fr[i].orientation);
 		}
 	}
-	zassert_true(t && h && p && a && l && o, "NA field missing: t%d h%d p%d a%d l%d o%d", t,
-		     h, p, a, l, o);
+	zassert_true(t && h && p && a && l && o, "NA field missing: t%d h%d p%d a%d l%d o%d", t, h,
+		     p, a, l, o);
 }
 
 /* #465: cap_sht off drops the onboard temperature/humidity from the wire, even
@@ -467,15 +467,14 @@ static void fill_machine_probe(int slot)
 	w1_put(slot, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, -0.54f);
 }
 
-/* A machine-probe reading bigger than a page is never split: it goes out whole,
- * alone on its own page (the stall guard), the other content on the other
- * pages within the budget, pages numbered. */
-ZTEST(compose, test_w1_reading_bigger_than_page_sent_alone)
+/* A machine-probe reading bigger than an empty page is never split and never
+ * sent over the budget (the MAC would reject it): it is skipped (#503), the
+ * other content goes out on numbered pages within the budget. */
+ZTEST(compose, test_w1_reading_bigger_than_page_skipped)
 {
 	Telemetry fr[16];
 	size_t n;
 	int32_t v[32];
-	static const int32_t want[] = {2365, 108, 2250, 27, 62, 1, 38, -935, -54};
 
 	set_clean();
 	g_app_config.cap_w1_sensors = true;
@@ -484,26 +483,10 @@ ZTEST(compose, test_w1_reading_bigger_than_page_sent_alone)
 	w1_put(3, APP_SENSOR_CH_DALLAS_TEMPERATURE, 21.5f);
 	test_budget = 24;
 
-	run_report_ex(fr, 16, &n, true);
+	run_report(fr, 16, &n);
 
-	zassert_true(n > 1, "expected a paged report, got %zu", n);
 	assert_pages(fr, n);
-	for (size_t i = 0; i < n; i++) {
-		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
-			const SensorReading *r = &fr[i].w1_sensors[j];
-
-			zassert_equal(r->type, r->slot == 2 ? APP_SENSOR_TYPE_MACHINE_PROBE
-							    : APP_SENSOR_TYPE_DALLAS);
-			if (r->slot == 2) {
-				zassert_equal(fr[i].w1_sensors_count, 1, "probe not alone");
-				zassert_equal(r->valid, 0x1FF, "probe split");
-			}
-		}
-	}
-	zassert_equal(merge_slot(fr, n, 2, v), 0x1FF, "machine-probe channels");
-	for (size_t ch = 0; ch < ARRAY_SIZE(want); ch++) {
-		zassert_equal(v[ch], want[ch], "ch %zu: %d", ch, v[ch]);
-	}
+	zassert_equal(merge_slot(fr, n, 2, v), 0, "an unfittable probe must be skipped");
 	zassert_equal(merge_slot(fr, n, 4, v), BIT(0), "dallas channel");
 	zassert_equal(v[0], 2150);
 }
@@ -536,9 +519,9 @@ ZTEST(compose, test_w1_reading_moves_whole_when_it_fits_a_page)
 	zassert_equal(fr[1].w1_sensors[0].valid, 0x1FF);
 }
 
-/* 11 B tier (US915 DR0 / AU915 DR2): the reading does not fit a page, so it is
- * sent whole and alone (the MAC rejects it, as before paging); the report
- * still ends. */
+/* 11 B tier (US915 DR0 / AU915 DR2): the reading does not fit even an empty
+ * page, so it is skipped (#503) instead of being handed to the MAC over the
+ * budget; the report still ends and no frame exceeds the budget. */
 ZTEST(compose, test_w1_at_11_byte_tier)
 {
 	Telemetry fr[24];
@@ -551,16 +534,76 @@ ZTEST(compose, test_w1_at_11_byte_tier)
 	fill_machine_probe(0);
 	test_budget = 11;
 
-	run_report_ex(fr, 24, &n, true);
+	run_report(fr, 24, &n);
 
 	assert_pages(fr, n);
-	zassert_equal(merge_slot(fr, n, 1, v), 0x1FF, "machine-probe channels");
+	zassert_true(n >= 1, "the system group must still go out");
+	zassert_true(fr[0].has_system_flags, "system_flags missing");
+	zassert_equal(merge_slot(fr, n, 1, v), 0, "an unfittable reading must be skipped");
+}
+
+/* #503 defect 3: two NA sentinels (6 B each) in the internal group exceed the
+ * 10 B protobuf room of the 11 B tier. No frame may go over the budget, and
+ * the system group (battery + alarm bits) leads the first page. */
+ZTEST(compose, test_na_sentinels_at_11_byte_tier)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean(); /* cap_sht on, temperature + humidity NaN */
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.0f;
+	test_alarm_flags = 0x03;
+	test_budget = 11;
+
+	run_report(fr, 8, &n);
+
+	assert_pages(fr, n);
+	zassert_true(n >= 1, "no frame");
+	zassert_true(fr[0].has_system_flags, "system_flags must lead the report");
+	zassert_equal(fr[0].system_flags >> 1, 0x03, "alarm bits lost");
+	test_alarm_flags = 0;
+}
+
+/* #503: a group bigger than the room left on a page is sent field by field
+ * instead of being dropped; every value arrives exactly once, numbered pages,
+ * none over the budget. */
+ZTEST(compose, test_group_split_at_11_byte_tier)
+{
+	Telemetry fr[12];
+	size_t n;
+	bool t = false, h = false, p = false, a = false;
+
+	set_clean();
+	g_app_config.cap_barometer = true;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1013.2f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = 250.0f;
+	test_budget = 11;
+
+	run_report(fr, 12, &n);
+
+	assert_pages(fr, n);
+	zassert_true(n >= 4, "expected the groups split over pages, got %zu", n);
+	zassert_true(fr[0].has_system_flags, "system group not on the first page");
 	for (size_t i = 0; i < n; i++) {
-		for (pb_size_t j = 0; j < fr[i].w1_sensors_count; j++) {
-			zassert_equal(fr[i].w1_sensors[j].valid, 0x1FF, "page %zu: probe split",
-				      i);
+		zassert_false(t && fr[i].has_temperature, "temperature sent twice");
+		zassert_false(h && fr[i].has_humidity, "humidity sent twice");
+		zassert_false(p && fr[i].has_pressure, "pressure sent twice");
+		zassert_false(a && fr[i].has_altitude, "altitude sent twice");
+		t |= fr[i].has_temperature;
+		h |= fr[i].has_humidity;
+		p |= fr[i].has_pressure;
+		a |= fr[i].has_altitude;
+		if (fr[i].has_temperature) {
+			zassert_equal(fr[i].temperature, 2350);
+		}
+		if (fr[i].has_pressure) {
+			zassert_equal(fr[i].pressure, 10132);
 		}
 	}
+	zassert_true(t && h && p && a, "a field was lost: t%d h%d p%d a%d", t, h, p, a);
 }
 
 ZTEST(compose, test_machine_probe_cluster)
@@ -680,7 +723,7 @@ ZTEST(compose, test_mismatch_and_absent_slots_send_type_only)
 /* Byte cost of the encoded readings incl. the 3 B field-27 tag + length (plan
  * D2 table): a mismatched slot 7 B, dallas 13 B, a full machine-probe <= 30 B.
  * A reading does not fit the 11 B tier (US915 DR0 / AU915 DR2) with the
- * version byte; the composer then sends it alone (oversized-unit path). */
+ * version byte; the composer then skips it (#503). */
 ZTEST(compose, test_sensor_reading_size)
 {
 	SensorReading sr = SensorReading_init_zero;
