@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        config: [debug, release]
+        config: [debug, provisioning, release]
 
     steps:
       - name: Checkout repository
@@ -99,6 +99,8 @@ jobs:
         run: |
           if [ "${{ matrix.config }}" == "debug" ]; then
              ARGS="-DEXTRA_CONF_FILE=debug.conf"
+          elif [ "${{ matrix.config }}" == "provisioning" ]; then
+             ARGS="-DEXTRA_CONF_FILE=debug.conf;provisioning.conf"
           else
              ARGS=""
           fi
