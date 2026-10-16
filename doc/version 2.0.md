@@ -367,6 +367,7 @@ to the full description.
 | Radio | **Changed** — a deferred post-command action waits up to 120 s for undelivered frames (was ~56 s). See §50. |
 | Config | **Fix** — NVS keys of removed parameters are deleted at boot; no more `set-value failure` boot errors. See §51. |
 | Robustness | **Fix** — release review (#503): stillness rule armed only with its capability, RATE on live counters, 11 B tier telemetry never over budget, wrong-size config values cleaned up, reboot after a failed save, exact release tags, Zephyr pinned by SHA. See §53. |
+| Build | **New** — provisioning image `debug.conf;provisioning.conf`: every sensor, LoRaWAN EU868, shell over RTT, no logging, no history; CI ships it as `hio-sticker-<ver>-provisioning.hex`. See §55. |
 
 ---
 
@@ -3079,6 +3080,50 @@ ADC, GPIO, flash). `scripts/sim/` holds a LoRaWAN LNS and P2P hub
 (`sim_air.py`), an NFC phone (`sim_nfc.py`), the CI smoke test and a runner
 of the v2.0.0 HIL plan H1–H9 (`hil_v200.py`, found the §53 stale-key log). No
 firmware behaviour changes. See [simulator.md](simulator.md) (PR #510).
+
+## 55. Provisioning build variant
+
+`app/provisioning.conf` layers on top of `debug.conf` and is the image for
+the production line: it brings up every sensor so a unit can be checked end
+to end, and it keeps the RTT shell for writing the identity, keys and
+configuration into NVS. The release image is then flashed **without an
+erase** and boots with those NVS values.
+
+```bash
+west build -b sticker app -- -DEXTRA_CONF_FILE="debug.conf;provisioning.conf"
+```
+
+| | debug | provisioning | release |
+|---|---|---|---|
+| Sensors (SHT4x, OPT3001, MPL3115A2, ADC, hall) | yes | yes | yes |
+| 1-Wire, accelerometer, PIR, buzzer | no | **yes** | yes |
+| Shell + RTT console | yes | yes | no |
+| Log output (`LOG_*`) | WRN and up | **none** | none |
+| History | 992 B RAM | 32 B RAM | 32 KB flash ring |
+| LoRaWAN regions | EU868 | EU868 | EU868, AS923, AU915, US915 |
+| P2P | no | no | yes |
+| Power management | off (2 h auto-suspend) | off (2 h auto-suspend) | on |
+| Flash / RAM (8ab438a9) | 241.1 KB / 85.9 % | 231.7 KB (94.3 %) / 84.2 % | 192.8 KB (90.5 %) / 73.7 % |
+
+- **Why no logging.** With every sensor on, `debug.conf` overflows the
+  240 KB debug image budget by ~28 KB. The other trims together
+  (`SHELL_HELP`, stack diagnostics, fault dump, calibration) give back ~3 KB;
+  only the log subsystem is large enough. Shell commands, `printk` and the
+  RTT console are not affected, so the line reads state back through the
+  shell (`ats radio status`, `ats sensors sample`, `config show`), never from
+  log lines.
+- **Debug and release from the same commit.** The release image takes the
+  settings that the provisioning image wrote, so both must share the settings
+  layout. CI builds all three images from one commit, and a tag release
+  ships all three.
+- **History partition.** The provisioning image (like `debug.conf`) is
+  larger than the 208 KB code partition and runs into the history partition
+  at 0x34000. The release image ignores pages there without a valid header
+  and CRC and erases a page before it writes it, so the leftover code bytes
+  are harmless. NVS at 0x3C000 is never touched.
+- `radio-mode` defaults to `off` (#350): set `radio-mode lorawan` and
+  `settings save` during provisioning, so the release image joins on its
+  first boot.
 
 ---
 
