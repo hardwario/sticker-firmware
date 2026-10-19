@@ -89,8 +89,8 @@ struct rstate {
 				       #195/#498) */
 	int64_t oneshot_expiry;     /* STATE edge / momentary one-shot: auto-clear time (0 =
 				       none) */
-	int64_t confirm_deadline; /* STATE dwell-before-activation / stillness deadline (#348,
-				     #498, 0 = none) */
+	int64_t confirm_deadline;   /* STATE dwell-before-activation / stillness deadline (#348,
+				       #498, 0 = none) */
 	struct app_alarm_rule last_rule; /* full rule snapshot as of the last rt_sync() reset, so an
 					  * edit that only changes e.g. lo/hi/dwell/enabled/
 					  * from_state/to_state is still detected and resets the
@@ -1939,9 +1939,10 @@ static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, siz
 	switch (c->kind) {
 	case APP_SENSOR_KIND_THRESHOLD:
 		if (!have_lo || !have_hi) {
-			shell_error(sh,
-				    "threshold args: lo <lo> hi <hi> [dwell <d>]  (dwell = deadband "
-				    "in channel units: clears below hi-d / above lo+d, 0 = none)");
+			shell_error(
+				sh,
+				"threshold args: lo <lo> hi <hi> [dwell <d>]  (dwell = deadband "
+				"in channel units: clears below hi-d / above lo+d, 0 = none)");
 			return -EINVAL;
 		}
 		break;
@@ -2063,7 +2064,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Set a rule in the first free index. Usage: new <slot> <channel> <key> "
 		      "<value>...\n"
 		      "  keys as in 'alarm set'. dwell: threshold = deadband in channel units\n"
-		      "  (activate outside [lo,hi], clear below hi-dwell / above lo+dwell); state edge = confirm dwell before firing AND hold\n"
+		      "  (activate outside [lo,hi], clear below hi-dwell / above lo+dwell); state "
+		      "edge = confirm dwell before firing AND hold\n"
 		      "  before re-arm; state level = dwell before activating (deactivate is\n"
 		      "  immediate); pir/accel motion (momentary) = hold before re-arm, no\n"
 		      "  confirm; rate = hold before re-arm. 0 = immediate/no hold throughout.",
