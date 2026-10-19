@@ -291,11 +291,16 @@ static void w1_rescan_work_handler(struct k_work *work)
 		struct w1_bus_sig sig;
 		bool changed = w1_bus_sig_read(&sig) != 0 || sig.count != m_w1_sig.count ||
 			       sig.sum != m_w1_sig.sum;
+		/* Same bus as last time but more devices than bound slots: the boot
+		 * bind lost a sensor to a transient read failure (bus signature alone
+		 * would never retry it), so rebind anyway. Bounded by the backoff. */
+		bool unbound = sig.count > m_w1_present;
+		bool rebind = force || changed || unbound;
 
 		LOG_INF("1-Wire rescan: %u device(s) on the bus, %s", sig.count,
-			force || changed ? "rebind" : "unchanged");
+			rebind ? "rebind" : "unchanged");
 
-		if (force || changed) {
+		if (rebind) {
 			int before = m_w1_present;
 
 			(void)w1_scan_rebind();
