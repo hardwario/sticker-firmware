@@ -28,6 +28,7 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
@@ -290,11 +291,16 @@ static void w1_rescan_work_handler(struct k_work *work)
 		struct w1_bus_sig sig;
 		bool changed = w1_bus_sig_read(&sig) != 0 || sig.count != m_w1_sig.count ||
 			       sig.sum != m_w1_sig.sum;
+		/* Same bus as last time but more devices than bound slots: the boot
+		 * bind lost a sensor to a transient read failure (bus signature alone
+		 * would never retry it), so rebind anyway. Bounded by the backoff. */
+		bool unbound = sig.count > m_w1_present;
+		bool rebind = force || changed || unbound;
 
 		LOG_INF("1-Wire rescan: %u device(s) on the bus, %s", sig.count,
-			force || changed ? "rebind" : "unchanged");
+			rebind ? "rebind" : "unchanged");
 
-		if (force || changed) {
+		if (rebind) {
 			int before = m_w1_present;
 
 			(void)w1_scan_rebind();
@@ -607,6 +613,20 @@ int app_sensor_init(void)
 		(void)pm_device_runtime_get(m_i2c_dev);
 
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+
+		/* The DS2484 is slept via SLPZ between 1-Wire transactions
+		 * (app_w1_release()), and an MCU reset does not wake it. Its driver
+		 * init drives SLPZ awake and resets the device over I2C right away,
+		 * with no wake-up time, so after a warm reboot the reset NACKs and
+		 * device_init() fails with -EIO for the whole boot: every 1-Wire
+		 * slot stays absent. Wake it here and wait like app_w1_acquire(). */
+		static const struct gpio_dt_spec slpz =
+			GPIO_DT_SPEC_GET(DT_NODELABEL(ds2484), slpz_gpios);
+
+		if (gpio_is_ready_dt(&slpz) &&
+		    gpio_pin_configure_dt(&slpz, GPIO_OUTPUT_INACTIVE) == 0) {
+			k_sleep(K_MSEC(3));
+		}
 
 		ret = device_init(dev);
 		if (ret) {
