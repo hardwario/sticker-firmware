@@ -8,7 +8,7 @@ This document lists **only the changes introduced in firmware v2.0.0** relative 
 
 This chapter is the short version for anyone who installs, configures or integrates
 STICKER: what is new, what behaves differently, and what has to be done when a fleet
-moves from v1.4.x to v2.0.0. The numbered sections below (§1–§51) carry the full
+moves from v1.4.x to v2.0.0. The numbered sections below (§1–§56) carry the full
 technical detail.
 
 ### Highlights
@@ -105,6 +105,9 @@ to the full description.
 - **Stricter rule checks.** STATE `from` / `to` must be 0/1, RATE `hi` must be in range. A
   rejected rule answers `fault_field` = 400 + the `alarm_N` tag, so the host knows which rule
   failed (§46).
+- **Threshold `dwell` = hysteresis.** On a THRESHOLD rule `dwell` is a deadband in the
+  channel's units, not seconds: the alarm activates at once outside `[lo, hi]` and clears
+  below `hi - dwell` / above `lo + dwell` (§56).
 - **RATE window = `dwell`.** A RATE rule counts within `dwell` seconds (`0` =
   `interval-report`, the old window). It fires as soon as the count is reached, and a
   sustained rate stays one alarm (§48).
@@ -1104,7 +1107,7 @@ error{code 1 BAD_REQUEST}}`, paired on the Hub (before: seq 0).
 **Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
 after any reboot (including `settings_save`) every condition that still holds activates
 again and is re-reported on fPort 3 once the device is joined: threshold rules on the first
-evaluation (after their dwell), level `state` rules after their dwell, low battery on the
+evaluation, level `state` rules after their dwell, low battery on the
 first valid measurement, no-data after 5 s of NaN. Edge/momentary/count rules are events and
 fire again only on a new event. A host detects the reboot from the rejoin, the boot `Info`
 (`reset_cause`, small `uptime`) or the first telemetry's `boot` flag, drops its open alarms
@@ -2359,7 +2362,7 @@ Kind (threshold / state / rate), scale, validation and no-data liveness come fro
 - `sensor_type` is the type the rule was written for. If the slot now expects another type,
   the rule is **stale**: kept, shown `STALE` in `alarm list`, never evaluated. A `SetParam`
   that makes a rule stale answers an error unless the same batch fixes or clears it.
-- Shell: `alarm set <rule> <slot> <channel> lo <v> hi <v> dwell <s>` (or `from`/`to`), slots
+- Shell: `alarm set <rule> <slot> <channel> lo <v> hi <v> dwell <v>` (or `from`/`to`), slots
   `mb`, `s1`…`s4`, channels by name or number; `sensor types [<type>]` lists the channels.
 
 **Expected type per 1-Wire slot.** `sensor1_type`…`sensor4_type` (`sensors` 23..26) hold the
@@ -3128,3 +3131,34 @@ west build -b sticker app -- -DEXTRA_CONF_FILE="debug.conf;provisioning.conf"
 ---
 
 *Applies to firmware v2.0.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
+
+## 56. Threshold `dwell` is a hysteresis (#521)
+
+Analog channels are read only every `interval-sample` (60 s to 15 min), so a time
+`dwell` on a THRESHOLD rule shorter than that confirmed a single sample and did not
+debounce anything; a longer one only delayed the alarm. A value hovering at the limit
+raised and cleared the alarm on every sample. THRESHOLD rules now read `dwell` as a
+deadband in the channel's units (ISA-18.2 alarm deadband):
+
+- The alarm **activates immediately** when the value leaves `[lo, hi]`.
+- A HIGH alarm clears once the value drops **below `hi - dwell`**, a LOW alarm once it
+  rises **above `lo + dwell`**. Between the limit and the deadband edge the alarm holds.
+- `dwell 0` clears on re-entering the band (no hysteresis).
+- A jump straight to the other side deactivates the old side and activates the new one
+  in the same poll.
+- Valid range: `0 .. hi - lo` (a wider deadband could never clear); a rule outside it is
+  rejected. STATE and RATE rules keep `dwell` in seconds (0..3600).
+- Wire format unchanged (`alarm_N` bytes 14..17, float32); only the meaning of the value
+  for THRESHOLD rules changed. Hosts should label it with the channel unit
+  (Manager-App: apps/manager#148).
+
+```
+alarm set 3 mb humidity lo 0 hi 55 dwell 5   # active > 55 %, clears < 50 %
+alarm set 0 s1 temperature lo 2 hi 8 dwell 0.5  # LOW clears > 2.5 °C, HIGH clears < 7.5 °C
+```
+
+- **Tests:** `alarm_eval` immediate activation, hold inside the deadband, clear past it,
+  low side and side swap; `alarm_rules` deadband validation (full band accepted, wider and
+  NaN rejected). HIL on 2162165722 (`mb humidity hi 55 dwell 5`, `interval-sample 5`):
+  active at once above 55 %, held 50–55 %, cleared below 50 %; fPort 3 activate and
+  deactivate received.

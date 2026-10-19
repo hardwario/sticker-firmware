@@ -166,7 +166,8 @@ var _ALM_FLOAT = {};
 // Dynamic alarm rules alarm_0..alarm_15 = proto fields 3..18, each a packed
 // 18-byte rule carried as native bytes (presented/authored as a 36-char hex
 // string). Layout (#430): flags, slot, channel, sensor_type, from, to, then
-// float32 LE lo, hi, dwell.
+// float32 LE lo, hi, dwell (THRESHOLD: hysteresis in the channel's units;
+// STATE / RATE: seconds).
 var _ALM_HEX = {};
 var _ALM_HEX_ENC = {};
 (function () {
