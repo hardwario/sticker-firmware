@@ -89,10 +89,8 @@ struct rstate {
 				       #195/#498) */
 	int64_t oneshot_expiry;     /* STATE edge / momentary one-shot: auto-clear time (0 =
 				       none) */
-	int64_t confirm_deadline; /* dwell-before-activation deadline (#348, 0 = none). While armed,
-				   * `type` doubles as the pending THRESHOLD side (LOW/HIGH) being
-				   * confirmed, since it is otherwise unused until the rule latches.
-				   */
+	int64_t confirm_deadline; /* STATE dwell-before-activation / stillness deadline (#348,
+				     #498, 0 = none) */
 	struct app_alarm_rule last_rule; /* full rule snapshot as of the last rt_sync() reset, so an
 					  * edit that only changes e.g. lo/hi/dwell/enabled/
 					  * from_state/to_state is still detected and resets the
@@ -200,9 +198,9 @@ static bool m_batch_held;
 static struct k_work_delayable m_alarm_batch_work;
 
 /* Per-rule dwell/hold duration in ms (#348): `dwell` is a plain duration in
- * seconds, unified across every kind that uses a timer (THRESHOLD dwell-before-
- * activate, STATE edge confirm+hold, STATE level dwell-before-activate,
- * momentary-source hold/re-arm, RATE hold/re-arm). Negative/NaN clamps to 0
+ * seconds for every kind that uses a timer (STATE edge confirm+hold, STATE
+ * level dwell-before-activate, momentary-source hold/re-arm, RATE hold/re-arm).
+ * THRESHOLD uses `dwell` as a value deadband instead (eval_threshold()). Negative/NaN clamps to 0
  * (immediate — never widens a window from garbage data). */
 static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 {
@@ -777,13 +775,16 @@ static bool read_poll_state(const struct app_alarm_rule *rule, const struct app_
 
 /* ---- rule evaluation ---------------------------------------------------- */
 
-/* Threshold rule (#348): lo/hi are a plain band, no hysteresis. `dwell`
- * (seconds) is a dwell that must elapse, with the value continuously outside [lo, hi]
- * the whole time, before the rule activates; 0 = immediate. Deactivation is
- * always immediate on returning to [lo, hi] — dwell only guards against a
- * spurious/transient excursion causing a false activation, and there is no
- * matching reason to delay clearing an alarm once the value has recovered.
- * Returns latched state. */
+/* Threshold rule: lo/hi are the activation limits and `dwell` is a deadband
+ * (hysteresis) in the channel's own units, as in ISA-18.2 alarm deadband. The
+ * rule activates immediately once the value leaves [lo, hi] and clears only
+ * after it returns past the deadband: HIGH clears below hi - dwell, LOW clears
+ * above lo + dwell. 0 = clear as soon as the value is back inside [lo, hi].
+ *
+ * Analog channels are only refreshed at interval_sample (or interval_report),
+ * so a time-based dwell either confirmed nothing (dwell < interval_sample: one
+ * sample decided) or only delayed the alarm; a value deadband works per sample
+ * and stops the alarm flapping around a limit. Returns latched state. */
 static bool eval_threshold(uint8_t idx, const struct app_alarm_rule *rule, struct rstate *rt,
 			   float value, bool *should_send)
 {
@@ -793,21 +794,11 @@ static bool eval_threshold(uint8_t idx, const struct app_alarm_rule *rule, struc
 			*should_send = true;
 			alarm_collect(idx, rule, false, rt->type, false, 0);
 		}
-		rt->confirm_deadline = 0;
 		return false;
 	}
 
 	float lo = rule->lo, hi = rule->hi;
-
-	if (rt->active) {
-		if (value >= lo && value <= hi) {
-			rt->active = false;
-			rt->confirm_deadline = 0;
-			*should_send = true;
-			alarm_collect(idx, rule, false, rt->type, true, rule_scale(rule, value));
-		}
-		return rt->active;
-	}
+	float db = rule->dwell >= 0.0f ? rule->dwell : 0.0f; /* NaN/negative: no deadband */
 
 	uint8_t want_type = ALARM_TYPE_NONE;
 	if (value < lo) {
@@ -816,39 +807,31 @@ static bool eval_threshold(uint8_t idx, const struct app_alarm_rule *rule, struc
 		want_type = ALARM_TYPE_HIGH;
 	}
 
+	if (rt->active) {
+		if (want_type == rt->type) {
+			return true;
+		}
+		bool cleared = (rt->type == ALARM_TYPE_HIGH) ? value < hi - db : value > lo + db;
+		if (!cleared && want_type == ALARM_TYPE_NONE) {
+			return true; /* inside the deadband: hold */
+		}
+		/* Past the deadband, or straight across to the opposite limit:
+		 * clear the latched side first (the opposite side, if any,
+		 * activates below in the same poll). */
+		rt->active = false;
+		*should_send = true;
+		alarm_collect(idx, rule, false, rt->type, true, rule_scale(rule, value));
+	}
+
 	if (want_type == ALARM_TYPE_NONE) {
-		/* Back in bounds: any pending dwell was on a false alarm — drop it. */
-		rt->confirm_deadline = 0;
 		return false;
 	}
 
-	int64_t hold_ms = rule_hold_ms(rule);
-	if (hold_ms <= 0) {
-		rt->active = true;
-		rt->type = want_type;
-		*should_send = true;
-		alarm_collect(idx, rule, true, want_type, true, rule_scale(rule, value));
-		return true;
-	}
-
-	/* `type` doubles as the pending side while a dwell is armed (struct rstate
-	 * comment) — a change of side (e.g. dwelling HIGH, briefly back in bounds,
-	 * now LOW) restarts the window rather than reusing a stale deadline. */
-	if (rt->confirm_deadline == 0 || rt->type != want_type) {
-		rt->type = want_type;
-		rt->confirm_deadline = k_uptime_get() + hold_ms;
-		return false;
-	}
-
-	if (k_uptime_get() >= rt->confirm_deadline) {
-		rt->confirm_deadline = 0;
-		rt->active = true;
-		*should_send = true;
-		alarm_collect(idx, rule, true, want_type, true, rule_scale(rule, value));
-		return true;
-	}
-
-	return false; /* still dwelling */
+	rt->active = true;
+	rt->type = want_type;
+	*should_send = true;
+	alarm_collect(idx, rule, true, want_type, true, rule_scale(rule, value));
+	return true;
 }
 
 /* Momentary/pulse channels (APP_SENSOR_F_MOMENTARY) only ever assert
@@ -1957,8 +1940,8 @@ static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, siz
 	case APP_SENSOR_KIND_THRESHOLD:
 		if (!have_lo || !have_hi) {
 			shell_error(sh,
-				    "threshold args: lo <lo> hi <hi> [dwell <s>]  (dwell = "
-				    "seconds outside the band before activating, 0 = immediate)");
+				    "threshold args: lo <lo> hi <hi> [dwell <d>]  (dwell = deadband "
+				    "in channel units: clears below hi-d / above lo+d, 0 = none)");
 			return -EINVAL;
 		}
 		break;
@@ -1986,8 +1969,8 @@ static int store_rule(const struct shell *sh, uint8_t idx, const struct app_alar
 	int ret = app_alarm_rules_set(idx, r);
 	if (ret) {
 		shell_error(sh,
-			    "set failed: %d (band hi > lo, dwell 0..3600, PIR/accel motion "
-			    "edge only)",
+			    "set failed: %d (band hi > lo, threshold dwell 0..hi-lo, other dwell "
+			    "0..3600, PIR/accel motion edge only)",
 			    ret);
 		return ret;
 	}
@@ -2072,15 +2055,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(set, NULL,
 		      "Set rule <rule>. Usage: set <rule> <slot> <channel> <key> <value>...\n"
 		      "  slot: mb | s1..s4; channel: name or number (see 'sensor types')\n"
-		      "  threshold: lo <lo> hi <hi> [dwell <s>]\n"
+		      "  threshold: lo <lo> hi <hi> [dwell <deadband>]\n"
 		      "  state: from <0|1> to <0|1> [dwell <s>]   rate: hi <N> [dwell <s>]\n"
-		      "  e.g. set 0 mb temperature lo 2 hi 8 dwell 60",
+		      "  e.g. set 0 mb temperature lo 2 hi 8 dwell 0.5",
 		      cmd_alarm_set, 6, 4),
 	SHELL_CMD_ARG(new, NULL,
 		      "Set a rule in the first free index. Usage: new <slot> <channel> <key> "
 		      "<value>...\n"
-		      "  keys as in 'alarm set'. dwell: threshold = seconds outside [lo,hi]\n"
-		      "  before activating; state edge = confirm dwell before firing AND hold\n"
+		      "  keys as in 'alarm set'. dwell: threshold = deadband in channel units\n"
+		      "  (activate outside [lo,hi], clear below hi-dwell / above lo+dwell); state edge = confirm dwell before firing AND hold\n"
 		      "  before re-arm; state level = dwell before activating (deactivate is\n"
 		      "  immediate); pir/accel motion (momentary) = hold before re-arm, no\n"
 		      "  confirm; rate = hold before re-arm. 0 = immediate/no hold throughout.",
