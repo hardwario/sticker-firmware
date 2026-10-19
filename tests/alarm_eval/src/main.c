@@ -398,11 +398,12 @@ ZTEST(alarm_eval, test_rate_count_dwell_zero_uses_interval_report)
 		      "did not deactivate after an idle interval_report window");
 }
 
-/* THRESHOLD (onboard temperature): dwell before activating outside [lo, hi],
- * immediate deactivate, and the early-revert-resets-the-window guarantee —
- * the HIL-confirmed behavior (project_issue348_alarm_dwell_unify.md), now
- * also covered deterministically. */
-ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
+extern struct app_cmd_alarm_event test_alarm_events[16];
+extern size_t test_alarm_event_count;
+
+/* THRESHOLD (onboard temperature): activates immediately outside [lo, hi];
+ * `dwell` is a deadband in °C — HIGH clears only below hi - dwell. */
+ZTEST(alarm_eval, test_threshold_deadband_activate_immediate_clear_past_deadband)
 {
 	struct app_alarm_rule r = {
 		.slot = 0,
@@ -411,27 +412,35 @@ ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
 		.enabled = 1,
 		.lo = 0.0f,
 		.hi = 30.0f,
-		.dwell = 0.3f,
+		.dwell = 2.0f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f; /* above hi: arms the dwell */
-	app_alarm_poll();
-	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
-		      "threshold fired before the dwell elapsed");
-
-	k_sleep(K_MSEC(400));
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 30.5f; /* above hi */
 	app_alarm_poll();
 	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
-		     "threshold never fired after the dwell elapsed");
+		     "threshold did not activate immediately");
 
-	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f; /* back in band */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 29.0f; /* in band, inside deadband */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
+		     "threshold cleared inside the deadband");
+
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 30.5f; /* back above: no new edge */
+	size_t n = test_alarm_event_count;
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE), "latch lost");
+	zassert_equal(test_alarm_event_count, n, "re-crossing hi inside deadband re-fired");
+
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 27.9f; /* below hi - dwell */
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
-		      "threshold deactivation was not immediate");
+		      "threshold did not clear past the deadband");
 }
 
-ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
+/* LOW side mirrors HIGH (clears above lo + dwell); a jump straight from HIGH
+ * to below lo swaps the latched side in one poll. */
+ZTEST(alarm_eval, test_threshold_deadband_low_side_and_side_swap)
 {
 	struct app_alarm_rule r = {
 		.slot = 0,
@@ -440,24 +449,40 @@ ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
 		.enabled = 1,
 		.lo = 0.0f,
 		.hi = 30.0f,
-		.dwell = 0.3f,
+		.dwell = 2.0f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
-	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f; /* arm the dwell */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 35.0f;
 	app_alarm_poll();
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = -1.0f; /* straight below lo */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE), "LOW not latched");
 
-	k_sleep(K_MSEC(100)); /* well short of the 300 ms dwell */
-	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) =
-		20.0f; /* reverts: back in band, cancel */
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 1.5f; /* inside LOW deadband */
+	app_alarm_poll();
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
+		     "LOW cleared inside the deadband");
+
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 2.5f; /* above lo + dwell */
 	app_alarm_poll();
 	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
-		      "revert did not cancel the pending dwell");
+		      "LOW did not clear past the deadband");
+}
 
-	k_sleep(K_MSEC(400)); /* past the ORIGINAL deadline */
-	app_alarm_poll();
-	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE),
-		      "reverted threshold fired anyway — window was paused, not reset");
+/* Deadband wider than the band is rejected (HIGH would clear below lo). */
+ZTEST(alarm_eval, test_threshold_deadband_wider_than_band_rejected)
+{
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+		.dwell = 31.0f,
+	};
+	zassert_not_equal(app_alarm_rules_set(0, &r), 0, "deadband > hi - lo accepted");
 }
 
 /* Bug A regression (today's PR#349 same-day finding): rt_sync() must reset the
@@ -516,8 +541,6 @@ ZTEST(alarm_eval, test_rt_sync_resets_latch_on_same_source_rule_edit)
  * (they can never see the pre-reset latch). Without the emission, a backend
  * pairing activate/deactivate edges is left with a dangling activate. */
 
-extern struct app_cmd_alarm_event test_alarm_events[16];
-extern size_t test_alarm_event_count;
 
 static void activate_threshold_slot0(void)
 {

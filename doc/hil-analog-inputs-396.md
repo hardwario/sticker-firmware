@@ -167,8 +167,8 @@ Not covered by the session above; ordered roughly by value.
    `LOG_WRN`, matching `version 2.0.md` §45 (R8).
 10. **Dynamic signals.** One-shot sampling against a slowly varying / pulsed input
     — characterize aliasing and the effective sample instant.
-11. **Alarm dwell & hysteresis.** Non-zero `dwell` on an analog threshold rule
-    (confirm the band + dwell timing), and history/alarm behaviour over a full
+11. **Alarm hysteresis.** Non-zero `dwell` on an analog threshold rule is a
+    hysteresis in volts (`version 2.0.md` §56): confirm the clear point `hi - dwell`, and history/alarm behaviour over a full
     LoRaWAN replay and NFC paged readout of the new channels.
 
 ## Re-verification on the reworked layout

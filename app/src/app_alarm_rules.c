@@ -135,13 +135,19 @@ bool app_alarm_rule_armed(const struct app_alarm_rule *r)
 	return app_sensor_channel_cap_on(c);
 }
 
-/* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
- * that uses it — bound it to a sane range regardless of kind (same cap as the
- * old alarm_light_confirm_delay it replaces). */
+/* `dwell` (#348) is a dwell/hold duration in seconds for STATE/RATE, bounded
+ * to a sane range (same cap as the old alarm_light_confirm_delay it replaced).
+ * THRESHOLD uses it as a deadband in the channel's units: the HIGH clear point
+ * hi - dwell must not drop below lo (and LOW's lo + dwell not above hi). NaN
+ * fails every comparison. */
 #define RULE_DWELL_MAX_S 3600.0f
 
-static bool rule_dwell_range_valid(const struct app_alarm_rule *r)
+static bool rule_dwell_range_valid(const struct app_alarm_rule *r,
+				   const struct app_sensor_channel *c)
 {
+	if (c->kind == APP_SENSOR_KIND_THRESHOLD) {
+		return r->dwell >= 0.0f && r->dwell <= r->hi - r->lo;
+	}
 	return r->dwell >= 0.0f && r->dwell <= RULE_DWELL_MAX_S;
 }
 
@@ -178,7 +184,7 @@ static bool rule_valid(const struct app_alarm_rule *r)
 {
 	const struct app_sensor_channel *c = app_alarm_rule_channel(r);
 
-	return c != NULL && rule_dwell_range_valid(r) && rule_threshold_band_valid(r, c) &&
+	return c != NULL && rule_dwell_range_valid(r, c) && rule_threshold_band_valid(r, c) &&
 	       rule_state_levels_valid(r, c) && rule_rate_limit_valid(r, c);
 }
 

@@ -30,9 +30,9 @@
  * for slot N) is stale: kept, but inert until the type matches again.
  *
  * Kind, scale, momentary and counter come from the channel descriptor:
- *  - THRESHOLD: lo/hi band, no hysteresis; dwell = seconds the value must stay
- *    outside [lo,hi] before activating (0 = immediate). Deactivation is always
- *    immediate on returning inside the band.
+ *  - THRESHOLD: lo/hi activation limits; activates immediately outside
+ *    [lo,hi]. dwell = deadband in the channel's units (ISA-18.2): HIGH clears
+ *    below hi - dwell, LOW above lo + dwell (0 = clear on re-entering the band).
  *  - STATE (digital 0/1): from_state/to_state — from != to is an edge (dwell =
  *    confirm time before firing, then the same duration holds the alarm
  *    active/re-arm-blocked, no separate deactivate event); from == to is a
@@ -66,7 +66,7 @@ struct app_alarm_rule {
 	uint8_t enabled;
 	uint8_t from_state;  /* STATE only: previous level (0/1) */
 	uint8_t to_state;    /* STATE only: triggering level (0/1); from==to => level */
-	float lo, hi, dwell; /* THRESHOLD/RATE use hi; dwell is a hold in seconds, all kinds */
+	float lo, hi, dwell; /* THRESHOLD/RATE use hi; dwell: THRESHOLD deadband, else seconds */
 };
 
 /* Build the rule cache from the app_config entries (called once at init,

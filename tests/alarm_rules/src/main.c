@@ -6,8 +6,8 @@
  *  - THRESHOLD: hi > lo (a collapsed/inverted/NaN band can never satisfy the
  *    deactivate check in eval_threshold(), so a rule that ever activates would
  *    latch forever, #203).
- *  - All kinds: dwell is a plain dwell/hold duration in seconds, bounded to
- *    [0, 3600] regardless of kind.
+ *  - THRESHOLD: dwell is a deadband in channel units, bounded to [0, hi - lo].
+ *  - STATE/RATE: dwell is a dwell/hold duration in seconds, bounded to [0, 3600].
  *  - #430: the (slot, channel, sensor_type) target is checked against the
  *    sensor type registry, the 18 B blob round-trips, and a rule whose type
  *    differs from the slot's is stale (kept, counted by reload, inert).
@@ -78,12 +78,12 @@ ZTEST(alarm_rules, test_threshold_nan_bound_rejected)
 
 ZTEST(alarm_rules, test_threshold_narrow_but_open_band_accepted)
 {
-	/* A narrow but non-empty band is fine now — dwell no longer eats into it. */
-	struct app_alarm_rule r = threshold(10.0f, 10.01f, 60.0f);
+	/* A narrow but non-empty band is fine with a deadband that fits it. */
+	struct app_alarm_rule r = threshold(10.0f, 10.5f, 0.25f);
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "narrow-but-open band rejected");
 }
 
-/* ---- dwell: plain dwell/hold seconds, bounded [0, 3600], all kinds --------- */
+/* ---- dwell: THRESHOLD deadband [0, hi - lo]; STATE/RATE seconds [0, 3600] -- */
 
 ZTEST(alarm_rules, test_threshold_zero_dwell_accepted)
 {
@@ -97,16 +97,22 @@ ZTEST(alarm_rules, test_threshold_negative_dwell_rejected)
 	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "negative dwell accepted");
 }
 
-ZTEST(alarm_rules, test_threshold_dwell_at_max_accepted)
+ZTEST(alarm_rules, test_threshold_deadband_full_band_accepted)
 {
-	struct app_alarm_rule r = threshold(10.0f, 30.0f, 3600.0f);
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "dwell at max rejected");
+	struct app_alarm_rule r = threshold(10.0f, 30.0f, 20.0f);
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "deadband == hi - lo rejected");
 }
 
-ZTEST(alarm_rules, test_threshold_dwell_over_max_rejected)
+ZTEST(alarm_rules, test_threshold_deadband_wider_than_band_rejected)
 {
-	struct app_alarm_rule r = threshold(10.0f, 30.0f, 3600.01f);
-	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "dwell over max accepted");
+	struct app_alarm_rule r = threshold(10.0f, 30.0f, 20.5f);
+	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "deadband > hi - lo accepted");
+}
+
+ZTEST(alarm_rules, test_threshold_nan_deadband_rejected)
+{
+	struct app_alarm_rule r = threshold(10.0f, 30.0f, NAN);
+	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "NaN deadband accepted");
 }
 
 ZTEST(alarm_rules, test_state_dwell_range_enforced)

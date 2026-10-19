@@ -1229,7 +1229,8 @@ columns (it stays in `history-channels`).
 > layout. A rule written for another sensor type than the slot now holds is **stale**: kept,
 > listed as `STALE`, never evaluated. `alarm-limit` (rate-limit) still applies globally.
 >
-> **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band** —
+> **#348: `dwell` is a per-rule dwell/hold duration in seconds** (THRESHOLD rules: a hysteresis in
+> the channel's units since v2.0.0, see A1) —
 > `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` config keys are gone.
 > `dwell` behaves differently per kind (see `doc/version 1.4.md` §7 for the full per-kind
 > description); the scenarios below (A1, A3, A5, A6) each call out what `dwell` does for that kind
@@ -1252,38 +1253,37 @@ columns (it stays in `history-channels`).
 > correctness from LoRaWAN connectivity entirely — useful when the bench gateway is congested or
 > the device is mid-rejoin.
 
-### A1 — Threshold alarm (onboard temperature): band + dwell
+### A1 — Threshold alarm (onboard temperature): band + hysteresis
 
-**Goal:** Crossing a plain `[lo, hi]` band raises an alarm only after it has stayed outside the
-band continuously for `dwell` seconds; a value that dips back inside the band before `dwell` elapses
-must NOT fire, and must NOT get credit toward a later attempt (the dwell window resets).
-Deactivation is always immediate.
+**Goal:** Leaving the `[lo, hi]` band raises an alarm immediately (no time delay). `dwell` is a
+hysteresis in °C (v2.0.0, `version 2.0.md` §56): a HIGH alarm clears only below `hi - dwell`, a LOW
+alarm only above `lo + dwell`; a value hovering at the limit gives one alarm, not one per sample.
 **Observable:** AlarmReport on fPort 3, slot `mb`, channel `temperature`, edge + side
 (LO/HI); RTT alarm log; red LED while active.
 
 **Prompt for Claude:**
-> Arm `alarm set 0 mb temperature lo <lo> hi <hi> dwell <dwell>` with bounds near the current room
-> temperature and `dwell` a few seconds (note the values); confirm with `alarm list`. Then, in order:
-> (1) push the sensor just past the bound and back inside within less than `dwell` seconds — confirm
-> **no** AlarmReport fires (the dwell was interrupted); (2) push it past the bound and hold it there
-> for longer than `dwell` — confirm an AlarmReport fires only after roughly `dwell` seconds have
-> elapsed, with slot `mb`/channel `temperature` and the correct side (LO/HI); (3) bring the
-> value back inside the band and confirm the alarm clears **immediately** (no matching dwell on the
-> way down). Decode and report all three events/non-events with their timing.
+> Set `interval-sample` short (e.g. 5 s, note the old value). Arm `alarm set 0 mb temperature lo <lo>
+> hi <hi> dwell <d>` with bounds near the current room temperature and `d` around 1 °C; confirm with
+> `alarm list`. Then, in order: (1) push the sensor past `hi` — confirm the AlarmReport fires on the
+> first sample above it, with slot `mb`/channel `temperature` and side HI; (2) let it cool to between
+> `hi - d` and `hi` — confirm the alarm **stays active** and no deactivate is sent; (3) cool below
+> `hi - d` — confirm the deactivate AlarmReport. Also confirm `dwell` larger than `hi - lo` is
+> rejected. Decode and report the events with the values; restore `interval-sample`.
 
 - [ ] Pass
 
 ### A2 — Threshold alarms: humidity / pressure / 1-Wire slots
 
-**Goal:** The other analog channels behave like temperature (band + dwell + immediate clear).
+**Goal:** The other analog channels behave like temperature (immediate activation, clear past the
+hysteresis).
 **Observable:** AlarmReport fPort 3 with the matching slot/channel and side.
 
 **Prompt for Claude:**
 > For each present analog channel (`mb` humidity/pressure, and the 1-Wire slots s1…s4 per their
 > type — dallas `temperature`, machine-probe `temperature`/`temperature-aux`/`humidity`), arm
-> `alarm set <i> <slot> <channel> lo <lo> hi <hi> [dwell <s>]`, stimulate a crossing held past
-> `dwell`, and confirm an AlarmReport on fPort 3 with the correct slot/channel (and `sensor_type`
-> for a 1-Wire slot) and LO/HI side after the dwell. Summarize per channel; mark any sensor not
+> `alarm set <i> <slot> <channel> lo <lo> hi <hi> [dwell <hysteresis>]`, stimulate a crossing and
+> its return past the hysteresis, and confirm an AlarmReport on fPort 3 with the correct slot/channel (and `sensor_type`
+> for a 1-Wire slot) and LO/HI side Summarize per channel; mark any sensor not
 > fitted as N/A.
 
 - [ ] Pass
@@ -1512,9 +1512,9 @@ and stops the poll cycle after `active` clears (after any configured hold), trac
 > pulse and, in parallel, watch both the red LED and repeated `alarm list` output. Confirm the red
 > blink starts immediately (momentary sources have no dwell) and `alarm list` shows `active=1`,
 > then confirm both the blink and `active=1` persist for ~8 s and clear together (not
-> independently) once the hold elapses. Repeat with a threshold rule that has a dwell (e.g. A1's
-> slot 0) and confirm the red blink only starts once the dwell has elapsed and `active` has
-> latched, not at the moment the value first crossed the bound. Report the correlation between the
+> independently) once the hold elapses. Repeat with a threshold rule that has a hysteresis (e.g. A1's
+> slot 0) and confirm the red blink starts with the first sample past the bound and keeps going
+> until the value is back past the hysteresis. Report the correlation between the
 > LED, `alarm list active=`, and the configured `dwell` in each case.
 
 - [ ] Pass

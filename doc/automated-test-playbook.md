@@ -943,36 +943,36 @@ On debug, manage via `alarm new/set/list/clear/poll`
 over transports via SetParam on the rule bytes (the manual plan's set_param vector includes a
 worked alarm_0 example).
 
-**#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band.** `alarm-notif-time`
+**#348: `dwell` is a per-rule dwell/hold duration in seconds** — except THRESHOLD rules,
+where v2.0.0 (#521) makes it a hysteresis in the channel's units (AT-ALM-01/01b). `alarm-notif-time`
 and the illuminance-only `alarm-light-confirm-delay` config keys are removed — every kind now
 reads its own timing from the rule's `dwell` field (see `doc/version 1.4.md` §7 for the full
 per-kind table). The scenarios below test each kind's specific `dwell` role, plus the "early
 revert resets the window" behavior that a naive check-once-at-expiry timer would get wrong
-(AT-ALM-01b/03b). `alarm poll` forces one evaluation pass immediately — use it to pin down
+(AT-ALM-03b). `alarm poll` forces one evaluation pass immediately — use it to pin down
 timing without waiting for the 3 s main-loop cadence, but note the dwell/hold deadlines
 themselves are still wall-clock (`k_uptime_get()`), so waiting real time past the deadline is
 still required before the next `alarm poll` will observe it as elapsed.
 
-### AT-ALM-01 — onboard temperature threshold + dwell (D, SA; maps A1)
-- **Steps:** arm slot 0: onboard temp, hi = ambient + 3 °C, dwell = 5 (`alarm set 0 mb
-  temperature lo <lo> hi <hi> dwell 5`); `alarm poll` for baseline (no alarm); assist: finger on sensor
-  until it crosses; `alarm poll` immediately (before 5 s), then again after 5 s; then cool
-  down and `alarm poll` once more.
-- **Expect:** the immediate poll (before the dwell elapses) shows no alarm yet; the poll
-  after ~5 s shows exactly one alarm (fPort 3 decoded: type/threshold/value); the poll after
-  cooling shows an immediate "cleared" transition, no matching dwell on the way down.
+### AT-ALM-01 — onboard temperature threshold + hysteresis (D, SA; maps A1)
+- **Steps:** `interval-sample` short (e.g. 5 s); arm slot 0: onboard temp, hi = ambient + 3 °C,
+  dwell = 1 (`alarm set 0 mb temperature lo <lo> hi <hi> dwell 1` — deadband 1 °C, §56 of
+  `version 2.0.md`); `alarm poll` for baseline (no alarm); assist: finger on sensor until it
+  crosses `hi`; `alarm poll`; let it cool to between `hi - 1` and `hi`, `alarm poll`; cool
+  below `hi - 1`, `alarm poll`.
+- **Expect:** the alarm activates on the first poll above `hi` (no time delay; fPort 3
+  decoded: type/threshold/value); it stays active between `hi - 1` and `hi`; it clears only
+  below `hi - 1`.
 - **Cleanup:** `alarm clear 0`.
 
-### AT-ALM-01b — dwell window resets on an early revert (D, SA; maps A1)
-- **Steps:** same slot 0 as AT-ALM-01 (dwell = 5); assist: cross the bound, hold ~2 s, release
-  back inside the bound, `alarm poll` (expect no alarm — dwell interrupted); wait a further
-  4 s and `alarm poll` again (still expect no alarm — the window was reset, not just paused,
-  so the ~2 s spent outside the bound the first time does NOT carry over).
-- **Expect:** no alarm fires from the combined ~6 s of intermittent exposure, since no single
-  continuous stretch reached 5 s. This directly exercises the #348 "continuous, not
-  check-once-at-expiry" dwell requirement — a regression here would silently readmit the old
-  illuminance-dwell weakness (#319) across every threshold quantity.
-- **Cleanup:** `alarm clear 0`.
+### AT-ALM-01b — deadband validation and side swap (D, SA; maps A1)
+- **Steps:** (a) `alarm set 0 mb temperature lo 20 hi 25 dwell 6` — expect rejection
+  (`dwell > hi - lo`); `dwell 5` is accepted. (b) LOW side: `lo` = ambient − 1, dwell 1;
+  cool below `lo` (active at once), warm to between `lo` and `lo + 1` (held), above `lo + 1`
+  (cleared).
+- **Expect:** as above; a value hovering at a limit raises one alarm, not one per sample.
+  `tests/alarm_eval` covers the direct HIGH↔LOW swap.
+- **Cleanup:** `alarm clear 0`, restore `interval-sample`.
 
 ### AT-ALM-02 — 1-Wire slot threshold (D, SA; maps A2)
 - Same as AT-ALM-01 on the enrolled slot 1 (`alarm set 0 s1 temperature lo <lo> hi <hi> dwell 5`,
@@ -1067,8 +1067,9 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Steps:** (a) via SetParam, attempt slot 15 with an inverted/collapsed THRESHOLD band
   (`hi <= lo`, e.g. `lo=20, hi=20`) — expect rejection, not silent acceptance (#348 replaces
   the old `hi-lo <= 2*dwell` band-collapse guard with a direct `hi > lo` check, since `dwell` no
-  longer offsets the band); (b) attempt a rule with `dwell` outside `[0, 3600]` (e.g. `-1` or
-  `4000`) on any kind — expect rejection; (c) write a malformed 18-byte blob into `alarm-15`
+  longer offsets the band); (b) attempt a STATE/RATE rule with `dwell` outside `[0, 3600]`
+  (e.g. `-1` or `4000`), and a THRESHOLD rule with `dwell` outside `[0, hi - lo]` — expect
+  rejection; (c) write a malformed 18-byte blob into `alarm-15`
   directly via SetParam (e.g. slot 0 with a 1-Wire `sensor_type`, a channel past the type's
   count, or the watchdog-only `battery-voltage` channel; flags=present) and read `alarm list`;
   (d) #430: arm a rule on `s1` for the slot's type, then change `sensor1-type` over SetParam.
