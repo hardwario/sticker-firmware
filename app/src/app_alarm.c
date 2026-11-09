@@ -2085,13 +2085,34 @@ static int cmd_alarm_poll(const struct shell *sh, size_t argc, char **argv)
  * (event log + fPort 3), bypassing the sensors and the rule evaluation. */
 static int cmd_alarm_sim(const struct shell *sh, size_t argc, char **argv)
 {
-	long idx = strtol(argv[1], NULL, 10);
+	long idx;
 	bool on;
 	uint8_t type = 3; /* AlarmEvent TYPE_TRIGGER */
 	struct app_alarm_rule r = {0};
 
+	/* System (watchdog) edges: bat [mV], nodata <slot> <ch>, mismatch <w1> <exp> <det> */
+	bool sys_on = argc > 2 && strcmp(argv[2], "on") == 0;
+
+	if (strcmp(argv[1], "bat") == 0) {
+		alarm_collect_battery(sys_on, argc > 3 ? strtof(argv[3], NULL) : 2.1f);
+		shell_print(sh, "battery %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	if (strcmp(argv[1], "nodata") == 0) {
+		alarm_collect_nodata(argc > 3 ? atoi(argv[3]) : 1, argc > 4 ? atoi(argv[4]) : 0,
+				     0, sys_on);
+		shell_print(sh, "no-data %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	if (strcmp(argv[1], "mismatch") == 0) {
+		alarm_collect_mismatch(argc > 3 ? atoi(argv[3]) : 0, argc > 4 ? atoi(argv[4]) : 1,
+				       argc > 5 ? atoi(argv[5]) : 2, sys_on);
+		shell_print(sh, "mismatch %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	idx = strtol(argv[1], NULL, 10);
 	if (idx < 0 || idx >= APP_ALARM_RULE_COUNT) {
-		shell_error(sh, "rule 0..%d", APP_ALARM_RULE_COUNT - 1);
+		shell_error(sh, "rule 0..%d | bat | nodata | mismatch", APP_ALARM_RULE_COUNT - 1);
 		return -EINVAL;
 	}
 	if (strcmp(argv[2], "on") == 0) {
@@ -2173,8 +2194,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_alarm_new, 5, 4),
 	SHELL_CMD_ARG(sim, NULL,
 		      "Inject an alarm edge (event log + fPort 3). Usage: sim <rule> on|off "
-		      "[low|high|trigger] [value]",
-		      cmd_alarm_sim, 3, 2),
+		      "[low|high|trigger] [value]\n"
+		      "  system: sim bat on|off [V] | nodata on|off [slot ch] | "
+		      "mismatch on|off [w1 exp det]",
+		      cmd_alarm_sim, 3, 3),
 	SHELL_CMD_ARG(clear, NULL, "Clear a rule (or all). Usage: clear <rule>|all",
 		      cmd_alarm_clear, 1, 1),
 	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,
