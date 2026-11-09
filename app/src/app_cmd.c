@@ -694,6 +694,7 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 25, 4, false, false},
 	{DUMP_SECTION_ALARMS, 26, 5, false, false},
 	{DUMP_SECTION_ALARMS, 27, 3, false, false},
+	{DUMP_SECTION_ALARMS, 28, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},

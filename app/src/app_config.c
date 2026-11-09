@@ -60,6 +60,7 @@ static const struct app_config m_app_config_defaults = {
 	.event_flush_count = 20,
 	.event_flush_interval = 3600,
 	.log_split = 0,
+	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -110,6 +111,7 @@ static struct app_config m_app_config = {
 	.event_flush_count = 20,
 	.event_flush_interval = 3600,
 	.log_split = 0,
+	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -270,6 +272,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("event-flush-interval", &m_app_config.event_flush_interval,
 		     sizeof(m_app_config.event_flush_interval));
 	SETTINGS_SET("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
+	SETTINGS_SET("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -486,6 +489,9 @@ static int h_commit(void)
 	if (m_app_config.log_split > 100) {
 		m_app_config.log_split = 100;
 	}
+	if ((int)m_app_config.event_format < 0 || (int)m_app_config.event_format > 2) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_FULL;
+	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
@@ -615,6 +621,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("event-flush-interval", &m_app_config.event_flush_interval,
 		    sizeof(m_app_config.event_flush_interval));
 	EXPORT_FUNC("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
+	EXPORT_FUNC("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -1233,6 +1240,26 @@ static void print_log_split(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " log-split %d", m_app_config.log_split);
 }
 
+static void print_event_format(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.event_format) {
+	case APP_CONFIG_EVENT_FORMAT_FULL:
+		str = "full";
+		break;
+	case APP_CONFIG_EVENT_FORMAT_COMPACT:
+		str = "compact";
+		break;
+	case APP_CONFIG_EVENT_FORMAT_RAW:
+		str = "raw";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " event-format %s", str);
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -1407,6 +1434,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_event_flush_count(shell);
 	print_event_flush_interval(shell);
 	print_log_split(shell);
+	print_event_format(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor1_type(shell);
@@ -2088,6 +2116,39 @@ static int cmd_log_split(const struct shell *shell, size_t argc, char **argv)
 	return cmd_int(shell, argc, argv, &m_app_config.log_split, 0, 100, print_log_split);
 }
 
+static int cmd_event_format(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_event_format(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: full, compact, raw");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "full")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_FULL;
+	} else if (!strcmp(argv[1], "compact")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_COMPACT;
+	} else if (!strcmp(argv[1], "raw")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_RAW;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: full, compact, raw");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -2590,6 +2651,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(log-split, NULL,
 	              "Get/Set share of the history flash for the event log in % (0/25/50/75/100, rounded down); applies after reboot, a change erases history and event log.",
 	              cmd_log_split, 1, 1),
+
+	SHELL_CMD_ARG(event-format, NULL,
+	              "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event).",
+	              cmd_event_format, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

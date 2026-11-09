@@ -91,6 +91,19 @@ enums:
       value: 1
       shell: fsk
 
+  # Event log (fPort 4) wire format: full AlarmReport, compact AlarmReport
+  # (time/edge/rule only) or raw 3-byte records.
+  event_format:
+    - name: FULL
+      value: 0
+      shell: full
+    - name: COMPACT
+      value: 1
+      shell: compact
+    - name: RAW
+      value: 2
+      shell: raw
+
   motion_sensitivity:
     - name: "OFF"
       value: 0
@@ -1031,6 +1044,15 @@ parameters:
     max: 100
     writable: [shell, nfc, radio]
     help: "Get/Set share of the history flash for the event log in % (0/25/50/75/100, rounded down); applies after reboot, a change erases history and event log."
+
+  - name: event_format
+    proto_group: alarms
+    proto_id: 28
+    type: enum
+    enum: event_format
+    default: "full"
+    writable: [shell, nfc, radio]
+    help: "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event)."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

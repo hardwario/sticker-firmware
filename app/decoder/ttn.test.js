@@ -1551,3 +1551,50 @@ test("req_events downlink encodes and decodes", () => {
   assert.equal(dec.seq, 7);
   assert.deepEqual(dec.req_events, { from_unix: 1794224900, to_unix: 1794225100 });
 });
+
+// event_format raw (0x03): 6 B header + 3 B per event (time / edge / rule).
+test("fPort-4 raw event batch", () => {
+  const base = 1780000000;
+  const b = [0x03, base & 0xff, (base >>> 8) & 0xff, (base >>> 16) & 0xff, (base >>> 24) & 0xff, 0x01,
+    0x00, 0x00, 0x00,        // rel 0, activate, rule 0
+    0x4b, 0x00, 0x80,        // rel 75, deactivate, rule 0
+    0x2c, 0x01, 0x7f];       // rel 300, activate, watchdog
+  const r = codec.decodeUplink({ bytes: b, fPort: 4 });
+  assert.deepEqual(r.warnings, []);
+  const d = r.data;
+  assert.equal(d.format, "raw");
+  assert.equal(d.total, 3);
+  assert.deepEqual(d.events[0], { rule: 0, event: "activate", time: base });
+  assert.deepEqual(d.events[1], { rule: 0, event: "deactivate", time: base + 75 });
+  assert.equal(d.events[2].rule, null);
+  assert.equal(d.events[2].source, "watchdog");
+  assert.equal(d.events[2].time, base + 300);
+});
+
+test("fPort-4 raw event batch: unsynced time is null", () => {
+  const d = codec.decodeUplink({ bytes: [0x03, 10, 0, 0, 0, 0x00, 5, 0, 0x01], fPort: 4 }).data;
+  assert.equal(d.time_synced, false);
+  assert.deepEqual(d.events[0], { rule: 1, event: "activate", time: null });
+});
+
+// event_format compact (0x02): AlarmReport with rel_s / edge / rule only.
+test("fPort-4 compact event batch", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(0, 0, 0, 0, 0, null, 2),
+    alarmEvent(0, 0, 1, 0, 75, null, 2),
+  ]);
+  f[0] = 0x02;
+  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  assert.equal(d.format, "compact");
+  assert.deepEqual(d.events[0], { rule: 2, event: "activate", time: base });
+  assert.deepEqual(d.events[1], { rule: 2, event: "deactivate", time: base + 75 });
+});
+
+test("event_format set_param round-trip (alarms 28)", () => {
+  const data = { seq: 30, command: "set_param", set_param: { alarms: { event_format: "raw" } } };
+  const enc = codec.encodeDownlink({ fPort: 85, data });
+  assert.deepEqual(enc.errors || [], []);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.equal(dec.set_param.alarms.event_format, "raw");
+});

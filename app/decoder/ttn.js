@@ -161,11 +161,12 @@ var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_
 var _ALM_NAMES = {
   1: "alarm_limit", 20: "alarm_buzzer_mode", 21: "radio_alarm_ack",
   // Event log (fPort 4): 22..26.
-  22: "event_log_enable", 23: "alarm_send_detail", 24: "alarm_send_report", 27: "log_split",
+  22: "event_log_enable", 23: "alarm_send_detail", 24: "alarm_send_report", 27: "log_split", 28: "event_format",
   25: "event_flush_count", 26: "event_flush_interval"
 };
 var _ALM_ENUMS = {
-  20: ["off", "once", "slow", "normal", "fast", "continuous", "reserved6", "reserved7"]
+  20: ["off", "once", "slow", "normal", "fast", "continuous", "reserved6", "reserved7"],
+  28: ["full", "compact", "raw"]
 };
 var _ALM_FLOAT = {};
 // Dynamic alarm rules alarm_0..alarm_15 = proto fields 3..18, each a packed
@@ -1573,6 +1574,39 @@ var _PROTO_VERSION = 0x01;
 // (byte 1..end) and pushes a warning on an unexpected version (the remainder is
 // still decoded best-effort). fPort 1 (legacy bitmap) and fPort 10 (calibration)
 // are unversioned.
+// Event log compact/raw: the rule index identifies slot/channel/type.
+function _eventCompact(a) {
+  return { rule: a.rule, event: a.event, time: a.time };
+}
+
+// fPort 4 raw: u8 0x03, u32 LE base_time, u8 flags (bit0 synced),
+// 3 B per event: u16 LE rel_s, u8 edge<<7 | rule (126 low battery, 127 watchdog).
+function _decodeEventsRaw(bytes, warnings) {
+  var out = { format: "raw", base_time: 0, time_synced: true, events: [] };
+  if (bytes.length < 6) {
+    warnings.push("raw event batch too short");
+    return out;
+  }
+  out.base_time = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
+  out.time_synced = (bytes[5] & 0x01) !== 0;
+  if ((bytes.length - 6) % 3 !== 0) warnings.push("raw event batch has trailing bytes");
+  for (var i = 6; i + 3 <= bytes.length; i += 3) {
+    var rel = bytes[i] | (bytes[i + 1] << 8);
+    var b = bytes[i + 2];
+    var r = b & 0x7f;
+    var ev = {
+      rule: r < _ALARM_RULE_COUNT ? r : null,
+      event: (b & 0x80) ? "deactivate" : "activate",
+      time: out.time_synced ? out.base_time + rel : null
+    };
+    if (r === 127) ev.source = "watchdog";
+    else if (r === 126) ev.source = "low_battery";
+    out.events.push(ev);
+  }
+  out.total = out.events.length;
+  return out;
+}
+
 function _stripProtoVersion(bytes, warnings) {
   if (!bytes || bytes.length < 1) return bytes;
   if (bytes[0] !== _PROTO_VERSION) {
@@ -1606,6 +1640,18 @@ function decodeUplink(input) {
   // named `events` (not `alarms`) so the batch is told apart by its key.
   if (input.fPort === 4) {
     var w4 = [];
+    // event_format raw (0x03) / compact (0x02): time, event and rule only.
+    if (input.bytes && input.bytes.length > 0 && input.bytes[0] === 0x03) {
+      return { data: _decodeEventsRaw(input.bytes, w4), warnings: w4, errors: [] };
+    }
+    if (input.bytes && input.bytes.length > 0 && input.bytes[0] === 0x02) {
+      var dc = decodeAlarmBatch(input.bytes.slice(1));
+      dc.format = "compact";
+      dc.events = dc.alarms.map(_eventCompact);
+      delete dc.alarms;
+      delete dc.truncated;
+      return { data: dc, warnings: w4, errors: [] };
+    }
     var b4 = _stripProtoVersion(input.bytes, w4);
     var d4 = decodeAlarmBatch(b4);
     d4.events = d4.alarms;

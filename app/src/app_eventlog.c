@@ -18,6 +18,7 @@
 /* Zephyr includes */
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
@@ -146,6 +147,7 @@ static uint8_t m_pend_n;
 /* Upload in progress: a chunk of selected records, paged up front. */
 static struct app_cmd_alarm_event m_tx[EVENTLOG_CHUNK];
 static uint8_t m_tx_page_n[EVENTLOG_CHUNK];
+static uint8_t m_tx_fmt; /* enum app_config_event_format of the loaded chunk */
 static uint16_t m_tx_total;
 static uint16_t m_tx_first;
 static uint8_t m_tx_pages;
@@ -567,6 +569,61 @@ static bool next_abs(uint32_t abs, uint32_t *out)
 	return false;
 }
 
+/* Raw format (fPort 4, version 0x03): u8 version, u32 LE base_time, u8 flags
+ * (bit 0 = time synced), then 3 B per event: u16 LE rel_s, u8 edge << 7 | rule
+ * (0..15, 126 = low battery, 127 = watchdog). */
+#define EVENTLOG_RAW_VERSION 0x03
+#define EVENTLOG_RAW_HDR     6
+#define EVENTLOG_RAW_REC     3
+/* Compact format (version 0x02): AlarmReport with only rel_s / edge / rule. */
+#define EVENTLOG_COMPACT_VERSION 0x02
+
+static uint8_t raw_rule(uint8_t rule)
+{
+	return rule == 0xFF ? 127 : rule == 0xFE ? 126 : (rule & 0x7F);
+}
+
+/* Build one fPort-4 page of n events in the loaded chunk's format. */
+static int page_build(const struct app_cmd_alarm_event *ev, uint8_t n, uint32_t page_index,
+		      uint32_t page_count, uint8_t *buf, size_t cap, size_t *len)
+{
+	if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW) {
+		size_t need = EVENTLOG_RAW_HDR + (size_t)n * EVENTLOG_RAW_REC;
+
+		if (need > cap) {
+			return -EMSGSIZE;
+		}
+		buf[0] = EVENTLOG_RAW_VERSION;
+		sys_put_le32(m_tx_base, &buf[1]);
+		buf[5] = m_tx_synced ? 0x01 : 0x00;
+		for (uint8_t i = 0; i < n; i++) {
+			uint8_t *r = &buf[EVENTLOG_RAW_HDR + i * EVENTLOG_RAW_REC];
+
+			sys_put_le16((uint16_t)ev[i].rel_s, r);
+			r[2] = (uint8_t)((ev[i].edge ? 0x80 : 0x00) | raw_rule(ev[i].rule));
+		}
+		*len = need;
+		return 0;
+	}
+
+	int ret = app_cmd_build_alarm_report(m_tx_base, m_tx_total, m_tx_synced, ev, n,
+					     page_index, page_count, buf, cap, len);
+
+	if (ret == 0 && m_tx_fmt == APP_CONFIG_EVENT_FORMAT_COMPACT) {
+		buf[0] = EVENTLOG_COMPACT_VERSION;
+	}
+	return ret;
+}
+
+/* Events one page may hold in the loaded chunk's format. */
+static uint8_t page_max_events(size_t cap)
+{
+	if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW) {
+		return (uint8_t)MIN((cap - EVENTLOG_RAW_HDR) / EVENTLOG_RAW_REC, UINT8_MAX);
+	}
+	return EVENTLOG_PAGE_EVENTS;
+}
+
 /* Load the next chunk of the running upload into m_tx and lay out its pages.
  * A chunk never mixes synced and unsynced times, nor two unsynced pages (each
  * has its own boot's uptime epoch). Returns the event count. m_lock held. */
@@ -577,6 +634,9 @@ static uint16_t chunk_load(void)
 	bool have_dom = false, dom_synced = false;
 	uint32_t dom_seq = 0;
 	uint32_t abs;
+	uint32_t t_min = UINT32_MAX, t_max = 0;
+
+	m_tx_fmt = (uint8_t)g_app_config.event_format;
 
 	while (n < EVENTLOG_CHUNK && m_up_next_abs < m_up_end_abs &&
 	       next_abs(m_up_next_abs, &abs) && abs < m_up_end_abs) {
@@ -598,6 +658,13 @@ static uint16_t chunk_load(void)
 		if (have_dom && (synced != dom_synced || (!synced && p->seq != dom_seq))) {
 			break; /* next chunk */
 		}
+		/* Raw stamps rel_s on 16 bits: keep a chunk within ~18 h */
+		if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW && n > 0 &&
+		    MAX(t_max, t) - MIN(t_min, t) > UINT16_MAX) {
+			break;
+		}
+		t_min = MIN(t_min, t);
+		t_max = MAX(t_max, t);
 		have_dom = true;
 		dom_synced = synced;
 		dom_seq = p->seq;
@@ -612,6 +679,10 @@ static uint16_t chunk_load(void)
 			.has_value = r.has_value,
 			.value = r.value,
 		};
+		if (m_tx_fmt != APP_CONFIG_EVENT_FORMAT_FULL) {
+			/* time / edge / rule only: the rule index identifies the rest */
+			m_tx[n] = (struct app_cmd_alarm_event){.rule = r.rule, .edge = r.edge};
+		}
 		sel_t[n++] = t;
 		m_up_next_abs = abs + 1;
 	}
@@ -647,13 +718,12 @@ static uint16_t chunk_load(void)
 
 	while (laid < m_tx_total) {
 		size_t len = 0;
-		uint8_t k = MIN(m_tx_total - laid, EVENTLOG_PAGE_EVENTS);
+		uint8_t k = MIN(m_tx_total - laid, page_max_events(cap));
 		int ret = -EMSGSIZE;
 
 		while (k > 0) {
-			ret = app_cmd_build_alarm_report(m_tx_base, m_tx_total, m_tx_synced,
-							 &m_tx[laid], k, EVENTLOG_PAGE_BOUND,
-							 EVENTLOG_PAGE_BOUND, buf, cap, &len);
+			ret = page_build(&m_tx[laid], k, EVENTLOG_PAGE_BOUND, EVENTLOG_PAGE_BOUND,
+					 buf, cap, &len);
 			if (ret == 0) {
 				break;
 			}
@@ -686,11 +756,10 @@ static bool chunk_send(void)
 
 		uint8_t n = m_tx_page_n[m_tx_page];
 		size_t len = 0;
-		int ret = app_cmd_build_alarm_report(m_tx_base, m_tx_total, m_tx_synced,
-						     &m_tx[m_tx_first], n, m_tx_page, m_tx_pages,
-						     buf, sizeof(buf), &len);
+		int ret = page_build(&m_tx[m_tx_first], n, m_tx_page, m_tx_pages, buf,
+				     sizeof(buf), &len);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
+			LOG_ERR_CALL_FAILED_INT("page_build", ret);
 			break;
 		}
 
