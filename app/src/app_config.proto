@@ -140,6 +140,12 @@ message AppConfigMessage {
             RESERVED_7 = 7;
         }
 
+        enum EventFormat {
+            FULL = 0;
+            COMPACT = 1;
+            RAW = 2;
+        }
+
         reserved 2;
         reserved 19;
         optional uint32 alarm_limit = 1;
@@ -167,6 +173,7 @@ message AppConfigMessage {
         optional uint32 event_flush_count = 25;
         optional uint32 event_flush_interval = 26;
         optional uint32 log_split = 27;
+        optional EventFormat event_format = 28;
     }
 
     message P2P {
