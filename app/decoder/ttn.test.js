@@ -1688,3 +1688,16 @@ test("Response.event_page decodes events with seq and the cursor", () => {
   assert.equal(p.oldest_seq, 1);
   assert.equal(p.events[1].time, base + 9);
 });
+
+// Compact keeps the wire rule: 0xFE = low battery, 0xFF = watchdog (HW frame).
+test("fPort-4 compact system events carry source", () => {
+  const b = [...Buffer.from("AgjH5sjXBhACGgM4/wEaBSABOP8BIAE4iAE=", "base64")];
+  const d = codec.decodeUplink({ fPort: 4, bytes: b }).data;
+  assert.equal(d.events[0].source, "watchdog");
+  assert.equal(d.events[0].rule, null);
+  const bat = [0x02, 0x08, 0x01, 0x1a, 0x03, 0x38, 0xfe, 0x01, 0x1a, 0x02, 0x38, 0x00, 0x20, 0x02];
+  const e = codec.decodeUplink({ fPort: 4, bytes: bat }).data.events;
+  assert.equal(e[0].source, "low_battery");
+  assert.equal(e[1].rule, 0);
+  assert.equal(e[1].source, undefined);
+});

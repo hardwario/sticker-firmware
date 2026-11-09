@@ -1601,6 +1601,8 @@ function decodeAlarmBatch(bytes) {
         // Rules 0..15; the watchdogs (no-data / mismatch 0xFF, battery 0xFE)
         // have none — type and channel say which one fired.
         a.rule = ev.rule < _ALARM_RULE_COUNT ? ev.rule : null;
+        // Wire rule kept (hidden) for the compact view, which has no type.
+        Object.defineProperty(a, "_wire_rule", { value: ev.rule, enumerable: false });
         a.event = _ALARM_EDGES[ev.edge] || "activate";
         a.type = _ALARM_TYPES[ev.type] || "none";
         a.value = ev.value === null ? null
@@ -1653,6 +1655,8 @@ var _PROTO_VERSION = 0x01;
 // Event log compact/raw: the rule index identifies slot/channel/type.
 function _eventCompact(a) {
   var c = { rule: a.rule, event: a.event, time: a.time };
+  if (a._wire_rule === 255) c.source = "watchdog";
+  else if (a._wire_rule === 254) c.source = "low_battery";
   if (a.seq !== undefined) c.seq = a.seq;
   return c;
 }
