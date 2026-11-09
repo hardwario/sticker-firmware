@@ -1156,6 +1156,88 @@ int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
 	return request(&q);
 }
 
+int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
+			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page)
+{
+	struct sel q = {.kind = SEL_TIME, .from = from_unix, .to = to_unix};
+	uint32_t times[EVENTLOG_PAGE_EVENTS];
+	uint32_t seqs[EVENTLOG_PAGE_EVENTS];
+	bool have_dom = false, dom_synced = false;
+	uint32_t dom_page = 0;
+	size_t n = 0;
+
+	max = MIN(max, ARRAY_SIZE(times));
+	memset(page, 0, sizeof(*page));
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (!m_ready) {
+		k_mutex_unlock(&m_lock);
+		return -ENODATA;
+	}
+	page->oldest = oldest_seq();
+	page->next_seq = m_ev_next;
+
+	for (uint16_t i = 0; i < m_nlive; i++) {
+		const struct ev_page *p = &m_pages[i];
+
+		if (p->ev_n == 0 || p->ev_first + p->ev_n <= start_seq) {
+			continue; /* whole page before the cursor */
+		}
+		for (uint8_t k = 0; k < p->nrec; k++) {
+			struct ev_rec r;
+			bool synced;
+
+			if (!rec_is_event(p, k, &r)) {
+				continue;
+			}
+			uint32_t seq = rec_seq(p, k);
+			uint32_t t = rec_time(p, &r, &synced);
+
+			if (seq < start_seq || !sel_match(&q, seq, t, synced)) {
+				continue;
+			}
+			if (n == max ||
+			    (have_dom && (synced != dom_synced || (!synced && p->seq != dom_page)))) {
+				/* Page full: the next one starts here */
+				page->next_seq = seq;
+				page->more = true;
+				goto done;
+			}
+			have_dom = true;
+			dom_synced = synced;
+			dom_page = p->seq;
+			ev[n] = (struct app_cmd_alarm_event){
+				.rule = r.rule,
+				.slot = r.slot,
+				.channel = r.channel,
+				.edge = r.edge,
+				.type = r.type,
+				.sensor_type = r.sensor_type,
+				.has_value = r.has_value,
+				.value = r.value,
+			};
+			times[n] = t;
+			seqs[n++] = seq;
+		}
+	}
+done:
+	k_mutex_unlock(&m_lock);
+
+	uint32_t base = UINT32_MAX;
+
+	for (size_t i = 0; i < n; i++) {
+		base = MIN(base, times[i]);
+	}
+	for (size_t i = 0; i < n; i++) {
+		ev[i].rel_s = times[i] - base;
+		ev[i].seq = (i && seqs[i] != seqs[i - 1] + 1) ? seqs[i] : 0;
+	}
+	page->base_time = n ? base : 0;
+	page->synced = dom_synced;
+	page->seq_first = n ? seqs[0] : page->next_seq;
+	return (int)n;
+}
+
 void app_eventlog_on_clock_sync(uint32_t unix_now)
 {
 	if (!m_ready) {
@@ -1307,6 +1389,23 @@ static int cmd_eventlog_flush(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* eventlog page [start_seq]: what one NFC read returns */
+static int cmd_eventlog_page(const struct shell *sh, size_t argc, char **argv)
+{
+	struct app_cmd_alarm_event ev[6];
+	struct app_eventlog_page pg;
+	uint32_t start = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 0) : 0;
+	int n = app_eventlog_export(start, 0, UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
+
+	shell_print(sh, "n %d first %u oldest %u next %u more %d synced %d base %u", n,
+		    pg.seq_first, pg.oldest, pg.next_seq, pg.more, pg.synced, pg.base_time);
+	for (int i = 0; i < n; i++) {
+		shell_print(sh, "  rule %u edge %u rel %u own_seq %u", ev[i].rule, ev[i].edge,
+			    ev[i].rel_s, ev[i].seq);
+	}
+	return 0;
+}
+
 /* eventlog req time <from> <to> | rng <seq> <count> [...] | seq <seq> [...] */
 static int cmd_eventlog_req(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1338,6 +1437,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_eventlog,
 			       SHELL_CMD_ARG(req, NULL, "Replay: time|rng|seq ...",
 					     cmd_eventlog_req, 3, SEL_MAX_SEQS - 1),
 			       SHELL_CMD(info, NULL, "Event log state.", cmd_eventlog_info),
+			       SHELL_CMD_ARG(page, NULL, "NFC page from [seq].", cmd_eventlog_page,
+					     1, 1),
 			       SHELL_CMD(flush, NULL, "Upload pending events now.",
 					 cmd_eventlog_flush),
 			       SHELL_SUBCMD_SET_END);

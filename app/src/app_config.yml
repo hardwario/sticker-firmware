@@ -265,10 +265,13 @@ commands:
     - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [radio]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [radio]}
-    # Event log PoC: re-send the retained event log (RAM, last 128 edges) whose
-    # time falls in [from_unix, to_unix] as fPort-4 batches. LoRaWAN only (the
-    # handler rejects P2P), like the automatic flush.
+    # Event log PoC: re-send retained events (flash ring) selected by time
+    # window, seq ranges or single seqs as fPort-4 replay batches. LoRaWAN only
+    # (the handler rejects P2P), like the automatic flush.
     - {name: req_events, proto_id: 33, body: ReqEvents, kind: handler, response: none, transports: [radio]}
+    # Event log PoC: NFC read of the retained event log, client-driven like
+    # req_history_page: start_seq cursor, the reply's next_seq / has_more.
+    - {name: req_events_page, proto_id: 34, body: ReqEventsPage, kind: handler, response: none, transports: [nfc, shell]}
     - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
     - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [radio, nfc]}
     - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}

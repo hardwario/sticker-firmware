@@ -258,6 +258,7 @@ var _CMD_NAMES = {
   31: "get_settings",
   32: "get_radio_state",
   33: "req_events",
+  34: "req_events_page",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -784,6 +785,16 @@ function _decodeHistoryFrame(bytes, start, end) {
   return hf;
 }
 
+// Event log NFC page (Response.event_page): an AlarmReport with the cursor
+// next_seq / has_more; events as on fPort 4 (full), each with its seq.
+function _decodeEventPage(bytes) {
+  var d = decodeAlarmBatch(bytes);
+  d.events = d.alarms;
+  delete d.alarms;
+  delete d.truncated;
+  return d;
+}
+
 function decodeDownlinkResponse(bytes) {
   var resp = {};
   var pos = 0;
@@ -809,6 +820,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
       else if (field === 14) resp.radio_state = _decodeRadioState(bytes, pos, end); // get_radio_state (#446)
+      else if (field === 15) resp.event_page = _decodeEventPage(bytes.slice(pos, end)); // req_events_page (NFC)
       pos = end;
     } else {
       break;
@@ -1251,6 +1263,11 @@ function encodeDownlinkCommand(cmd) {
     // unix_time set: one-shot RTC bootstrap (normally an NFC-only use case, but
     // encodable here too since the field is transport-agnostic).
     if (b.unix_time) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.unix_time));
+  } else if (name === "req_events_page") {
+    // Event log NFC read: start_seq cursor (the previous page's next_seq).
+    if (b.start_seq) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.start_seq));
+    if (b.from_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.from_unix));
+    if (b.to_unix) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.to_unix));
   } else if (name === "req_history_page") {
     // #260 — NFC-only transport (rejected with NOT_READY over LoRaWAN), encoded
     // here so the same builder can produce a hand-injected NFC payload.
@@ -1426,6 +1443,19 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history_page = rp;
+      } else if (field === 34) { // req_events_page (event log, NFC)
+        var ep = {}, eq = pos;
+        while (eq < end && eq < bytes.length) {
+          var t34 = _pbReadVarint(bytes, eq); eq = t34.next;
+          var f34 = t34.value >>> 3, w34 = t34.value & 0x7;
+          if (w34 === 0) {
+            var v34 = _pbReadVarint(bytes, eq); eq = v34.next;
+            if (f34 === 1) ep.start_seq = v34.value;
+            else if (f34 === 2) ep.from_unix = v34.value;
+            else if (f34 === 3) ep.to_unix = v34.value;
+          } else { break; }
+        }
+        cmd.req_events_page = ep;
       }
       pos = end;
     } else {
@@ -1558,6 +1588,8 @@ function decodeAlarmBatch(bytes) {
       else if (field === 7) out.seq_first = v.value >>> 0;
       else if (field === 8) out.replay = v.value !== 0;
       else if (field === 9) out.oldest_seq = v.value >>> 0;
+      else if (field === 10) out.next_seq = v.value >>> 0;
+      else if (field === 11) out.has_more = v.value !== 0;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;

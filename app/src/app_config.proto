@@ -223,6 +223,7 @@ message Command {
         GetSettings      get_settings      = 31;
         GetRadioState    get_radio_state   = 32;
         ReqEvents        req_events        = 33;
+        ReqEventsPage    req_events_page   = 34;
     }
 // END GENERATED COMMANDS
 
@@ -309,6 +310,15 @@ message Command {
         optional uint32 to_unix   = 2;
         repeated uint32 ranges    = 3;
         repeated uint32 seqs      = 4;
+    }
+    // Event log PoC: NFC paged read of the event log. Client-driven and
+    // stateless like ReqHistoryPage: start_seq (omitted => oldest) is the
+    // cursor, the reply (Response.event_page) gives next_seq / has_more.
+    // from_unix/to_unix bound the window (unsynced events always pass).
+    message ReqEventsPage {
+        optional uint32 start_seq = 1;
+        optional uint32 from_unix = 2;
+        optional uint32 to_unix   = 3;
     }
     // NFC paged history read (#260). Client-driven, stateless: the phone taps
     // repeatedly, passing start_ord = the previous response's next_ord each time,
@@ -422,6 +432,7 @@ message Response {
         ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
         BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
         RadioState     radio_state      = 14;  // get_radio_state: link state + diagnostics (#446)
+        AlarmReport    event_page       = 15;  // req_events_page: event log page (NFC)
     }
 
     // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
@@ -695,6 +706,9 @@ message AlarmReport {
     optional uint32 seq_first  = 7;
     optional bool   replay     = 8;
     optional uint32 oldest_seq = 9;
+    // NFC event page: pass next_seq back as start_seq while has_more.
+    optional uint32 next_seq   = 10;
+    optional bool   has_more   = 11;
 }
 
 message AlarmEvent {

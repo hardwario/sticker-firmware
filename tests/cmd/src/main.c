@@ -3617,3 +3617,44 @@ ZTEST(cmd, test_removed_sensor_ids_are_bad_request)
 	zassert_not_equal(r.which_body, Response_error_tag, "id 28 rejected");
 	zassert_equal(g_app_config.cap_gpio_input_a, APP_CONFIG_GPIO_INPUT_PULSE, "id 28 not set");
 }
+
+/* Event log PoC: req_events_page over NFC returns one AlarmReport page with
+ * the cursor fields; six worst-case events fit one NFC response. */
+ZTEST(cmd, test_req_events_page_nfc)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	/* seq=5, req_events_page (field 34) { start_seq = 10 } */
+	const uint8_t req[] = {0x08, 0x05, 0x92, 0x02, 0x02, 0x08, 0x0a};
+
+	reset_cfg();
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				 &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+	zassert_true(out_len <= 231, "NFC page %u B over one FTM frame", (unsigned)out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.which_body, Response_event_page_tag);
+	const AlarmReport *e = &r.body.event_page;
+
+	zassert_equal(e->events_count, 6);
+	zassert_equal(e->seq_first, 10);
+	zassert_true(e->has_more);
+	zassert_equal(e->next_seq, 0xfffffff0u);
+	zassert_false(e->events[0].has_seq, "first follows seq_first");
+	zassert_true(e->events[1].has_seq);
+
+	/* Not over LoRaWAN */
+	size_t l2 = 0;
+
+	ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, req, sizeof(req), out, sizeof(out), &l2,
+			     &action);
+	is = pb_istream_from_buffer(out + 1, l2 - 1);
+	r = (Response)Response_init_zero;
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.which_body, Response_error_tag);
+}

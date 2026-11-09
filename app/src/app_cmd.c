@@ -1501,6 +1501,63 @@ static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *
 	}
 }
 
+/* Event log PoC: NFC paged read (client-driven, stateless like
+ * req_history_page). One AlarmReport page from start_seq on; the phone passes
+ * next_seq back as start_seq while has_more. */
+static void app_cmd_handle_req_events_page(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_ReqEventsPage *rq = &cmd->body.req_events_page;
+	struct app_eventlog_page pg = {0};
+	/* 6 worst-case events (~30 B each) + the report header stay within the
+	 * DUMP_PAGE_BUDGET_NFC-sized response of one FTM frame. */
+	struct app_cmd_alarm_event ev[MIN(6, ARRAY_SIZE(resp->body.event_page.events))];
+	int ret = app_eventlog_export(rq->has_start_seq ? rq->start_seq : 0,
+				      rq->has_from_unix ? rq->from_unix : 0,
+				      rq->has_to_unix ? rq->to_unix : UINT32_MAX, ev, ARRAY_SIZE(ev),
+				      &pg);
+
+	if (ret < 0) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no event log");
+		return;
+	}
+
+	AlarmReport *r = &resp->body.event_page;
+
+	resp->which_body = Response_event_page_tag;
+	r->base_time = pg.base_time;
+	r->total = (uint32_t)ret;
+	r->has_time_synced = true;
+	r->time_synced = pg.synced;
+	for (int i = 0; i < ret; i++) {
+		AlarmEvent *e = &r->events[i];
+
+		e->rule = ev[i].rule;
+		e->slot = ev[i].slot;
+		e->channel = ev[i].channel;
+		e->edge = (AlarmEvent_Edge)ev[i].edge;
+		e->type = (AlarmEvent_Type)ev[i].type;
+		e->rel_s = ev[i].rel_s;
+		e->has_value = ev[i].has_value;
+		e->value = ev[i].value;
+		e->has_sensor_type = ev[i].slot != 0 && ev[i].sensor_type != 0;
+		e->sensor_type = ev[i].sensor_type;
+		e->has_seq = ev[i].seq != 0;
+		e->seq = ev[i].seq;
+	}
+	r->events_count = (pb_size_t)ret;
+	r->has_seq_first = true;
+	r->seq_first = pg.seq_first;
+	r->has_oldest_seq = true;
+	r->oldest_seq = pg.oldest;
+	r->has_next_seq = true;
+	r->next_seq = pg.next_seq;
+	r->has_has_more = true;
+	r->has_more = pg.more;
+}
+
 /* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
  * streaming), this is client-driven and stateless: each tap returns exactly one
  * HistoryFrame and the phone advances the cursor by passing the response's
@@ -1853,6 +1910,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_req_events(tp, cmd, resp, action);
+		break;
+	case Command_req_events_page_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_events_page(tp, cmd, resp, action);
 		break;
 	case Command_req_history_page_tag:
 		/* transports: [nfc] — reject on any other transport */
