@@ -70,8 +70,11 @@ LOG_MODULE_REGISTER(app_eventlog, LOG_LEVEL_DBG);
 #define EVENTLOG_RETRY_MS       5000
 /* Poll cadence while neither trigger is armed (picks up a config change). */
 #define EVENTLOG_IDLE_POLL_S    60
-/* Edges waiting for the flash writer (alarm context never writes flash). */
-#define EVENTLOG_PENDING        16
+/* Edges waiting for the flash writer (alarm context never writes flash). The
+ * writer runs at the lowest priority, so a burst from a higher-priority thread
+ * (all 16 rules plus no-data watchdogs flipping in one poll) queues up here
+ * before the first record is written: size for that, not for the average. */
+#define EVENTLOG_PENDING        32
 
 struct ev_hdr {
 	uint32_t magic;
