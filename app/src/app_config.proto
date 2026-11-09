@@ -301,7 +301,15 @@ message Command {
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
     // Event log PoC: re-send the retained events in [from_unix, to_unix]
     // (omitted => all) as fPort-4 batches; the batches are the reply.
-    message ReqEvents    { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+    // Event log PoC: re-send retained events (fPort 4, replay). One selector:
+    // from_unix/to_unix (time window), ranges = pairs (seq_from, count), or
+    // seqs = individual event seqs, ascending, first absolute then deltas.
+    message ReqEvents {
+        optional uint32 from_unix = 1;
+        optional uint32 to_unix   = 2;
+        repeated uint32 ranges    = 3;
+        repeated uint32 seqs      = 4;
+    }
     // NFC paged history read (#260). Client-driven, stateless: the phone taps
     // repeatedly, passing start_ord = the previous response's next_ord each time,
     // until the response reports has_more=false. Unlike req_history (LRW,
@@ -681,6 +689,12 @@ message AlarmReport {
     // paging as Response. Absent = the whole batch is in this report.
     uint32 page_index = 5;
     uint32 page_count = 6;
+    // Event log (fPort 4): seq of this report's first event; the next events
+    // follow it by one unless they carry their own AlarmEvent.seq. replay =
+    // answer to req_events; oldest_seq = the oldest event still retained.
+    optional uint32 seq_first  = 7;
+    optional bool   replay     = 8;
+    optional uint32 oldest_seq = 9;
 }
 
 message AlarmEvent {
@@ -726,6 +740,7 @@ message AlarmEvent {
     Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
     uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
     optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
+    optional uint32 seq = 12;    // event log: own seq when not the previous one + 1
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

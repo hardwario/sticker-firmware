@@ -531,3 +531,17 @@ int app_eventlog_request(uint32_t from_unix, uint32_t to_unix)
 	(void)to_unix;
 	return -ENODATA;
 }
+
+int app_eventlog_request_ranges(const uint32_t *pairs, size_t n_pairs)
+{
+	(void)pairs;
+	(void)n_pairs;
+	return -ENODATA;
+}
+
+int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
+{
+	(void)seqs;
+	(void)n;
+	return -ENODATA;
+}

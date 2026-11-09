@@ -1475,10 +1475,26 @@ static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
 	int ret = -ENOTSUP;
 
-	if (tp == APP_CMD_TRANSPORT_LRW) {
+	if (tp != APP_CMD_TRANSPORT_LRW) {
+		/* LoRaWAN only */
+	} else if (rq->ranges_count > 0) {
+		ret = rq->ranges_count % 2 ? -EINVAL
+					   : app_eventlog_request_ranges(rq->ranges,
+									 rq->ranges_count / 2);
+	} else if (rq->seqs_count > 0) {
+		/* First seq absolute, the next ones deltas from the previous */
+		uint32_t seqs[ARRAY_SIZE(rq->seqs)];
+
+		for (pb_size_t i = 0; i < rq->seqs_count; i++) {
+			seqs[i] = i ? seqs[i - 1] + rq->seqs[i] : rq->seqs[0];
+		}
+		ret = app_eventlog_request_seqs(seqs, rq->seqs_count);
+	} else {
 		ret = app_eventlog_request(from, to);
 	}
-	if (ret == -ENODATA) {
+	if (ret == -EINVAL) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "bad selector");
+	} else if (ret == -ENODATA) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no events");
 	} else if (ret != 0) {
 		make_error(resp, Response_Error_Code_NOT_READY, "LoRaWAN only");
@@ -3508,6 +3524,17 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 			       uint32_t page_index, uint32_t page_count, uint8_t *out,
 			       size_t out_cap, size_t *out_len)
 {
+	return app_cmd_build_alarm_report_seq(base_time, total, time_synced, events, n_events,
+					      page_index, page_count, NULL, out, out_cap,
+					      out_len);
+}
+
+int app_cmd_build_alarm_report_seq(uint32_t base_time, uint32_t total, bool time_synced,
+				   const struct app_cmd_alarm_event *events, size_t n_events,
+				   uint32_t page_index, uint32_t page_count,
+				   const struct app_cmd_alarm_seq *sq, uint8_t *out, size_t out_cap,
+				   size_t *out_len)
+{
 	if (!out || !out_len || (n_events > 0 && !events)) {
 		return -EINVAL;
 	}
@@ -3542,8 +3569,19 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 		/* Slot 0 is always the motherboard: no type on the wire (#430). */
 		ev->has_sensor_type = events[i].slot != 0 && events[i].sensor_type != 0;
 		ev->sensor_type = events[i].sensor_type;
+		/* Event log: own seq only where it breaks the +1 run */
+		ev->has_seq = sq != NULL && events[i].seq != 0;
+		ev->seq = events[i].seq;
 	}
 	report.events_count = (pb_size_t)n;
+	if (sq != NULL) {
+		report.has_seq_first = true;
+		report.seq_first = sq->seq_first;
+		report.has_replay = sq->replay;
+		report.replay = sq->replay;
+		report.has_oldest_seq = sq->replay;
+		report.oldest_seq = sq->oldest;
+	}
 
 	/* fPort 3 carries the same 1-byte APP_PROTO_VERSION prefix as fPort 2
 	 * (telemetry) and fPort 85 (responses) so every protobuf uplink frame is

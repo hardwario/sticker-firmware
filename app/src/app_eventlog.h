@@ -47,6 +47,12 @@ void app_eventlog_flush(void);
  * the log is empty, -ENOTSUP outside LoRaWAN. Any thread. */
 int app_eventlog_request(uint32_t from_unix, uint32_t to_unix);
 
+/* req_events by seq: `n_pairs` (seq_from, count) ranges (max 8), or `n` single
+ * seqs (absolute, max 20). A selection with no retained event is answered by
+ * an empty replay page carrying oldest_seq. -EINVAL on a bad count. */
+int app_eventlog_request_ranges(const uint32_t *pairs, size_t n_pairs);
+int app_eventlog_request_seqs(const uint32_t *seqs, size_t n);
+
 /* Events waiting for upload, and events dropped by a ring overflow since boot. */
 uint32_t app_eventlog_pending(void);
 uint32_t app_eventlog_lost(void);

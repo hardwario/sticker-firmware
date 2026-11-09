@@ -43,10 +43,17 @@ LOG_MODULE_REGISTER(app_eventlog, LOG_LEVEL_DBG);
  *
  * What was uploaded is remembered by SENT records (rule 0xFD, value = the
  * absolute ordinal of the first record not uploaded yet), so unsent events
- * survive a reboot. Ordinal = page seq * EV_RPP + record index. */
+ * survive a reboot. Ordinal = page seq * EV_RPP + record index.
+ *
+ * Event seq: every event gets the next number of a global counter that never
+ * restarts. A page header holds the seq of its first event (ev_first); the
+ * following events of the page (every slot but SENT records, torn ones
+ * included) count on by one, so no record grows. A jump in the numbering (an
+ * edge dropped from the pending queue) opens a new page. After a reboot the
+ * counter goes on from the head page's last seq + 1. */
 #define EV_PAGE_SIZE   2048
 #define EV_TOTAL_PAGES (FIXED_PARTITION_SIZE(history_partition) / EV_PAGE_SIZE)
-#define EV_MAGIC       0x45564c31 /* "EVL1" */
+#define EV_MAGIC       0x45564c32 /* "EVL2": header carries ev_first */
 #define EV_HDR_SIZE    16
 #define EV_FIXUP_OFF   EV_HDR_SIZE
 #define EV_DATA_OFF    (EV_HDR_SIZE + 8)
@@ -81,7 +88,7 @@ struct ev_hdr {
 	uint32_t seq;
 	uint8_t synced; /* 1: records carry unix time */
 	uint8_t split;  /* log_split the ring was laid out for */
-	uint8_t rsv[4];
+	uint32_t ev_first; /* seq of the page's first event */
 	uint16_t crc; /* crc16-ccitt over the preceding 14 bytes */
 } __packed;
 BUILD_ASSERT(sizeof(struct ev_hdr) == EV_HDR_SIZE, "event page header must be 16 B");
@@ -111,8 +118,10 @@ BUILD_ASSERT(sizeof(struct ev_rec) == EV_REC_SIZE, "event record must be 16 B");
 struct ev_page {
 	uint32_t seq;
 	uint32_t offset; /* fix-up offset (valid with EVP_FIXED) */
+	uint32_t ev_first; /* seq of the first event */
 	uint16_t phys;
 	uint8_t nrec; /* written records */
+	uint8_t ev_n; /* event slots (records but SENT ones) */
 	uint8_t flags;
 };
 #define EVP_SYNCED   BIT(0) /* records carry unix time */
@@ -135,6 +144,8 @@ static bool m_head_open; /* the head page was opened during this boot */
 
 static uint32_t m_sent_abs; /* first ordinal not uploaded yet */
 static uint32_t m_lost;     /* unsent events overwritten by the ring */
+static uint32_t m_ev_next;  /* seq of the next edge app_eventlog_add() takes */
+static uint32_t m_ev_wr;    /* seq the next written event continues the head with */
 static uint16_t m_unsent;   /* events at/after m_sent_abs */
 static uint16_t m_new;      /* edges since the last flush (count trigger) */
 static bool m_force;
@@ -144,11 +155,13 @@ static int64_t m_last_flush_ms;
 static struct {
 	struct app_cmd_alarm_event ev;
 	int64_t at_ms;
+	uint32_t seq;
 } m_pend[EVENTLOG_PENDING];
 static uint8_t m_pend_n;
 
 /* Upload in progress: a chunk of selected records, paged up front. */
 static struct app_cmd_alarm_event m_tx[EVENTLOG_CHUNK];
+static uint32_t m_tx_seq[EVENTLOG_CHUNK];
 static uint8_t m_tx_page_n[EVENTLOG_CHUNK];
 static uint8_t m_tx_fmt; /* enum app_config_event_format of the loaded chunk */
 static uint16_t m_tx_total;
@@ -161,11 +174,24 @@ static bool m_tx_synced;
 /* Scan cursor of the running upload. */
 static bool m_up_active;
 static bool m_up_replay;
-static uint32_t m_up_from, m_up_to;
 static uint32_t m_up_next_abs; /* next ordinal to look at */
 static uint32_t m_up_end_abs;  /* stop before this ordinal */
+static bool m_up_any; /* the running replay found an event */
+
+/* What a replay selects (req_events). */
+enum sel_kind { SEL_TIME, SEL_RANGES, SEL_SEQS };
+#define SEL_MAX_RANGES 8
+#define SEL_MAX_SEQS   20
+struct sel {
+	uint8_t kind;
+	uint8_t n;
+	uint32_t from, to;              /* SEL_TIME */
+	uint32_t rng[SEL_MAX_RANGES][2]; /* SEL_RANGES: seq_from, count */
+	uint32_t seqs[SEL_MAX_SEQS];    /* SEL_SEQS */
+};
+static struct sel m_up_sel;
 static bool m_req;
-static uint32_t m_req_from, m_req_to;
+static struct sel m_req_sel;
 
 static struct k_work_delayable m_flush_work;
 static struct k_work m_write_work;
@@ -345,7 +371,7 @@ static void mount(void)
 		if (flash_area_read(m_fa, page_off(phys), &h, sizeof(h)) || !hdr_valid(&h)) {
 			continue;
 		}
-		struct ev_page pg = {.seq = h.seq, .phys = phys};
+		struct ev_page pg = {.seq = h.seq, .ev_first = h.ev_first, .phys = phys};
 
 		if (h.synced) {
 			pg.flags |= EVP_SYNCED;
@@ -358,6 +384,14 @@ static void mount(void)
 			pg.flags |= EVP_FIXED;
 		}
 		pg.nrec = scan_nrec(&pg);
+		for (uint8_t k = 0; k < pg.nrec; k++) {
+			struct ev_rec r;
+
+			if (!(read_rec(&pg, k, &r) == 0 && r.mark == EV_REC_MARK &&
+			      r.rule == EV_RULE_SENT)) {
+				pg.ev_n++;
+			}
+		}
 		insert_sorted(&pg);
 		if (h.seq >= m_next_seq) {
 			m_next_seq = h.seq + 1;
@@ -379,13 +413,21 @@ static void mount(void)
 	}
 	m_unsent = count_unsent();
 	m_new = m_unsent;
-	LOG_INF("Event log: %u page(s), %u unsent", m_nlive, m_unsent);
+	/* Seq goes on after the newest event (1 on an empty ring). */
+	m_ev_next = 1;
+	if (m_nlive) {
+		const struct ev_page *hd = &m_pages[m_nlive - 1];
+
+		m_ev_next = MAX(hd->ev_first + hd->ev_n, 1);
+	}
+	m_ev_wr = m_ev_next;
+	LOG_INF("Event log: %u page(s), %u unsent, next seq %u", m_nlive, m_unsent, m_ev_next);
 }
 
 /* ---- append (writer work only) ------------------------------------------- */
 
 /* Open a new head page (the oldest is erased when the ring is full). */
-static int open_page(void)
+static int open_page(uint32_t ev_first)
 {
 	uint16_t phys = (m_last_phys + 1) % m_npages;
 
@@ -422,16 +464,17 @@ static int open_page(void)
 		.seq = m_next_seq,
 		.synced = now_unix(&u) ? 1 : 0,
 		.split = split_pct(),
+		.ev_first = ev_first,
 	};
 
-	memset(h.rsv, 0xFF, sizeof(h.rsv));
 	hdr_crc_set(&h);
 	ret = ev_write(page_off(phys), &h, sizeof(h));
 	if (ret) {
 		return ret;
 	}
 
-	struct ev_page pg = {.seq = m_next_seq, .phys = phys, .flags = EVP_CUR_BOOT};
+	struct ev_page pg = {
+		.seq = m_next_seq, .ev_first = ev_first, .phys = phys, .flags = EVP_CUR_BOOT};
 
 	if (h.synced) {
 		pg.flags |= EVP_SYNCED;
@@ -446,10 +489,17 @@ static int open_page(void)
 	return 0;
 }
 
-static int append(const struct ev_rec *in)
+/* Append a record; an event takes `seq` (ignored for SENT records). */
+static int append(const struct ev_rec *in, uint32_t seq)
 {
-	if (!m_head_open || m_nlive == 0 || m_pages[m_nlive - 1].nrec >= EV_RPP) {
-		int ret = open_page();
+	bool event = in->rule != EV_RULE_SENT;
+
+	if (!m_head_open || m_nlive == 0 || m_pages[m_nlive - 1].nrec >= EV_RPP ||
+	    (event && seq != m_ev_wr)) {
+		if (event && seq != m_ev_wr) {
+			LOG_WRN("Event log: seq %u..%u missing", m_ev_wr, seq - 1);
+		}
+		int ret = open_page(event ? seq : m_ev_wr);
 
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("open_page", ret);
@@ -464,6 +514,10 @@ static int append(const struct ev_rec *in)
 	int ret = ev_write(page_off(h->phys) + EV_DATA_OFF + h->nrec * EV_REC_SIZE, &r, sizeof(r));
 
 	h->nrec++; /* a failed write leaves a torn slot behind; it is skipped */
+	if (event) {
+		h->ev_n++; /* a torn event slot still holds its seq */
+		m_ev_wr = seq + 1;
+	}
 	return ret;
 }
 
@@ -520,7 +574,7 @@ static void write_work_handler(struct k_work *work)
 			.has_value = e->has_value,
 		};
 
-		if (append(&r) == 0) {
+		if (append(&r, m_pend[i].seq) == 0) {
 			m_unsent++;
 		}
 	}
@@ -572,12 +626,76 @@ static bool next_abs(uint32_t abs, uint32_t *out)
 	return false;
 }
 
-/* Raw format (fPort 4, version 0x03): u8 version, u32 LE base_time, u8 flags
- * (bit 0 = time synced), then 3 B per event: u16 LE rel_s, u8 edge << 7 | rule
- * (0..15, 126 = low battery, 127 = watchdog). */
+/* Seq of record `idx` on page `p`: ev_first + the event slots before it. The
+ * upload walks records in order, so the last answer is cached. m_lock held. */
+static uint32_t rec_seq(const struct ev_page *p, uint8_t idx)
+{
+	static uint32_t c_page = UINT32_MAX;
+	static uint8_t c_idx;
+	static uint32_t c_val;
+	uint8_t k = 0;
+	uint32_t v = p->ev_first;
+
+	if (c_page == p->seq && c_idx <= idx) {
+		k = c_idx;
+		v = c_val;
+	}
+	for (; k < idx; k++) {
+		struct ev_rec r;
+
+		if (!(read_rec(p, k, &r) == 0 && r.mark == EV_REC_MARK &&
+		      r.rule == EV_RULE_SENT)) {
+			v++;
+		}
+	}
+	c_page = p->seq;
+	c_idx = idx;
+	c_val = v;
+	return v;
+}
+
+/* Oldest retained seq (the next one when the ring holds no event). */
+static uint32_t oldest_seq(void)
+{
+	return m_nlive ? m_pages[0].ev_first : m_ev_next;
+}
+
+/* Does the running replay want this event? */
+static bool sel_match(const struct sel *q, uint32_t seq, uint32_t t, bool synced)
+{
+	switch (q->kind) {
+	case SEL_RANGES:
+		for (uint8_t i = 0; i < q->n; i++) {
+			if (seq >= q->rng[i][0] && seq - q->rng[i][0] < q->rng[i][1]) {
+				return true;
+			}
+		}
+		return false;
+	case SEL_SEQS:
+		for (uint8_t i = 0; i < q->n; i++) {
+			if (q->seqs[i] == seq) {
+				return true;
+			}
+		}
+		return false;
+	default:
+		/* Unsynced times cannot be compared: always sent */
+		return !synced || (t >= q->from && t <= q->to);
+	}
+}
+
+/* Raw format (fPort 4, version 0x03): u8 version, u32 LE base_time, u8 flags,
+ * u32 LE seq_first, [u32 LE oldest_seq when replay], then per event: u16 LE
+ * rel_s, u8 edge << 7 | rule (0..15, 126 = low battery, 127 = watchdog),
+ * [u8 seq delta from the previous event when flag bit 2]. Flags: bit 0 = time
+ * synced, bit 1 = replay, bit 2 = per-event seq delta. */
 #define EVENTLOG_RAW_VERSION 0x03
-#define EVENTLOG_RAW_HDR     6
+#define EVENTLOG_RAW_HDR     10
+#define EVENTLOG_RAW_HDR_RP  14
 #define EVENTLOG_RAW_REC     3
+#define EVENTLOG_RAW_F_SYNC  BIT(0)
+#define EVENTLOG_RAW_F_RP    BIT(1)
+#define EVENTLOG_RAW_F_DELTA BIT(2)
 /* Compact format (version 0x02): AlarmReport with only rel_s / edge / rule. */
 #define EVENTLOG_COMPACT_VERSION 0x02
 
@@ -586,31 +704,62 @@ static uint8_t raw_rule(uint8_t rule)
 	return rule == 0xFF ? 127 : rule == 0xFE ? 126 : (rule & 0x7F);
 }
 
-/* Build one fPort-4 page of n events in the loaded chunk's format. */
-static int page_build(const struct app_cmd_alarm_event *ev, uint8_t n, uint32_t page_index,
-		      uint32_t page_count, uint8_t *buf, size_t cap, size_t *len)
+/* Build one fPort-4 page of the loaded chunk's events [first, first + n) in
+ * its format (n = 0: an empty replay answer). */
+static int page_build(uint16_t first, uint8_t n, uint32_t page_index, uint32_t page_count,
+		      uint8_t *buf, size_t cap, size_t *len)
 {
+	const struct app_cmd_alarm_event *ev = &m_tx[first];
+	const uint32_t *sq = &m_tx_seq[first];
+	uint32_t seq_first = n ? sq[0] : m_ev_next;
+	bool gaps = false;
+
+	for (uint8_t i = 1; i < n; i++) {
+		gaps |= sq[i] != sq[i - 1] + 1;
+	}
+
 	if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW) {
-		size_t need = EVENTLOG_RAW_HDR + (size_t)n * EVENTLOG_RAW_REC;
+		size_t hdr = m_up_replay ? EVENTLOG_RAW_HDR_RP : EVENTLOG_RAW_HDR;
+		size_t rec = EVENTLOG_RAW_REC + (gaps ? 1 : 0);
+		size_t need = hdr + (size_t)n * rec;
 
 		if (need > cap) {
 			return -EMSGSIZE;
 		}
 		buf[0] = EVENTLOG_RAW_VERSION;
 		sys_put_le32(m_tx_base, &buf[1]);
-		buf[5] = m_tx_synced ? 0x01 : 0x00;
+		buf[5] = (m_tx_synced ? EVENTLOG_RAW_F_SYNC : 0) |
+			 (m_up_replay ? EVENTLOG_RAW_F_RP : 0) | (gaps ? EVENTLOG_RAW_F_DELTA : 0);
+		sys_put_le32(seq_first, &buf[6]);
+		if (m_up_replay) {
+			sys_put_le32(oldest_seq(), &buf[10]);
+		}
 		for (uint8_t i = 0; i < n; i++) {
-			uint8_t *r = &buf[EVENTLOG_RAW_HDR + i * EVENTLOG_RAW_REC];
+			uint8_t *r = &buf[hdr + i * rec];
 
 			sys_put_le16((uint16_t)ev[i].rel_s, r);
 			r[2] = (uint8_t)((ev[i].edge ? 0x80 : 0x00) | raw_rule(ev[i].rule));
+			if (gaps) {
+				uint32_t d = i ? sq[i] - sq[i - 1] : 0;
+
+				if (d > UINT8_MAX) {
+					return -EMSGSIZE; /* split the page here */
+				}
+				r[3] = (uint8_t)d;
+			}
 		}
 		*len = need;
 		return 0;
 	}
 
-	int ret = app_cmd_build_alarm_report(m_tx_base, m_tx_total, m_tx_synced, ev, n,
-					     page_index, page_count, buf, cap, len);
+	/* Own seq only where the +1 run breaks */
+	for (uint8_t i = 0; i < n; i++) {
+		m_tx[first + i].seq = (i && sq[i] != sq[i - 1] + 1) ? sq[i] : 0;
+	}
+	struct app_cmd_alarm_seq aseq = {
+		.seq_first = seq_first, .oldest = oldest_seq(), .replay = m_up_replay};
+	int ret = app_cmd_build_alarm_report_seq(m_tx_base, m_tx_total, m_tx_synced, ev, n,
+						 page_index, page_count, &aseq, buf, cap, len);
 
 	if (ret == 0 && m_tx_fmt == APP_CONFIG_EVENT_FORMAT_COMPACT) {
 		buf[0] = EVENTLOG_COMPACT_VERSION;
@@ -622,7 +771,9 @@ static int page_build(const struct app_cmd_alarm_event *ev, uint8_t n, uint32_t 
 static uint8_t page_max_events(size_t cap)
 {
 	if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW) {
-		return (uint8_t)MIN((cap - EVENTLOG_RAW_HDR) / EVENTLOG_RAW_REC, UINT8_MAX);
+		size_t hdr = m_up_replay ? EVENTLOG_RAW_HDR_RP : EVENTLOG_RAW_HDR;
+
+		return (uint8_t)MIN((cap - hdr) / EVENTLOG_RAW_REC, UINT8_MAX);
 	}
 	return EVENTLOG_PAGE_EVENTS;
 }
@@ -653,8 +804,9 @@ static uint16_t chunk_load(void)
 			continue;
 		}
 		uint32_t t = rec_time(p, &r, &synced);
+		uint32_t seq = rec_seq(p, idx);
 
-		if (m_up_replay && synced && (t < m_up_from || t > m_up_to)) {
+		if (m_up_replay && !sel_match(&m_up_sel, seq, t, synced)) {
 			m_up_next_abs = abs + 1;
 			continue;
 		}
@@ -686,6 +838,7 @@ static uint16_t chunk_load(void)
 			/* time / edge / rule only: the rule index identifies the rest */
 			m_tx[n] = (struct app_cmd_alarm_event){.rule = r.rule, .edge = r.edge};
 		}
+		m_tx_seq[n] = seq;
 		sel_t[n++] = t;
 		m_up_next_abs = abs + 1;
 	}
@@ -697,6 +850,7 @@ static uint16_t chunk_load(void)
 	if (n == 0) {
 		return 0;
 	}
+	m_up_any = true;
 
 	uint32_t base = UINT32_MAX;
 
@@ -725,8 +879,8 @@ static uint16_t chunk_load(void)
 		int ret = -EMSGSIZE;
 
 		while (k > 0) {
-			ret = page_build(&m_tx[laid], k, EVENTLOG_PAGE_BOUND, EVENTLOG_PAGE_BOUND,
-					 buf, cap, &len);
+			ret = page_build(laid, k, EVENTLOG_PAGE_BOUND, EVENTLOG_PAGE_BOUND, buf,
+					 cap, &len);
 			if (ret == 0) {
 				break;
 			}
@@ -759,8 +913,8 @@ static bool chunk_send(void)
 
 		uint8_t n = m_tx_page_n[m_tx_page];
 		size_t len = 0;
-		int ret = page_build(&m_tx[m_tx_first], n, m_tx_page, m_tx_pages, buf,
-				     sizeof(buf), &len);
+		int ret = page_build(m_tx_first, n, m_tx_page, m_tx_pages, buf, sizeof(buf),
+				     &len);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("page_build", ret);
 			break;
@@ -792,17 +946,36 @@ static void mark_sent(uint32_t abs)
 	struct ev_rec r = {.time = now_up_s(), .value = (int32_t)abs, .rule = EV_RULE_SENT};
 
 	m_sent_abs = abs;
-	(void)append(&r);
+	(void)append(&r, 0);
 	/* Edges stored while the batch streamed stay unsent. */
 	m_unsent = count_unsent();
 }
 
-static void up_start(bool replay, uint32_t from, uint32_t to)
+/* A replay that found nothing still answers: an empty page with oldest_seq. */
+static void send_empty_replay(void)
+{
+	uint8_t buf[EVENTLOG_FRAME_MAX];
+	size_t len = 0;
+
+	m_tx_fmt = (uint8_t)g_app_config.event_format;
+	m_tx_total = 0;
+	m_tx_base = 0;
+	m_tx_synced = false;
+	if (page_build(0, 0, 0, 1, buf, sizeof(buf), &len) == 0 &&
+	    app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, APP_EVENTLOG_PORT, buf,
+			       len) == 0) {
+		LOG_INF("Event log replay: nothing selected (oldest seq %u)", oldest_seq());
+	}
+}
+
+static void up_start(bool replay, const struct sel *q)
 {
 	m_up_active = true;
 	m_up_replay = replay;
-	m_up_from = from;
-	m_up_to = to;
+	m_up_any = false;
+	if (q) {
+		m_up_sel = *q;
+	}
 	m_up_next_abs = replay ? (m_nlive ? page_abs(&m_pages[0], 0) : 0) : m_sent_abs;
 	m_up_end_abs = m_nlive ? page_abs(&m_pages[m_nlive - 1], 0) + m_pages[m_nlive - 1].nrec : 0;
 	if (!replay) {
@@ -820,6 +993,8 @@ static bool up_step(void)
 		if (chunk_load() == 0) {
 			if (!m_up_replay) {
 				mark_sent(m_up_end_abs);
+			} else if (!m_up_any) {
+				send_empty_replay();
 			}
 			m_up_active = false;
 			break;
@@ -849,7 +1024,7 @@ static void flush_work_handler(struct k_work *work)
 
 	if (m_req && lorawan) {
 		m_req = false;
-		up_start(true, m_req_from, m_req_to);
+		up_start(true, &m_req_sel);
 		if (up_step()) {
 			next = K_MSEC(EVENTLOG_RETRY_MS);
 			goto out;
@@ -861,7 +1036,7 @@ static void flush_work_handler(struct k_work *work)
 	bool interval_due = interval > 0 && (now - m_last_flush_ms) >= (int64_t)interval * 1000;
 
 	if ((m_force || count_due || interval_due) && m_unsent > 0 && lorawan) {
-		up_start(false, 0, UINT32_MAX);
+		up_start(false, NULL);
 		m_last_flush_ms = now;
 		m_force = false;
 		if (up_step()) {
@@ -895,10 +1070,12 @@ void app_eventlog_add(const struct app_cmd_alarm_event *ev, int64_t at_ms)
 	if (m_pend_n < EVENTLOG_PENDING) {
 		m_pend[m_pend_n].ev = *ev;
 		m_pend[m_pend_n].at_ms = at_ms > 0 ? at_ms : k_uptime_get();
+		m_pend[m_pend_n].seq = m_ev_next;
 		m_pend_n++;
 	} else {
 		m_lost++;
 	}
+	m_ev_next++; /* a dropped edge leaves its seq out: a visible gap */
 	if (m_new < UINT16_MAX) {
 		m_new++;
 	}
@@ -927,23 +1104,56 @@ void app_eventlog_flush(void)
 	k_work_reschedule_for_queue(m_q, &m_flush_work, K_NO_WAIT);
 }
 
-int app_eventlog_request(uint32_t from_unix, uint32_t to_unix)
+static int request(const struct sel *q)
 {
 	if (g_app_config.radio_mode != APP_CONFIG_RADIO_MODE_LORAWAN) {
 		return -ENOTSUP;
 	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	if (!m_ready || m_nlive == 0) {
+	if (!m_ready) {
 		k_mutex_unlock(&m_lock);
 		return -ENODATA;
 	}
 	m_req = true;
-	m_req_from = from_unix;
-	m_req_to = to_unix;
+	m_req_sel = *q;
 	k_mutex_unlock(&m_lock);
 	k_work_reschedule_for_queue(m_q, &m_flush_work, K_NO_WAIT);
 	return 0;
+}
+
+int app_eventlog_request(uint32_t from_unix, uint32_t to_unix)
+{
+	struct sel q = {.kind = SEL_TIME, .from = from_unix, .to = to_unix};
+
+	return request(&q);
+}
+
+int app_eventlog_request_ranges(const uint32_t *pairs, size_t n_pairs)
+{
+	struct sel q = {.kind = SEL_RANGES};
+
+	if (n_pairs == 0 || n_pairs > SEL_MAX_RANGES) {
+		return -EINVAL;
+	}
+	for (size_t i = 0; i < n_pairs; i++) {
+		q.rng[i][0] = pairs[2 * i];
+		q.rng[i][1] = pairs[2 * i + 1];
+	}
+	q.n = (uint8_t)n_pairs;
+	return request(&q);
+}
+
+int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
+{
+	struct sel q = {.kind = SEL_SEQS};
+
+	if (n == 0 || n > SEL_MAX_SEQS) {
+		return -EINVAL;
+	}
+	memcpy(q.seqs, seqs, n * sizeof(seqs[0]));
+	q.n = (uint8_t)n;
+	return request(&q);
 }
 
 void app_eventlog_on_clock_sync(uint32_t unix_now)
@@ -1042,6 +1252,7 @@ int app_eventlog_init(void)
 
 #if defined(CONFIG_SHELL)
 #include <zephyr/shell/shell.h>
+#include <stdlib.h>
 
 static int cmd_eventlog_info(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1050,9 +1261,15 @@ static int cmd_eventlog_info(const struct shell *sh, size_t argc, char **argv)
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	shell_print(sh, "ready %d pages %u live %u unsent %u queued %u lost %u sent_abs %u "
-		    "upload %d replay %d format %d",
+		    "upload %d replay %d format %d seq next %u oldest %u",
 		    m_ready, m_npages, m_nlive, m_unsent, m_pend_n, m_lost, m_sent_abs,
-		    m_up_active, m_up_replay, g_app_config.event_format);
+		    m_up_active, m_up_replay, g_app_config.event_format, m_ev_next,
+		    oldest_seq());
+	for (uint16_t i = 0; i < m_nlive; i++) {
+		shell_print(sh, "  page %u phys %u nrec %u ev %u..%u", m_pages[i].seq,
+			    m_pages[i].phys, m_pages[i].nrec, m_pages[i].ev_first,
+			    m_pages[i].ev_first + m_pages[i].ev_n - 1);
+	}
 	k_mutex_unlock(&m_lock);
 	return 0;
 }
@@ -1067,7 +1284,36 @@ static int cmd_eventlog_flush(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* eventlog req time <from> <to> | rng <seq> <count> [...] | seq <seq> [...] */
+static int cmd_eventlog_req(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t v[MAX(2 * SEL_MAX_RANGES, SEL_MAX_SEQS)];
+	size_t n = argc - 2;
+	int ret;
+
+	if (argc < 3 || n > ARRAY_SIZE(v)) {
+		shell_error(sh, "usage: req time <from> <to> | rng <seq> <count>... | seq <seq>...");
+		return -EINVAL;
+	}
+	for (size_t i = 0; i < n; i++) {
+		v[i] = (uint32_t)strtoul(argv[i + 2], NULL, 0);
+	}
+	if (strcmp(argv[1], "time") == 0 && n == 2) {
+		ret = app_eventlog_request(v[0], v[1]);
+	} else if (strcmp(argv[1], "rng") == 0 && n % 2 == 0) {
+		ret = app_eventlog_request_ranges(v, n / 2);
+	} else if (strcmp(argv[1], "seq") == 0) {
+		ret = app_eventlog_request_seqs(v, n);
+	} else {
+		ret = -EINVAL;
+	}
+	shell_print(sh, "req: %d", ret);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_eventlog,
+			       SHELL_CMD_ARG(req, NULL, "Replay: time|rng|seq ...",
+					     cmd_eventlog_req, 3, SEL_MAX_SEQS - 1),
 			       SHELL_CMD(info, NULL, "Event log state.", cmd_eventlog_info),
 			       SHELL_CMD(flush, NULL, "Upload pending events now.",
 					 cmd_eventlog_flush),

@@ -827,8 +827,8 @@ function buildLayoutFrame(t0, interval, channels, w1Types, samples) {
   if (w1Types) hf = hf.concat(pbLD(11, w1Types));
   return [0x01].concat(pbTV(1, 7)).concat(pbLD(5, hf));
 }
-const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
 const le32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
 
 test("history frame with channels/w1_types decodes any registry channel (#430)", () => {
   // temperature, humidity, s1 temperature (dallas), pir-motion, hall-left-count,
@@ -1562,29 +1562,83 @@ test("req_events downlink encodes and decodes", () => {
   assert.deepEqual(dec.req_events, { from_unix: 1794224900, to_unix: 1794225100 });
 });
 
-// event_format raw (0x03): 6 B header + 3 B per event (time / edge / rule).
+
+// event_format raw (0x03): 10 B header (seq_first) + 3 B per event.
 test("fPort-4 raw event batch", () => {
   const base = 1780000000;
-  const b = [0x03, base & 0xff, (base >>> 8) & 0xff, (base >>> 16) & 0xff, (base >>> 24) & 0xff, 0x01,
-    0x00, 0x00, 0x00,        // rel 0, activate, rule 0
-    0x4b, 0x00, 0x80,        // rel 75, deactivate, rule 0
-    0x2c, 0x01, 0x7f];       // rel 300, activate, watchdog
+  const b = [0x03].concat(le32(base), [0x01], le32(500),
+    [0x00, 0x00, 0x00,        // rel 0, activate, rule 0
+     0x4b, 0x00, 0x80,        // rel 75, deactivate, rule 0
+     0x2c, 0x01, 0x7f]);      // rel 300, activate, watchdog
   const r = codec.decodeUplink({ bytes: b, fPort: 4 });
   assert.deepEqual(r.warnings, []);
   const d = r.data;
   assert.equal(d.format, "raw");
   assert.equal(d.total, 3);
-  assert.deepEqual(d.events[0], { rule: 0, event: "activate", time: base });
-  assert.deepEqual(d.events[1], { rule: 0, event: "deactivate", time: base + 75 });
+  assert.equal(d.seq_first, 500);
+  assert.equal(d.replay, undefined);
+  assert.deepEqual(d.events[0], { seq: 500, rule: 0, event: "activate", time: base });
+  assert.deepEqual(d.events[1], { seq: 501, rule: 0, event: "deactivate", time: base + 75 });
+  assert.equal(d.events[2].seq, 502);
   assert.equal(d.events[2].rule, null);
   assert.equal(d.events[2].source, "watchdog");
   assert.equal(d.events[2].time, base + 300);
 });
 
 test("fPort-4 raw event batch: unsynced time is null", () => {
-  const d = codec.decodeUplink({ bytes: [0x03, 10, 0, 0, 0, 0x00, 5, 0, 0x01], fPort: 4 }).data;
+  const d = codec.decodeUplink({ bytes: [0x03, 10, 0, 0, 0, 0x00].concat(le32(1), [5, 0, 0x01]), fPort: 4 }).data;
   assert.equal(d.time_synced, false);
-  assert.deepEqual(d.events[0], { rule: 1, event: "activate", time: null });
+  assert.deepEqual(d.events[0], { seq: 1, rule: 1, event: "activate", time: null });
+});
+
+// Replay of single seqs: oldest_seq + a seq delta byte per event.
+test("fPort-4 raw replay with seq deltas", () => {
+  const base = 1780000000;
+  const b = [0x03].concat(le32(base), [0x01 | 0x02 | 0x04], le32(40), le32(12),
+    [0, 0, 0x02, 0,      // seq 40
+     10, 0, 0x82, 3,     // seq 43
+     20, 0, 0x02, 200]); // seq 243
+  const r = codec.decodeUplink({ bytes: b, fPort: 4 });
+  assert.deepEqual(r.warnings, []);
+  const d = r.data;
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 12);
+  assert.deepEqual(d.events.map((e) => e.seq), [40, 43, 243]);
+  assert.equal(d.events[1].event, "deactivate");
+  assert.equal(d.events[2].time, base + 20);
+});
+
+// Empty replay answer: nothing selected, only oldest_seq.
+test("fPort-4 raw empty replay", () => {
+  const d = codec.decodeUplink({ bytes: [0x03].concat(le32(0), [0x02], le32(90), le32(30)), fPort: 4 }).data;
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 30);
+  assert.equal(d.events.length, 0);
+});
+
+// Full format: seq_first (7), replay (8), oldest_seq (9), own AlarmEvent.seq (12).
+test("fPort-4 full batch carries seq", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 3, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),
+    alarmEvent(0, 17, 1, 3, 5, 0, 0),
+    alarmEvent(0, 17, 0, 3, 9, 1, 0).concat(pbTV(12, 77)),
+  ]).concat(pbTV(7, 70), pbTV(8, 1), pbTV(9, 3));
+  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  assert.equal(d.seq_first, 70);
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 3);
+  assert.deepEqual(d.events.map((e) => e.seq), [70, 71, 77]);
+});
+
+test("req_events by seq ranges and single seqs round-trip", () => {
+  const e1 = codec.encodeDownlink({ data: { seq: 8, command: "req_events", req_events: { ranges: [[100, 4], [300, 17]] } } });
+  assert.deepEqual(e1.errors || [], []);
+  assert.deepEqual(codec.decodeDownlink({ fPort: 85, bytes: e1.bytes }).data.req_events, { ranges: [[100, 4], [300, 17]] });
+  const e2 = codec.encodeDownlink({ data: { seq: 9, command: "req_events", req_events: { seqs: [1205, 1200, 1300] } } });
+  assert.deepEqual(e2.errors || [], []);
+  assert.deepEqual(codec.decodeDownlink({ fPort: 85, bytes: e2.bytes }).data.req_events, { seqs: [1200, 1205, 1300] });
+  assert.ok(e2.bytes.length <= 51);
 });
 
 // event_format compact (0x02): AlarmReport with rel_s / edge / rule only.
@@ -1595,10 +1649,10 @@ test("fPort-4 compact event batch", () => {
     alarmEvent(0, 0, 1, 0, 75, null, 2),
   ]);
   f[0] = 0x02;
-  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  const d = codec.decodeUplink({ bytes: f.concat(pbTV(7, 9)), fPort: 4 }).data;
   assert.equal(d.format, "compact");
-  assert.deepEqual(d.events[0], { rule: 2, event: "activate", time: base });
-  assert.deepEqual(d.events[1], { rule: 2, event: "deactivate", time: base + 75 });
+  assert.deepEqual(d.events[0], { rule: 2, event: "activate", time: base, seq: 9 });
+  assert.deepEqual(d.events[1], { rule: 2, event: "deactivate", time: base + 75, seq: 10 });
 });
 
 test("event_format set_param round-trip (alarms 28)", () => {
