@@ -1036,3 +1036,38 @@ int app_eventlog_init(void)
 	k_work_schedule_for_queue(m_q, &m_flush_work, K_SECONDS(EVENTLOG_IDLE_POLL_S));
 	return 0;
 }
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+
+static int cmd_eventlog_info(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	shell_print(sh, "ready %d pages %u live %u unsent %u queued %u lost %u sent_abs %u "
+		    "upload %d replay %d format %d",
+		    m_ready, m_npages, m_nlive, m_unsent, m_pend_n, m_lost, m_sent_abs,
+		    m_up_active, m_up_replay, g_app_config.event_format);
+	k_mutex_unlock(&m_lock);
+	return 0;
+}
+
+static int cmd_eventlog_flush(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_eventlog_flush();
+	shell_print(sh, "flush requested");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_eventlog,
+			       SHELL_CMD(info, NULL, "Event log state.", cmd_eventlog_info),
+			       SHELL_CMD(flush, NULL, "Upload pending events now.",
+					 cmd_eventlog_flush),
+			       SHELL_SUBCMD_SET_END);
+SHELL_CMD_REGISTER(eventlog, &sub_eventlog, "Event log (fPort 4).", NULL);
+#endif /* defined(CONFIG_SHELL) */
