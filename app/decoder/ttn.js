@@ -1224,9 +1224,26 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
   } else if (name === "req_events") {
-    // Event log PoC: re-send the retained events in [from_unix, to_unix] (fPort 4).
+    // Event log PoC: re-send retained events (fPort 4) in [from_unix, to_unix],
+    // by seq ranges [[from, count], ...] or by single seqs [s1, s2, ...].
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+    if (b.ranges && b.ranges.length) {
+      var rp = [];
+      for (var ri = 0; ri < b.ranges.length; ri++) {
+        rp = rp.concat(_encVarint(b.ranges[ri][0])).concat(_encVarint(b.ranges[ri][1]));
+      }
+      body = body.concat(_encTag(3, 2)).concat(_encVarint(rp.length)).concat(rp);
+    }
+    if (b.seqs && b.seqs.length) {
+      // Ascending; first absolute, then deltas (1 B each when close).
+      var ss = b.seqs.slice().sort(function (x, y) { return x - y; });
+      var sp = [];
+      for (var si = 0; si < ss.length; si++) {
+        sp = sp.concat(_encVarint(si ? ss[si] - ss[si - 1] : ss[0]));
+      }
+      body = body.concat(_encTag(4, 2)).concat(_encVarint(sp.length)).concat(sp);
+    }
   } else if (name === "clock_sync") {
     // Empty body (LRW): re-sync the RTC from the network (DeviceTimeReq). With
     // unix_time set: one-shot RTC bootstrap (normally an NFC-only use case, but
@@ -1369,6 +1386,17 @@ function decodeDownlinkCommand(bytes) {
             var v33 = _pbReadVarint(bytes, ru); ru = v33.next;
             if (f33 === 1) re.from_unix = v33.value;
             else if (f33 === 2) re.to_unix = v33.value;
+          } else if (w33 === 2) {
+            var l33 = _pbReadVarint(bytes, ru); ru = l33.next;
+            var e33 = ru + l33.value, vals = [];
+            while (ru < e33) { var x33 = _pbReadVarint(bytes, ru); ru = x33.next; vals.push(x33.value); }
+            if (f33 === 3) {
+              re.ranges = [];
+              for (var q = 0; q + 1 < vals.length; q += 2) re.ranges.push([vals[q], vals[q + 1]]);
+            } else if (f33 === 4) {
+              re.seqs = [];
+              for (var q2 = 0; q2 < vals.length; q2++) re.seqs.push(q2 ? re.seqs[q2 - 1] + vals[q2] : vals[0]);
+            }
           } else { break; }
         }
         cmd.req_events = re;
@@ -1500,6 +1528,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 9) ev.type = v.value;
       else if (field === 10) ev.channel = v.value;
       else if (field === 11) ev.sensor_type = v.value; // 1-Wire slot events only
+      else if (field === 12) ev.seq = v.value; // event log: own seq (gap)
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -1510,7 +1539,7 @@ function _decodeAlarmEvent(bytes, start, end) {
 function decodeAlarmBatch(bytes) {
   // time_synced (field 4) absent = old FW = treat as synced (emit timestamps).
   var out = { base_time: 0, total: 0, time_synced: true, alarms: [] };
-  var rels = [];
+  var rels = [], seqs = [];
   var pos = 0;
   while (pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -1523,6 +1552,10 @@ function decodeAlarmBatch(bytes) {
       // #425: page_index (5) / page_count (6), the same paging as Response.
       else if (field === 5) out.page_index = v.value;
       else if (field === 6) out.page_count = v.value;
+      // Event log (fPort 4): seq_first (7), replay (8), oldest_seq (9).
+      else if (field === 7) out.seq_first = v.value >>> 0;
+      else if (field === 8) out.replay = v.value !== 0;
+      else if (field === 9) out.oldest_seq = v.value >>> 0;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
@@ -1543,6 +1576,7 @@ function decodeAlarmBatch(bytes) {
         if (mismatch && ev.value !== null) a.detected_type = _W1_SLOT_TYPES[ev.value] || ("type" + ev.value);
         out.alarms.push(a);
         rels.push(ev.rel_s);
+        seqs.push(ev.seq);
       }
       pos = endE;
     } else { break; }
@@ -1552,6 +1586,14 @@ function decodeAlarmBatch(bytes) {
   // clock had not synced at window start (L-3/L-4): base_time is uptime-relative.
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
+  }
+  // Event log seq: seq_first, then previous + 1 unless the event has its own.
+  if (out.seq_first !== undefined) {
+    var sq = out.seq_first;
+    for (var j = 0; j < out.alarms.length; j++) {
+      if (j > 0) sq = seqs[j] !== undefined ? seqs[j] : sq + 1;
+      out.alarms[j].seq = sq;
+    }
   }
   // total counts every alarm in the window. A batch split across frames (#425)
   // is labelled "i/N"; its pages share base_time and total, and each decodes on
@@ -1576,25 +1618,48 @@ var _PROTO_VERSION = 0x01;
 // are unversioned.
 // Event log compact/raw: the rule index identifies slot/channel/type.
 function _eventCompact(a) {
-  return { rule: a.rule, event: a.event, time: a.time };
+  var c = { rule: a.rule, event: a.event, time: a.time };
+  if (a.seq !== undefined) c.seq = a.seq;
+  return c;
 }
 
-// fPort 4 raw: u8 0x03, u32 LE base_time, u8 flags (bit0 synced),
-// 3 B per event: u16 LE rel_s, u8 edge<<7 | rule (126 low battery, 127 watchdog).
+// fPort 4 raw: u8 0x03, u32 LE base_time, u8 flags, u32 LE seq_first,
+// [u32 LE oldest_seq when replay], then per event: u16 LE rel_s,
+// u8 edge<<7 | rule (126 low battery, 127 watchdog), [u8 seq delta].
+// flags: bit0 synced, bit1 replay, bit2 per-event seq delta.
+function _u32le(b, i) {
+  return (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) >>> 0;
+}
 function _decodeEventsRaw(bytes, warnings) {
   var out = { format: "raw", base_time: 0, time_synced: true, events: [] };
-  if (bytes.length < 6) {
+  if (bytes.length < 10) {
     warnings.push("raw event batch too short");
     return out;
   }
-  out.base_time = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
-  out.time_synced = (bytes[5] & 0x01) !== 0;
-  if ((bytes.length - 6) % 3 !== 0) warnings.push("raw event batch has trailing bytes");
-  for (var i = 6; i + 3 <= bytes.length; i += 3) {
+  var fl = bytes[5];
+  out.base_time = _u32le(bytes, 1);
+  out.time_synced = (fl & 0x01) !== 0;
+  out.seq_first = _u32le(bytes, 6);
+  var i = 10;
+  if (fl & 0x02) {
+    out.replay = true;
+    if (bytes.length < 14) {
+      warnings.push("raw replay header too short");
+      return out;
+    }
+    out.oldest_seq = _u32le(bytes, 10);
+    i = 14;
+  }
+  var rec = (fl & 0x04) ? 4 : 3;
+  if ((bytes.length - i) % rec !== 0) warnings.push("raw event batch has trailing bytes");
+  var sq = out.seq_first;
+  for (var k = 0; i + rec <= bytes.length; i += rec, k++) {
     var rel = bytes[i] | (bytes[i + 1] << 8);
     var b = bytes[i + 2];
     var r = b & 0x7f;
+    if (k > 0) sq += rec === 4 ? bytes[i + 3] : 1;
     var ev = {
+      seq: sq,
       rule: r < _ALARM_RULE_COUNT ? r : null,
       event: (b & 0x80) ? "deactivate" : "activate",
       time: out.time_synced ? out.base_time + rel : null
