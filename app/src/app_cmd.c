@@ -11,6 +11,7 @@
 #include "app_buzzer.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_eventlog.h"
 #include "app_counters.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -687,6 +688,12 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 18, 21, false, false},
 	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	{DUMP_SECTION_ALARMS, 21, 3, false, false},
+	{DUMP_SECTION_ALARMS, 22, 3, false, false},
+	{DUMP_SECTION_ALARMS, 23, 3, false, false},
+	{DUMP_SECTION_ALARMS, 24, 3, false, false},
+	{DUMP_SECTION_ALARMS, 25, 4, false, false},
+	{DUMP_SECTION_ALARMS, 26, 5, false, false},
+	{DUMP_SECTION_ALARMS, 27, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},
@@ -1447,6 +1454,28 @@ static void history_frame_layout(Response_HistoryFrame *hf, const struct app_his
 }
 #endif
 
+/* Event log PoC: re-send the retained events as fPort-4 batches. Like
+ * req_history the batches are the reply (which_body stays 0); only when nothing
+ * can be sent does the host get an Error. */
+static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_ReqEvents *rq = &cmd->body.req_events;
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	int ret = -ENOTSUP;
+
+	if (tp == APP_CMD_TRANSPORT_LRW) {
+		ret = app_eventlog_request(from, to);
+	}
+	if (ret == -ENODATA) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no events");
+	} else if (ret != 0) {
+		make_error(resp, Response_Error_Code_NOT_READY, "LoRaWAN only");
+	}
+}
+
 /* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
  * streaming), this is client-driven and stateless: each tap returns exactly one
  * HistoryFrame and the phone advances the cursor by passing the response's
@@ -1791,6 +1820,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
+		break;
+	case Command_req_events_tag:
+		/* transports: [lrw, p2p] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_events(tp, cmd, resp, action);
 		break;
 	case Command_req_history_page_tag:
 		/* transports: [nfc] — reject on any other transport */

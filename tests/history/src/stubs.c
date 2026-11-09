@@ -19,3 +19,9 @@ int app_clock_get_unix(uint32_t *unix_s)
 	*unix_s = test_clock_unix;
 	return 0;
 }
+
+/* Event log: no flash taken from history in this test. */
+uint16_t app_eventlog_flash_pages(void)
+{
+	return 0;
+}

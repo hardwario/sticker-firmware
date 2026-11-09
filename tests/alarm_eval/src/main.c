@@ -39,6 +39,7 @@ extern size_t test_alarm_max_events;
 extern int32_t test_radio_data_hold_ms;
 extern uint32_t test_radio_alarm_free;
 extern size_t test_alarm_frames;
+extern size_t test_eventlog_adds;
 extern bool test_w1_configured[APP_W1_SLOT_COUNT];
 extern enum app_w1_slot_state test_w1_state[APP_W1_SLOT_COUNT];
 extern uint8_t test_w1_expected[APP_W1_SLOT_COUNT];
@@ -57,6 +58,10 @@ static void before(void *unused)
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
 	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	/* Event log off, immediate alarm uplinks on: the shipped defaults. */
+	g_app_config.event_log_enable = false;
+	g_app_config.alarm_send_detail = true;
+	g_app_config.alarm_send_report = true;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
@@ -540,7 +545,6 @@ ZTEST(alarm_eval, test_rt_sync_resets_latch_on_same_source_rule_edit)
  * only AFTER rt_sync() already zeroed rt->active for exactly that transition
  * (they can never see the pre-reset latch). Without the emission, a backend
  * pairing activate/deactivate edges is left with a dangling activate. */
-
 
 static void activate_threshold_slot0(void)
 {
@@ -1679,6 +1683,39 @@ ZTEST(alarm_eval, test_momentary_level_rule_is_motion_state)
 		      count_events(0, 3, 0));
 }
 
+/* "Motion ended" is stamped at the last motion event, not when the quiet dwell
+ * ran out (nor at the later poll that noticed it). */
+ZTEST(alarm_eval, test_motion_ended_backdated_to_last_event)
+{
+	extern size_t test_eventlog_adds;
+	extern int64_t test_eventlog_last_at;
+
+	flush_stale_alarms();
+	g_app_config.event_log_enable = true;
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 1,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+	k_sleep(K_MSEC(200));
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+	int64_t last = k_uptime_get();
+
+	k_sleep(K_MSEC(900)); /* dwell + a late poll */
+	test_eventlog_adds = 0;
+	app_alarm_poll();
+	zassert_equal(test_eventlog_adds, 1, "one 'motion ended' expected");
+	zassert_within(test_eventlog_last_at, last, 20, "ended at %lld, last event at %lld",
+		       test_eventlog_last_at, last);
+}
+
 /* #503 defect 1: a stillness rule whose capability is off never fires. With
  * neither PIR nor the accelerometer on, no motion event can ever end the
  * alarm, so a latch here would hold for the whole boot. */
@@ -1748,4 +1785,40 @@ ZTEST(alarm_eval, test_momentary_zero_level_rule_is_stillness)
 		      count_events(0, 3, 1));
 	zassert_equal(count_events(0, 3, 0), 1, "one 'moving again' expected, got %zu",
 		      count_events(0, 3, 0));
+}
+
+/* Event log PoC, logger mode: every motion-state edge goes to the event log and
+ * none to the fPort 3 batch when alarm_send_detail is off. */
+ZTEST(alarm_eval, test_event_log_logger_mode)
+{
+	flush_stale_alarms();
+	test_alarm_event_count = 0;
+	test_eventlog_adds = 0;
+	g_app_config.event_log_enable = true;
+	g_app_config.alarm_send_detail = false;
+	g_app_config.alarm_send_report = false;
+
+	struct app_alarm_rule r = {
+		.slot = 0,
+		.channel = APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION,
+		.sensor_type = APP_SENSOR_TYPE_MOTHERBOARD,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 1,
+		.dwell = 0.4f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_event(APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION, true);
+	zassert_true(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION), "motion did not fire");
+	k_sleep(K_MSEC(500)); /* dwell with no event */
+	app_alarm_poll();
+	zassert_false(is_active(0, APP_SENSOR_CH_MOTHERBOARD_PIR_MOTION),
+		      "motion state did not end after a quiet dwell");
+	k_sleep(K_MSEC(10));
+
+	zassert_equal(test_eventlog_adds, 2, "start + end expected in the log, got %zu",
+		      test_eventlog_adds);
+	zassert_equal(test_alarm_event_count, 0, "no fPort 3 event expected, got %zu",
+		      test_alarm_event_count);
 }

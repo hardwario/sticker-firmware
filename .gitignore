@@ -5,3 +5,4 @@ __pycache__/
 /app/deploy/
 build/
 twister-out/
+app/decoder/ttn.min.js

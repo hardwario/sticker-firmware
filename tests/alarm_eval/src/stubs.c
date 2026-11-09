@@ -19,6 +19,7 @@
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_eventlog.h"
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_report.h"
@@ -146,6 +147,17 @@ int app_radio_send_alarm(const uint8_t *buf, size_t len)
 
 void app_report_trigger(void)
 {
+}
+
+/* Event log (#event-log PoC): edges are counted, nothing is stored. */
+size_t test_eventlog_adds;
+int64_t test_eventlog_last_at;
+
+void app_eventlog_add(const struct app_cmd_alarm_event *ev, int64_t at_ms)
+{
+	ARG_UNUSED(ev);
+	test_eventlog_adds++;
+	test_eventlog_last_at = at_ms;
 }
 
 /* ---- alarm-report encoding: alarm_batch_flush() calls this unconditionally

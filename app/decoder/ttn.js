@@ -159,9 +159,14 @@ var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "s
 var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_rom: 14 };
 
 var _ALM_NAMES = {
-  1: "alarm_limit"
+  1: "alarm_limit", 20: "alarm_buzzer_mode", 21: "radio_alarm_ack",
+  // Event log (fPort 4): 22..26.
+  22: "event_log_enable", 23: "alarm_send_detail", 24: "alarm_send_report", 27: "log_split",
+  25: "event_flush_count", 26: "event_flush_interval"
 };
-var _ALM_ENUMS = {};
+var _ALM_ENUMS = {
+  20: ["off", "once", "slow", "normal", "fast", "continuous", "reserved6", "reserved7"]
+};
 var _ALM_FLOAT = {};
 // Dynamic alarm rules alarm_0..alarm_15 = proto fields 3..18, each a packed
 // 18-byte rule carried as native bytes (presented/authored as a 36-char hex
@@ -251,6 +256,7 @@ var _CMD_NAMES = {
   30: "get_basic_info",
   31: "get_settings",
   32: "get_radio_state",
+  33: "req_events",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -1036,6 +1042,7 @@ function _applyTelemetryPages(d) {
 //   { "command": "reset_counters", "hall_left": true, "input_a": true }
 //   { "command": "get_config", "page": 0 }
 //   { "command": "req_history", "from_unix": 1780000000, "to_unix": 1780003600 }
+//   { "command": "req_events", "req_events": { "from_unix": 1780000000, "to_unix": 1780003600 } }
 //   { "command": "req_history_page", "req_history_page": { "start_ord": 440 } }
 //                                            // nfc-only transport — rejected over LoRaWAN too
 //   { "command": "get_param", "lorawan_field": [3], "application_field": [4, 7] }
@@ -1215,6 +1222,10 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+  } else if (name === "req_events") {
+    // Event log PoC: re-send the retained events in [from_unix, to_unix] (fPort 4).
+    if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
+    if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
   } else if (name === "clock_sync") {
     // Empty body (LRW): re-sync the RTC from the network (DeviceTimeReq). With
     // unix_time set: one-shot RTC bootstrap (normally an NFC-only use case, but
@@ -1348,6 +1359,18 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history = rh;
+      } else if (field === 33) { // req_events (event log PoC)
+        var re = {}, ru = pos;
+        while (ru < end && ru < bytes.length) {
+          var t33 = _pbReadVarint(bytes, ru); ru = t33.next;
+          var f33 = t33.value >>> 3, w33 = t33.value & 0x7;
+          if (w33 === 0) {
+            var v33 = _pbReadVarint(bytes, ru); ru = v33.next;
+            if (f33 === 1) re.from_unix = v33.value;
+            else if (f33 === 2) re.to_unix = v33.value;
+          } else { break; }
+        }
+        cmd.req_events = re;
       } else if (field === 12) { // clock_sync (empty = network re-sync; unix_time = NFC bootstrap)
         var cs = {}, cp = pos;
         while (cp < end && cp < bytes.length) {
@@ -1576,6 +1599,20 @@ function decodeUplink(input) {
     var w3 = [];
     var b3 = _stripProtoVersion(input.bytes, w3);
     return { data: decodeAlarmBatch(b3), warnings: w3, errors: [] };
+  }
+
+  // fPort 4: event log batch -- the alarm edges logged on the device, the same
+  // AlarmReport layout as fPort 3, uploaded by count / interval. The list is
+  // named `events` (not `alarms`) so the batch is told apart by its key.
+  if (input.fPort === 4) {
+    var w4 = [];
+    var b4 = _stripProtoVersion(input.bytes, w4);
+    var d4 = decodeAlarmBatch(b4);
+    d4.events = d4.alarms;
+    delete d4.alarms;
+    // The log never cuts a batch: every event goes out, paged.
+    delete d4.truncated;
+    return { data: d4, warnings: w4, errors: [] };
   }
 
   // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.

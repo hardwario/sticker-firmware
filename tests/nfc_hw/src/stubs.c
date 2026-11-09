@@ -372,3 +372,11 @@ void app_radio_flash_hold(void)
 void app_radio_flash_release(void)
 {
 }
+
+/* Event log PoC (req_events): nothing retained in the tests. */
+int app_eventlog_request(uint32_t from_unix, uint32_t to_unix)
+{
+	(void)from_unix;
+	(void)to_unix;
+	return -ENODATA;
+}

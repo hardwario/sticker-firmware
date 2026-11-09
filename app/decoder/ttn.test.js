@@ -1503,3 +1503,51 @@ test("lorawan link-check fields: old names still encode (v1.5.0 rename alias)", 
   assert.equal(dec.set_param.lorawan.radio_link_check_interval, 7);
   assert.equal(dec.set_param.lorawan.radio_link_check_fail_rejoin, 4);
 });
+
+// Event log PoC: fPort 4 carries the logged alarm edges in the fPort-3
+// AlarmReport layout (motion start / end of a level rule here).
+test("fPort-4 event log batch: motion start + end", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),  // accel-motion, activate, TRIGGER
+    alarmEvent(0, 17, 1, 3, 75, 0, 0), // accel-motion, deactivate after 75 s
+  ]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  assert.equal(d.alarms, undefined);
+  assert.equal(d.event_log, undefined);
+  assert.equal(d.truncated, undefined);
+  assert.equal(d.total, 2);
+  assert.equal(d.events.length, 2);
+  assert.equal(d.events[0].channel, "accel-motion");
+  assert.equal(d.events[0].event, "activate");
+  assert.equal(d.events[0].time, base);
+  assert.equal(d.events[1].event, "deactivate");
+  assert.equal(d.events[1].time, base + 75);
+});
+
+test("event log config fields encode and decode (alarms 22..26)", () => {
+  const cfg = {
+    event_log_enable: true, alarm_send_detail: false, alarm_send_report: false,
+    event_flush_count: 20, event_flush_interval: 3600,
+  };
+  const data = { seq: 7, command: "set_param", set_param: { alarms: cfg } };
+  const enc = codec.encodeDownlink({ data });
+  assert.deepEqual(enc.errors || [], []);
+  const dec = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  const a = dec.set_param.alarms;
+  assert.equal(a.event_log_enable, 1);
+  assert.equal(a.alarm_send_detail, 0);
+  assert.equal(a.alarm_send_report, 0);
+  assert.equal(a.event_flush_count, 20);
+  assert.equal(a.event_flush_interval, 3600);
+});
+
+// Event log PoC: req_events downlink round-trip.
+test("req_events downlink encodes and decodes", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 7, command: "req_events", req_events: { from_unix: 1794224900, to_unix: 1794225100 } } });
+  assert.deepEqual(enc.errors || [], []);
+  assert.equal(enc.fPort, 85);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.equal(dec.seq, 7);
+  assert.deepEqual(dec.req_events, { from_unix: 1794224900, to_unix: 1794225100 });
+});
