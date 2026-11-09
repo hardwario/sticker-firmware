@@ -1652,3 +1652,29 @@ test("event_format set_param round-trip (alarms 28)", () => {
   const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
   assert.equal(dec.set_param.alarms.event_format, "raw");
 });
+
+// Event log NFC read: req_events_page round-trip and the event_page response.
+test("req_events_page encodes and decodes", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 5, command: "req_events_page", req_events_page: { start_seq: 10 } } });
+  assert.deepEqual(enc.errors || [], []);
+  assert.deepEqual(enc.bytes, [0x08, 0x05, 0x92, 0x02, 0x02, 0x08, 0x0a]);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.deepEqual(dec.req_events_page, { start_seq: 10 });
+});
+
+test("Response.event_page decodes events with seq and the cursor", () => {
+  const base = 1780000000;
+  const rep = buildAlarmReport(base, 2, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),
+    alarmEvent(0, 17, 1, 3, 9, 0, 0).concat(pbTV(12, 50)),
+  ]).slice(1).concat(pbTV(7, 40), pbTV(9, 1), pbTV(10, 51), pbTV(11, 1));
+  const resp = [0x01].concat(pbTV(1, 5), pbLD(15, rep));
+  const d = codec.decodeUplink({ fPort: 85, bytes: resp }).data;
+  const p = d.event_page;
+  assert.ok(p, "event_page");
+  assert.deepEqual(p.events.map((e) => e.seq), [40, 50]);
+  assert.equal(p.next_seq, 51);
+  assert.equal(p.has_more, true);
+  assert.equal(p.oldest_seq, 1);
+  assert.equal(p.events[1].time, base + 9);
+});

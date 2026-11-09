@@ -392,3 +392,54 @@ ZTEST(eventlog, test_request_needs_lorawan)
 	g_app_config.radio_mode = 0;
 	zassert_equal(app_eventlog_request(0, UINT32_MAX), -ENOTSUP);
 }
+
+/* NFC export: pages of `max` events from a seq cursor; next_seq / more walk
+ * the whole log once, seq gaps are flagged per event. */
+ZTEST(eventlog, test_export_paging)
+{
+	for (int i = 0; i < 40; i++) {
+		add(0, i % 2); /* 8 dropped: seqs 33..40 missing */
+	}
+	settle();
+	add_n(5); /* seqs 41..45 */
+
+	struct app_cmd_alarm_event ev[6];
+	struct app_eventlog_page pg;
+	uint32_t cur = 0, seen = 0, last = 0;
+	int pages = 0;
+
+	do {
+		int n = app_eventlog_export(cur, 0, UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
+
+		zassert_true(n >= 0);
+		uint32_t sq = pg.seq_first;
+
+		for (int i = 0; i < n; i++) {
+			if (i) {
+				sq = ev[i].seq ? ev[i].seq : sq + 1;
+			}
+			zassert_true(sq > last, "ascending");
+			if (last == 32) {
+				zassert_equal(sq, 41, "gap kept");
+			}
+			last = sq;
+			seen++;
+		}
+		cur = pg.next_seq;
+		pages++;
+	} while (pg.more && pages < 20);
+
+	zassert_equal(seen, 37);
+	zassert_equal(last, 45);
+	zassert_equal(pg.oldest, 1);
+	zassert_equal(pg.next_seq, 46, "cursor ends at the next seq");
+
+	/* Cursor in the middle, and past the end */
+	int n = app_eventlog_export(44, 0, UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
+
+	zassert_equal(n, 2);
+	zassert_false(pg.more);
+	n = app_eventlog_export(100, 0, UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
+	zassert_equal(n, 0);
+	zassert_equal(pg.seq_first, 46);
+}

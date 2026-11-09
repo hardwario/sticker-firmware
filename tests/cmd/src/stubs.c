@@ -14,6 +14,7 @@
 #include "app_buzzer.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_eventlog.h"
 #include "app_history.h"
 #include "app_radio_lrw.h"
 #include "app_nfc.h"
@@ -544,4 +545,28 @@ int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
 	(void)seqs;
 	(void)n;
 	return -ENODATA;
+}
+
+/* Event log NFC page: six worst-case events (long varints, seq gaps). */
+int test_eventlog_export_n = 6;
+
+int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
+			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page)
+{
+	(void)from_unix;
+	(void)to_unix;
+	int n = MIN((int)max, test_eventlog_export_n);
+
+	for (int i = 0; i < n; i++) {
+		ev[i] = (struct app_cmd_alarm_event){
+			.rule = 15, .slot = 0, .channel = 200, .edge = 1, .type = 5,
+			.has_value = true, .value = -2000000000, .rel_s = 4000000000u,
+			.seq = i ? 0x7fffff00u + i * 2 : 0,
+		};
+	}
+	*page = (struct app_eventlog_page){
+		.base_time = 4000000000u, .seq_first = start_seq, .oldest = 0x7fffff00u,
+		.next_seq = 0xfffffff0u, .synced = true, .more = true,
+	};
+	return n;
 }
