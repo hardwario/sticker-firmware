@@ -29,3 +29,9 @@ void app_radio_flash_hold(void)
 void app_radio_flash_release(void)
 {
 }
+
+/* Event log: no flash taken from history in this test. */
+uint16_t app_eventlog_flash_pages(void)
+{
+	return 0;
+}

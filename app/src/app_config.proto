@@ -161,6 +161,12 @@ message AppConfigMessage {
         optional bytes alarm_15 = 18;
         optional AlarmBuzzerMode alarm_buzzer_mode = 20;
         optional bool radio_alarm_ack = 21;
+        optional bool event_log_enable = 22;
+        optional bool alarm_send_detail = 23;
+        optional bool alarm_send_report = 24;
+        optional uint32 event_flush_count = 25;
+        optional uint32 event_flush_interval = 26;
+        optional uint32 log_split = 27;
     }
 
     message P2P {
@@ -209,6 +215,7 @@ message Command {
         GetBasicInfo     get_basic_info    = 30;
         GetSettings      get_settings      = 31;
         GetRadioState    get_radio_state   = 32;
+        ReqEvents        req_events        = 33;
     }
 // END GENERATED COMMANDS
 
@@ -285,6 +292,9 @@ message Command {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+    // Event log PoC: re-send the retained events in [from_unix, to_unix]
+    // (omitted => all) as fPort-4 batches; the batches are the reply.
+    message ReqEvents    { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
     // NFC paged history read (#260). Client-driven, stateless: the phone taps
     // repeatedly, passing start_ord = the previous response's next_ord each time,
     // until the response reports has_more=false. Unlike req_history (LRW,

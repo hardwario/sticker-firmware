@@ -11,6 +11,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_eventlog.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -443,6 +444,12 @@ int main(void)
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
+	}
+
+	/* Before history: a changed log_split erases the shared partition. */
+	ret = app_eventlog_init();
+	if (ret && ret != -ENOSPC) {
+		LOG_WRN("app_eventlog_init failed: %d (event log unavailable)", ret);
 	}
 
 	ret = app_history_init();

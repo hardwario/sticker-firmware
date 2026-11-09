@@ -4,6 +4,7 @@
   "private": true,
   "description": "STICKER LoRaWAN payload codec (TTN/ChirpStack) + tests",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "build:tts": "terser ttn.js --toplevel -c passes=2 -m 'reserved=[\"decodeUplink\",\"encodeDownlink\",\"decodeDownlink\",\"Decode\",\"Encode\",\"module\"]' -o ttn.min.js"
   }
 }
