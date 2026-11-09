@@ -13,6 +13,7 @@
 #include "app_log.h"
 #include "app_radio_lrw.h"
 #include "app_radio.h"
+#include "app_eventlog.h"
 
 #if defined(CONFIG_RADIO_P2P)
 #include "app_radio_p2p.h"
@@ -1053,6 +1054,11 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
 	case APP_RADIO_TAG_SETTINGS:
 		app_radio_announce_rearm(true);
 		LOG_INF("settings-info re-armed for the deferred announce");
+		return false;
+	case APP_RADIO_TAG_EVENTLOG:
+		/* The DR fell after the batch was laid out: the event log re-sends
+		 * those events (as a replay) laid out for the new budget. */
+		app_eventlog_frame_dropped(tx->buf, tx->len);
 		return false;
 	case APP_RADIO_TAG_CMD_RESPONSE: {
 		uint32_t seq = response_seq(tx);

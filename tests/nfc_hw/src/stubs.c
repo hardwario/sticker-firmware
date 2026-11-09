@@ -380,3 +380,29 @@ int app_eventlog_request(uint32_t from_unix, uint32_t to_unix)
 	(void)to_unix;
 	return -ENODATA;
 }
+
+int app_eventlog_request_ranges(const uint32_t *pairs, size_t n_pairs)
+{
+	(void)pairs;
+	(void)n_pairs;
+	return -ENODATA;
+}
+
+int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
+{
+	(void)seqs;
+	(void)n;
+	return -ENODATA;
+}
+
+int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
+			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page)
+{
+	(void)start_seq;
+	(void)from_unix;
+	(void)to_unix;
+	(void)ev;
+	(void)max;
+	(void)page;
+	return -ENODATA;
+}

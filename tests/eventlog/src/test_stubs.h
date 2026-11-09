@@ -21,6 +21,7 @@ struct test_frame {
 extern struct test_frame test_frames[TEST_FRAMES_MAX];
 extern volatile int test_nframes;
 extern bool test_clock_has;
+extern uint8_t test_budget;
 extern uint32_t test_clock_unix;
 
 #endif /* TEST_STUBS_H_ */

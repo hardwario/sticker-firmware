@@ -167,6 +167,17 @@ static uint8_t m_tx_fmt; /* enum app_config_event_format of the loaded chunk */
 static uint16_t m_tx_total;
 static uint16_t m_tx_first;
 static uint8_t m_tx_pages;
+static bool m_tx_nofit; /* not even one event fits the budget */
+
+/* Pages handed to the radio, to re-send one the radio drops over budget. */
+#define EVENTLOG_SENT_LOG 8
+struct sent_page {
+	uint32_t crc;
+	uint32_t seq_first;
+	uint32_t seq_last;
+};
+static struct sent_page m_sent_log[EVENTLOG_SENT_LOG];
+static uint8_t m_sent_log_wr;
 static uint8_t m_tx_page;
 static uint32_t m_tx_base;
 static bool m_tx_synced;
@@ -773,7 +784,7 @@ static uint8_t page_max_events(size_t cap)
 	if (m_tx_fmt == APP_CONFIG_EVENT_FORMAT_RAW) {
 		size_t hdr = m_up_replay ? EVENTLOG_RAW_HDR_RP : EVENTLOG_RAW_HDR;
 
-		return (uint8_t)MIN((cap - hdr) / EVENTLOG_RAW_REC, UINT8_MAX);
+		return cap <= hdr ? 0 : (uint8_t)MIN((cap - hdr) / EVENTLOG_RAW_REC, UINT8_MAX);
 	}
 	return EVENTLOG_PAGE_EVENTS;
 }
@@ -844,6 +855,7 @@ static uint16_t chunk_load(void)
 	}
 
 	m_tx_total = n;
+	m_tx_nofit = false;
 	m_tx_pages = 0;
 	m_tx_page = 0;
 	m_tx_first = 0;
@@ -887,8 +899,9 @@ static uint16_t chunk_load(void)
 			k--;
 		}
 		if (ret != 0) {
-			LOG_WRN("Event log: %u event(s) do not fit %u B; dropped",
-				m_tx_total - laid, (unsigned)cap);
+			LOG_WRN("Event log: no event fits %u B; upload deferred", (unsigned)cap);
+			m_tx_nofit = true;
+			m_tx_pages = 0;
 			break;
 		}
 		m_tx_page_n[m_tx_pages++] = k;
@@ -920,7 +933,7 @@ static bool chunk_send(void)
 			break;
 		}
 
-		ret = app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER,
+		ret = app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_EVENTLOG,
 					 APP_EVENTLOG_PORT, buf, len);
 		if (ret == -ENOMEM) {
 			return true;
@@ -928,6 +941,12 @@ static bool chunk_send(void)
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_radio_tx_queue", ret);
 		} else {
+			m_sent_log[m_sent_log_wr] = (struct sent_page){
+				.crc = crc32_ieee(buf, len),
+				.seq_first = m_tx_seq[m_tx_first],
+				.seq_last = m_tx_seq[m_tx_first + n - 1],
+			};
+			m_sent_log_wr = (m_sent_log_wr + 1) % EVENTLOG_SENT_LOG;
 			LOG_INF("Event log page %u/%u: events %u..%u of %u (%u B)", m_tx_page + 1,
 				m_tx_pages, m_tx_first + 1, m_tx_first + n, m_tx_total,
 				(unsigned)len);
@@ -990,7 +1009,18 @@ static bool up_step(void)
 		return true;
 	}
 	while (m_up_active) {
-		if (chunk_load() == 0) {
+		uint16_t loaded = chunk_load();
+
+		if (loaded > 0 && m_tx_nofit) {
+			/* Budget too small for one event (e.g. US915 DR0): keep the
+			 * events unsent, the next flush tries again. */
+			m_up_active = false;
+			if (!m_up_replay) {
+				m_new = MAX(m_new, 1);
+			}
+			break;
+		}
+		if (loaded == 0) {
 			if (!m_up_replay) {
 				mark_sent(m_up_end_abs);
 			} else if (!m_up_any) {
@@ -1156,6 +1186,45 @@ int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
 	return request(&q);
 }
 
+void app_eventlog_frame_dropped(const uint8_t *buf, size_t len)
+{
+	uint32_t crc = crc32_ieee(buf, len);
+	bool queued = false;
+	int i;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (i = 0; i < EVENTLOG_SENT_LOG; i++) {
+		if (m_sent_log[i].seq_last != 0 && m_sent_log[i].crc == crc) {
+			break;
+		}
+	}
+	if (i < EVENTLOG_SENT_LOG) {
+		struct sent_page *sp = &m_sent_log[i];
+		uint32_t first = sp->seq_first, cnt = sp->seq_last - sp->seq_first + 1;
+
+		sp->seq_last = 0;
+		/* Several pages dropped in a row join one ranges request. */
+		if (!m_req) {
+			m_req_sel = (struct sel){.kind = SEL_RANGES};
+		}
+		if (m_req_sel.kind == SEL_RANGES && m_req_sel.n < SEL_MAX_RANGES) {
+			m_req_sel.rng[m_req_sel.n][0] = first;
+			m_req_sel.rng[m_req_sel.n][1] = cnt;
+			m_req_sel.n++;
+			m_req = true;
+			queued = true;
+		}
+		LOG_WRN("Event log page seq %u..%u over budget: %s", first, first + cnt - 1,
+			queued ? "replay" : "gap left");
+	} else {
+		LOG_WRN("Event log page over budget: unknown, gap left");
+	}
+	k_mutex_unlock(&m_lock);
+	if (queued) {
+		k_work_reschedule_for_queue(m_q, &m_flush_work, K_NO_WAIT);
+	}
+}
+
 int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
 			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page)
 {
@@ -1304,6 +1373,7 @@ int app_eventlog_init(void)
 	m_force = false;
 	m_req = false;
 	m_up_active = false;
+	memset(m_sent_log, 0, sizeof(m_sent_log));
 	m_tx_pages = 0;
 	m_tx_page = 0;
 	m_last_flush_ms = k_uptime_get();

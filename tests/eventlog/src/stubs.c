@@ -39,9 +39,11 @@ void app_radio_flash_release(void)
 {
 }
 
+uint8_t test_budget; /* 0 = no DR limit: the 64 B slot */
+
 uint8_t app_radio_get_max_payload(void)
 {
-	return 0; /* no DR limit: the 64 B slot */
+	return test_budget;
 }
 
 uint32_t app_radio_tx_answer_free(void)

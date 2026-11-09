@@ -25,6 +25,9 @@
 #define RAW_F_DELTA BIT(2)
 
 struct parsed {
+	bool synced;
+	uint32_t base;
+	uint16_t rel[32];
 	bool replay;
 	bool delta;
 	uint32_t seq_first;
@@ -44,6 +47,8 @@ static void parse(const struct test_frame *f, struct parsed *p)
 		uint8_t fl = f->b[5];
 		size_t i = 10;
 
+		p->synced = fl & RAW_F_SYNC;
+		p->base = sys_get_le32(&f->b[1]);
 		p->replay = fl & RAW_F_RP;
 		p->delta = fl & RAW_F_DELTA;
 		p->seq_first = sys_get_le32(&f->b[6]);
@@ -59,6 +64,7 @@ static void parse(const struct test_frame *f, struct parsed *p)
 			if (p->n) {
 				sq += p->delta ? f->b[i + 3] : 1;
 			}
+			p->rel[p->n] = sys_get_le16(&f->b[i]);
 			p->rule[p->n] = f->b[i + 2] & 0x7f;
 			p->edge[p->n] = f->b[i + 2] >> 7;
 			p->seq[p->n++] = sq;
@@ -145,6 +151,7 @@ static void before(void *f)
 	g_app_config.event_format = APP_CONFIG_EVENT_FORMAT_RAW;
 	set_split(25);
 	test_clock_has = false;
+	test_budget = 0;
 
 	zassert_ok(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa));
 	zassert_ok(flash_area_erase(fa, 0, fa->fa_size));
@@ -442,4 +449,168 @@ ZTEST(eventlog, test_export_paging)
 	n = app_eventlog_export(100, 0, UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
 	zassert_equal(n, 0);
 	zassert_equal(pg.seq_first, 46);
+}
+
+/* Budget below one event (US915 DR0, 11 B): nothing is sent and nothing is
+ * marked sent; a larger budget later uploads every event. */
+ZTEST(eventlog, test_budget_too_small_defers)
+{
+	add_n(5);
+	test_budget = 11;
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 0, "13 B raw page cannot fit 11 B");
+
+	test_budget = 0;
+	app_eventlog_flush();
+	settle();
+	uint32_t s[16];
+	int n = collect(0, s, ARRAY_SIZE(s));
+
+	zassert_equal(n, 5, "all 5 sent later");
+	zassert_equal(s[0], 1);
+	zassert_equal(s[4], 5);
+}
+
+/* Small DR budget lays out small pages (51 B: (51 - 10) / 3 = 13 events). */
+ZTEST(eventlog, test_budget_limits_page)
+{
+	add_n(30);
+	test_budget = 51;
+	app_eventlog_flush();
+	settle();
+	for (int i = 0; i < test_nframes; i++) {
+		zassert_true(test_frames[i].len <= 51, "frame %d: %zu B", i, test_frames[i].len);
+	}
+	zassert_equal(test_nframes, 3, "13 + 13 + 4");
+}
+
+/* The radio drops pages over budget (the DR fell): they come back as one
+ * replay with both ranges. */
+ZTEST(eventlog, test_dropped_pages_replayed)
+{
+	add_n(30);
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 2, "18 + 12");
+	struct test_frame f0 = test_frames[0], f1 = test_frames[1];
+
+	test_budget = 51;
+	app_eventlog_frame_dropped(f0.b, f0.len);
+	app_eventlog_frame_dropped(f1.b, f1.len);
+	app_eventlog_frame_dropped(f1.b, f1.len); /* already handled */
+	settle();
+
+	uint32_t s[40];
+	int n = collect(2, s, ARRAY_SIZE(s));
+	struct parsed p;
+
+	parse(&test_frames[2], &p);
+	zassert_true(p.replay);
+	zassert_equal(n, 30, "all 30 again");
+	zassert_equal(s[0], 1);
+	zassert_equal(s[29], 30);
+	for (int i = 2; i < test_nframes; i++) {
+		zassert_true(test_frames[i].len <= 51);
+	}
+}
+
+#define T_UNIX 1794000000U
+
+static uint32_t up_s(void)
+{
+	return (uint32_t)(k_uptime_get() / 1000);
+}
+
+/* Sync the clock now: unix = T_UNIX at this uptime. */
+static uint32_t clock_sync(void)
+{
+	uint32_t off = T_UNIX - up_s();
+
+	test_clock_has = true;
+	test_clock_unix = T_UNIX;
+	app_eventlog_on_clock_sync(T_UNIX);
+	settle();
+	return off;
+}
+
+/* Never synced: the batch goes out unsynced, stamped with this boot's uptime. */
+ZTEST(eventlog, test_unsynced_batch_uses_uptime)
+{
+	uint32_t up0 = up_s();
+
+	add_n(3);
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 1);
+	struct parsed p;
+
+	parse(&test_frames[0], &p);
+	zassert_false(p.synced, "flag bit0 clear");
+	zassert_true(p.base >= up0 && p.base <= up_s(), "base %u = uptime", p.base);
+	zassert_equal(p.n, 3);
+}
+
+/* Edges before the sync, uploaded after it: unix times by the fix-up. */
+ZTEST(eventlog, test_sync_fixes_this_boot)
+{
+	uint32_t up0 = up_s();
+
+	add_n(3);
+	k_sleep(K_SECONDS(2));
+	uint32_t off = clock_sync();
+
+	add_n(2);
+	app_eventlog_flush();
+	settle();
+	struct parsed p;
+
+	zassert_equal(test_nframes, 1, "one domain, one frame");
+	parse(&test_frames[0], &p);
+	zassert_true(p.synced, "fixed page goes out synced");
+	zassert_equal(p.n, 5);
+	zassert_true(p.base >= up0 + off && p.base <= up0 + off + 1, "base %u", p.base);
+	zassert_true(p.rel[3] >= 2, "post-sync edges 2 s later");
+}
+
+/* The fix-up is in flash: after a reboot the old page keeps unix time. */
+ZTEST(eventlog, test_fixup_survives_reboot)
+{
+	add_n(3);
+	uint32_t off = clock_sync();
+	uint32_t want = (uint32_t)(k_uptime_get() / 1000) + off;
+
+	reboot();
+	test_clock_has = false; /* the new boot is not synced yet */
+	app_eventlog_flush();
+	settle();
+	struct parsed p;
+
+	zassert_equal(test_nframes, 1);
+	parse(&test_frames[0], &p);
+	zassert_true(p.synced, "fix-up read back from flash");
+	zassert_true(p.base + 2 >= want && p.base <= want, "base %u want ~%u", p.base, want);
+}
+
+/* A boot that never synced keeps its uptime; the next boot's synced edges go
+ * in another frame (domains never mix), seq continuous. */
+ZTEST(eventlog, test_unsynced_boot_then_synced_boot)
+{
+	add_n(3);
+	reboot();
+	clock_sync();
+	add_n(2);
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 2, "two time domains");
+	struct parsed a, b;
+
+	parse(&test_frames[0], &a);
+	parse(&test_frames[1], &b);
+	zassert_false(a.synced, "old boot stays uptime");
+	zassert_true(b.synced);
+	zassert_equal(a.seq_first, 1);
+	zassert_equal(a.n, 3);
+	zassert_equal(b.seq_first, 4, "seq continues");
+	zassert_equal(b.n, 2);
 }
