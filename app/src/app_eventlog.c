@@ -1198,11 +1198,34 @@ uint32_t app_eventlog_lost(void)
 
 int app_eventlog_init(void)
 {
-	k_work_queue_init(&m_q_obj);
-	k_work_queue_start(&m_q_obj, m_q_stack, K_THREAD_STACK_SIZEOF(m_q_stack),
-			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
-	k_work_init_delayable(&m_flush_work, flush_work_handler);
-	k_work_init(&m_write_work, write_work_handler);
+	static bool q_started;
+
+	if (!q_started) {
+		k_work_queue_init(&m_q_obj);
+		k_work_queue_start(&m_q_obj, m_q_stack, K_THREAD_STACK_SIZEOF(m_q_stack),
+				   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+		k_work_init_delayable(&m_flush_work, flush_work_handler);
+		k_work_init(&m_write_work, write_work_handler);
+		q_started = true;
+	}
+
+	/* A second init (tests: a simulated reboot) starts from a clean RAM state. */
+	struct k_work_sync sync;
+
+	(void)k_work_cancel_delayable_sync(&m_flush_work, &sync);
+	(void)k_work_flush(&m_write_work, &sync);
+	k_mutex_lock(&m_lock, K_FOREVER);
+	m_ready = false;
+	m_head_open = false;
+	m_pend_n = 0;
+	m_lost = 0;
+	m_force = false;
+	m_req = false;
+	m_up_active = false;
+	m_tx_pages = 0;
+	m_tx_page = 0;
+	m_last_flush_ms = k_uptime_get();
+	k_mutex_unlock(&m_lock);
 
 	if (!IS_ENABLED(CONFIG_APP_HISTORY_FLASH)) {
 		return -ENOTSUP;

@@ -1,0 +1,14 @@
+/* STM32WL flash geometry (2 KB pages, 8 B write unit) and a 16 KB history
+ * partition = 8 pages, like the bench image: log_split 25 % gives the event
+ * log 2 pages, 100 % all 8. */
+&flash0 {
+	erase-block-size = <2048>;
+	write-block-size = <8>;
+
+	partitions {
+		history_partition: partition@100000 {
+			label = "history";
+			reg = <0x00100000 0x00004000>;
+		};
+	};
+};
