@@ -91,8 +91,11 @@ mixed with synced events.
 Every batch is self-contained; a large batch is split into several frames,
 each with its own `seq_first`. A frame never exceeds the current DR budget
 (min of 64 B and the LoRaWAN max payload, e.g. 51 B at EU868 DR0-2). If the DR
-drops after the batch was laid out and the radio refuses a frame, its events are
-re-sent as a replay sized for the new budget. If not even one event fits
+drops after the batch was laid out and the radio refuses a frame, or the radio
+gives a frame up after its retries, its events are re-sent once as a replay
+(sized for the current budget). A re-send that is dropped again is left to the
+receiver (seq gap, `req_events`). These re-sends are queued apart from
+`req_events`, so a downlink request does not cancel them. If not even one event fits
 (US915 DR0, 11 B) the upload waits for the next flush and nothing is marked sent.
 
 ### raw (`event_format raw`, first byte 0x03)
@@ -138,10 +141,14 @@ rest. 8 events per frame.
 ```json
 { "format": "raw", "base_time": 1794254190, "time_synced": true,
   "seq_first": 81, "total": 3,
-  "events": [ { "seq": 81, "rule": 2, "event": "activate",   "time": 1794254190 },
-              { "seq": 82, "rule": 3, "event": "activate",   "time": 1794254192 },
-              { "seq": 83, "rule": 0, "event": "deactivate", "time": 1794254192 } ] }
+  "events": [ { "seq": 81, "rule": 2, "event": "activate",   "time": 1794254190, "rel_s": 0 },
+              { "seq": 82, "rule": 3, "event": "activate",   "time": 1794254192, "rel_s": 2 },
+              { "seq": 83, "rule": 0, "event": "deactivate", "time": 1794254192, "rel_s": 2 } ] }
 ```
+
+An unsynced raw batch has `"time": null`; `base_time` is then that boot's
+uptime and every event carries `"uptime_s"` (= `base_time + rel_s`), so the
+events keep their order and spacing.
 
 A replay adds `"replay": true, "oldest_seq": N`.
 
