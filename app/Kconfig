@@ -175,8 +175,16 @@ config APP_CMD_DEBUG_SHELL
 	  from the given transport (lrw or nfc) and the encoded response
 	  is logged and (for lrw) queued on port 85.
 
+config APP_HISTORY
+	bool "Sensor history store-and-forward"
+	default y
+	help
+	  Disable to drop the history (and the event log) entirely, e.g. in the
+	  provisioning image. History commands then report no data.
+
 config APP_HISTORY_FLASH
 	bool "Persist sensor history in the history_partition flash"
+	depends on APP_HISTORY
 	default y
 	help
 	  Store the sensor history store-and-forward buffer in the dedicated
