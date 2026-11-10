@@ -2099,8 +2099,8 @@ static int cmd_alarm_sim(const struct shell *sh, size_t argc, char **argv)
 		return 0;
 	}
 	if (strcmp(argv[1], "nodata") == 0) {
-		alarm_collect_nodata(argc > 3 ? atoi(argv[3]) : 1, argc > 4 ? atoi(argv[4]) : 0,
-				     0, sys_on);
+		alarm_collect_nodata(argc > 3 ? atoi(argv[3]) : 1, argc > 4 ? atoi(argv[4]) : 0, 0,
+				     sys_on);
 		shell_print(sh, "no-data %s", sys_on ? "activate" : "deactivate");
 		return 0;
 	}

@@ -86,10 +86,10 @@ LOG_MODULE_REGISTER(app_eventlog, LOG_LEVEL_DBG);
 struct ev_hdr {
 	uint32_t magic;
 	uint32_t seq;
-	uint8_t synced; /* 1: records carry unix time */
-	uint8_t split;  /* log_split the ring was laid out for */
+	uint8_t synced;    /* 1: records carry unix time */
+	uint8_t split;     /* log_split the ring was laid out for */
 	uint32_t ev_first; /* seq of the page's first event */
-	uint16_t crc; /* crc16-ccitt over the preceding 14 bytes */
+	uint16_t crc;      /* crc16-ccitt over the preceding 14 bytes */
 } __packed;
 BUILD_ASSERT(sizeof(struct ev_hdr) == EV_HDR_SIZE, "event page header must be 16 B");
 
@@ -117,7 +117,7 @@ BUILD_ASSERT(sizeof(struct ev_rec) == EV_REC_SIZE, "event record must be 16 B");
 
 struct ev_page {
 	uint32_t seq;
-	uint32_t offset; /* fix-up offset (valid with EVP_FIXED) */
+	uint32_t offset;   /* fix-up offset (valid with EVP_FIXED) */
 	uint32_t ev_first; /* seq of the first event */
 	uint16_t phys;
 	uint8_t nrec; /* written records */
@@ -188,18 +188,22 @@ static bool m_up_active;
 static bool m_up_replay;
 static uint32_t m_up_next_abs; /* next ordinal to look at */
 static uint32_t m_up_end_abs;  /* stop before this ordinal */
-static bool m_up_any; /* the running replay found an event */
+static bool m_up_any;          /* the running replay found an event */
 
 /* What a replay selects (req_events). */
-enum sel_kind { SEL_TIME, SEL_RANGES, SEL_SEQS };
+enum sel_kind {
+	SEL_TIME,
+	SEL_RANGES,
+	SEL_SEQS
+};
 #define SEL_MAX_RANGES 8
 #define SEL_MAX_SEQS   20
 struct sel {
 	uint8_t kind;
 	uint8_t n;
-	uint32_t from, to;              /* SEL_TIME */
+	uint32_t from, to;               /* SEL_TIME */
 	uint32_t rng[SEL_MAX_RANGES][2]; /* SEL_RANGES: seq_from, count */
-	uint32_t seqs[SEL_MAX_SEQS];    /* SEL_SEQS */
+	uint32_t seqs[SEL_MAX_SEQS];     /* SEL_SEQS */
 };
 static struct sel m_up_sel;
 static bool m_req;
@@ -660,8 +664,7 @@ static uint32_t rec_seq(const struct ev_page *p, uint8_t idx)
 	for (; k < idx; k++) {
 		struct ev_rec r;
 
-		if (!(read_rec(p, k, &r) == 0 && r.mark == EV_REC_MARK &&
-		      r.rule == EV_RULE_SENT)) {
+		if (!(read_rec(p, k, &r) == 0 && r.mark == EV_REC_MARK && r.rule == EV_RULE_SENT)) {
 			v++;
 		}
 	}
@@ -706,13 +709,13 @@ static bool sel_match(const struct sel *q, uint32_t seq, uint32_t t, bool synced
  * rel_s, u8 edge << 7 | rule (0..15, 126 = low battery, 127 = watchdog),
  * [u8 seq delta from the previous event when flag bit 2]. Flags: bit 0 = time
  * synced, bit 1 = replay, bit 2 = per-event seq delta. */
-#define EVENTLOG_RAW_VERSION 0x03
-#define EVENTLOG_RAW_HDR     10
-#define EVENTLOG_RAW_HDR_RP  14
-#define EVENTLOG_RAW_REC     3
-#define EVENTLOG_RAW_F_SYNC  BIT(0)
-#define EVENTLOG_RAW_F_RP    BIT(1)
-#define EVENTLOG_RAW_F_DELTA BIT(2)
+#define EVENTLOG_RAW_VERSION     0x03
+#define EVENTLOG_RAW_HDR         10
+#define EVENTLOG_RAW_HDR_RP      14
+#define EVENTLOG_RAW_REC         3
+#define EVENTLOG_RAW_F_SYNC      BIT(0)
+#define EVENTLOG_RAW_F_RP        BIT(1)
+#define EVENTLOG_RAW_F_DELTA     BIT(2)
 /* Compact format (version 0x02): AlarmReport with only rel_s / edge / rule. */
 #define EVENTLOG_COMPACT_VERSION 0x02
 
@@ -932,8 +935,7 @@ static bool chunk_send(void)
 
 		uint8_t n = m_tx_page_n[m_tx_page];
 		size_t len = 0;
-		int ret = page_build(m_tx_first, n, m_tx_page, m_tx_pages, buf, sizeof(buf),
-				     &len);
+		int ret = page_build(m_tx_first, n, m_tx_page, m_tx_pages, buf, sizeof(buf), &len);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("page_build", ret);
 			break;
@@ -1284,8 +1286,8 @@ int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix
 			if (seq < start_seq || !sel_match(&q, seq, t, synced)) {
 				continue;
 			}
-			if (n == max ||
-			    (have_dom && (synced != dom_synced || (!synced && p->seq != dom_page)))) {
+			if (n == max || (have_dom && (synced != dom_synced ||
+						      (!synced && p->seq != dom_page)))) {
 				/* Page full: the next one starts here */
 				page->next_seq = seq;
 				page->more = true;
@@ -1456,11 +1458,11 @@ static int cmd_eventlog_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	shell_print(sh, "ready %d pages %u live %u unsent %u queued %u lost %u sent_abs %u "
+	shell_print(sh,
+		    "ready %d pages %u live %u unsent %u queued %u lost %u sent_abs %u "
 		    "upload %d replay %d format %d seq next %u oldest %u",
-		    m_ready, m_npages, m_nlive, m_unsent, m_pend_n, m_lost, m_sent_abs,
-		    m_up_active, m_up_replay, g_app_config.event_format, m_ev_next,
-		    oldest_seq());
+		    m_ready, m_npages, m_nlive, m_unsent, m_pend_n, m_lost, m_sent_abs, m_up_active,
+		    m_up_replay, g_app_config.event_format, m_ev_next, oldest_seq());
 	for (uint16_t i = 0; i < m_nlive; i++) {
 		shell_print(sh, "  page %u phys %u nrec %u ev %u..%u", m_pages[i].seq,
 			    m_pages[i].phys, m_pages[i].nrec, m_pages[i].ev_first,
@@ -1505,7 +1507,8 @@ static int cmd_eventlog_req(const struct shell *sh, size_t argc, char **argv)
 	int ret;
 
 	if (argc < 3 || n > ARRAY_SIZE(v)) {
-		shell_error(sh, "usage: req time <from> <to> | rng <seq> <count>... | seq <seq>...");
+		shell_error(sh,
+			    "usage: req time <from> <to> | rng <seq> <count>... | seq <seq>...");
 		return -EINVAL;
 	}
 	for (size_t i = 0; i < n; i++) {
@@ -1524,14 +1527,12 @@ static int cmd_eventlog_req(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_eventlog,
-			       SHELL_CMD_ARG(req, NULL, "Replay: time|rng|seq ...",
-					     cmd_eventlog_req, 3, SEL_MAX_SEQS - 1),
-			       SHELL_CMD(info, NULL, "Event log state.", cmd_eventlog_info),
-			       SHELL_CMD_ARG(page, NULL, "NFC page from [seq].", cmd_eventlog_page,
-					     1, 1),
-			       SHELL_CMD(flush, NULL, "Upload pending events now.",
-					 cmd_eventlog_flush),
-			       SHELL_SUBCMD_SET_END);
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_eventlog,
+	SHELL_CMD_ARG(req, NULL, "Replay: time|rng|seq ...", cmd_eventlog_req, 3, SEL_MAX_SEQS - 1),
+	SHELL_CMD(info, NULL, "Event log state.", cmd_eventlog_info),
+	SHELL_CMD_ARG(page, NULL, "NFC page from [seq].", cmd_eventlog_page, 1, 1),
+	SHELL_CMD(flush, NULL, "Upload pending events now.", cmd_eventlog_flush),
+	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(eventlog, &sub_eventlog, "Event log (fPort 4).", NULL);
 #endif /* defined(CONFIG_SHELL) */
