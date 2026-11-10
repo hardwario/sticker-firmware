@@ -65,15 +65,15 @@ struct app_eventlog_page {
 	bool more;          /* events at/after next_seq remain */
 };
 
-/* Copy up to `max` retained events with seq >= start_seq (time in [from, to]
- * when synced) into `ev` for a client-driven read (NFC). Events carry rel_s
- * from page->base_time and their own seq where the +1 run breaks. A page never
- * mixes synced and unsynced times. Returns the count or -ENODATA. */
 /* The radio dropped a queued fPort-4 page (over the DR budget, or abandoned
  * after its retries): re-send its events once as a replay. Safe from any
  * thread. */
 void app_eventlog_frame_dropped(const uint8_t *buf, size_t len);
 
+/* Copy up to `max` retained events with seq >= start_seq (time in [from, to]
+ * when synced) into `ev` for a client-driven read (NFC). Events carry rel_s
+ * from page->base_time and their own seq where the +1 run breaks. A page never
+ * mixes synced and unsynced times. Returns the count or -ENODATA. */
 int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
 			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page);
 
