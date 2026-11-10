@@ -1470,9 +1470,9 @@ static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *
 	if (tp != APP_CMD_TRANSPORT_LRW) {
 		/* LoRaWAN only */
 	} else if (rq->ranges_count > 0) {
-		ret = rq->ranges_count % 2 ? -EINVAL
-					   : app_eventlog_request_ranges(rq->ranges,
-									 rq->ranges_count / 2);
+		ret = rq->ranges_count % 2
+			      ? -EINVAL
+			      : app_eventlog_request_ranges(rq->ranges, rq->ranges_count / 2);
 	} else if (rq->seqs_count > 0) {
 		/* First seq absolute, the next ones deltas from the previous */
 		uint32_t seqs[ARRAY_SIZE(rq->seqs)];
@@ -1506,10 +1506,9 @@ static void app_cmd_handle_req_events_page(enum app_cmd_transport tp, const Comm
 	/* 6 worst-case events (~30 B each) + the report header stay within the
 	 * DUMP_PAGE_BUDGET_NFC-sized response of one FTM frame. */
 	struct app_cmd_alarm_event ev[MIN(6, ARRAY_SIZE(resp->body.event_page.events))];
-	int ret = app_eventlog_export(rq->has_start_seq ? rq->start_seq : 0,
-				      rq->has_from_unix ? rq->from_unix : 0,
-				      rq->has_to_unix ? rq->to_unix : UINT32_MAX, ev, ARRAY_SIZE(ev),
-				      &pg);
+	int ret = app_eventlog_export(
+		rq->has_start_seq ? rq->start_seq : 0, rq->has_from_unix ? rq->from_unix : 0,
+		rq->has_to_unix ? rq->to_unix : UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
 
 	if (ret < 0) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no event log");
@@ -3550,8 +3549,7 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 			       size_t out_cap, size_t *out_len)
 {
 	return app_cmd_build_alarm_report_seq(base_time, total, time_synced, events, n_events,
-					      page_index, page_count, NULL, out, out_cap,
-					      out_len);
+					      page_index, page_count, NULL, out, out_cap, out_len);
 }
 
 int app_cmd_build_alarm_report_seq(uint32_t base_time, uint32_t total, bool time_synced,
