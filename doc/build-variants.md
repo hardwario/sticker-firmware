@@ -1,13 +1,17 @@
 # Build variants
 
-CI builds two images:
+CI builds three images:
 
 | Image | Command | Purpose |
 |---|---|---|
 | release | `west build -b sticker app` | Production firmware |
 | debug | `west build -b sticker app -- -DEXTRA_CONF_FILE=debug.conf` | Development: RTT shell, fault dumps |
+| provisioning | `west build -b sticker app -- "-DEXTRA_CONF_FILE=debug.conf;provisioning.conf"` | Production test: debug + 1-Wire, accelerometer, PIR, buzzer |
 
-The provisioning image is no longer built.
+The provisioning image is the debug image with the peripherals needed for the
+production test turned back on (`app/provisioning.conf`): `CONFIG_W1`,
+`CONFIG_LIS2DH`, `CONFIG_APP_PYQ1648`, `CONFIG_APP_BUZZER`. History in RAM is
+cut to 32 B to make room. Everything else in the table below stays off.
 
 ## What the debug image turns off
 
@@ -29,4 +33,5 @@ removed to fit into flash (`app/debug.conf`):
 | Shell extras | `CONFIG_I2C_SHELL=n`, `CONFIG_LORA_SHELL=n`, `CONFIG_SHELL_VT100_COMMANDS=n` | Fewer shell commands |
 | Float printing | `CONFIG_CBPRINTF_FP_SUPPORT=n` | `printk` cannot format floats |
 
-Features that need any of the above must be tested with the release image.
+Features that need any of the above must be tested with the release image
+(1-Wire, accelerometer, PIR and buzzer also with the provisioning image).
