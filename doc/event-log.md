@@ -190,6 +190,42 @@ LoRaWAN.
 4. Seqs not returned while `>= oldest_seq` never existed (dropped in a burst).
 5. Duplicates (replays, repeated uplinks) are identified by seq.
 
+Example (verified on HW): frames with seq 2433..2437 were lost while the device
+was disabled on the network server.
+
+```text
+uplink  fPort 4  seq_first 2430, 3 events        -> expect 2433 next
+uplink  fPort 4  seq_first 2438, 3 events        -> gap 2433..2437 (5)
+downlink fPort 85 08f7038a02051a03811305
+         = { "seq": 503, "command": "req_events", "req_events": { "ranges": [[2433, 5]] } }
+uplink  fPort 4  seq_first 2441, 1 event         (downlink rides on this uplink's RX window)
+uplink  fPort 4  replay, seq_first 2433, 5 events -> gap filled
+```
+
+Receiver sketch (JavaScript, `decodeUplink` from `ttn.js`):
+
+```js
+// state per device: { next: null, missing: [[from, count], ...] }
+function onEventFrame(st, d) {            // d = decodeUplink(...).data, fPort 4
+  if (d.replay) {
+    d.events.forEach(e => fill(st, e.seq));                    // remove from st.missing
+    st.missing = st.missing.filter(([f, n]) => f + n > d.oldest_seq); // evicted = gone
+    return;
+  }
+  if (st.next !== null && d.seq_first > st.next)
+    st.missing.push([st.next, d.seq_first - st.next]);         // lost frame(s)
+  else if (st.next !== null && d.seq_first < st.next && !isDuplicate(st, d))
+    st.missing = [];                                           // new log (log_split change)
+  st.next = d.seq_first + d.events.length;
+}
+// Then, when st.missing is not empty and no request is pending (or it timed out):
+// encodeDownlink({ data: { seq: n, command: "req_events",
+//                          req_events: { ranges: st.missing.slice(0, 8) } } })  -> fPort 85
+```
+
+Retry an unanswered request a few times (the device may not have had an
+uplink to receive it on), then give the range up.
+
 There is no automatic acknowledgement: a LoRaWAN confirmed uplink would only
 confirm delivery to the network server and costs gateway downlink airtime, so
 the PoC relies on seq + `req_events`.
