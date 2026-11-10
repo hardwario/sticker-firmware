@@ -1700,8 +1700,11 @@ function _decodeEventsRaw(bytes, warnings) {
       seq: sq,
       rule: r < _ALARM_RULE_COUNT ? r : null,
       event: (b & 0x80) ? "deactivate" : "activate",
-      time: out.time_synced ? out.base_time + rel : null
+      time: out.time_synced ? out.base_time + rel : null,
+      rel_s: rel
     };
+    // Unsynced batch: base_time is the boot's uptime, keep the event's uptime
+    if (!out.time_synced) ev.uptime_s = out.base_time + rel;
     if (r === 127) ev.source = "watchdog";
     else if (r === 126) ev.source = "low_battery";
     out.events.push(ev);

@@ -614,3 +614,67 @@ ZTEST(eventlog, test_unsynced_boot_then_synced_boot)
 	zassert_equal(b.seq_first, 4, "seq continues");
 	zassert_equal(b.n, 2);
 }
+
+/* A seq jump (pending queue overflow) after a late clock sync opens a synced
+ * page: its records must carry unix time, not this boot's uptime. */
+ZTEST(eventlog, test_seq_jump_after_sync_keeps_unix)
+{
+	add_n(3); /* unsynced head page */
+	clock_sync();
+	for (int i = 0; i < 40; i++) {
+		add(0, i % 2); /* 8 dropped: the next edge jumps */
+	}
+	settle();
+	add_n(2);
+	app_eventlog_flush();
+	settle();
+	zassert_true(test_nframes > 0);
+	for (int i = 0; i < test_nframes; i++) {
+		struct parsed p;
+
+		parse(&test_frames[i], &p);
+		zassert_true(p.synced, "frame %d synced", i);
+		zassert_true(p.base >= T_UNIX - 1000, "frame %d base %u is unix", i, p.base);
+	}
+}
+
+/* A req_events downlink does not replace the re-send of dropped frames. */
+ZTEST(eventlog, test_req_keeps_dropped_replay)
+{
+	add_n(30);
+	app_eventlog_flush();
+	settle();
+	struct test_frame f0 = test_frames[0];
+	int base = test_nframes;
+	uint32_t want = 25;
+
+	app_eventlog_frame_dropped(f0.b, f0.len);
+	zassert_ok(app_eventlog_request_seqs(&want, 1));
+	k_sleep(K_MSEC(6000));
+
+	uint32_t s[40];
+	int n = collect(base, s, ARRAY_SIZE(s));
+
+	zassert_equal(n, 19, "18 dropped + 1 requested, got %d", n);
+	zassert_equal(s[0], 1);
+	zassert_equal(s[17], 18);
+	zassert_equal(s[18], 25);
+}
+
+/* A re-send that is dropped again is not re-sent (no loop on a dead link). */
+ZTEST(eventlog, test_dropped_resend_not_looped)
+{
+	add_n(5);
+	app_eventlog_flush();
+	settle();
+	struct test_frame f0 = test_frames[0];
+
+	app_eventlog_frame_dropped(f0.b, f0.len);
+	settle();
+	zassert_equal(test_nframes, 2, "one re-send");
+	struct test_frame f1 = test_frames[1];
+
+	app_eventlog_frame_dropped(f1.b, f1.len);
+	k_sleep(K_MSEC(6000));
+	zassert_equal(test_nframes, 2, "not re-sent again");
+}

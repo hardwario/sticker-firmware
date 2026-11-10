@@ -1577,18 +1577,18 @@ test("fPort-4 raw event batch", () => {
   assert.equal(d.total, 3);
   assert.equal(d.seq_first, 500);
   assert.equal(d.replay, undefined);
-  assert.deepEqual(d.events[0], { seq: 500, rule: 0, event: "activate", time: base });
-  assert.deepEqual(d.events[1], { seq: 501, rule: 0, event: "deactivate", time: base + 75 });
+  assert.deepEqual(d.events[0], { seq: 500, rule: 0, event: "activate", time: base, rel_s: 0 });
+  assert.deepEqual(d.events[1], { seq: 501, rule: 0, event: "deactivate", time: base + 75, rel_s: 75 });
   assert.equal(d.events[2].seq, 502);
   assert.equal(d.events[2].rule, null);
   assert.equal(d.events[2].source, "watchdog");
   assert.equal(d.events[2].time, base + 300);
 });
 
-test("fPort-4 raw event batch: unsynced time is null", () => {
+test("fPort-4 raw event batch: unsynced keeps uptime", () => {
   const d = codec.decodeUplink({ bytes: [0x03, 10, 0, 0, 0, 0x00].concat(le32(1), [5, 0, 0x01]), fPort: 4 }).data;
   assert.equal(d.time_synced, false);
-  assert.deepEqual(d.events[0], { seq: 1, rule: 1, event: "activate", time: null });
+  assert.deepEqual(d.events[0], { seq: 1, rule: 1, event: "activate", time: null, rel_s: 5, uptime_s: 15 });
 });
 
 // Replay of single seqs: oldest_seq + a seq delta byte per event.

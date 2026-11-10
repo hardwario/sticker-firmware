@@ -1179,6 +1179,10 @@ static bool tx_queued_step(void)
 		if (++m_cur_retries > TX_MAX_RETRIES) {
 			LOG_ERR("Frame (kind %u, %u B) abandoned after %d retries", m_cur_kind,
 				m_cur.len, TX_MAX_RETRIES);
+			if (m_cur.tag == APP_RADIO_TAG_EVENTLOG) {
+				/* Already marked sent: the event log re-sends it once. */
+				app_eventlog_frame_dropped(m_cur.buf, m_cur.len);
+			}
 			m_cur_valid = false;
 			ack_release(m_cur_kind);
 			break;

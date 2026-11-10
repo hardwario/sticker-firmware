@@ -175,6 +175,7 @@ struct sent_page {
 	uint32_t crc;
 	uint32_t seq_first;
 	uint32_t seq_last;
+	bool auto_rp; /* a re-send of dropped frames: never re-sent again */
 };
 static struct sent_page m_sent_log[EVENTLOG_SENT_LOG];
 static uint8_t m_sent_log_wr;
@@ -203,6 +204,11 @@ struct sel {
 static struct sel m_up_sel;
 static bool m_req;
 static struct sel m_req_sel;
+/* Frames the radio dropped (over budget, abandoned): re-sent before m_req,
+ * kept apart so a req_events downlink does not replace them. */
+static bool m_drop;
+static struct sel m_drop_sel;
+static bool m_up_auto; /* the running replay re-sends dropped frames */
 
 static struct k_work_delayable m_flush_work;
 static struct k_work m_write_work;
@@ -564,9 +570,9 @@ static void write_work_handler(struct k_work *work)
 		uint32_t u;
 		bool synced_now = now_unix(&u);
 		const struct ev_page *h = m_nlive ? &m_pages[m_nlive - 1] : NULL;
-		/* The page the record lands in: the open head, or a new one stamped
-		 * by the clock state now. */
-		bool head_ok = h && m_head_open && h->nrec < EV_RPP;
+		/* The page the record lands in: the open head, or a new one (head
+		 * full, closed or a seq jump, see append()) stamped by the clock now. */
+		bool head_ok = h && m_head_open && h->nrec < EV_RPP && m_pend[i].seq == m_ev_wr;
 		bool synced_page = head_ok ? (h->flags & EVP_SYNCED) != 0 : synced_now;
 		uint32_t t = up;
 
@@ -945,6 +951,7 @@ static bool chunk_send(void)
 				.crc = crc32_ieee(buf, len),
 				.seq_first = m_tx_seq[m_tx_first],
 				.seq_last = m_tx_seq[m_tx_first + n - 1],
+				.auto_rp = m_up_auto,
 			};
 			m_sent_log_wr = (m_sent_log_wr + 1) % EVENTLOG_SENT_LOG;
 			LOG_INF("Event log page %u/%u: events %u..%u of %u (%u B)", m_tx_page + 1,
@@ -999,6 +1006,7 @@ static void up_start(bool replay, const struct sel *q)
 	m_up_end_abs = m_nlive ? page_abs(&m_pages[m_nlive - 1], 0) + m_pages[m_nlive - 1].nrec : 0;
 	if (!replay) {
 		m_new = 0;
+		m_up_auto = false;
 	}
 }
 
@@ -1052,10 +1060,19 @@ static void flush_work_handler(struct k_work *work)
 		goto out;
 	}
 
-	if (m_req && lorawan) {
-		m_req = false;
-		up_start(true, &m_req_sel);
-		if (up_step()) {
+	if ((m_drop || m_req) && lorawan) {
+		struct sel q;
+
+		m_up_auto = m_drop;
+		if (m_drop) {
+			q = m_drop_sel;
+			m_drop = false;
+		} else {
+			q = m_req_sel;
+			m_req = false;
+		}
+		up_start(true, &q);
+		if (up_step() || m_drop || m_req) {
 			next = K_MSEC(EVENTLOG_RETRY_MS);
 			goto out;
 		}
@@ -1203,21 +1220,23 @@ void app_eventlog_frame_dropped(const uint8_t *buf, size_t len)
 		uint32_t first = sp->seq_first, cnt = sp->seq_last - sp->seq_first + 1;
 
 		sp->seq_last = 0;
-		/* Several pages dropped in a row join one ranges request. */
-		if (!m_req) {
-			m_req_sel = (struct sel){.kind = SEL_RANGES};
+		/* Several pages dropped in a row join one ranges request. A
+		 * re-send that is dropped again is left to the receiver (seq gap),
+		 * so a dead link does not loop. */
+		if (!m_drop) {
+			m_drop_sel = (struct sel){.kind = SEL_RANGES};
 		}
-		if (m_req_sel.kind == SEL_RANGES && m_req_sel.n < SEL_MAX_RANGES) {
-			m_req_sel.rng[m_req_sel.n][0] = first;
-			m_req_sel.rng[m_req_sel.n][1] = cnt;
-			m_req_sel.n++;
-			m_req = true;
+		if (!sp->auto_rp && m_drop_sel.n < SEL_MAX_RANGES) {
+			m_drop_sel.rng[m_drop_sel.n][0] = first;
+			m_drop_sel.rng[m_drop_sel.n][1] = cnt;
+			m_drop_sel.n++;
+			m_drop = true;
 			queued = true;
 		}
-		LOG_WRN("Event log page seq %u..%u over budget: %s", first, first + cnt - 1,
-			queued ? "replay" : "gap left");
+		LOG_WRN("Event log page seq %u..%u dropped by the radio: %s", first,
+			first + cnt - 1, queued ? "replay" : "gap left");
 	} else {
-		LOG_WRN("Event log page over budget: unknown, gap left");
+		LOG_WRN("Event log page dropped by the radio: unknown, gap left");
 	}
 	k_mutex_unlock(&m_lock);
 	if (queued) {
@@ -1372,6 +1391,8 @@ int app_eventlog_init(void)
 	m_lost = 0;
 	m_force = false;
 	m_req = false;
+	m_drop = false;
+	m_up_auto = false;
 	m_up_active = false;
 	memset(m_sent_log, 0, sizeof(m_sent_log));
 	m_tx_pages = 0;
