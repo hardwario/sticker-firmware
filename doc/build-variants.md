@@ -10,8 +10,10 @@ CI builds three images:
 
 The provisioning image is the debug image with the peripherals needed for the
 production test turned back on (`app/provisioning.conf`): `CONFIG_W1`,
-`CONFIG_LIS2DH`, `CONFIG_APP_PYQ1648`, `CONFIG_APP_BUZZER`. History in RAM is
-cut to 32 B to make room. Everything else in the table below stays off.
+`CONFIG_LIS2DH`, `CONFIG_APP_PYQ1648`, `CONFIG_APP_BUZZER`. History is off
+entirely (`CONFIG_APP_HISTORY=n`): a no-op stub reports an empty buffer, so
+`req_history` returns no data and there is no `history` shell. Everything else
+in the table below stays off.
 
 ## What the debug image turns off
 
