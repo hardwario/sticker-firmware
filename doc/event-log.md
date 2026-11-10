@@ -31,7 +31,14 @@ Upload happens on whichever trigger fires first (count or interval).
 **`log_split` must be at least 25** for the log to work. 0 (the default)
 leaves the whole partition to history and the event log has no storage.
 Changing `log_split` **erases the whole partition** (history and event log) on
-the next boot.
+the next boot, and the **seq restarts at 1**: a receiver that sees a seq lower
+than the last one received treats it as a new log (compare `oldest_seq`).
+
+Upgrade from firmware without the event log keeps the history: `log_split`
+defaults to 0, nothing is erased and history mounts its pages as before
+(verified on HW: main -> this branch, old records read back by `req_history`).
+A downgrade to such firmware followed by a settings save drops the event log
+parameters; back on this firmware they are at their defaults (log off).
 
 ### Capacity
 
@@ -55,6 +62,16 @@ offset. Each reboot therefore uses one page, and with a full ring it evicts the
 oldest page. Choose `log_split` with this in mind: few pages + frequent reboots =
 short retention. 50 % is a reasonable default for motion logging.
 
+## Time
+
+Events carry unix time once the clock is synced. The RTC keeps the time over a
+reset, so only a power loss (battery change) starts a boot without time. Such a
+boot stamps its events with uptime: they go out with `time_synced = false` and
+`base_time` = seconds since that boot. When the clock syncs in the same boot the
+page gets a fix-up (stored in flash) and its events go out in unix time; a boot
+that never synced keeps uptime for good and is sent in its own frames, never
+mixed with synced events.
+
 ## Sequence numbers
 
 * Every event gets the next number of a global counter starting at 1. The
@@ -71,8 +88,12 @@ short retention. 50 % is a reasonable default for motion logging.
 
 ## fPort 4 formats
 
-Every batch is self-contained; a large batch is split into several frames
-(max 64 B each), each with its own `seq_first`.
+Every batch is self-contained; a large batch is split into several frames,
+each with its own `seq_first`. A frame never exceeds the current DR budget
+(min of 64 B and the LoRaWAN max payload, e.g. 51 B at EU868 DR0-2). If the DR
+drops after the batch was laid out and the radio refuses a frame, its events are
+re-sent as a replay sized for the new budget. If not even one event fits
+(US915 DR0, 11 B) the upload waits for the next flush and nothing is marked sent.
 
 ### raw (`event_format raw`, first byte 0x03)
 
