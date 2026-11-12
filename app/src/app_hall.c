@@ -29,6 +29,17 @@ static const struct gpio_dt_spec m_hall_right = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), 
 static struct app_hall_data m_hall_data;
 
 K_MUTEX_DEFINE(m_hall_data_mutex);
+K_MUTEX_DEFINE(m_hall_gpio_mutex);
+
+void app_hall_gpio_lock(void)
+{
+	k_mutex_lock(&m_hall_gpio_mutex, K_FOREVER);
+}
+
+void app_hall_gpio_unlock(void)
+{
+	k_mutex_unlock(&m_hall_gpio_mutex);
+}
 
 /* #340 M14: `prime` seeds m_hall_data from the real GPIO level without treating
  * it as a rise/fall edge — used once at init so a magnet already seated before
@@ -47,6 +58,8 @@ static int poll_impl(bool prime)
 	if (!g_app_config.cap_hall_right) {
 		right_is_active = false;
 	}
+
+	app_hall_gpio_lock();
 
 	if (g_app_config.cap_hall_left) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
@@ -111,6 +124,8 @@ restore:
 			}
 		}
 	}
+
+	app_hall_gpio_unlock();
 
 	if (ret) {
 		return ret;

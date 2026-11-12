@@ -6,6 +6,7 @@
 
 #include "app_battery.h"
 #include "app_calibration.h"
+#include "app_hall.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
@@ -99,7 +100,12 @@ static bool read_hall_gpio(bool *out_left, bool *out_right)
 		if (!gpio_is_ready_dt(&halls[i])) {
 			return false;
 		}
+	}
 
+	/* Shared with app_hall's 100 ms poll: see app_hall_gpio_lock(). */
+	app_hall_gpio_lock();
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
 		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
 	}
 
@@ -113,6 +119,8 @@ static bool read_hall_gpio(bool *out_left, bool *out_right)
 
 		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
 	}
+
+	app_hall_gpio_unlock();
 
 	if (out_left) {
 		*out_left = active[0];
