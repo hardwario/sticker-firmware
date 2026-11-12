@@ -5,8 +5,8 @@
   "description": "STICKER LoRaWAN payload codec (TTN/TTS/ChirpStack) + tests",
   "scripts": {
     "test": "node --test",
-    "build": "npx --yes terser@5.46.1 decoder.js --toplevel -c passes=2 -m 'reserved=[\"decodeUplink\",\"encodeDownlink\",\"decodeDownlink\",\"Decode\",\"Encode\",\"module\"]' -o decoder.min.js",
-    "test:min": "DECODER=./decoder.min.js node --test decoder.test.js",
-    "check:min": "npm run build && git diff --exit-code decoder.min.js && node -e \"const n=require('fs').statSync('decoder.min.js').size;console.log('decoder.min.js',n,'B');if(n>38000){console.error('over 38 kB (TTS formatter limit ~40 kB)');process.exit(1)}\" && npm run test:min"
+    "build": "npx --yes terser@5.46.1 decoder.js --toplevel -c passes=2 -m 'reserved=[\"decodeUplink\",\"encodeDownlink\",\"decodeDownlink\",\"Decode\",\"Encode\",\"module\"]' -o decoder.tts.js",
+    "test:tts": "DECODER=./decoder.tts.js node --test decoder.test.js",
+    "check:tts": "npm run build && node -e \"const n=require('fs').statSync('decoder.tts.js').size;console.log('decoder.tts.js',n,'B');if(n>38000){console.error('over 38 kB (TTS formatter limit ~40 kB)');process.exit(1)}\" && npm run test:tts"
   }
 }

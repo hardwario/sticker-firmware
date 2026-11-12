@@ -2301,7 +2301,7 @@ ChirpStack before these tasks.
 (fPort 85).
 
 **Prompt for Claude:**
-> Confirm `app/decoder/decoder.min.js` (minified `decoder.js`, `npm run build`) is uploaded as the payload formatter on both TTN and ChirpStack.
+> Confirm `app/decoder/decoder.tts.js` (minified `decoder.js`, `npm run build`) is uploaded as the payload formatter on both TTN and ChirpStack.
 > Drive uplinks on fPorts 1, 2, 3 and 85 (telemetry via `send`, an alarm, and a `get_info`
 > response), then confirm each console's decoded output is well-formed and matches the raw payload
 > on **both** servers. Report any decode discrepancy between TTN and ChirpStack.
