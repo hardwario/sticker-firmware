@@ -131,6 +131,9 @@ static struct k_work_delayable m_join_complete_work;
  * and backoff when a send is refused (duty cycle / MAC busy). */
 #define FRAME_GAP_SEC   3
 #define FRAME_RETRY_SEC 15
+/* On top of the MAC's duty-cycle wait: its credits must be strictly above the
+ * cost, so a frame woken exactly on time could be refused once more. */
+#define LRW_DUTY_MARGIN_MS 100
 
 /* --- State machine --- */
 static atomic_t m_state = ATOMIC_INIT(APP_RADIO_STATE_IDLE);
@@ -1013,10 +1016,20 @@ static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 			/* The DR fell between the budget query and the send. */
 			res->budget = refresh_payload_budget();
 			return -EMSGSIZE;
-		case -ECONNREFUSED:
+		case -ECONNREFUSED: {
 			/* Refused by the duty cycle (F29): the MAC is throttled, the
-			 * frame is not failing. */
+			 * frame is not failing. Every band with an enabled channel is
+			 * out of credits; try again when the MAC has one back. */
+			uint32_t wait = lorawan_get_duty_cycle_wait_ms();
+
+			if (wait > 0) {
+				res->wait_ms = wait + LRW_DUTY_MARGIN_MS;
+				res->held = true;
+				app_radio_note_duty_hold(res->wait_ms);
+				LOG_WRN("TX duty-cycle blocked by the MAC for %u ms", wait);
+			}
 			return -EAGAIN;
+		}
 		default:
 			/* MAC busy, no free channel, confirm timeout: retried after
 			 * the backoff, a bounded number of times (#219). */
@@ -1442,9 +1455,12 @@ int app_radio_lrw_init(void)
 		}
 		m_mac_started = true;
 		m_region = region;
-		/* EU868: one 1 % allowance over all bands (the MAC's own duty cycle
-		 * still runs per band). Elsewhere no limit, the air is still shown. */
-		app_radio_duty_init(region == LORAWAN_REGION_EU868 ? APP_RADIO_DUTY_1PCT_MS : 0);
+		/* The duty cycle is LoRaMac's alone: it keeps the credits per band
+		 * (EU868: 1 % in 865-868 MHz and 1 % in 868.0-868.6 MHz, ...) and
+		 * picks a channel of a band that still has some. A refused send
+		 * waits as long as the MAC says (lorawan_get_duty_cycle_wait_ms()).
+		 * The ledger only shows the air of the trailing hour. */
+		app_radio_duty_init(0);
 
 		ret = apply_channel_plan();
 		if (ret) {

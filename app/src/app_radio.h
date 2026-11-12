@@ -151,7 +151,7 @@ struct app_radio_status {
 	uint32_t join_attempts;
 	uint32_t duty_blocked_s;  /* 0 = not held by the duty cycle */
 	uint32_t backoff_s;       /* network backoff left (P2P 0x15), 0 = none */
-	bool has_airtime;         /* the ledger runs (T2d: both radios) */
+	bool has_airtime;         /* the ledger runs (both radios; limits P2P only) */
 	uint32_t airtime_hour_ms; /* air of the trailing hour */
 	/* Counters since boot (enum app_radio_counter) and their time base. */
 	uint32_t uptime_s;
@@ -389,7 +389,9 @@ static inline uint32_t app_radio_lora_toa_ms(uint32_t sf, uint32_t bw_hz, size_t
  * One exact sliding-hour ledger in app_radio for the running radio: every
  * frame is charged with its time on air when it leaves, and app_radio sends a
  * frame only when the air of the trailing hour plus this frame fits the
- * limit. A held frame waits exactly until it fits (-EAGAIN with that wait). */
+ * limit. A held frame waits exactly until it fits (-EAGAIN with that wait).
+ * P2P only: on LoRaWAN the ledger has no limit and just shows the air, the
+ * duty cycle is LoRaMac's per band (#526, doc/lorawan-duty-cycle.md). */
 #define APP_RADIO_DUTY_WINDOW_MS 3600000U /* the sliding window: one hour */
 #define APP_RADIO_DUTY_1PCT_MS   36000U   /* 1 % of it */
 
@@ -452,6 +454,9 @@ int64_t app_radio_duty_wait_ms(uint32_t air_ms);
  * that keyed the PA). Charged to the ledger; the duty cycle holds nothing
  * now. */
 void app_radio_duty_charge(uint32_t air_ms);
+/* A backend's own duty cycle (the LoRaWAN MAC) holds the frame for `hold_ms`:
+ * the M-2 stale-uplink excuse lasts until then, as for a ledger hold. */
+void app_radio_note_duty_hold(int64_t hold_ms);
 
 /* A network backoff longer than this is cut to it: it stays inside the M-2
  * excuse (APP_RADIO_STALE_DC_HOLD_MAX_MS), so a held node is never rejoined. */

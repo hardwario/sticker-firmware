@@ -439,7 +439,10 @@ gateway.
 
 ### 6.6 Duty cycle
 
-The common sliding-hour ledger (`app_radio_duty_*`) is used:
+The common sliding-hour ledger (`app_radio_duty_*`) is used. It limits P2P only;
+on LoRaWAN it just shows the air and LoRaMac keeps the duty cycle per band
+(doc/lorawan-duty-cycle.md, #526).
+
 
 - the budget comes from `p2p-frequency`'s EU868 sub-band;
 - every transmission is charged at its ToA, including a failed one;
