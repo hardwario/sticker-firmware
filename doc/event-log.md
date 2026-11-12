@@ -333,4 +333,4 @@ The bench image with the flash ring:
 * `tests/cmd`: `req_events` / `req_events_page` dispatch, NFC page size.
 * `app/decoder/decoder.test.js`: all fPort-4 formats, replay, `req_events`,
   `req_events_page`. CI runs the same tests on
-  `decoder.min.js`.
+  `decoder.tts.js`.

@@ -1,5 +1,5 @@
 // STICKER LoRaWAN payload codec (TTN / TTS / ChirpStack). Docs: app/decoder/README.md.
-// Upload decoder.min.js (npm run build); the regions between BEGIN/END GENERATED
+// Upload decoder.tts.js (npm run build); the regions between BEGIN/END GENERATED
 // are written by west configen / west sensorgen.
 function Decode(fPort, bytes, variables) {
   return decodeUplink({ fPort: fPort, bytes: bytes }).data;
