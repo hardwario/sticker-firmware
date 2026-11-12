@@ -447,6 +447,14 @@ static void set_page(Response *resp, uint32_t index, uint32_t count)
 	}
 }
 
+/* Page 0 of an answer whose layout left an item out says so (Response.partial).
+ * The layouts measure every page with page_index = PAGE_COUNT_BOUND (2 B), but
+ * page 0 carries no page_index on the wire, so the 2 B flag always fits it. */
+static void set_partial(Response *resp, uint32_t page, bool dropped)
+{
+	resp->partial = dropped && page == 0;
+}
+
 /* Command handlers share a uniform signature (transport, cmd, resp, action) so
  * the generated app_cmd_dispatch() switch can call any of them the same way; a
  * handler simply ignores the parameters it does not need. They fill `resp`
@@ -2190,7 +2198,7 @@ static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint
  * lands on the stack (the GetSettings path already holds app_cmd_handle()'s
  * Command + Response). */
 static int config_status_layout(Response *scratch, size_t cap, uint32_t seq,
-				uint32_t mask[CS_ITEMS], uint32_t *count)
+				uint32_t mask[CS_ITEMS], uint32_t *count, bool *dropped)
 {
 	uint8_t tmp[128];
 	size_t len;
@@ -2198,6 +2206,7 @@ static int config_status_layout(Response *scratch, size_t cap, uint32_t seq,
 
 	cap = MIN(cap, sizeof(tmp));
 	memset(mask, 0, sizeof(uint32_t) * CS_ITEMS);
+	*dropped = false;
 
 	for (size_t i = 0; i < CS_ITEMS; i++) {
 		config_status_fill(scratch, seq, mask[cur] | BIT(i), PAGE_COUNT_BOUND,
@@ -2208,6 +2217,7 @@ static int config_status_layout(Response *scratch, size_t cap, uint32_t seq,
 		}
 		config_status_fill(scratch, seq, BIT(i), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
 		if (encode_response(scratch, tmp, cap, &len) != 0) {
+			*dropped = true;
 			continue; /* too big even alone: left out */
 		}
 		cur++;
@@ -2226,7 +2236,8 @@ static int config_status_page(Response *scratch, size_t layout_cap, uint32_t seq
 			      uint8_t *out, size_t out_cap, size_t *out_len, uint32_t *count)
 {
 	uint32_t mask[CS_ITEMS];
-	int ret = config_status_layout(scratch, layout_cap, seq, mask, count);
+	bool dropped;
+	int ret = config_status_layout(scratch, layout_cap, seq, mask, count, &dropped);
 
 	if (ret) {
 		return ret;
@@ -2235,6 +2246,7 @@ static int config_status_page(Response *scratch, size_t layout_cap, uint32_t seq
 		return -ENODATA;
 	}
 	config_status_fill(scratch, seq, mask[page], page, *count);
+	set_partial(scratch, page, dropped);
 	return encode_response(scratch, out, out_cap, out_len);
 }
 
@@ -2511,9 +2523,11 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
  * scratch Response (clobbered): a Response is ~580 B and this runs deep on
  * m_work_q under app_cmd_handle(), so no extra one lives on this frame. */
 static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, uint32_t *mask_out,
-		       struct alarm_range *rng_out, uint32_t *count, Response *r)
+		       struct alarm_range *rng_out, uint32_t *count, Response *r, bool *dropped)
 {
 	uint32_t cur = 0, mask = 0;
+
+	*dropped = false;
 	struct alarm_range rng = {.snap = snap, .start = 0, .end = 0};
 	size_t units = INFO_U_SCALARS + snap->n_alarms;
 
@@ -2556,6 +2570,7 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 		}
 		info_page_fill(r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
 		if (!response_fits(r, cap)) {
+			*dropped = true;
 			continue;
 		}
 		if (mask != 0 || rng.end != rng.start) {
@@ -2585,7 +2600,8 @@ static int info_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_le
 	uint32_t mask = 0, count;
 	struct alarm_range rng = {.snap = snap};
 	Response r;
-	int ret = info_layout(snap, m_page_stream.cap, page, &mask, &rng, &count, &r);
+	bool dropped;
+	int ret = info_layout(snap, m_page_stream.cap, page, &mask, &rng, &count, &r, &dropped);
 
 	if (ret) {
 		return ret;
@@ -2594,6 +2610,7 @@ static int info_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_le
 		return -ENODATA;
 	}
 	info_page_fill(&r, snap, mask, &rng, page, count);
+	set_partial(&r, page, dropped);
 	return encode_response(&r, out, out_cap, out_len);
 }
 
@@ -2628,12 +2645,14 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 
 	uint32_t mask = 0;
 	struct alarm_range rng = {.snap = snap};
-	int ret = info_layout(snap, cap, 0, &mask, &rng, &count, r);
+	bool dropped;
+	int ret = info_layout(snap, cap, 0, &mask, &rng, &count, r, &dropped);
 
 	if (ret) {
 		return ret;
 	}
 	info_page_fill(r, snap, mask, &rng, 0, count);
+	set_partial(r, 0, dropped);
 	ret = encode_response(r, out, cap, out_len);
 	if (ret) {
 		return ret;
@@ -2706,11 +2725,13 @@ static void rs_page_fill(Response *r, const Response_RadioState *all, uint32_t s
  * page `want` and the page count. A unit too big alone is left out (physical
  * floor, #425); -EMSGSIZE only when none fits. `r` is scratch. */
 static int rs_layout(const Response_RadioState *all, uint32_t seq, size_t cap, uint32_t want,
-		     uint32_t *mask_out, uint32_t *count, Response *r)
+		     uint32_t *mask_out, uint32_t *count, Response *r, bool *dropped)
 {
 	Response_RadioState tmp = *all;
 	uint32_t present = rs_units(&tmp, 0, true);
 	uint32_t cur = 0, mask = 0;
+
+	*dropped = false;
 
 	for (uint32_t u = 1; u < 32; u++) {
 		if (!(present & BIT(u))) {
@@ -2723,6 +2744,7 @@ static int rs_layout(const Response_RadioState *all, uint32_t seq, size_t cap, u
 		}
 		rs_page_fill(r, all, seq, BIT(u), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
 		if (!response_fits(r, cap)) {
+			*dropped = true;
 			continue; /* too big even alone: left out */
 		}
 		if (mask != 0) {
@@ -2747,8 +2769,9 @@ static int radio_state_page(uint32_t page, uint8_t *out, size_t out_cap, size_t 
 {
 	uint32_t mask = 0, count;
 	Response r;
+	bool dropped;
 	int ret = rs_layout(&m_page_stream.u.rs, m_page_stream.seq, m_page_stream.cap, page, &mask,
-			    &count, &r);
+			    &count, &r, &dropped);
 
 	if (ret) {
 		return ret;
@@ -2757,6 +2780,7 @@ static int radio_state_page(uint32_t page, uint8_t *out, size_t out_cap, size_t 
 		return -ENODATA;
 	}
 	rs_page_fill(&r, &m_page_stream.u.rs, m_page_stream.seq, mask, page, count);
+	set_partial(&r, page, dropped);
 	return encode_response(&r, out, out_cap, out_len);
 }
 
@@ -2774,11 +2798,14 @@ static int radio_state_paged(Response *resp, uint8_t *out, size_t cap, size_t *o
 		return -EBUSY; /* as info_paged() */
 	}
 	m_page_stream.u.rs = resp->body.radio_state;
-	ret = rs_layout(&m_page_stream.u.rs, seq, cap, 0, &mask, &count, resp);
+	bool dropped;
+
+	ret = rs_layout(&m_page_stream.u.rs, seq, cap, 0, &mask, &count, resp, &dropped);
 	if (ret) {
 		return ret;
 	}
 	rs_page_fill(resp, &m_page_stream.u.rs, seq, mask, 0, count);
+	set_partial(resp, 0, dropped);
 	ret = encode_response(resp, out, cap, out_len);
 	if (ret) {
 		return ret;
@@ -2912,7 +2939,8 @@ static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, ui
 
 	uint32_t mask = 0, count = 0;
 	struct alarm_range rng = {.snap = &snap};
-	int ret = info_layout(&snap, cap, page, &mask, &rng, &count, r);
+	bool dropped;
+	int ret = info_layout(&snap, cap, page, &mask, &rng, &count, r, &dropped);
 
 	if (ret) {
 		return ret;
@@ -2921,6 +2949,7 @@ static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, ui
 		page_out_of_range(r, seq);
 	} else {
 		info_page_fill(r, &snap, mask, &rng, page, count);
+		set_partial(r, page, dropped);
 	}
 	return encode_response(r, out, cap, out_len);
 }
@@ -2932,7 +2961,8 @@ static __noinline int radio_state_host_page(uint32_t seq, uint32_t page, Respons
 {
 	Response_RadioState all = r->body.radio_state;
 	uint32_t mask = 0, count = 0;
-	int ret = rs_layout(&all, seq, cap, page, &mask, &count, r);
+	bool dropped;
+	int ret = rs_layout(&all, seq, cap, page, &mask, &count, r, &dropped);
 
 	if (ret) {
 		return ret;
@@ -2941,6 +2971,7 @@ static __noinline int radio_state_host_page(uint32_t seq, uint32_t page, Respons
 		page_out_of_range(r, seq);
 	} else {
 		rs_page_fill(r, &all, seq, mask, page, count);
+		set_partial(r, page, dropped);
 	}
 	return encode_response(r, out, cap, out_len);
 }

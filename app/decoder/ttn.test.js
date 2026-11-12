@@ -183,6 +183,16 @@ test("envelope paging: ConfigDump page 2/3 decodes alone (#425)", () => {
   assert.equal(d.config_dump.application.interval_report, 900);
 });
 
+// Response.partial (15): an item fit no page at this DR (page 0 only).
+test("envelope paging: partial flag on page 0", () => {
+  // seq 25, config_dump.application.interval_sample 60, page_count 2, partial
+  const d = codec.decodeUplink({ bytes: hex("01081922042202103c68027801"), fPort: 85 }).data;
+  assert.equal(d.seq, 25);
+  assert.equal(d.pages, "1/2");
+  assert.equal(d.partial, true);
+  assert.equal(d.config_dump.application.interval_sample, 60);
+});
+
 test("envelope paging: HistoryFrame page 1/2 (page_index 0 omitted) (#425)", () => {
   const d = codec.decodeUplink({
     bytes: hex("01080a2a121880cae2d006220366085a280330840738016802"), fPort: 85,
