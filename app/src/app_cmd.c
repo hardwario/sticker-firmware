@@ -3126,6 +3126,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 
 	Response resp = Response_init_zero;
 	uint32_t host_page = 0;
+	bool armed_request = false;
 	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act, &host_page);
 
 	if (cmd_body != 0) {
@@ -3141,6 +3142,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 				stream_busy(&resp, resp.seq);
 			} else if (page_stream_arm(in, in_len, &resp)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
+				armed_request = true;
 			}
 		} else if (radio_transport(transport) && resp.which_body == Response_w1_scan_tag) {
 			/* #425: a scan that does not fit is paged by ROM. */
@@ -3259,6 +3261,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		 * over-broad GetParam/GetConfig page). Reuses `resp` (no second ~580 B
 		 * Response on this frame). */
 		LOG_WRN("Response too large for buffer; sending Error instead");
+		/* Page 0 of a GetConfig/GetParam did not fit the budget: the pages
+		 * laid out after it are no smaller, so one Error answers the whole
+		 * request instead of one per page (US915 DR0, 11 B). */
+		if (armed_request) {
+			app_cmd_stream_cancel();
+			act = APP_CMD_ACTION_NONE;
+		}
 		resp = (Response)Response_init_zero;
 		resp.seq = seq;
 		/* #409: over a radio the only reason is the payload budget (LoRaWAN:

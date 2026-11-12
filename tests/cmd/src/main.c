@@ -2789,6 +2789,35 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
+/* US915 DR0 (11 B): not even page 0 of a GetConfig fits, so the answer is one
+ * BUDGET_TOO_SMALL and no page stream is armed. Before, the stream sent every
+ * remaining page and each became another BUDGET_TOO_SMALL (10 Errors). */
+ZTEST(cmd, test_get_config_too_small_budget_no_stream)
+{
+	uint8_t in[8], out[11];
+	size_t in_len = unhex("08662a00", in, sizeof(in)); /* seq102 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	app_cmd_stream_cancel();
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 102, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream (act %d)", action);
+	zassert_false(app_cmd_stream_active(), "stream must not be armed");
+	zassert_equal(app_cmd_stream_next(out, sizeof(out), &out_len), -ENODATA, "no pages");
+}
+
 /* #425 step 7: P2P pages exactly like LoRaWAN — a multi-page GetConfig over
  * APP_CMD_TRANSPORT_P2P streams every page with the same seq, and the pages
  * are dispatched on the P2P transport (same field gating). */
