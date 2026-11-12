@@ -1065,6 +1065,12 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
 		uint32_t seq = response_seq(tx);
 		size_t len;
 
+		/* A page of a streamed answer (the budget fell mid-stream): the
+		 * pages not yet queued would not fit either, so stop the stream. */
+		if (app_cmd_stream_active()) {
+			app_cmd_stream_cancel();
+			LOG_INF("Page stream cancelled: budget fell to %u B", budget);
+		}
 		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
 		    0) {
 			tx->len = (uint16_t)len;
