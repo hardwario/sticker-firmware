@@ -1044,11 +1044,6 @@ static uint32_t response_seq(const struct tx_slot *tx)
  * BUDGET_TOO_SMALL carrying the command's seq (the host retries at a higher
  * DR); an alarm is dropped, its state still rides in telemetry system_flags.
  * Returns true when `tx` now holds a frame to send. */
-/* seq of the last command answer replaced by BUDGET_TOO_SMALL; cleared by
- * every new command, so a later command with the same seq is answered again. */
-static uint32_t m_budget_err_seq;
-static bool m_budget_err_valid;
-
 static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget)
 {
 	LOG_WRN("TX %u B over budget %u B (kind %u, tag %u)", tx->len, budget, kind, tx->tag);
@@ -1070,18 +1065,12 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
 		uint32_t seq = response_seq(tx);
 		size_t len;
 
-		/* A page of a streamed answer (the budget fell mid-stream): the rest
-		 * of the stream would not fit either. One Error per seq is enough. */
+		/* A page of a streamed answer (the budget fell mid-stream): the
+		 * pages not yet queued would not fit either, so stop the stream. */
 		if (app_cmd_stream_active()) {
 			app_cmd_stream_cancel();
 			LOG_INF("Page stream cancelled: budget fell to %u B", budget);
 		}
-		if (m_budget_err_valid && m_budget_err_seq == seq) {
-			LOG_INF("Command answer (seq %u) dropped: Error already sent", seq);
-			return false;
-		}
-		m_budget_err_valid = true;
-		m_budget_err_seq = seq;
 		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
 		    0) {
 			tx->len = (uint16_t)len;
@@ -2429,8 +2418,6 @@ void app_radio_downlink(const uint8_t *buf, size_t len)
 	/* Cap to the payload budget of the next uplink, not just the buffer, so
 	 * a GetInfo command gets the same trimming as the autonomous Info
 	 * (#409 3g); an answer that still does not fit is paged. */
-	m_budget_err_valid = false;
-
 	int ret = app_cmd_handle((enum app_cmd_transport)m_be->cmd_transport, buf, len, resp,
 				 app_radio_tx_answer_cap(sizeof(resp)), &resp_len, &action);
 	if (ret) {
