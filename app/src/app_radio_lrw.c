@@ -135,6 +135,9 @@ static struct k_work_delayable m_join_complete_work;
 /* --- State machine --- */
 static atomic_t m_state = ATOMIC_INIT(APP_RADIO_STATE_IDLE);
 static bool m_link_check_pending; /* Waiting for LC response */
+
+/* LinkCheckReq size in FOpts (CID only). */
+#define LINK_CHECK_REQ_LEN 1
 static int m_rejoin_attempts;     /* Rejoin attempt counter for backoff */
 static int m_join_busy_polls;     /* Counter for MAC busy polling */
 static bool m_init_join;          /* True for first join after boot */
@@ -969,6 +972,19 @@ static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 	}
 
 	bool with_link_check = (f->flags & APP_RADIO_FRAME_LINK_CHECK) != 0;
+
+	/* LinkCheckReq rides in FOpts (1 B). The budget does not include it, so a
+	 * frame that fills the budget exactly (11 B at US915 DR0 / EU868 DR0-2)
+	 * plus the request overflows: Zephyr then sends an empty frame (LinkCheckReq
+	 * on port 0), drops the payload and app_radio retries the same frame
+	 * forever. Skip the check on such a frame; the next scheduled check (every
+	 * report while WARNING) tries again, and a skipped check counts as neither
+	 * success nor failure. */
+	if (with_link_check && f->len + LINK_CHECK_REQ_LEN > budget) {
+		LOG_INF("Link check deferred: %u B frame + LinkCheckReq > %u B budget",
+			f->len, budget);
+		with_link_check = false;
+	}
 
 	if (with_link_check) {
 		ret = lorawan_request_link_check(false);
