@@ -890,12 +890,6 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 			FAULT(28);
 		}
 	}
-	/* M-3: this field is not writable over vendor. */
-	if (src->has_event_ack && (tp == APP_CMD_TRANSPORT_VENDOR)) {
-		FAULT_TRANSPORT(29);
-	} else if (src->has_event_ack) {
-		config->event_ack = src->event_ack;
-	}
 	return ret;
 }
 
@@ -1007,10 +1001,6 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 28)) {
 		dst->has_event_format = true;
 		dst->event_format = (AppConfigMessage_Alarms_EventFormat)c->event_format;
-	}
-	if (requested(ids, n, 29)) {
-		dst->has_event_ack = true;
-		dst->event_ack = c->event_ack;
 	}
 }
 

@@ -668,36 +668,6 @@ static void confirmed_frame_given_up_after_its_retries(void)
 }
 BOTH_PROFILES(confirmed_frame_given_up_after_its_retries)
 
-/* event_ack: fPort-4 event log frames go confirmed (LNS Ack in RX1/RX2) with
- * the alarm retries; given up, the event log gets the frame back for its
- * one replay. Without event_ack they stay unconfirmed. */
-ZTEST(radio_common, test_event_ack_sends_eventlog_confirmed)
-{
-	extern int g_eventlog_dropped_calls;
-	int dropped = g_eventlog_dropped_calls;
-
-	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_EVENTLOG, 8, 0xe0);
-	k_sleep(K_MSEC(100));
-	zassert_equal(fk.n, 1);
-	zassert_equal(fk.log[0].flags, 0, "event_ack off: unconfirmed");
-
-	g_app_config.event_ack = true;
-	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb0);
-	k_sleep(K_MSEC(100));
-	zassert_equal(fk.log[1].flags, 0, "other answers stay unconfirmed");
-
-	script_fill(-ETIMEDOUT, fk.n + 1 + APP_RADIO_ACK_MAX_RETRIES);
-	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_EVENTLOG, 8, 0xe1);
-	k_sleep(K_SECONDS(20)); /* > 2 + 4 + 8 s of spread */
-	zassert_equal(fk.n, 3 + APP_RADIO_ACK_MAX_RETRIES);
-	for (size_t i = 2; i < fk.n; i++) {
-		zassert_equal(fk.log[i].head[0], 0xe1);
-		zassert_equal(fk.log[i].flags, APP_RADIO_FRAME_CONFIRMED, "attempt %zu", i);
-	}
-	zassert_equal(g_eventlog_dropped_calls, dropped + 1, "back to the event log");
-	zassert_false(app_radio_ack_pending());
-}
-
 /* P2P (F6): every report goes confirmed, but only the link-check one, lost
  * after its retries, is a failed check. */
 ZTEST(radio_common, test_only_a_lost_link_check_report_fails_the_link)

@@ -1553,13 +1553,6 @@ test("req_events downlink encodes and decodes", () => {
 });
 
 
-test("event_ack param set_param round-trip", () => {
-  const enc = codec.encodeDownlink({ data: { seq: 2, command: "set_param", set_param: { alarms: { event_ack: 1 } } } });
-  assert.deepEqual(enc.errors || [], []);
-  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
-  assert.equal(dec.set_param.alarms.event_ack, 1);
-});
-
 // event_format raw (0x03): 10 B header (seq_first) + 3 B per event.
 test("fPort-4 raw event batch", () => {
   const base = 1780000000;

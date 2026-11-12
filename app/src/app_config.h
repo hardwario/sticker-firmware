@@ -164,7 +164,6 @@ struct app_config {
 	int event_flush_interval;
 	int log_split;
 	enum app_config_event_format event_format;
-	bool event_ack;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor1_type;
