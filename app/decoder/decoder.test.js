@@ -1,4 +1,4 @@
-// Tests for the STICKER LoRaWAN codec (ttn.js).
+// Tests for the STICKER LoRaWAN codec (decoder.js).
 // Run: `node --test` (Node >= 18, zero dependencies).
 //
 // Vectors are HW-verified / current-schema captures. The downlink command hex
@@ -8,7 +8,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const codec = require("./ttn.js");
+const codec = require(process.env.DECODER || "./decoder.js");
 
 const hex = (h) => Buffer.from(h, "hex");
 const toHex = (bytes) => Buffer.from(bytes).toString("hex");
@@ -1562,6 +1562,24 @@ test("req_events downlink encodes and decodes", () => {
   assert.deepEqual(dec.req_events, { from_unix: 1794224900, to_unix: 1794225100 });
 });
 
+
+// event_ack: ack_events downlink round-trip (seq 0 is a valid ack).
+test("ack_events downlink encodes and decodes", () => {
+  for (const upto of [0, 300, 70000]) {
+    const enc = codec.encodeDownlink({ data: { seq: 9, command: "ack_events", ack_events: { upto_seq: upto } } });
+    assert.deepEqual(enc.errors || [], []);
+    const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+    assert.equal(dec.command, "ack_events");
+    assert.deepEqual(dec.ack_events, { upto_seq: upto });
+  }
+});
+
+test("event_ack param set_param round-trip", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 2, command: "set_param", set_param: { alarms: { event_ack: 1 } } } });
+  assert.deepEqual(enc.errors || [], []);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.equal(dec.set_param.alarms.event_ack, 1);
+});
 
 // event_format raw (0x03): 10 B header (seq_first) + 3 B per event.
 test("fPort-4 raw event batch", () => {

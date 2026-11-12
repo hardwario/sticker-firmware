@@ -25,6 +25,7 @@ All parameters are in the `alarms` group (shell `config <name>`, NFC, downlink
 | 26 | `event_flush_interval` | 3600 | Upload at least every N seconds when events wait (0 = off) |
 | 27 | `log_split` | 0 | Percent of the history partition given to the event log: 0 / 25 / 50 / 75 / 100 |
 | 28 | `event_format` | full | fPort-4 format: `full`, `compact`, `raw` |
+| 29 | `event_ack` | false | Keep sent events unsent until the backend confirms them with `ack_events` (see [Acknowledgement](#acknowledgement-event_ack)) |
 
 Upload happens on whichever trigger fires first (count or interval).
 
@@ -61,6 +62,39 @@ stamped with that boot's uptime, and one page can carry only one uptime-to-unix
 offset. Each reboot therefore uses one page, and with a full ring it evicts the
 oldest page. Choose `log_split` with this in mind: few pages + frequent reboots =
 short retention. 50 % is a reasonable default for motion logging.
+
+### Burst: unsent events can be evicted
+
+The ring evicts its oldest page when it needs a new one, **whether or not its
+events were uploaded**. Uploading is limited by the duty cycle (see
+[Duty cycle](#duty-cycle)), so a burst longer than the ring can buffer loses
+its oldest unsent events. They count in `lost`, `oldest_seq` moves past them
+and a `req_events` for them answers nothing. One page is always the open write
+page, so the safe backlog is one page less than the capacity:
+
+| `log_split` | capacity | safe unsent backlog | DR0 drain (~200 events/h) | DR5 drain |
+|---|---|---|---|---|
+| 25 % | 504 | ~378 | ~2 h | minutes |
+| 50 % | 1008 | ~882 | ~4.5 h | minutes |
+| 75 % | 1512 | ~1386 | ~7 h | minutes |
+| 100 % | 2016 | ~1890 | ~9.5 h | minutes |
+
+Measured on the bench (DR0, `raw`, `log_split 25` on the 8-page bench
+partition = 2 pages): a burst of 400 edges ended with `lost 2`. The DR0 rate
+comes from the #527 bench (209 events in the first hour with the per-band duty
+cycle); every reboot in the meantime takes one more page.
+
+Recommendation:
+
+* Size `log_split` so that the longest expected burst (events per hour × hours
+  of bad coverage) fits the safe backlog. Motion on a machine with long busy
+  periods: 75 % or 100 %; occasional alarms: 25 %.
+* Use `event_format raw` (3 B per event): more events per frame drain the
+  backlog fastest.
+* Watch `lost` (shell `eventlog info`) and gaps below `oldest_seq` on the
+  receiver; a growing gap means the ring is too small for the traffic.
+* With `event_ack` on, unacknowledged events are still unsent and keep
+  occupying the ring until the ack arrives.
 
 ## Time
 
@@ -209,7 +243,7 @@ uplink  fPort 4  seq_first 2441, 1 event         (downlink rides on this uplink'
 uplink  fPort 4  replay, seq_first 2433, 5 events -> gap filled
 ```
 
-Receiver sketch (JavaScript, `decodeUplink` from `ttn.js`):
+Receiver sketch (JavaScript, `decodeUplink` from `decoder.js`):
 
 ```js
 // state per device: { next: null, missing: [[from, count], ...] }
@@ -233,9 +267,33 @@ function onEventFrame(st, d) {            // d = decodeUplink(...).data, fPort 4
 Retry an unanswered request a few times (the device may not have had an
 uplink to receive it on), then give the range up.
 
-There is no automatic acknowledgement: a LoRaWAN confirmed uplink would only
-confirm delivery to the network server and costs gateway downlink airtime, so
-the PoC relies on seq + `req_events`.
+### Acknowledgement (`event_ack`)
+
+By default a batch is marked uploaded once the radio sent it (fire and
+forget); the receiver recovers gaps with `req_events`. A LoRaWAN confirmed
+uplink is not used: it only confirms delivery to the network server and costs
+gateway downlink airtime.
+
+With `event_ack true` the backend confirms what it stored:
+
+```json
+{ "seq": 9, "command": "ack_events", "ack_events": { "upto_seq": 1234 } }
+```
+
+* A sent batch stays **unsent** until an `ack_events` covers it. The ack moves
+  the upload position past every event with seq ≤ `upto_seq`, but never past
+  the last batch sent and never back (an older ack is ignored). The flash
+  write is done by the event log work, not in the downlink callback.
+* No ack within one `interval_report` + 60 s (a class A device receives the
+  queued downlink with its next uplink): the batch is sent again from the
+  first unacknowledged event, together with whatever was logged since. At most
+  **3 re-sends**, then the log waits for the next regular flush (count /
+  interval) or a `req_events`, which start a new batch with 3 re-sends again.
+* After a reboot the unacknowledged events go out again with the next flush.
+* Duplicates are possible (a re-send crosses a late ack); the receiver drops
+  them by seq.
+* Send one `ack_events` per received batch (the highest seq of the batch, or
+  of the contiguous run received). LoRaWAN only, no response.
 
 ## NFC read: `req_events_page`
 
@@ -265,10 +323,17 @@ commands (for example ACS ACR1552U or a phone).
 
 ## Duty cycle
 
-The event log only queues frames. `app_radio` keeps one sliding-hour ledger
-(EU868: 1 % = 36 s/h) and holds a frame until it fits; LoRaMAC additionally
-enforces the per-sub-band limits. A large backlog (hundreds of events) is
-therefore spread over time automatically.
+The event log only queues frames. Since #527 the LoRaWAN duty cycle is
+enforced only by LoRaMAC, per band (EU868 with the CFList: 865–868 MHz and
+868.0–868.6 MHz, 1 % each = 2 % in total). When LoRaMAC refuses a frame,
+`app_radio` holds it for the wait LoRaMAC reports (+100 ms) and sends it then,
+so a large backlog (hundreds of events) is spread over time automatically.
+The application ledger (1 % sliding hour) limits only P2P. Details:
+[lorawan-duty-cycle.md](lorawan-duty-cycle.md).
+
+Bench (DR0, `raw`): 209 events before the first hold (107 with the old single
+1 % ledger), and the regular telemetry went out 2.5 min after the hold
+instead of ~1 h.
 
 ## Shell (debug / bench images)
 
@@ -288,7 +353,9 @@ The bench image with the flash ring:
 ## Tests
 
 * `tests/eventlog` (native_sim flash simulator): seq, reboot recovery, overflow
-  gap, eviction, replay selectors, raw framing, NFC export paging.
+  gap, eviction, replay selectors, raw framing, NFC export paging, `event_ack`
+  (position, cap at the sent batch, 3 re-sends, re-send after reboot).
 * `tests/cmd`: `req_events` / `req_events_page` dispatch, NFC page size.
-* `app/decoder/ttn.test.js`: all fPort-4 formats, replay, `req_events`,
-  `req_events_page`.
+* `app/decoder/decoder.test.js`: all fPort-4 formats, replay, `req_events`,
+  `req_events_page`, `ack_events`, `event_ack`. CI runs the same tests on
+  `decoder.min.js`.

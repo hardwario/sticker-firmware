@@ -112,7 +112,7 @@ One process serves both radio modes, told apart by the sync word:
 - **LoRaWAN** (EU868, 1.0.x): OTAA join for `--appkey` (any DevEUI) or
   `--device DEVEUI:APPKEY`, MIC check, decryption, LinkCheckAns,
   DeviceTimeAns. Uplinks are decoded with the app's TTN decoder
-  (`app/decoder/ttn.js`, needs `node`).
+  (`app/decoder/decoder.js`, needs `node`).
 - **P2P** (TOWER over LoRa, [p2p.md](p2p.md)), in `sim_p2p.py`:
   JoinRequest/JoinAccept with the derived session key, replay lane, a local
   ACK with PENDING and a CTRL tail (LinkCheckAns, TimeAns, PendingInfo), and
@@ -169,7 +169,7 @@ every PR, and uploads the logs when it fails.
 ([plan](plan/509%20-%20v2.0.0%20release%20review%20fixes.md)) on the simulator:
 pulse counter at both idle levels and with bounce, RATE alarms on live
 counters, stillness rules with the capability off and on, the 11 B tier
-(decoded with `ttn.js`), settings save over NFC and the radio, the v1.4
+(decoded with `decoder.js`), settings save over NFC and the radio, the v1.4
 stale-key upgrade, buzzer and PIR modes, a shortened release regression over
 LoRaWAN and P2P (join, Info, telemetry, alarm, paged GetConfig, SetParam +
 reboot) and the commands kept off the radio (R-3/C-1). About 45 minutes; name

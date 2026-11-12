@@ -174,6 +174,7 @@ message AppConfigMessage {
         optional uint32 event_flush_interval = 26;
         optional uint32 log_split = 27;
         optional EventFormat event_format = 28;
+        optional bool event_ack = 29;
     }
 
     message P2P {
@@ -224,6 +225,7 @@ message Command {
         GetRadioState    get_radio_state   = 32;
         ReqEvents        req_events        = 33;
         ReqEventsPage    req_events_page   = 34;
+        AckEvents        ack_events        = 35;
     }
 // END GENERATED COMMANDS
 
@@ -310,6 +312,11 @@ message Command {
         optional uint32 to_unix   = 2;
         repeated uint32 ranges    = 3;
         repeated uint32 seqs      = 4;
+    }
+    // Event log: acknowledge the uploaded events with seq <= upto_seq
+    // (event_ack). LoRaWAN only, no reply.
+    message AckEvents {
+        optional uint32 upto_seq = 1;
     }
     // Event log PoC: NFC paged read of the event log. Client-driven and
     // stateless like ReqHistoryPage: start_seq (omitted => oldest) is the

@@ -82,6 +82,13 @@ LOG_MODULE_REGISTER(app_eventlog, LOG_LEVEL_DBG);
  * (all 16 rules plus no-data watchdogs flipping in one poll) queues up here
  * before the first record is written: size for that, not for the average. */
 #define EVENTLOG_PENDING        32
+/* event_ack: re-sends of a batch nobody acknowledged, before the log waits
+ * for the next regular flush (count / interval) or a req_events. */
+#define EVENTLOG_ACK_RETRIES 3
+/* event_ack: wait for the ack this long past one report interval. A class A
+ * device gets a queued downlink only with its next uplink, and the telemetry
+ * of the next interval is the uplink that brings it. */
+#define EVENTLOG_ACK_MARGIN_S 60
 
 struct ev_hdr {
 	uint32_t magic;
@@ -150,6 +157,15 @@ static uint16_t m_unsent;   /* events at/after m_sent_abs */
 static uint16_t m_new;      /* edges since the last flush (count trigger) */
 static bool m_force;
 static int64_t m_last_flush_ms;
+
+/* event_ack: a batch went out and waits for ack_events. m_sent_abs only moves
+ * with an ack, so a re-send starts again from the first unacknowledged event. */
+static bool m_ack_wait;
+static uint8_t m_ack_tries;    /* re-sends of the waiting batch */
+static int64_t m_ack_due_ms;   /* re-send when no ack came by then */
+static uint32_t m_ack_end_abs; /* an ack never reaches past the last batch sent */
+static bool m_ack_in;          /* ack_events received, applied by the flush work */
+static uint32_t m_ack_seq;
 
 /* Edges queued by app_eventlog_add() for the writer work. */
 static struct {
@@ -1012,6 +1028,38 @@ static void up_start(bool replay, const struct sel *q)
 	}
 }
 
+static int64_t ack_wait_ms(void)
+{
+	return ((int64_t)g_app_config.interval_report + EVENTLOG_ACK_MARGIN_S) * MSEC_PER_SEC;
+}
+
+/* ack_events: the events up to `seq` (of the batches sent) are delivered. The
+ * upload position moves past them (a SENT record). m_lock held, flush work. */
+static void ack_apply(uint32_t seq)
+{
+	uint32_t abs = m_sent_abs;
+	uint32_t a;
+
+	while (abs < m_ack_end_abs && next_abs(abs, &a) && a < m_ack_end_abs) {
+		uint8_t idx;
+		struct ev_page *p = page_of(a, &idx);
+		struct ev_rec r;
+
+		if (p && rec_is_event(p, idx, &r) && rec_seq(p, idx) > seq) {
+			break;
+		}
+		abs = a + 1;
+	}
+	if (abs > m_sent_abs) {
+		mark_sent(abs);
+		LOG_INF("Event log ack up to seq %u: %u event(s) still unsent", seq, m_unsent);
+	}
+	if (m_sent_abs >= m_ack_end_abs) {
+		m_ack_wait = false;
+		m_ack_tries = 0;
+	}
+}
+
 /* Advance the running upload. Returns true while it needs another run. */
 static bool up_step(void)
 {
@@ -1031,7 +1079,14 @@ static bool up_step(void)
 			break;
 		}
 		if (loaded == 0) {
-			if (!m_up_replay) {
+			if (!m_up_replay && g_app_config.event_ack) {
+				/* Sent, not yet delivered: wait for ack_events. */
+				m_ack_wait = true;
+				m_ack_end_abs = m_up_end_abs;
+				m_ack_due_ms = k_uptime_get() + ack_wait_ms();
+				LOG_INF("Event log batch sent, waiting for the ack (try %u)",
+					m_ack_tries + 1);
+			} else if (!m_up_replay) {
 				mark_sent(m_up_end_abs);
 			} else if (!m_up_any) {
 				send_empty_replay();
@@ -1057,9 +1112,38 @@ static void flush_work_handler(struct k_work *work)
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
+	if (m_ack_in) {
+		m_ack_in = false;
+		ack_apply(m_ack_seq);
+	}
+
 	if (up_step()) {
 		next = K_MSEC(EVENTLOG_RETRY_MS);
 		goto out;
+	}
+
+	if (m_ack_wait && now >= m_ack_due_ms) {
+		if (!g_app_config.event_ack || m_unsent == 0) {
+			m_ack_wait = false;
+			m_ack_tries = 0;
+		} else if (m_ack_tries < EVENTLOG_ACK_RETRIES && lorawan) {
+			/* No ack: the batch again, from the first unacknowledged event
+			 * (with whatever was logged since). */
+			m_ack_tries++;
+			LOG_WRN("Event log: no ack, re-send %u/%u", m_ack_tries,
+				EVENTLOG_ACK_RETRIES);
+			up_start(false, NULL);
+			if (up_step()) {
+				next = K_MSEC(EVENTLOG_RETRY_MS);
+				goto out;
+			}
+		} else {
+			/* Given up: the next regular flush or a req_events sends them. */
+			LOG_WRN("Event log: no ack after %u re-sends, waiting for the next flush",
+				EVENTLOG_ACK_RETRIES);
+			m_ack_wait = false;
+			m_ack_tries = 0;
+		}
 	}
 
 	if ((m_drop || m_req) && lorawan) {
@@ -1085,6 +1169,8 @@ static void flush_work_handler(struct k_work *work)
 	bool interval_due = interval > 0 && (now - m_last_flush_ms) >= (int64_t)interval * 1000;
 
 	if ((m_force || count_due || interval_due) && m_unsent > 0 && lorawan) {
+		/* A regular flush is a new batch: its own EVENTLOG_ACK_RETRIES. */
+		m_ack_tries = 0;
 		up_start(false, NULL);
 		m_last_flush_ms = now;
 		m_force = false;
@@ -1101,6 +1187,11 @@ static void flush_work_handler(struct k_work *work)
 		int64_t left = m_last_flush_ms + (int64_t)interval * 1000 - now;
 
 		next = K_MSEC(CLAMP(left, 1000, (int64_t)interval * 1000));
+	}
+	if (m_ack_wait) {
+		int64_t left = m_ack_due_ms - now;
+
+		next = K_MSEC(MIN(k_ticks_to_ms_floor64(next.ticks), MAX(left, 1000)));
 	}
 out:
 	k_mutex_unlock(&m_lock);
@@ -1352,6 +1443,26 @@ void app_eventlog_on_clock_sync(uint32_t unix_now)
 	k_work_submit_to_queue(m_q, &m_write_work);
 }
 
+int app_eventlog_ack(uint32_t upto_seq)
+{
+	if (g_app_config.radio_mode != APP_CONFIG_RADIO_MODE_LORAWAN) {
+		return -ENOTSUP;
+	}
+	if (!m_ready) {
+		return -ENODATA;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	/* The flash write (SENT record) runs on the flush work, never in the
+	 * downlink callback (#96). A later ack only moves further. */
+	if (!m_ack_in || upto_seq > m_ack_seq) {
+		m_ack_seq = upto_seq;
+	}
+	m_ack_in = true;
+	k_mutex_unlock(&m_lock);
+	k_work_reschedule_for_queue(m_q, &m_flush_work, K_NO_WAIT);
+	return 0;
+}
+
 uint32_t app_eventlog_pending(void)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
@@ -1396,6 +1507,9 @@ int app_eventlog_init(void)
 	m_drop = false;
 	m_up_auto = false;
 	m_up_active = false;
+	m_ack_wait = false;
+	m_ack_tries = 0;
+	m_ack_in = false;
 	memset(m_sent_log, 0, sizeof(m_sent_log));
 	m_tx_pages = 0;
 	m_tx_page = 0;
@@ -1460,9 +1574,10 @@ static int cmd_eventlog_info(const struct shell *sh, size_t argc, char **argv)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	shell_print(sh,
 		    "ready %d pages %u live %u unsent %u queued %u lost %u sent_abs %u "
-		    "upload %d replay %d format %d seq next %u oldest %u",
+		    "upload %d replay %d format %d seq next %u oldest %u ack wait %d tries %u",
 		    m_ready, m_npages, m_nlive, m_unsent, m_pend_n, m_lost, m_sent_abs, m_up_active,
-		    m_up_replay, g_app_config.event_format, m_ev_next, oldest_seq());
+		    m_up_replay, g_app_config.event_format, m_ev_next, oldest_seq(), m_ack_wait,
+		    m_ack_tries);
 	for (uint16_t i = 0; i < m_nlive; i++) {
 		shell_print(sh, "  page %u phys %u nrec %u ev %u..%u", m_pages[i].seq,
 			    m_pages[i].phys, m_pages[i].nrec, m_pages[i].ev_first,

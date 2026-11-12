@@ -517,7 +517,7 @@ authenticated downlink is a success.
   - the app_key registry and the join: it answers the JoinReq, allocates the
     `central_nonce`, and derives and hands the session key to the gateway;
   - `0x81` decode through the STICKER decoder (`app/decoder/p2p.js` +
-    `ttn.js`);
+    `decoder.js`);
   - `0x91` answers (TimeAns, LinkCheckAns);
   - Detach / RejoinReq.
 

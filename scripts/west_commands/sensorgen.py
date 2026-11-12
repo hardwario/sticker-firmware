@@ -9,7 +9,7 @@ publishes a channel table. This command validates the YAML and generates:
 
 - app_sensor_types.h / app_sensor_types.c: type/channel ids, descriptor tables
   and lookups for the firmware;
-- the `// BEGIN GENERATED SENSOR_TYPES` region of decoder/ttn.js, so the
+- the `// BEGIN GENERATED SENSOR_TYPES` region of decoder/decoder.js, so the
   stateless decoder resolves (type, channel) -> name / unit / scale.
 
 Numbering is append-only: before overwriting, the committed header is parsed and
@@ -407,7 +407,7 @@ class Sensorgen(WestCommand):
                             "(default: <output-dir>/app_config.yml)")
         parser.add_argument("--decoder", type=Path, default=None,
                             help="decoder whose SENSOR_TYPES region is rewritten "
-                            "(default: <output-dir>/../decoder/ttn.js)")
+                            "(default: <output-dir>/../decoder/decoder.js)")
         parser.add_argument("--dry-run", action="store_true",
                             help="validate and print, write nothing")
         return parser
@@ -416,7 +416,7 @@ class Sensorgen(WestCommand):
         yaml_path = args.yaml_file.resolve()
         out = (args.output_dir or yaml_path.parent).resolve()
         app_config = (args.app_config or out / "app_config.yml").resolve()
-        decoder = (args.decoder or out.parent / "decoder" / "ttn.js").resolve()
+        decoder = (args.decoder or out.parent / "decoder" / "decoder.js").resolve()
 
         reg = yaml.safe_load(yaml_path.read_text())
         enum_caps = load_enum_caps(app_config)

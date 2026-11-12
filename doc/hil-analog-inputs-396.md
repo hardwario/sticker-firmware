@@ -35,7 +35,7 @@ the ratio `V_report / V_applied` is the headline metric (target ≈ 1.0).
 | Probe | J-Link EDU Mini `801053709`, SWD @ 0x20000000 (LTO) |
 | Supply | battery, ~3.5 V → VDDA = LDO 3.3 V (TPS7A2033) |
 | Signal source | PPK2 in source-meter mode, one channel at a time on the input connector **before** the divider |
-| Observability | RTT shell over `rttt` (`ats sensors sample`, `ats lrw compose`, `history`, `alarm`); telemetry decoded with `app/decoder/ttn.js` |
+| Observability | RTT shell over `rttt` (`ats sensors sample`, `ats lrw compose`, `history`, `alarm`); telemetry decoded with `app/decoder/decoder.js` |
 
 **Bench constraints that shaped the plan:**
 
@@ -87,13 +87,13 @@ the ×34 attenuation.
 **Goal:** the measured value reaches the fPort-2 `Telemetry` frame (fields
 28/29) and decodes correctly.
 **Observable:** `ats lrw compose` (builds the uplink without sending) → decode
-with `ttn.js`.
+with `decoder.js`.
 
 With PPK2 = 1000 mV on GP_B, GP_A floating:
 
 ```
 frame: 0108ad01...e00144e8019e08
-ttn.js: { input_a_voltage: 0.068, input_b_voltage: 1.054 }
+decoder.js: { input_a_voltage: 0.068, input_b_voltage: 1.054 }
 ```
 
 **Result: PASS.** `input_b_voltage` matches the source; `input_a_voltage` shows
@@ -178,7 +178,7 @@ Plan (R1–R8) and results of the 2026-10-13 run below.
 | # | Test | Steps | Expected |
 |---|---|---|---|
 | R1 | Divider spot check | `config cap-analog-b true`, `config save`; PPK2 1000 / 3000 / 5000 mV on B; `ats sensors sample` | `input-b-voltage` ≈ source (ratio 1.00–1.02, as T1) |
-| R2 | Telemetry | `ats lrw compose` → `ttn.js` | `input_b_voltage` in V from field 31; field 30 absent with `cap-analog-a false` |
+| R2 | Telemetry | `ats lrw compose` → `decoder.js` | `input_b_voltage` in V from field 31; field 30 absent with `cap-analog-a false` |
 | R3 | History | `config history-channels 00010b0e` + rest `ff`; `history capture`; `history read` | both channels recorded, values as R1 |
 | R4 | Threshold alarm | `alarm new mb input-b-voltage lo 1.5 hi 5`; PPK2 1000 → 3000 mV; `alarm poll` | active below the band, recovers inside it; clear the rule afterwards |
 | R5 | No-data watchdog | `cap-analog-b true`, force a failed read (temporary hook) | `no_data` alarm on (0, 14) |
@@ -201,7 +201,7 @@ the ADC pinctrl, which the STM32 ADC driver re-applies on every PM resume.
 | # | Result | Observation |
 |---|---|---|
 | R1 | **PASS** | see the sweep below |
-| R2 | **PASS** | `ats radio compose` → `01088e01100118b224205af001ce0e`; `ttn.js` → `input_a_voltage: 1.87`, no `input_b_voltage` (cap off) |
+| R2 | **PASS** | `ats radio compose` → `01088e01100118b224205af001ce0e`; `decoder.js` → `input_a_voltage: 1.87`, no `input_b_voltage` (cap off) |
 | R3 | **PASS** | `history-channels 00010b…`: `history read` shows 2.11 → 0.99 → 3.09 V as the source was changed |
 | R4 | **PASS** | `alarm new mb input-a-voltage lo 1.5 hi 5`: 1.05 V → `active=1`, 3.06 V → `active=0` |
 | R5 | not run | needs a temporary fault hook |
