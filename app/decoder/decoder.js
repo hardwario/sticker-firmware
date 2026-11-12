@@ -162,7 +162,7 @@ var _ALM_NAMES = {
   1: "alarm_limit", 20: "alarm_buzzer_mode", 21: "radio_alarm_ack",
   // Event log (fPort 4): 22..26.
   22: "event_log_enable", 23: "alarm_send_detail", 24: "alarm_send_report", 27: "log_split", 28: "event_format",
-  25: "event_flush_count", 26: "event_flush_interval", 29: "event_ack"
+  25: "event_flush_count", 26: "event_flush_interval"
 };
 var _ALM_ENUMS = {
   20: ["off", "once", "slow", "normal", "fast", "continuous", "reserved6", "reserved7"],

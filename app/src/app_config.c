@@ -61,7 +61,6 @@ static const struct app_config m_app_config_defaults = {
 	.event_flush_interval = 3600,
 	.log_split = 0,
 	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
-	.event_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -113,7 +112,6 @@ static struct app_config m_app_config = {
 	.event_flush_interval = 3600,
 	.log_split = 0,
 	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
-	.event_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -275,7 +273,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.event_flush_interval));
 	SETTINGS_SET("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
 	SETTINGS_SET("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
-	SETTINGS_SET("event-ack", &m_app_config.event_ack, sizeof(m_app_config.event_ack));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -625,7 +622,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.event_flush_interval));
 	EXPORT_FUNC("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
 	EXPORT_FUNC("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
-	EXPORT_FUNC("event-ack", &m_app_config.event_ack, sizeof(m_app_config.event_ack));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -1264,11 +1260,6 @@ static void print_event_format(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " event-format %s", str);
 }
 
-static void print_event_ack(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " event-ack %s", m_app_config.event_ack ? "true" : "false");
-}
-
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -1444,7 +1435,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_event_flush_interval(shell);
 	print_log_split(shell);
 	print_event_format(shell);
-	print_event_ack(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor1_type(shell);
@@ -2159,11 +2149,6 @@ static int cmd_event_format(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_event_ack(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.event_ack, print_event_ack);
-}
-
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -2670,10 +2655,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(event-format, NULL,
 	              "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event).",
 	              cmd_event_format, 1, 1),
-
-	SHELL_CMD_ARG(event-ack, NULL,
-	              "Get/Set event log acknowledgement (true/false): fPort-4 frames go as LoRaWAN confirmed uplinks; the network server acks in RX1/RX2, an unacknowledged frame is sent again up to 3 times, then re-sent once as a replay.",
-	              cmd_event_ack, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

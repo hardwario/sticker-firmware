@@ -1057,14 +1057,6 @@ parameters:
     writable: [shell, nfc, radio]
     help: "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event)."
 
-  - name: event_ack
-    proto_group: alarms
-    proto_id: 29
-    type: bool
-    default: false
-    writable: [shell, nfc, radio]
-    help: "Get/Set event log acknowledgement (true/false): fPort-4 frames go as LoRaWAN confirmed uplinks; the network server acks in RX1/RX2, an unacknowledged frame is sent again up to 3 times, then re-sent once as a replay."
-
   - name: accel_motion_sensitivity
     proto_group: sensors
     proto_id: 10

@@ -174,7 +174,6 @@ message AppConfigMessage {
         optional uint32 event_flush_interval = 26;
         optional uint32 log_split = 27;
         optional EventFormat event_format = 28;
-        optional bool event_ack = 29;
     }
 
     message P2P {
@@ -312,8 +311,6 @@ message Command {
         repeated uint32 ranges    = 3;
         repeated uint32 seqs      = 4;
     }
-    // Event log: acknowledge the uploaded events with seq <= upto_seq
-    // (event_ack). LoRaWAN only, no reply.
     // Event log PoC: NFC paged read of the event log. Client-driven and
     // stateless like ReqHistoryPage: start_seq (omitted => oldest) is the
     // cursor, the reply (Response.event_page) gives next_seq / has_more.
