@@ -77,10 +77,6 @@ void app_eventlog_frame_dropped(const uint8_t *buf, size_t len);
 int app_eventlog_export(uint32_t start_seq, uint32_t from_unix, uint32_t to_unix,
 			struct app_cmd_alarm_event *ev, size_t max, struct app_eventlog_page *page);
 
-/* event_ack: events up to upto_seq are delivered (ack_events downlink). Only
- * moves the upload position forward. 0, -ENOTSUP (not LoRaWAN), -ENODATA. */
-int app_eventlog_ack(uint32_t upto_seq);
-
 /* Events waiting for upload, and events dropped by a ring overflow since boot. */
 uint32_t app_eventlog_pending(void);
 uint32_t app_eventlog_lost(void);

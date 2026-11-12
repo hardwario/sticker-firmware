@@ -1553,17 +1553,6 @@ test("req_events downlink encodes and decodes", () => {
 });
 
 
-// event_ack: ack_events downlink round-trip (seq 0 is a valid ack).
-test("ack_events downlink encodes and decodes", () => {
-  for (const upto of [0, 300, 70000]) {
-    const enc = codec.encodeDownlink({ data: { seq: 9, command: "ack_events", ack_events: { upto_seq: upto } } });
-    assert.deepEqual(enc.errors || [], []);
-    const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
-    assert.equal(dec.command, "ack_events");
-    assert.deepEqual(dec.ack_events, { upto_seq: upto });
-  }
-});
-
 test("event_ack param set_param round-trip", () => {
   const enc = codec.encodeDownlink({ data: { seq: 2, command: "set_param", set_param: { alarms: { event_ack: 1 } } } });
   assert.deepEqual(enc.errors || [], []);

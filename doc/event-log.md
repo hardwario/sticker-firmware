@@ -25,7 +25,7 @@ All parameters are in the `alarms` group (shell `config <name>`, NFC, downlink
 | 26 | `event_flush_interval` | 3600 | Upload at least every N seconds when events wait (0 = off) |
 | 27 | `log_split` | 0 | Percent of the history partition given to the event log: 0 / 25 / 50 / 75 / 100 |
 | 28 | `event_format` | full | fPort-4 format: `full`, `compact`, `raw` |
-| 29 | `event_ack` | false | Keep sent events unsent until the backend confirms them with `ack_events` (see [Acknowledgement](#acknowledgement-event_ack)) |
+| 29 | `event_ack` | false | fPort-4 frames as LoRaWAN confirmed uplinks (see [Acknowledgement](#acknowledgement-event_ack)) |
 
 Upload happens on whichever trigger fires first (count or interval).
 
@@ -93,8 +93,8 @@ Recommendation:
   backlog fastest.
 * Watch `lost` (shell `eventlog info`) and gaps below `oldest_seq` on the
   receiver; a growing gap means the ring is too small for the traffic.
-* With `event_ack` on, unacknowledged events are still unsent and keep
-  occupying the ring until the ack arrives.
+* `event_ack` adds a gateway downlink (the Ack) to every frame and up to 3
+  retries of a lost one: more airtime per event, a slower drain at DR0.
 
 ## Time
 
@@ -269,31 +269,23 @@ uplink to receive it on), then give the range up.
 
 ### Acknowledgement (`event_ack`)
 
-By default a batch is marked uploaded once the radio sent it (fire and
-forget); the receiver recovers gaps with `req_events`. A LoRaWAN confirmed
-uplink is not used: it only confirms delivery to the network server and costs
-gateway downlink airtime.
+By default fPort-4 frames go unconfirmed (fire and forget); the receiver
+recovers gaps with `req_events`.
 
-With `event_ack true` the backend confirms what it stored:
+With `event_ack true` every fPort-4 frame goes as a LoRaWAN **confirmed
+uplink**, exactly like alarms with `radio_alarm_ack`:
 
-```json
-{ "seq": 9, "command": "ack_events", "ack_events": { "upto_seq": 1234 } }
-```
-
-* A sent batch stays **unsent** until an `ack_events` covers it. The ack moves
-  the upload position past every event with seq ≤ `upto_seq`, but never past
-  the last batch sent and never back (an older ack is ignored). The flash
-  write is done by the event log work, not in the downlink callback.
-* No ack within one `interval_report` + 60 s (a class A device receives the
-  queued downlink with its next uplink): the batch is sent again from the
-  first unacknowledged event, together with whatever was logged since. At most
-  **3 re-sends**, then the log waits for the next regular flush (count /
-  interval) or a `req_events`, which start a new batch with 3 re-sends again.
-* After a reboot the unacknowledged events go out again with the next flush.
-* Duplicates are possible (a re-send crosses a late ack); the receiver drops
-  them by seq.
-* Send one `ack_events` per received batch (the highest seq of the batch, or
-  of the contiguous run received). LoRaWAN only, no response.
+* The network server (LNS) sends the Ack in RX1/RX2, i.e. within ~1-2 s of
+  the uplink. The backend does nothing.
+* No Ack: the frame goes again after a random backoff (~2/4/8 s), at most 3
+  times; other frames wait meanwhile (one confirmed frame in flight).
+* Still no Ack: the frame is given up and the event log re-sends its events
+  once as a replay (the same path as a frame dropped by the radio). A replay
+  lost again is left to `req_events` (seq gap on the receiver).
+* The Ack confirms delivery to the LNS, not to the application backend; the
+  LNS -> backend leg is not covered (rarely lost, recover with `req_events`).
+* Costs: one gateway downlink per frame (gateway duty cycle, RX windows on the
+  device) and the retries' airtime.
 
 ## NFC read: `req_events_page`
 
@@ -353,9 +345,10 @@ The bench image with the flash ring:
 ## Tests
 
 * `tests/eventlog` (native_sim flash simulator): seq, reboot recovery, overflow
-  gap, eviction, replay selectors, raw framing, NFC export paging, `event_ack`
-  (position, cap at the sent batch, 3 re-sends, re-send after reboot).
+  gap, eviction, replay selectors, raw framing, NFC export paging.
+* `tests/radio_common`: `event_ack` sends fPort-4 frames confirmed, retries
+  them and hands a given-up frame back to the event log.
 * `tests/cmd`: `req_events` / `req_events_page` dispatch, NFC page size.
 * `app/decoder/decoder.test.js`: all fPort-4 formats, replay, `req_events`,
-  `req_events_page`, `ack_events`, `event_ack`. CI runs the same tests on
+  `req_events_page`, `event_ack`. CI runs the same tests on
   `decoder.min.js`.
