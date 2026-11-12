@@ -748,7 +748,7 @@ ZTEST(cmd, test_build_config_status)
 
 	/* This native build has no CONFIG_W1 (APP_CMD_HAVE_W1 undefined), so the
 	 * runtime-only slot-type list is compiled out; the wire encoding of
-	 * w1_slot_type is covered by the decoder regression test (ttn.test.js). */
+	 * w1_slot_type is covered by the decoder regression test (decoder.test.js). */
 	zassert_equal(r.body.config_dump.w1_slot_type_count, 0,
 		      "w1_slot_type must be empty without CONFIG_W1");
 }

@@ -162,7 +162,7 @@ var _ALM_NAMES = {
   1: "alarm_limit", 20: "alarm_buzzer_mode", 21: "radio_alarm_ack",
   // Event log (fPort 4): 22..26.
   22: "event_log_enable", 23: "alarm_send_detail", 24: "alarm_send_report", 27: "log_split", 28: "event_format",
-  25: "event_flush_count", 26: "event_flush_interval"
+  25: "event_flush_count", 26: "event_flush_interval", 29: "event_ack"
 };
 var _ALM_ENUMS = {
   20: ["off", "once", "slow", "normal", "fast", "continuous", "reserved6", "reserved7"],
@@ -259,6 +259,7 @@ var _CMD_NAMES = {
   32: "get_radio_state",
   33: "req_events",
   34: "req_events_page",
+  35: "ack_events",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -1056,6 +1057,7 @@ function _applyTelemetryPages(d) {
 //   { "command": "get_config", "page": 0 }
 //   { "command": "req_history", "from_unix": 1780000000, "to_unix": 1780003600 }
 //   { "command": "req_events", "req_events": { "from_unix": 1780000000, "to_unix": 1780003600 } }
+//   { "command": "ack_events", "ack_events": { "upto_seq": 1234 } }
 //   { "command": "req_history_page", "req_history_page": { "start_ord": 440 } }
 //                                            // nfc-only transport — rejected over LoRaWAN too
 //   { "command": "get_param", "lorawan_field": [3], "application_field": [4, 7] }
@@ -1261,6 +1263,9 @@ function encodeDownlinkCommand(cmd) {
     // unix_time set: one-shot RTC bootstrap (normally an NFC-only use case, but
     // encodable here too since the field is transport-agnostic).
     if (b.unix_time) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.unix_time));
+  } else if (name === "ack_events") {
+    // event_ack: the events up to upto_seq arrived (seq 0 is valid).
+    if (b.upto_seq !== undefined) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.upto_seq));
   } else if (name === "req_events_page") {
     // Event log NFC read: start_seq cursor (the previous page's next_seq).
     if (b.start_seq) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.start_seq));
@@ -1454,6 +1459,15 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_events_page = ep;
+      } else if (field === 35) { // ack_events (event_ack)
+        var ak = {}, aq = pos;
+        while (aq < end && aq < bytes.length) {
+          var t35 = _pbReadVarint(bytes, aq); aq = t35.next;
+          if ((t35.value & 0x7) !== 0) break;
+          var v35 = _pbReadVarint(bytes, aq); aq = v35.next;
+          if ((t35.value >>> 3) === 1) ak.upto_seq = v35.value;
+        }
+        cmd.ack_events = ak;
       }
       pos = end;
     } else {

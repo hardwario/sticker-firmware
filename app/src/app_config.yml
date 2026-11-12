@@ -271,6 +271,9 @@ commands:
     - {name: req_events, proto_id: 33, body: ReqEvents, kind: handler, response: none, transports: [radio]}
     # Event log PoC: NFC read of the retained event log, client-driven like
     # req_history_page: start_seq cursor, the reply's next_seq / has_more.
+    # Event log: the receiver acknowledges the events up to upto_seq (event_ack).
+    # No reply: an answer would cost an uplink for every batch.
+    - {name: ack_events, proto_id: 35, body: AckEvents, kind: handler, response: none, transports: [radio]}
     - {name: req_events_page, proto_id: 34, body: ReqEventsPage, kind: handler, response: none, transports: [nfc, shell]}
     - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
     - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [radio, nfc]}
@@ -1056,6 +1059,14 @@ parameters:
     default: "full"
     writable: [shell, nfc, radio]
     help: "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event)."
+
+  - name: event_ack
+    proto_group: alarms
+    proto_id: 29
+    type: bool
+    default: false
+    writable: [shell, nfc, radio]
+    help: "Get/Set event log acknowledgement (true/false): uploaded events count as sent only after an ack_events downlink; unacknowledged batches are sent again up to 3 times."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

@@ -695,6 +695,7 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 26, 5, false, false},
 	{DUMP_SECTION_ALARMS, 27, 3, false, false},
 	{DUMP_SECTION_ALARMS, 28, 3, false, false},
+	{DUMP_SECTION_ALARMS, 29, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},
@@ -1493,6 +1494,30 @@ static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *
 	}
 }
 
+/* event_ack: the backend confirms the fPort 4 events up to upto_seq. */
+static void app_cmd_handle_ack_events(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_AckEvents *rq = &cmd->body.ack_events;
+	int ret = -ENOTSUP;
+
+	if (tp != APP_CMD_TRANSPORT_LRW) {
+		/* LoRaWAN only */
+	} else if (!rq->has_upto_seq) {
+		ret = -EINVAL;
+	} else {
+		ret = app_eventlog_ack(rq->upto_seq);
+	}
+	if (ret == -EINVAL) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "no upto_seq");
+	} else if (ret == -ENODATA) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no events");
+	} else if (ret != 0) {
+		make_error(resp, Response_Error_Code_NOT_READY, "LoRaWAN only");
+	}
+}
+
 /* Event log PoC: NFC paged read (client-driven, stateless like
  * req_history_page). One AlarmReport page from start_seq on; the phone passes
  * next_seq back as start_seq while has_more. */
@@ -1901,6 +1926,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_req_events(tp, cmd, resp, action);
+		break;
+	case Command_ack_events_tag:
+		/* transports: [lrw, p2p] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_ack_events(tp, cmd, resp, action);
 		break;
 	case Command_req_events_page_tag:
 		/* transports: [nfc, shell] — reject on any other transport */

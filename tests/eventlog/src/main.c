@@ -678,3 +678,91 @@ ZTEST(eventlog, test_dropped_resend_not_looped)
 	k_sleep(K_MSEC(6000));
 	zassert_equal(test_nframes, 2, "not re-sent again");
 }
+
+/* event_ack: a sent batch stays unsent until ack_events; an ack moves the
+ * upload position only up to its seq. */
+ZTEST(eventlog, test_ack_moves_position)
+{
+	g_app_config.event_ack = true;
+	g_app_config.interval_report = 900;
+	add_n(10);
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 1);
+	zassert_equal(app_eventlog_pending(), 10, "no ack yet");
+
+	zassert_ok(app_eventlog_ack(6));
+	settle();
+	zassert_equal(app_eventlog_pending(), 4);
+	zassert_ok(app_eventlog_ack(3));
+	settle();
+	zassert_equal(app_eventlog_pending(), 4, "an older ack does not go back");
+	zassert_ok(app_eventlog_ack(10));
+	settle();
+	zassert_equal(app_eventlog_pending(), 0);
+
+	/* Nothing re-sent once acknowledged. */
+	k_sleep(K_SECONDS(2000));
+	zassert_equal(test_nframes, 1);
+}
+
+/* An ack never reaches past the last batch sent. */
+ZTEST(eventlog, test_ack_capped_at_sent_batch)
+{
+	g_app_config.event_ack = true;
+	g_app_config.interval_report = 900;
+	add_n(5);
+	app_eventlog_flush();
+	settle();
+	add_n(3);
+	zassert_ok(app_eventlog_ack(100));
+	settle();
+	zassert_equal(app_eventlog_pending(), 3);
+}
+
+/* No ack: the batch is re-sent from the first unacknowledged event up to
+ * EVENTLOG_ACK_RETRIES (3) times, then the log waits for the next flush. */
+ZTEST(eventlog, test_ack_retries_then_gives_up)
+{
+	g_app_config.event_ack = true;
+	g_app_config.interval_report = 60;
+	add_n(4);
+	app_eventlog_flush();
+	settle();
+	zassert_equal(test_nframes, 1);
+	zassert_ok(app_eventlog_ack(2));
+	settle();
+
+	k_sleep(K_SECONDS(10 * 120));
+	zassert_equal(test_nframes, 4, "1 + 3 re-sends");
+	struct parsed p;
+
+	parse(&test_frames[1], &p);
+	zassert_equal(p.seq_first, 3, "from the first unacknowledged");
+	zassert_equal(p.n, 2);
+	zassert_equal(app_eventlog_pending(), 2);
+}
+
+/* Unacknowledged events go again after a reboot; ack off keeps the old
+ * fire-and-forget behaviour. */
+ZTEST(eventlog, test_ack_unacked_resent_after_reboot)
+{
+	g_app_config.event_ack = true;
+	g_app_config.interval_report = 900;
+	add_n(3);
+	app_eventlog_flush();
+	settle();
+	reboot();
+	zassert_equal(app_eventlog_pending(), 3);
+
+	g_app_config.event_ack = false;
+	app_eventlog_flush();
+	settle();
+	zassert_equal(app_eventlog_pending(), 0);
+}
+
+ZTEST(eventlog, test_ack_needs_lorawan)
+{
+	g_app_config.radio_mode = 0;
+	zassert_equal(app_eventlog_ack(1), -ENOTSUP);
+}

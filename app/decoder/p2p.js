@@ -16,7 +16,7 @@
 //   0x91 | { cmd(1) | len(1) | value } x n   control TLVs (Capabilities, Hello,
 //                                            join, LinkCheck, Time, ...)
 // The 0x81 body is the exact payload LoRaWAN would carry on that fPort, so it is
-// decoded by the ttn.js fPort decoders.
+// decoded by the decoder.js fPort decoders.
 //
 // Keys: join_key seals the JoinRequest / JoinAccept, session_key every frame after
 // the join. Both are AES-128-CMAC of the device's LoRaWAN OTAA AppKey (app_key):
@@ -31,7 +31,7 @@
 "use strict";
 
 const crypto = require("crypto");
-const ttn = require("./ttn.js");
+const ttn = require("./decoder.js");
 
 const TWR_VERSION = 1;
 const TWR_HDR_LEN = 14;

@@ -40,7 +40,7 @@ logd = Path(_args.log_dir or tempfile.mkdtemp(prefix="sim_hil_"))
 logd.mkdir(parents=True, exist_ok=True)
 only = set(_args.tests)
 
-DECODER = (sim_dir.parent.parent / "app/decoder/ttn.js").resolve()
+DECODER = (sim_dir.parent.parent / "app/decoder/decoder.js").resolve()
 BOOT = r"RF_WRITE_EN configured"
 RESULTS = []
 

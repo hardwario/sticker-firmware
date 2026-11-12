@@ -388,6 +388,12 @@ int app_eventlog_request_ranges(const uint32_t *pairs, size_t n_pairs)
 	return -ENODATA;
 }
 
+int app_eventlog_ack(uint32_t upto_seq)
+{
+	(void)upto_seq;
+	return -ENODATA;
+}
+
 int app_eventlog_request_seqs(const uint32_t *seqs, size_t n)
 {
 	(void)seqs;

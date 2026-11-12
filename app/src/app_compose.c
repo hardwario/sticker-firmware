@@ -33,7 +33,7 @@
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
-/* "Value not available" sentinels (mirrored in ttn.js -> null). An enabled
+/* "Value not available" sentinels (mirrored in decoder.js -> null). An enabled
  * scalar sensor is always on the wire, so a missing key means "capability off"
  * and null means "enabled, no valid sample" (sensor absent, failed or out of
  * range) - no host state needed to tell them apart. The extreme of the wire
@@ -45,7 +45,7 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 /* uint32 fields: humidity, pressure, illuminance, orientation, input_a/b_voltage */
 #define TM_U32_NA UINT32_MAX
 
-/* Per-group flag bit positions (mirrored in ttn.js). */
+/* Per-group flag bit positions (mirrored in decoder.js). */
 #define SYSTEM_FLAG_BOOT        BIT(0)
 /* Bits 1..8: the device_status alarm byte (APP_DEVICE_STATUS_ALARM_*, bits 0..7)
  * shifted up by one (#409 A5a). Telemetry is the only uplink that still gets

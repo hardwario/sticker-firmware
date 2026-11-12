@@ -13,7 +13,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const p2p = require("./p2p.js");
-const ttn = require("./ttn.js");
+const ttn = require("./decoder.js");
 
 const hex = (h) => Buffer.from(h, "hex");
 const toHex = (b) => Buffer.from(b).toString("hex");
@@ -300,7 +300,7 @@ test("control downlinks: HomeGateway, Backoff, PendingInfo, DevStatusReq", () =>
   assert.equal(t[3].fields, null); // DevStatusReq: empty
 });
 
-test("decodeEnvelope: 0x81 ports go through the ttn.js fPort decoders; unknown envelope", () => {
+test("decodeEnvelope: 0x81 ports go through the decoder.js fPort decoders; unknown envelope", () => {
   const cmd = p2p.decodeEnvelope(hex("8156aa"));
   assert.equal(cmd.portName, "command");
   assert.equal(cmd.data, undefined); // downlink: not decoded as an uplink

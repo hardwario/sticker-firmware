@@ -190,6 +190,13 @@ jobs:
         working-directory: app/decoder
         run: node --test
 
+      # decoder.min.js is the file to upload to TTS / ChirpStack (TTS formatter
+      # limit ~40 kB): committed, rebuilt here to catch a stale copy, size-capped
+      # and run through the same tests as decoder.js.
+      - name: JS decoder minified build
+        working-directory: app/decoder
+        run: npm run check:min
+
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:

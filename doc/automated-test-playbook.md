@@ -239,11 +239,11 @@ dev.Enqueue(api.EnqueueDeviceQueueItemRequest(queue_item=api.DeviceQueueItem(
 ### 3.5 TTN / The Things Stack — secondary LNS
 
 Use the session's TTS MCP tools where present: `mcp__tts__get_uplinks` (decoded payloads
-incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex payload),
+incl. `decoded_payload` from `decoder.js`), `mcp__tts__send_downlink` (`f_port`, hex payload),
 `mcp__tts__get_device`. Application `{TTS_APP_ID}` on `{TTS_HOST}`.
 
 - Purpose here: **decoder parity** (same uplink must decode identically on both LNS — both
-  run `app/decoder/ttn.js`) and a second-opinion join path.
+  run `app/decoder/decoder.js`) and a second-opinion join path.
 - **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
   the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
   correctly and reliably — confirmed decisive on 2026-08-11: `ats radio check` got an immediate
@@ -438,7 +438,7 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 ### AT-HOST-03 — decoder tests + schema/decoder agreement
 - **Steps:** `cd app/decoder && node --test`; then
   `pytest scripts/west_commands/tests -k proto_and_decoder_agree`.
-- **Expect:** all decoder cases pass; the firmware proto schema and `ttn.js` agree on the wire.
+- **Expect:** all decoder cases pass; the firmware proto schema and `decoder.js` agree on the wire.
 - **Known gap (2026-08-11, not yet fixed):** `encodeDownlinkCommand` silently builds an
   **empty body** for two `Command` oneof members that actually carry fields in the firmware
   proto: `clock_sync` (drops `unix_time`) and `req_history_page` (drops
@@ -466,7 +466,7 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Evidence:** table variant × region × used/size/%.
 
 ### AT-HOST-06 — decoder fuzz (host-side adversarial warm-up)
-- **Steps:** run `decodeUplink`/`decodeDownlink` from `app/decoder/ttn.js` (node one-liners)
+- **Steps:** run `decodeUplink`/`decodeDownlink` from `app/decoder/decoder.js` (node one-liners)
   over: empty payload, 1-byte payloads 0x00–0xFF on fPorts 1/2/3/85, truncations of each
   known-good vector from `manual-test-plan.md` §"Ready-to-use hex downlinks", and 100
   random byte strings per fPort.
@@ -567,7 +567,7 @@ source of truth — read it before testing so parameter names/ranges are current
 ### AT-CFG-02 — range clamping & rejection (D, A; maps C5)
 - **Steps:** for each sampled int param, try min−1, max+1, absurd (0xFFFFFFFF), and for
   enums an undefined value — via shell AND via `ats cmd lrw <set_param hex>` (build the
-  protobuf with the encodeDownlink helper in `app/decoder/ttn.js` or hand-crafted vectors).
+  protobuf with the encodeDownlink helper in `app/decoder/decoder.js` or hand-crafted vectors).
 - **Expect:** shell prints a range error; SetParam over transport returns an Error/NACK
   response, value unchanged. Record whether behaviour is clamp vs reject — inconsistency
   between transports = MED finding.
@@ -627,7 +627,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   by TTN (`mcp__tts__get_uplinks`), then reprovision back to ChirpStack and capture the
   matching uplink type there.
 - **Expect:** identical decoded JSON structure/values (modulo timestamps/metadata) — both
-  run `ttn.js`. Any divergence = HIGH finding (decoder or LNS integration).
+  run `decoder.js`. Any divergence = HIGH finding (decoder or LNS integration).
 
 ### AT-LRW-04 — GetInfo-on-join + device_status (DR, A; maps L4, G4)
 - **Steps:** force a rejoin (`lrw_join 08018a0100` via downlink or `ats cmd lrw`); capture
@@ -759,7 +759,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
 - **Steps:** after AT-LRW-13, capture periodic fPort-2 telemetry and run the AT-LRW-06 downlink
   matrix (get_info, set_param+readback, reboot, lrw_reset, …) over the US915 LNS; note the negotiated
   uplink DR and confirm a downlink is received in RX2.
-- **Expect:** uplinks flow and decode identically to EU868 (`ttn.js` is region-agnostic — any
+- **Expect:** uplinks flow and decode identically to EU868 (`decoder.js` is region-agnostic — any
   divergence = HIGH); telemetry fits the smallest US915 uplink DR max payload (DR0 ≈ 11 B → payload
   splits across frames, never silently dropped — cross-check with `ats radio compose 11` on debug);
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
@@ -1634,7 +1634,7 @@ These already have **executable native_sim repros** (in the analysis worktree `t
   `configen.py` `normalize_access` derives no `no_write_vendor`/`no_write_shell`). Repro: `tests/cmd` (3 failing ZTESTs).
 - **AT-DEF-histoob** (CRITICAL, release): a `flash_area_write()` failure in `backend_append()` leaves `m_stage_len=7`
   → OOB write into `m_stage[]` on the next capture. HW: pair with AT-ADV-06/PPK2 power-cut during a history flash write.
-- **AT-DEF-dechang** (HIGH): the payload decoder (`ttn.js`) infinite-loops on a malformed length-delimited uplink
+- **AT-DEF-dechang** (HIGH): the payload decoder (`decoder.js`) infinite-loops on a malformed length-delimited uplink
   (`while(pos<end)` with `end` > buffer). Repro: `node -e '…decodeUplink({fPort:85,bytes:[1,0x1a,0x7f]})'` hangs.
 - **AT-DEF-349** (HIGH): #349 `rt_sync` keeps a stale latch on an in-place STATE-rule edit; `eval_count` re-fires
   without `!rt->active` (ignores dwell/hold). Repro: `tests/alarm_eval` (2 ZTESTs).
