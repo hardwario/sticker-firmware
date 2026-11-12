@@ -830,6 +830,16 @@ static bool kind_confirmed(uint8_t kind)
 	return (m_be->confirm_kinds & BIT(kind)) != 0;
 }
 
+/* event_ack: fPort-4 event log frames go confirmed (LoRaWAN only; the event
+ * log does not run on P2P), so the network server acks each one in RX1/RX2. */
+static bool frame_confirmed(uint8_t kind, enum app_radio_frame_tag tag)
+{
+	if (tag == APP_RADIO_TAG_EVENTLOG && g_app_config.event_ack) {
+		return true;
+	}
+	return kind_confirmed(kind);
+}
+
 /* The path is done with its frame (sent, dropped, the replay ended): the
  * frames that waited go now. Only the other path waits for the kick (-EBUSY);
  * the releasing one schedules its own next step, and a kick of it would run
@@ -914,6 +924,11 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 				"up",
 				f->kind, APP_RADIO_ACK_MAX_RETRIES);
 			ack_release(f->kind);
+			if (f->tag == APP_RADIO_TAG_EVENTLOG) {
+				/* event_ack: undelivered; the event log re-sends it once
+				 * as a replay (marked sent already). */
+				app_eventlog_frame_dropped(f->buf, f->len);
+			}
 			/* Only a frame sent as a link check judges the link (Hynek
 			 * 2026-10-06): a lost alarm, answer or plain report does not
 			 * count towards WARNING and the rejoin. */
@@ -1150,7 +1165,7 @@ static bool tx_queued_step(void)
 		.kind = m_cur_kind,
 		.tag = m_cur.tag,
 		.port = m_cur.port,
-		.flags = kind_confirmed(m_cur_kind) ? APP_RADIO_FRAME_CONFIRMED : 0,
+		.flags = frame_confirmed(m_cur_kind, m_cur.tag) ? APP_RADIO_FRAME_CONFIRMED : 0,
 		.len = m_cur.len,
 		.buf = m_cur.buf,
 	};

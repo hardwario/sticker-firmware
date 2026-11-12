@@ -2672,7 +2672,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_event_format, 1, 1),
 
 	SHELL_CMD_ARG(event-ack, NULL,
-	              "Get/Set event log acknowledgement (true/false): uploaded events count as sent only after an ack_events downlink; unacknowledged batches are sent again up to 3 times.",
+	              "Get/Set event log acknowledgement (true/false): fPort-4 frames go as LoRaWAN confirmed uplinks; the network server acks in RX1/RX2, an unacknowledged frame is sent again up to 3 times, then re-sent once as a replay.",
 	              cmd_event_ack, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,

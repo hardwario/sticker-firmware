@@ -225,7 +225,6 @@ message Command {
         GetRadioState    get_radio_state   = 32;
         ReqEvents        req_events        = 33;
         ReqEventsPage    req_events_page   = 34;
-        AckEvents        ack_events        = 35;
     }
 // END GENERATED COMMANDS
 
@@ -315,9 +314,6 @@ message Command {
     }
     // Event log: acknowledge the uploaded events with seq <= upto_seq
     // (event_ack). LoRaWAN only, no reply.
-    message AckEvents {
-        optional uint32 upto_seq = 1;
-    }
     // Event log PoC: NFC paged read of the event log. Client-driven and
     // stateless like ReqHistoryPage: start_seq (omitted => oldest) is the
     // cursor, the reply (Response.event_page) gives next_seq / has_more.
