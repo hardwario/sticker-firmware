@@ -790,6 +790,8 @@ function decodeDownlinkResponse(bytes) {
       // #425 universal paging: page_index (12) / page_count (13) in the envelope.
       else if (field === 12) resp.page_index = v.value;
       else if (field === 13) resp.page_count = v.value;
+      // An item that fits no page at this DR was left out (set on page 0).
+      else if (field === 15) resp.partial = v.value !== 0;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var end = pos + len.value;

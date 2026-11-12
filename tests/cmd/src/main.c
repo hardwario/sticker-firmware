@@ -2628,6 +2628,79 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	zassert_equal(g_seen_cfg_fields, 13, "%u of 13 settings", g_seen_cfg_fields);
 }
 
+/* Response.partial: set on page 0 only, and only when the layout left an item
+ * out (physical floor at the 11 B tier: US915 DR0, AU915/AS923 DR2). */
+static uint32_t g_partial_pages;
+static bool g_partial_page0;
+
+static void visit_partial(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	if (r->partial) {
+		g_partial_pages++;
+		g_partial_page0 = r->page_index == 0;
+	}
+}
+
+ZTEST(cmd, test_settings_info_partial_at_11_byte_tier)
+{
+	uint8_t out[64];
+	size_t out_len = 0;
+	bool more = false;
+
+	reset_cfg();
+	g_app_config.interval_sample = 60;
+	g_app_config.interval_report = 900;
+	g_app_config.cap_sht = true;
+
+	/* 16 B: everything fits, no flag. */
+	zassert_equal(app_cmd_build_config_status(out, 16, &out_len, &more), 0, "build 16");
+	g_partial_pages = 0;
+	walk_pages(out, out_len, 16, 0, visit_partial);
+	zassert_equal(g_partial_pages, 0, "nothing left out at 16 B");
+
+	/* 11 B: interval_report (2 B value) and the 2 B-tag sensors fit no page. */
+	zassert_equal(app_cmd_build_config_status(out, 11, &out_len, &more), 0, "build 11");
+	g_partial_pages = 0;
+	g_partial_page0 = false;
+	walk_pages(out, out_len, 11, 0, visit_partial);
+	zassert_equal(g_partial_pages, 1, "flag on exactly one page, got %u", g_partial_pages);
+	zassert_true(g_partial_page0, "flag must be on page 0");
+}
+
+ZTEST(cmd, test_info_partial_at_11_byte_tier)
+{
+	uint8_t out[64];
+	size_t out_len = 0;
+	bool more = false;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
+
+	zassert_equal(app_cmd_build_info_seq(25, out, 51, &out_len, &more), 0, "51 B");
+	Response r = decode_resp(out, out_len);
+	zassert_false(r.partial, "nothing left out at 51 B");
+	app_cmd_stream_cancel();
+
+	/* With a seq, serial / uptime / battery fit no 11 B page. */
+	zassert_equal(app_cmd_build_info_seq(25, out, 11, &out_len, &more), 0, "11 B");
+	zassert_true(out_len <= 11, "page 0 is %zu B", out_len);
+	r = decode_resp(out, out_len);
+	zassert_equal(r.seq, 25, "seq %u", r.seq);
+	zassert_true(r.partial, "page 0 must carry partial");
+	if (more) {
+		uint8_t buf[64];
+		size_t n;
+
+		while (app_cmd_stream_next(buf, 11, &n) == 0) {
+			zassert_true(n <= 11, "page is %zu B", n);
+			zassert_false(decode_resp(buf, n).partial, "flag only on page 0");
+		}
+	}
+}
+
 /* GetSettings: the boot settings-info content on request. At the EU868 DR0
  * budget it is one frame, carries the command's seq (not the boot dump's 0) and
  * the same 13 settings; no page fields, no stream. */
