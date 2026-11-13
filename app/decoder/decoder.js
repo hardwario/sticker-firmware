@@ -662,7 +662,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
       else if (field === 14) resp.radio_state = _decodeRadioState(bytes, pos, end);
-      else if (field === 15) resp.event_page = _decodeEventPage(bytes.slice(pos, end));
+      else if (field === 16) resp.event_page = _decodeEventPage(bytes.slice(pos, end));
       pos = end;
     } else {
       break;

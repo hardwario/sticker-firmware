@@ -1678,7 +1678,8 @@ test("Response.event_page decodes events with seq and the cursor", () => {
     alarmEvent(0, 17, 0, 3, 0, 1, 0),
     alarmEvent(0, 17, 1, 3, 9, 0, 0).concat(pbTV(12, 50)),
   ]).slice(1).concat(pbTV(7, 40), pbTV(9, 1), pbTV(10, 51), pbTV(11, 1));
-  const resp = [0x01].concat(pbTV(1, 5), pbLD(15, rep));
+  // Field 16 needs a two-byte key (0x82 0x01), which pbLD does not emit.
+  const resp = [0x01].concat(pbTV(1, 5), [0x82, 0x01, rep.length], rep);
   const d = codec.decodeUplink({ fPort: 85, bytes: resp }).data;
   const p = d.event_page;
   assert.ok(p, "event_page");

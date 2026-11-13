@@ -432,7 +432,7 @@ message Response {
         ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
         BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
         RadioState     radio_state      = 14;  // get_radio_state: link state + diagnostics (#446)
-        AlarmReport    event_page       = 15;  // req_events_page: event log page (NFC)
+        AlarmReport    event_page       = 16;  // req_events_page: event log page (NFC)
     }
 
     // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
