@@ -8,7 +8,7 @@ manifest:
       remote: hardwario
       # Pinned to the head of v4.3.0-sticker2-branch so a release tag always
       # rebuilds the same Zephyr; bump the SHA together with the fork (#503).
-      revision: 3c68c3620ec2b030e181699f53104d0a9edae537
+      revision: 4ee23a216116e0266f2149d245760c562cf88499
       path: zephyr
       import: true
   self:

@@ -875,6 +875,14 @@ static void join_work_handler(struct k_work *work)
 	 * writers waiting through the busy-MAC polls too). Only -ETIMEDOUT (a lost
 	 * MAC confirm, #181) may leave the windows open; then the exchange ends
 	 * when JOINING is left (state_transition()). air_end is idempotent. */
+	/* lorawan_join() applies the network type before the JoinRequest, so it
+	 * must be set here: setting the MIB afterwards left the join itself on the
+	 * public sync word and a private-only gateway never heard it (#545). */
+	lorawan_set_public_network(g_app_config.lrw_network != APP_CONFIG_LRW_NETWORK_PRIVATE);
+	LOG_INF("Network type: %s", g_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PRIVATE
+					    ? "private (sync word 0x12)"
+					    : "public (sync word 0x34)");
+
 	app_radio_air_begin();
 	ret = lorawan_join(&config);
 	if (ret != -ETIMEDOUT) {
@@ -908,18 +916,6 @@ static void join_work_handler(struct k_work *work)
 		lorawan_mac_unlock();
 
 		LOG_INF("RX delays set: RX1=1s, RX2=2s");
-	}
-
-	/* Private sync word only when explicitly configured (default stays public). */
-	if (g_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PRIVATE) {
-		MibRequestConfirm_t mib;
-
-		mib.Type = MIB_PUBLIC_NETWORK;
-		mib.Param.EnablePublicNetwork = false;
-		lorawan_mac_lock();
-		LoRaMacMibSetRequestConfirm(&mib);
-		lorawan_mac_unlock();
-		LOG_INF("Network type: private (sync word 0x12)");
 	}
 
 	LOG_INF("lorawan_join() ret=%d, polling MAC...", ret);
