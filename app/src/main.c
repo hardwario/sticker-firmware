@@ -11,6 +11,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_eventlog.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -295,7 +296,7 @@ static __noinit struct fault_record m_fault;
 #if defined(CONFIG_CPU_CORTEX_M)
 BUILD_ASSERT(K_ERR_ARM_MEM_GENERIC == 16 && K_ERR_ARM_BUS_INSTRUCTION_BUS == 27 &&
 		     K_ERR_ARM_USAGE_UNDEFINED_INSTRUCTION == 36,
-	     "K_ERR_ARM_* moved: update _FAULT_REASONS in app/decoder/ttn.js");
+	     "K_ERR_ARM_* moved: update _FAULT_REASONS in app/decoder/decoder.js");
 #endif
 
 static uint32_t fault_check(const struct fault_record *f)
@@ -443,6 +444,12 @@ int main(void)
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
+	}
+
+	/* Before history: a changed log_split erases the shared partition. */
+	ret = app_eventlog_init();
+	if (ret && ret != -ENOSPC) {
+		LOG_WRN("app_eventlog_init failed: %d (event log unavailable)", ret);
 	}
 
 	ret = app_history_init();

@@ -1,4 +1,4 @@
-// Tests for the STICKER LoRaWAN codec (ttn.js).
+// Tests for the STICKER LoRaWAN codec (decoder.js).
 // Run: `node --test` (Node >= 18, zero dependencies).
 //
 // Vectors are HW-verified / current-schema captures. The downlink command hex
@@ -8,7 +8,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const codec = require("./ttn.js");
+const codec = require(process.env.DECODER || "./decoder.js");
 
 const hex = (h) => Buffer.from(h, "hex");
 const toHex = (bytes) => Buffer.from(bytes).toString("hex");
@@ -827,8 +827,8 @@ function buildLayoutFrame(t0, interval, channels, w1Types, samples) {
   if (w1Types) hf = hf.concat(pbLD(11, w1Types));
   return [0x01].concat(pbTV(1, 7)).concat(pbLD(5, hf));
 }
-const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
 const le32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+const le16 = (v) => [v & 0xff, (v >> 8) & 0xff];
 
 test("history frame with channels/w1_types decodes any registry channel (#430)", () => {
   // temperature, humidity, s1 temperature (dallas), pir-motion, hall-left-count,
@@ -1512,4 +1512,193 @@ test("lorawan link-check fields: old names still encode (v1.5.0 rename alias)", 
   const dec = codec.decodeDownlink({ fPort: 85, bytes: newEnc.bytes }).data;
   assert.equal(dec.set_param.lorawan.radio_link_check_interval, 7);
   assert.equal(dec.set_param.lorawan.radio_link_check_fail_rejoin, 4);
+});
+
+// Event log PoC: fPort 4 carries the logged alarm edges in the fPort-3
+// AlarmReport layout (motion start / end of a level rule here).
+test("fPort-4 event log batch: motion start + end", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),  // accel-motion, activate, TRIGGER
+    alarmEvent(0, 17, 1, 3, 75, 0, 0), // accel-motion, deactivate after 75 s
+  ]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  assert.equal(d.alarms, undefined);
+  assert.equal(d.event_log, undefined);
+  assert.equal(d.truncated, undefined);
+  assert.equal(d.total, 2);
+  assert.equal(d.events.length, 2);
+  assert.equal(d.events[0].channel, "accel-motion");
+  assert.equal(d.events[0].event, "activate");
+  assert.equal(d.events[0].time, base);
+  assert.equal(d.events[1].event, "deactivate");
+  assert.equal(d.events[1].time, base + 75);
+});
+
+test("event log config fields encode and decode (alarms 22..26)", () => {
+  const cfg = {
+    event_log_enable: true, alarm_send_detail: false, alarm_send_report: false,
+    event_flush_count: 20, event_flush_interval: 3600,
+  };
+  const data = { seq: 7, command: "set_param", set_param: { alarms: cfg } };
+  const enc = codec.encodeDownlink({ data });
+  assert.deepEqual(enc.errors || [], []);
+  const dec = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  const a = dec.set_param.alarms;
+  assert.equal(a.event_log_enable, 1);
+  assert.equal(a.alarm_send_detail, 0);
+  assert.equal(a.alarm_send_report, 0);
+  assert.equal(a.event_flush_count, 20);
+  assert.equal(a.event_flush_interval, 3600);
+});
+
+// Event log PoC: req_events downlink round-trip.
+test("req_events downlink encodes and decodes", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 7, command: "req_events", req_events: { from_unix: 1794224900, to_unix: 1794225100 } } });
+  assert.deepEqual(enc.errors || [], []);
+  assert.equal(enc.fPort, 85);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.equal(dec.seq, 7);
+  assert.deepEqual(dec.req_events, { from_unix: 1794224900, to_unix: 1794225100 });
+});
+
+
+// event_format raw (0x03): 10 B header (seq_first) + 3 B per event.
+test("fPort-4 raw event batch", () => {
+  const base = 1780000000;
+  const b = [0x03].concat(le32(base), [0x01], le32(500),
+    [0x00, 0x00, 0x00,        // rel 0, activate, rule 0
+     0x4b, 0x00, 0x80,        // rel 75, deactivate, rule 0
+     0x2c, 0x01, 0x7f]);      // rel 300, activate, watchdog
+  const r = codec.decodeUplink({ bytes: b, fPort: 4 });
+  assert.deepEqual(r.warnings, []);
+  const d = r.data;
+  assert.equal(d.format, "raw");
+  assert.equal(d.total, 3);
+  assert.equal(d.seq_first, 500);
+  assert.equal(d.replay, undefined);
+  assert.deepEqual(d.events[0], { seq: 500, rule: 0, event: "activate", time: base, rel_s: 0 });
+  assert.deepEqual(d.events[1], { seq: 501, rule: 0, event: "deactivate", time: base + 75, rel_s: 75 });
+  assert.equal(d.events[2].seq, 502);
+  assert.equal(d.events[2].rule, null);
+  assert.equal(d.events[2].source, "watchdog");
+  assert.equal(d.events[2].time, base + 300);
+});
+
+test("fPort-4 raw event batch: unsynced keeps uptime", () => {
+  const d = codec.decodeUplink({ bytes: [0x03, 10, 0, 0, 0, 0x00].concat(le32(1), [5, 0, 0x01]), fPort: 4 }).data;
+  assert.equal(d.time_synced, false);
+  assert.deepEqual(d.events[0], { seq: 1, rule: 1, event: "activate", time: null, rel_s: 5, uptime_s: 15 });
+});
+
+// Replay of single seqs: oldest_seq + a seq delta byte per event.
+test("fPort-4 raw replay with seq deltas", () => {
+  const base = 1780000000;
+  const b = [0x03].concat(le32(base), [0x01 | 0x02 | 0x04], le32(40), le32(12),
+    [0, 0, 0x02, 0,      // seq 40
+     10, 0, 0x82, 3,     // seq 43
+     20, 0, 0x02, 200]); // seq 243
+  const r = codec.decodeUplink({ bytes: b, fPort: 4 });
+  assert.deepEqual(r.warnings, []);
+  const d = r.data;
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 12);
+  assert.deepEqual(d.events.map((e) => e.seq), [40, 43, 243]);
+  assert.equal(d.events[1].event, "deactivate");
+  assert.equal(d.events[2].time, base + 20);
+});
+
+// Empty replay answer: nothing selected, only oldest_seq.
+test("fPort-4 raw empty replay", () => {
+  const d = codec.decodeUplink({ bytes: [0x03].concat(le32(0), [0x02], le32(90), le32(30)), fPort: 4 }).data;
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 30);
+  assert.equal(d.events.length, 0);
+});
+
+// Full format: seq_first (7), replay (8), oldest_seq (9), own AlarmEvent.seq (12).
+test("fPort-4 full batch carries seq", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 3, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),
+    alarmEvent(0, 17, 1, 3, 5, 0, 0),
+    alarmEvent(0, 17, 0, 3, 9, 1, 0).concat(pbTV(12, 77)),
+  ]).concat(pbTV(7, 70), pbTV(8, 1), pbTV(9, 3));
+  const d = codec.decodeUplink({ bytes: f, fPort: 4 }).data;
+  assert.equal(d.seq_first, 70);
+  assert.equal(d.replay, true);
+  assert.equal(d.oldest_seq, 3);
+  assert.deepEqual(d.events.map((e) => e.seq), [70, 71, 77]);
+});
+
+test("req_events by seq ranges and single seqs round-trip", () => {
+  const e1 = codec.encodeDownlink({ data: { seq: 8, command: "req_events", req_events: { ranges: [[100, 4], [300, 17]] } } });
+  assert.deepEqual(e1.errors || [], []);
+  assert.deepEqual(codec.decodeDownlink({ fPort: 85, bytes: e1.bytes }).data.req_events, { ranges: [[100, 4], [300, 17]] });
+  const e2 = codec.encodeDownlink({ data: { seq: 9, command: "req_events", req_events: { seqs: [1205, 1200, 1300] } } });
+  assert.deepEqual(e2.errors || [], []);
+  assert.deepEqual(codec.decodeDownlink({ fPort: 85, bytes: e2.bytes }).data.req_events, { seqs: [1200, 1205, 1300] });
+  assert.ok(e2.bytes.length <= 51);
+});
+
+// event_format compact (0x02): AlarmReport with rel_s / edge / rule only.
+test("fPort-4 compact event batch", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(0, 0, 0, 0, 0, null, 2),
+    alarmEvent(0, 0, 1, 0, 75, null, 2),
+  ]);
+  f[0] = 0x02;
+  const d = codec.decodeUplink({ bytes: f.concat(pbTV(7, 9)), fPort: 4 }).data;
+  assert.equal(d.format, "compact");
+  assert.deepEqual(d.events[0], { rule: 2, event: "activate", time: base, seq: 9 });
+  assert.deepEqual(d.events[1], { rule: 2, event: "deactivate", time: base + 75, seq: 10 });
+});
+
+test("event_format set_param round-trip (alarms 28)", () => {
+  const data = { seq: 30, command: "set_param", set_param: { alarms: { event_format: "raw" } } };
+  const enc = codec.encodeDownlink({ fPort: 85, data });
+  assert.deepEqual(enc.errors || [], []);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.equal(dec.set_param.alarms.event_format, "raw");
+});
+
+// Event log NFC read: req_events_page round-trip and the event_page response.
+test("req_events_page encodes and decodes", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 5, command: "req_events_page", req_events_page: { start_seq: 10 } } });
+  assert.deepEqual(enc.errors || [], []);
+  assert.deepEqual(enc.bytes, [0x08, 0x05, 0x92, 0x02, 0x02, 0x08, 0x0a]);
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes }).data;
+  assert.deepEqual(dec.req_events_page, { start_seq: 10 });
+});
+
+test("Response.event_page decodes events with seq and the cursor", () => {
+  const base = 1780000000;
+  const rep = buildAlarmReport(base, 2, [
+    alarmEvent(0, 17, 0, 3, 0, 1, 0),
+    alarmEvent(0, 17, 1, 3, 9, 0, 0).concat(pbTV(12, 50)),
+  ]).slice(1).concat(pbTV(7, 40), pbTV(9, 1), pbTV(10, 51), pbTV(11, 1));
+  // Field 16 needs a two-byte key (0x82 0x01), which pbLD does not emit.
+  const resp = [0x01].concat(pbTV(1, 5), [0x82, 0x01, rep.length], rep);
+  const d = codec.decodeUplink({ fPort: 85, bytes: resp }).data;
+  const p = d.event_page;
+  assert.ok(p, "event_page");
+  assert.deepEqual(p.events.map((e) => e.seq), [40, 50]);
+  assert.equal(p.next_seq, 51);
+  assert.equal(p.has_more, true);
+  assert.equal(p.oldest_seq, 1);
+  assert.equal(p.events[1].time, base + 9);
+});
+
+// Compact keeps the wire rule: 0xFE = low battery, 0xFF = watchdog (HW frame).
+test("fPort-4 compact system events carry source", () => {
+  const b = [...Buffer.from("AgjH5sjXBhACGgM4/wEaBSABOP8BIAE4iAE=", "base64")];
+  const d = codec.decodeUplink({ fPort: 4, bytes: b }).data;
+  assert.equal(d.events[0].source, "watchdog");
+  assert.equal(d.events[0].rule, null);
+  const bat = [0x02, 0x08, 0x01, 0x1a, 0x03, 0x38, 0xfe, 0x01, 0x1a, 0x02, 0x38, 0x00, 0x20, 0x02];
+  const e = codec.decodeUplink({ fPort: 4, bytes: bat }).data.events;
+  assert.equal(e[0].source, "low_battery");
+  assert.equal(e[1].rule, 0);
+  assert.equal(e[1].source, undefined);
 });

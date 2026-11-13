@@ -777,7 +777,7 @@ static void compose_work_handler(struct k_work *work)
 }
 
 /* Build the telemetry uplink WITHOUT sending it and dump the raw fPort-2 bytes
- * (decodable with ttn.js) — lets the tester verify exactly what would go on the
+ * (decodable with decoder.js) — lets the tester verify exactly what would go on the
  * wire. Samples first so the payload reflects the current sensors. Optional
  * budget arg picks the data-rate payload size (default 51 = EU868 DR0); needed
  * because the live budget is 0 before a join. */

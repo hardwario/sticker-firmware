@@ -848,7 +848,7 @@ def rewrite_marked_region(path, body, comment,
 
 # Marker labels for the command-codegen regions (each lives in its own file:
 # the Command oneof in the .proto, the dispatch switch in app_cmd.c, the
-# name<->tag maps in ttn.js). All use line comments so one rewrite helper fits.
+# name<->tag maps in decoder.js). All use line comments so one rewrite helper fits.
 COMMANDS_BEGIN = "BEGIN GENERATED COMMANDS"
 COMMANDS_END = "END GENERATED COMMANDS"
 DISPATCH_BEGIN = "BEGIN GENERATED DISPATCH"
@@ -1113,7 +1113,7 @@ class Configen(WestCommand):
             default=None,
             help="path to the JS decoder whose _CMD_NAMES/_CMD_TAGS region is "
             "rewritten from the YAML 'commands:' list "
-            "(default: <output-dir>/../decoder/ttn.js)",
+            "(default: <output-dir>/../decoder/decoder.js)",
         )
         parser.add_argument(
             "--app-cmd",
@@ -1354,10 +1354,10 @@ class Configen(WestCommand):
 
     def _generate_commands(self, env, model, output_dir, args):
         """Rewrite the command-codegen regions from the YAML `commands:` list:
-        the decoder _CMD_NAMES map (ttn.js) and the app_cmd_dispatch() switch
+        the decoder _CMD_NAMES map (decoder.js) and the app_cmd_dispatch() switch
         (app_cmd.c). The proto Command oneof is rewritten by _generate_proto."""
-        # Decoder: _CMD_NAMES / _CMD_TAGS region in ttn.js.
-        decoder_path = args.decoder or (output_dir.parent / "decoder" / "ttn.js")
+        # Decoder: _CMD_NAMES / _CMD_TAGS region in decoder.js.
+        decoder_path = args.decoder or (output_dir.parent / "decoder" / "decoder.js")
         decoder_path = decoder_path.resolve()
         if decoder_path.exists():
             body = env.get_template("commands_decoder.js.j2").render(**model)

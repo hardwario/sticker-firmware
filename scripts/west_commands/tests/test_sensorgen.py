@@ -1,6 +1,6 @@
 """Tests for the sensorgen west command (#430): the sensor type registry
 app_sensor_types.yaml, its validation, the append-only numbering guard, and that the
-committed generated files (app_sensor_types.{c,h}, the ttn.js SENSOR_TYPES
+committed generated files (app_sensor_types.{c,h}, the decoder.js SENSOR_TYPES
 region) are in sync with the YAML.
 
 Run: `pytest scripts/west_commands/tests` (from the repo root, inside the venv).
@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[3]
 APP_SRC = REPO / "app" / "src"
 REGISTRY = APP_SRC / "app_sensor_types.yaml"
 APP_CONFIG = APP_SRC / "app_config.yml"
-DECODER = REPO / "app" / "decoder" / "ttn.js"
+DECODER = REPO / "app" / "decoder" / "decoder.js"
 
 
 def _registry():
@@ -43,7 +43,7 @@ def _run(workdir):
         yaml_file=workdir / "app_sensor_types.yaml",
         output_dir=workdir,
         app_config=workdir / "app_config.yml",
-        decoder=workdir / "ttn.js",
+        decoder=workdir / "decoder.js",
         dry_run=False,
     ), [])
 
@@ -52,7 +52,7 @@ def _run(workdir):
 def workdir(tmp_path):
     for name in ["app_sensor_types.yaml", "app_config.yml", "app_sensor_types.h", "app_sensor_types.c"]:
         shutil.copy(APP_SRC / name, tmp_path / name)
-    shutil.copy(DECODER, tmp_path / "ttn.js")
+    shutil.copy(DECODER, tmp_path / "decoder.js")
     if (REPO / ".clang-format").exists():
         shutil.copy(REPO / ".clang-format", tmp_path / ".clang-format")
     return tmp_path
@@ -89,13 +89,13 @@ def test_generated_c_matches_committed(workdir):
 
 def test_generated_decoder_region_matches_committed(workdir):
     _run(workdir)
-    assert (workdir / "ttn.js").read_text() == DECODER.read_text(), \
-        "ttn.js SENSOR_TYPES region is stale — run `west sensorgen app/src/app_sensor_types.yaml`"
+    assert (workdir / "decoder.js").read_text() == DECODER.read_text(), \
+        "decoder.js SENSOR_TYPES region is stale — run `west sensorgen app/src/app_sensor_types.yaml`"
 
 
 def test_generation_is_idempotent(workdir):
     _run(workdir)
-    first = {n: (workdir / n).read_text() for n in ["app_sensor_types.h", "app_sensor_types.c", "ttn.js"]}
+    first = {n: (workdir / n).read_text() for n in ["app_sensor_types.h", "app_sensor_types.c", "decoder.js"]}
     _run(workdir)
     for n, text in first.items():
         assert (workdir / n).read_text() == text

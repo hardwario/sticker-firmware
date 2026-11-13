@@ -5,6 +5,7 @@
  */
 
 #include "app_history.h"
+#include "app_eventlog.h"
 #include "app_log.h"
 #include "app_config.h"
 #include "app_radio.h"
@@ -217,12 +218,15 @@ static uint32_t now_seconds(bool *synced)
 #define PAYLOAD_DW_V2    ((PAGE_SIZE - HIST_HDR_SIZE_V2) / DW_SIZE) /* 251 */
 #define PAGE_DATA_V1     (PAYLOAD_DW_V1 * DW_DATA)                  /* 1764 B / page */
 #define PAGE_DATA_V2     (PAYLOAD_DW_V2 * DW_DATA)                  /* 1757 B / page */
-#define HIST_NPAGES      (FIXED_PARTITION_SIZE(history_partition) / PAGE_SIZE)
+#define HIST_NPAGES_MAX  (FIXED_PARTITION_SIZE(history_partition) / PAGE_SIZE)
+/* Pages left to history after log_split gave the top of the partition to the
+ * event log (app_eventlog_flash_pages()); set once in backend_init(). */
+#define HIST_NPAGES      m_hist_npages
 
-BUILD_ASSERT(HIST_NPAGES >= 3, "history partition too small for a page ring");
+BUILD_ASSERT(HIST_NPAGES_MAX >= 3, "history partition too small for a page ring");
 /* Worst case (1 B sample, all pages v1) record count must fit the uint16_t
  * logical count. */
-BUILD_ASSERT((uint32_t)HIST_NPAGES *PAGE_DATA_V1 <= UINT16_MAX,
+BUILD_ASSERT((uint32_t)HIST_NPAGES_MAX *PAGE_DATA_V1 <= UINT16_MAX,
 	     "history ring exceeds uint16 count");
 
 struct hist_page_hdr {
@@ -285,7 +289,8 @@ struct live_page {
 #define LP_V2       BIT(2) /* 40 B header with a fix-up double word */
 #define LP_FIXUP    BIT(3) /* fix-up double word still to be programmed */
 
-static struct live_page m_live[HIST_NPAGES]; /* [0] = tail (oldest) .. [n-1] = head */
+static uint16_t m_hist_npages = HIST_NPAGES_MAX;
+static struct live_page m_live[HIST_NPAGES_MAX]; /* [0] = tail (oldest) .. [n-1] = head */
 static uint16_t m_nlive;
 static uint32_t m_next_seq;      /* seq to assign to the next new page */
 static uint32_t m_abs_ord;       /* absolute ordinal of the next record to append */
@@ -516,6 +521,12 @@ static int backend_init(void)
 		LOG_ERR("history: flash page size %zu != %d", info.size, PAGE_SIZE);
 		return -ENOTSUP;
 	}
+	m_hist_npages = (uint16_t)(HIST_NPAGES_MAX - app_eventlog_flash_pages());
+	if (m_hist_npages < 3) {
+		/* log_split gave (almost) all of the partition to the event log. */
+		LOG_INF("history: no flash left (log_split %d %%)", g_app_config.log_split);
+		return -ENOSPC;
+	}
 	m_ready = true;
 	m_last_phys = (uint16_t)(HIST_NPAGES - 1); /* first advance() wraps to page 0 */
 	return 0;
@@ -600,7 +611,7 @@ static bool backend_mount(void)
 	/* Walk physically backward from the head, collecting the contiguous run of
 	 * pages that share the head's interval and decreasing sequence numbers. A
 	 * gap (interval change, evicted page, older layout) ends the live set. */
-	uint16_t chain[HIST_NPAGES];
+	uint16_t chain[HIST_NPAGES_MAX];
 	uint16_t chain_len = 0;
 	chain[chain_len++] = head_phys;
 	struct hist_page_hdr cur = head_hdr;
@@ -870,7 +881,7 @@ static void backend_erase(void)
 	if (!m_ready) {
 		return;
 	}
-	(void)hist_flash_erase(0, FIXED_PARTITION_SIZE(history_partition));
+	(void)hist_flash_erase(0, (size_t)HIST_NPAGES * PAGE_SIZE);
 	backend_reset_logical();
 }
 

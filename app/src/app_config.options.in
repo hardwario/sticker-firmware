@@ -59,6 +59,9 @@ ClaimInfo.claim_token       max_size:16 fixed_length:true
 # Alarm-detail batch (fPort 3, #27). 8 events fit the smallest practical DR; the
 # encoder further caps by the live payload budget.
 AlarmReport.events max_count:8
+# req_events selectors: 8 (seq, count) pairs / 20 seqs fit a 51 B downlink.
+Command.ReqEvents.ranges max_count:16
+Command.ReqEvents.seqs max_count:20
 
 # 1-Wire telemetry: one SensorReading per ROM-bound slot (APP_W1_SLOT_COUNT).
 # Static array; the composer splits readings across frames to fit the budget.

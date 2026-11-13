@@ -54,6 +54,13 @@ static const struct app_config m_app_config_defaults = {
 	.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
+	.event_log_enable = false,
+	.alarm_send_detail = true,
+	.alarm_send_report = true,
+	.event_flush_count = 20,
+	.event_flush_interval = 3600,
+	.log_split = 0,
+	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -98,6 +105,13 @@ static struct app_config m_app_config = {
 	.cap_gpio_input_b = APP_CONFIG_GPIO_INPUT_DISABLED,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.radio_alarm_ack = false,
+	.event_log_enable = false,
+	.alarm_send_detail = true,
+	.alarm_send_report = true,
+	.event_flush_count = 20,
+	.event_flush_interval = 3600,
+	.log_split = 0,
+	.event_format = APP_CONFIG_EVENT_FORMAT_FULL,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 869525000,
 	.p2p_spreading_factor = 7,
@@ -247,6 +261,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_buzzer_mode));
 	SETTINGS_SET("radio-alarm-ack", &m_app_config.radio_alarm_ack,
 		     sizeof(m_app_config.radio_alarm_ack));
+	SETTINGS_SET("event-log-enable", &m_app_config.event_log_enable,
+		     sizeof(m_app_config.event_log_enable));
+	SETTINGS_SET("alarm-send-detail", &m_app_config.alarm_send_detail,
+		     sizeof(m_app_config.alarm_send_detail));
+	SETTINGS_SET("alarm-send-report", &m_app_config.alarm_send_report,
+		     sizeof(m_app_config.alarm_send_report));
+	SETTINGS_SET("event-flush-count", &m_app_config.event_flush_count,
+		     sizeof(m_app_config.event_flush_count));
+	SETTINGS_SET("event-flush-interval", &m_app_config.event_flush_interval,
+		     sizeof(m_app_config.event_flush_interval));
+	SETTINGS_SET("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
+	SETTINGS_SET("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -445,6 +471,27 @@ static int h_commit(void)
 	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 	}
+	if (m_app_config.event_flush_count < 0) {
+		m_app_config.event_flush_count = 0;
+	}
+	if (m_app_config.event_flush_count > 250) {
+		m_app_config.event_flush_count = 250;
+	}
+	if (m_app_config.event_flush_interval < 0) {
+		m_app_config.event_flush_interval = 0;
+	}
+	if (m_app_config.event_flush_interval > 86400) {
+		m_app_config.event_flush_interval = 86400;
+	}
+	if (m_app_config.log_split < 0) {
+		m_app_config.log_split = 0;
+	}
+	if (m_app_config.log_split > 100) {
+		m_app_config.log_split = 100;
+	}
+	if ((int)m_app_config.event_format < 0 || (int)m_app_config.event_format > 2) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_FULL;
+	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
@@ -563,6 +610,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_buzzer_mode));
 	EXPORT_FUNC("radio-alarm-ack", &m_app_config.radio_alarm_ack,
 		    sizeof(m_app_config.radio_alarm_ack));
+	EXPORT_FUNC("event-log-enable", &m_app_config.event_log_enable,
+		    sizeof(m_app_config.event_log_enable));
+	EXPORT_FUNC("alarm-send-detail", &m_app_config.alarm_send_detail,
+		    sizeof(m_app_config.alarm_send_detail));
+	EXPORT_FUNC("alarm-send-report", &m_app_config.alarm_send_report,
+		    sizeof(m_app_config.alarm_send_report));
+	EXPORT_FUNC("event-flush-count", &m_app_config.event_flush_count,
+		    sizeof(m_app_config.event_flush_count));
+	EXPORT_FUNC("event-flush-interval", &m_app_config.event_flush_interval,
+		    sizeof(m_app_config.event_flush_interval));
+	EXPORT_FUNC("log-split", &m_app_config.log_split, sizeof(m_app_config.log_split));
+	EXPORT_FUNC("event-format", &m_app_config.event_format, sizeof(m_app_config.event_format));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -1147,6 +1206,60 @@ static void print_radio_alarm_ack(const struct shell *shell)
 		    m_app_config.radio_alarm_ack ? "true" : "false");
 }
 
+static void print_event_log_enable(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " event-log-enable %s",
+		    m_app_config.event_log_enable ? "true" : "false");
+}
+
+static void print_alarm_send_detail(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-send-detail %s",
+		    m_app_config.alarm_send_detail ? "true" : "false");
+}
+
+static void print_alarm_send_report(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-send-report %s",
+		    m_app_config.alarm_send_report ? "true" : "false");
+}
+
+static void print_event_flush_count(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " event-flush-count %d", m_app_config.event_flush_count);
+}
+
+static void print_event_flush_interval(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " event-flush-interval %d",
+		    m_app_config.event_flush_interval);
+}
+
+static void print_log_split(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " log-split %d", m_app_config.log_split);
+}
+
+static void print_event_format(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.event_format) {
+	case APP_CONFIG_EVENT_FORMAT_FULL:
+		str = "full";
+		break;
+	case APP_CONFIG_EVENT_FORMAT_COMPACT:
+		str = "compact";
+		break;
+	case APP_CONFIG_EVENT_FORMAT_RAW:
+		str = "raw";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " event-format %s", str);
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -1315,6 +1428,13 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_gpio_input_b(shell);
 	print_alarm_buzzer_mode(shell);
 	print_radio_alarm_ack(shell);
+	print_event_log_enable(shell);
+	print_alarm_send_detail(shell);
+	print_alarm_send_report(shell);
+	print_event_flush_count(shell);
+	print_event_flush_interval(shell);
+	print_log_split(shell);
+	print_event_format(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor1_type(shell);
@@ -1962,6 +2082,73 @@ static int cmd_radio_alarm_ack(const struct shell *shell, size_t argc, char **ar
 	return cmd_bool(shell, argc, argv, &m_app_config.radio_alarm_ack, print_radio_alarm_ack);
 }
 
+static int cmd_event_log_enable(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.event_log_enable, print_event_log_enable);
+}
+
+static int cmd_alarm_send_detail(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_send_detail,
+			print_alarm_send_detail);
+}
+
+static int cmd_alarm_send_report(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_send_report,
+			print_alarm_send_report);
+}
+
+static int cmd_event_flush_count(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.event_flush_count, 0, 250,
+		       print_event_flush_count);
+}
+
+static int cmd_event_flush_interval(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.event_flush_interval, 0, 86400,
+		       print_event_flush_interval);
+}
+
+static int cmd_log_split(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.log_split, 0, 100, print_log_split);
+}
+
+static int cmd_event_format(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_event_format(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: full, compact, raw");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "full")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_FULL;
+	} else if (!strcmp(argv[1], "compact")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_COMPACT;
+	} else if (!strcmp(argv[1], "raw")) {
+		m_app_config.event_format = APP_CONFIG_EVENT_FORMAT_RAW;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: full, compact, raw");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -2440,6 +2627,34 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(radio-alarm-ack, NULL,
 	              "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times.",
 	              cmd_radio_alarm_ack, 1, 1),
+
+	SHELL_CMD_ARG(event-log-enable, NULL,
+	              "Get/Set alarm event log (true/false): every alarm edge is logged and uploaded in batches on fPort 4.",
+	              cmd_event_log_enable, 1, 1),
+
+	SHELL_CMD_ARG(alarm-send-detail, NULL,
+	              "Get/Set alarm detail uplink on fPort 3 at each alarm edge (true/false).",
+	              cmd_alarm_send_detail, 1, 1),
+
+	SHELL_CMD_ARG(alarm-send-report, NULL,
+	              "Get/Set immediate telemetry uplink on fPort 2 at each alarm edge (true/false).",
+	              cmd_alarm_send_report, 1, 1),
+
+	SHELL_CMD_ARG(event-flush-count, NULL,
+	              "Get/Set event log upload after this many new events (0 = off); whichever of count/interval comes first.",
+	              cmd_event_flush_count, 1, 1),
+
+	SHELL_CMD_ARG(event-flush-interval, NULL,
+	              "Get/Set event log upload interval in seconds (0 = off); whichever of count/interval comes first.",
+	              cmd_event_flush_interval, 1, 1),
+
+	SHELL_CMD_ARG(log-split, NULL,
+	              "Get/Set share of the history flash for the event log in % (0/25/50/75/100, rounded down); applies after reboot, a change erases history and event log.",
+	              cmd_log_split, 1, 1),
+
+	SHELL_CMD_ARG(event-format, NULL,
+	              "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event).",
+	              cmd_event_format, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

@@ -374,3 +374,12 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	*out_len = 4 + samples_len;
 	return 0;
 }
+
+int g_eventlog_dropped_calls;
+
+void app_eventlog_frame_dropped(const uint8_t *buf, size_t len)
+{
+	(void)buf;
+	(void)len;
+	g_eventlog_dropped_calls++;
+}

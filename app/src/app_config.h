@@ -57,6 +57,12 @@ enum app_config_p2p_modulation {
 	APP_CONFIG_P2P_MODULATION_FSK = 1,
 };
 
+enum app_config_event_format {
+	APP_CONFIG_EVENT_FORMAT_FULL = 0,
+	APP_CONFIG_EVENT_FORMAT_COMPACT = 1,
+	APP_CONFIG_EVENT_FORMAT_RAW = 2,
+};
+
 enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
 	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
@@ -151,6 +157,13 @@ struct app_config {
 	uint8_t alarm_15[18];
 	enum app_config_alarm_buzzer_mode alarm_buzzer_mode;
 	bool radio_alarm_ack;
+	bool event_log_enable;
+	bool alarm_send_detail;
+	bool alarm_send_report;
+	int event_flush_count;
+	int event_flush_interval;
+	int log_split;
+	enum app_config_event_format event_format;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor1_type;

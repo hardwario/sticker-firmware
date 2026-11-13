@@ -190,6 +190,19 @@ jobs:
         working-directory: app/decoder
         run: node --test
 
+      # decoder.tts.js: decoder.js minified for the LNS (TTS formatter limit
+      # ~40 kB), size-capped and run through the same tests as decoder.js.
+      - name: JS decoder TTS build
+        working-directory: app/decoder
+        run: npm run check:tts
+
+      - name: Upload TTS decoder
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: hio-sticker-decoder-tts
+          path: app/decoder/decoder.tts.js
+          if-no-files-found: error
+
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -322,7 +335,7 @@ jobs:
       # against what CI built (security review B-2).
       - name: Checksums
         working-directory: artifacts
-        run: sha256sum *.hex > SHA256SUMS
+        run: sha256sum *.hex decoder.tts.js > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
@@ -331,4 +344,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.hex
+            artifacts/decoder.tts.js
             artifacts/SHA256SUMS

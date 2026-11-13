@@ -91,6 +91,19 @@ enums:
       value: 1
       shell: fsk
 
+  # Event log (fPort 4) wire format: full AlarmReport, compact AlarmReport
+  # (time/edge/rule only) or raw 3-byte records.
+  event_format:
+    - name: FULL
+      value: 0
+      shell: full
+    - name: COMPACT
+      value: 1
+      shell: compact
+    - name: RAW
+      value: 2
+      shell: raw
+
   motion_sensitivity:
     - name: "OFF"
       value: 0
@@ -252,6 +265,13 @@ commands:
     - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [radio]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [radio]}
+    # Event log PoC: re-send retained events (flash ring) selected by time
+    # window, seq ranges or single seqs as fPort-4 replay batches. LoRaWAN only
+    # (the handler rejects P2P), like the automatic flush.
+    - {name: req_events, proto_id: 33, body: ReqEvents, kind: handler, response: none, transports: [radio]}
+    # Event log PoC: NFC read of the retained event log, client-driven like
+    # req_history_page: start_seq cursor, the reply's next_seq / has_more.
+    - {name: req_events_page, proto_id: 34, body: ReqEventsPage, kind: handler, response: none, transports: [nfc, shell]}
     - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
     - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [radio, nfc]}
     - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}
@@ -970,6 +990,72 @@ parameters:
     default: false
     writable: [shell, nfc, radio]
     help: "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times."
+
+  # Event log PoC: every alarm edge is also kept in a RAM event log and
+  # uploaded in batches on fPort 4 (LoRaWAN only). alarm_send_detail /
+  # alarm_send_report turn the immediate alarm uplinks off (logger mode).
+  - name: event_log_enable
+    proto_group: alarms
+    proto_id: 22
+    type: bool
+    default: false
+    writable: [shell, nfc, radio]
+    help: "Get/Set alarm event log (true/false): every alarm edge is logged and uploaded in batches on fPort 4."
+
+  - name: alarm_send_detail
+    proto_group: alarms
+    proto_id: 23
+    type: bool
+    default: true
+    writable: [shell, nfc, radio]
+    help: "Get/Set alarm detail uplink on fPort 3 at each alarm edge (true/false)."
+
+  - name: alarm_send_report
+    proto_group: alarms
+    proto_id: 24
+    type: bool
+    default: true
+    writable: [shell, nfc, radio]
+    help: "Get/Set immediate telemetry uplink on fPort 2 at each alarm edge (true/false)."
+
+  - name: event_flush_count
+    proto_group: alarms
+    proto_id: 25
+    type: int
+    default: 20
+    min: 0
+    max: 250
+    writable: [shell, nfc, radio]
+    help: "Get/Set event log upload after this many new events (0 = off); whichever of count/interval comes first."
+
+  - name: event_flush_interval
+    proto_group: alarms
+    proto_id: 26
+    type: int
+    default: 3600
+    min: 0
+    max: 86400
+    writable: [shell, nfc, radio]
+    help: "Get/Set event log upload interval in seconds (0 = off); whichever of count/interval comes first."
+
+  - name: log_split
+    proto_group: alarms
+    proto_id: 27
+    type: int
+    default: 0
+    min: 0
+    max: 100
+    writable: [shell, nfc, radio]
+    help: "Get/Set share of the history flash for the event log in % (0/25/50/75/100, rounded down); applies after reboot, a change erases history and event log."
+
+  - name: event_format
+    proto_group: alarms
+    proto_id: 28
+    type: enum
+    enum: event_format
+    default: "full"
+    writable: [shell, nfc, radio]
+    help: "Get/Set event log payload format: full (all fields), compact (time/event/rule, protobuf) or raw (3 B per event)."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

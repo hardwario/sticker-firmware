@@ -826,6 +826,70 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 	} else if (src->has_radio_alarm_ack) {
 		config->radio_alarm_ack = src->radio_alarm_ack;
 	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_event_log_enable && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(22);
+	} else if (src->has_event_log_enable) {
+		config->event_log_enable = src->event_log_enable;
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_send_detail && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(23);
+	} else if (src->has_alarm_send_detail) {
+		config->alarm_send_detail = src->alarm_send_detail;
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_send_report && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(24);
+	} else if (src->has_alarm_send_report) {
+		config->alarm_send_report = src->alarm_send_report;
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_event_flush_count && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(25);
+	} else if (src->has_event_flush_count) {
+		int val = src->event_flush_count;
+
+		if ((val >= 0 && val <= 250)) {
+			config->event_flush_count = val;
+		} else {
+			FAULT(25);
+		}
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_event_flush_interval && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(26);
+	} else if (src->has_event_flush_interval) {
+		int val = src->event_flush_interval;
+
+		if ((val >= 0 && val <= 86400)) {
+			config->event_flush_interval = val;
+		} else {
+			FAULT(26);
+		}
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_log_split && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(27);
+	} else if (src->has_log_split) {
+		int val = src->log_split;
+
+		if ((val >= 0 && val <= 100)) {
+			config->log_split = val;
+		} else {
+			FAULT(27);
+		}
+	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_event_format && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(28);
+	} else if (src->has_event_format) {
+		if ((int)src->event_format >= 0 && (int)src->event_format <= 2) {
+			config->event_format = (enum app_config_event_format)src->event_format;
+		} else {
+			FAULT(28);
+		}
+	}
 	return ret;
 }
 
@@ -909,6 +973,34 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 21)) {
 		dst->has_radio_alarm_ack = true;
 		dst->radio_alarm_ack = c->radio_alarm_ack;
+	}
+	if (requested(ids, n, 22)) {
+		dst->has_event_log_enable = true;
+		dst->event_log_enable = c->event_log_enable;
+	}
+	if (requested(ids, n, 23)) {
+		dst->has_alarm_send_detail = true;
+		dst->alarm_send_detail = c->alarm_send_detail;
+	}
+	if (requested(ids, n, 24)) {
+		dst->has_alarm_send_report = true;
+		dst->alarm_send_report = c->alarm_send_report;
+	}
+	if (requested(ids, n, 25)) {
+		dst->has_event_flush_count = true;
+		dst->event_flush_count = c->event_flush_count;
+	}
+	if (requested(ids, n, 26)) {
+		dst->has_event_flush_interval = true;
+		dst->event_flush_interval = c->event_flush_interval;
+	}
+	if (requested(ids, n, 27)) {
+		dst->has_log_split = true;
+		dst->log_split = c->log_split;
+	}
+	if (requested(ids, n, 28)) {
+		dst->has_event_format = true;
+		dst->event_format = (AppConfigMessage_Alarms_EventFormat)c->event_format;
 	}
 }
 

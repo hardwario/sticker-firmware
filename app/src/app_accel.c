@@ -568,3 +568,55 @@ int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data)
 	k_work_schedule(&m_motion_arm_work, K_SECONDS(MOTION_BOOT_ARM_SECONDS));
 	return 0;
 }
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+#include <stdlib.h>
+
+/* Bench: inject motion through the real callback (alarm rules, event log)
+ * without shaking the device. */
+static void sim_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_sim_work, sim_work_handler);
+static int64_t m_sim_end;
+static uint32_t m_sim_period_ms;
+
+static void sim_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (m_motion_cb) {
+		m_motion_cb(m_motion_user_data);
+	}
+	if (k_uptime_get() + m_sim_period_ms < m_sim_end) {
+		k_work_schedule(&m_sim_work, K_MSEC(m_sim_period_ms));
+	}
+}
+
+static int cmd_accel_sim(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t secs = strtoul(argv[1], NULL, 10);
+	uint32_t period = argc > 2 ? strtoul(argv[2], NULL, 10) : 500;
+
+	if (period < 50) {
+		period = 50;
+	}
+	if (secs == 0) {
+		(void)k_work_cancel_delayable(&m_sim_work);
+		shell_print(sh, "motion sim stopped");
+		return 0;
+	}
+	m_sim_period_ms = period;
+	m_sim_end = k_uptime_get() + (int64_t)secs * 1000;
+	k_work_reschedule(&m_sim_work, K_NO_WAIT);
+	shell_print(sh, "motion sim %u s every %u ms", secs, period);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_accel,
+			       SHELL_CMD_ARG(sim, NULL,
+					     "Simulate motion. Usage: sim <seconds> [period_ms] "
+					     "(0 = stop)",
+					     cmd_accel_sim, 2, 1),
+			       SHELL_SUBCMD_SET_END);
+SHELL_CMD_REGISTER(accel, &sub_accel, "Accelerometer bench tools.", NULL);
+#endif /* defined(CONFIG_SHELL) */

@@ -11,6 +11,7 @@
 #include "app_buzzer.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_eventlog.h"
 #include "app_counters.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -695,6 +696,13 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 18, 21, false, false},
 	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	{DUMP_SECTION_ALARMS, 21, 3, false, false},
+	{DUMP_SECTION_ALARMS, 22, 3, false, false},
+	{DUMP_SECTION_ALARMS, 23, 3, false, false},
+	{DUMP_SECTION_ALARMS, 24, 3, false, false},
+	{DUMP_SECTION_ALARMS, 25, 4, false, false},
+	{DUMP_SECTION_ALARMS, 26, 5, false, false},
+	{DUMP_SECTION_ALARMS, 27, 3, false, false},
+	{DUMP_SECTION_ALARMS, 28, 3, false, false},
 	{DUMP_SECTION_P2P, 1, 6, false, false},
 	{DUMP_SECTION_P2P, 2, 2, false, false},
 	{DUMP_SECTION_P2P, 3, 2, false, false},
@@ -1455,6 +1463,100 @@ static void history_frame_layout(Response_HistoryFrame *hf, const struct app_his
 }
 #endif
 
+/* Event log PoC: re-send the retained events as fPort-4 batches. Like
+ * req_history the batches are the reply (which_body stays 0); only when nothing
+ * can be sent does the host get an Error. */
+static void app_cmd_handle_req_events(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_ReqEvents *rq = &cmd->body.req_events;
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	int ret = -ENOTSUP;
+
+	if (tp != APP_CMD_TRANSPORT_LRW) {
+		/* LoRaWAN only */
+	} else if (rq->ranges_count > 0) {
+		ret = rq->ranges_count % 2
+			      ? -EINVAL
+			      : app_eventlog_request_ranges(rq->ranges, rq->ranges_count / 2);
+	} else if (rq->seqs_count > 0) {
+		/* First seq absolute, the next ones deltas from the previous */
+		uint32_t seqs[ARRAY_SIZE(rq->seqs)];
+
+		for (pb_size_t i = 0; i < rq->seqs_count; i++) {
+			seqs[i] = i ? seqs[i - 1] + rq->seqs[i] : rq->seqs[0];
+		}
+		ret = app_eventlog_request_seqs(seqs, rq->seqs_count);
+	} else {
+		ret = app_eventlog_request(from, to);
+	}
+	if (ret == -EINVAL) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "bad selector");
+	} else if (ret == -ENODATA) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no events");
+	} else if (ret != 0) {
+		make_error(resp, Response_Error_Code_NOT_READY, "LoRaWAN only");
+	}
+}
+
+/* Event log PoC: NFC paged read (client-driven, stateless like
+ * req_history_page). One AlarmReport page from start_seq on; the phone passes
+ * next_seq back as start_seq while has_more. */
+static void app_cmd_handle_req_events_page(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_ReqEventsPage *rq = &cmd->body.req_events_page;
+	struct app_eventlog_page pg = {0};
+	/* 6 worst-case events (~30 B each) + the report header stay within the
+	 * DUMP_PAGE_BUDGET_NFC-sized response of one FTM frame. */
+	struct app_cmd_alarm_event ev[MIN(6, ARRAY_SIZE(resp->body.event_page.events))];
+	int ret = app_eventlog_export(
+		rq->has_start_seq ? rq->start_seq : 0, rq->has_from_unix ? rq->from_unix : 0,
+		rq->has_to_unix ? rq->to_unix : UINT32_MAX, ev, ARRAY_SIZE(ev), &pg);
+
+	if (ret < 0) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no event log");
+		return;
+	}
+
+	AlarmReport *r = &resp->body.event_page;
+
+	resp->which_body = Response_event_page_tag;
+	r->base_time = pg.base_time;
+	r->total = (uint32_t)ret;
+	r->has_time_synced = true;
+	r->time_synced = pg.synced;
+	for (int i = 0; i < ret; i++) {
+		AlarmEvent *e = &r->events[i];
+
+		e->rule = ev[i].rule;
+		e->slot = ev[i].slot;
+		e->channel = ev[i].channel;
+		e->edge = (AlarmEvent_Edge)ev[i].edge;
+		e->type = (AlarmEvent_Type)ev[i].type;
+		e->rel_s = ev[i].rel_s;
+		e->has_value = ev[i].has_value;
+		e->value = ev[i].value;
+		e->has_sensor_type = ev[i].slot != 0 && ev[i].sensor_type != 0;
+		e->sensor_type = ev[i].sensor_type;
+		e->has_seq = ev[i].seq != 0;
+		e->seq = ev[i].seq;
+	}
+	r->events_count = (pb_size_t)ret;
+	r->has_seq_first = true;
+	r->seq_first = pg.seq_first;
+	r->has_oldest_seq = true;
+	r->oldest_seq = pg.oldest;
+	r->has_next_seq = true;
+	r->next_seq = pg.next_seq;
+	r->has_has_more = true;
+	r->has_more = pg.more;
+}
+
 /* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
  * streaming), this is client-driven and stateless: each tap returns exactly one
  * HistoryFrame and the phone advances the cursor by passing the response's
@@ -1799,6 +1901,22 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
+		break;
+	case Command_req_events_tag:
+		/* transports: [lrw, p2p] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_events(tp, cmd, resp, action);
+		break;
+	case Command_req_events_page_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_events_page(tp, cmd, resp, action);
 		break;
 	case Command_req_history_page_tag:
 		/* transports: [nfc] — reject on any other transport */
@@ -3470,6 +3588,16 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 			       uint32_t page_index, uint32_t page_count, uint8_t *out,
 			       size_t out_cap, size_t *out_len)
 {
+	return app_cmd_build_alarm_report_seq(base_time, total, time_synced, events, n_events,
+					      page_index, page_count, NULL, out, out_cap, out_len);
+}
+
+int app_cmd_build_alarm_report_seq(uint32_t base_time, uint32_t total, bool time_synced,
+				   const struct app_cmd_alarm_event *events, size_t n_events,
+				   uint32_t page_index, uint32_t page_count,
+				   const struct app_cmd_alarm_seq *sq, uint8_t *out, size_t out_cap,
+				   size_t *out_len)
+{
 	if (!out || !out_len || (n_events > 0 && !events)) {
 		return -EINVAL;
 	}
@@ -3504,8 +3632,19 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 		/* Slot 0 is always the motherboard: no type on the wire (#430). */
 		ev->has_sensor_type = events[i].slot != 0 && events[i].sensor_type != 0;
 		ev->sensor_type = events[i].sensor_type;
+		/* Event log: own seq only where it breaks the +1 run */
+		ev->has_seq = sq != NULL && events[i].seq != 0;
+		ev->seq = events[i].seq;
 	}
 	report.events_count = (pb_size_t)n;
+	if (sq != NULL) {
+		report.has_seq_first = true;
+		report.seq_first = sq->seq_first;
+		report.has_replay = sq->replay;
+		report.replay = sq->replay;
+		report.has_oldest_seq = sq->replay;
+		report.oldest_seq = sq->oldest;
+	}
 
 	/* fPort 3 carries the same 1-byte APP_PROTO_VERSION prefix as fPort 2
 	 * (telemetry) and fPort 85 (responses) so every protobuf uplink frame is

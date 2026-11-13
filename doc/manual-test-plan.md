@@ -436,7 +436,7 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 > `config interval-sample 60`, `config cap-w1-sensors true`) and run `settings save`, which reboots
 > and re-joins. Watching the network server / gateway uplinks, confirm that the uplink after the
 > fPort-85 `Info` is a fPort-85 `ConfigDump` (page 0/1), sent before the first fPort-2 Telemetry.
-> Decode it with `app/decoder/ttn.js` and confirm every field matches `config show`, including
+> Decode it with `app/decoder/decoder.js` and confirm every field matches `config show`, including
 > the change just made. On a `CONFIG_W1=y` image, confirm `w1_slot_type` has 4 entries matching the
 > attached 1-Wire sensors (`empty` / `dallas` / `machine-probe`). Report the frame size and DR.
 
@@ -449,12 +449,12 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 > `-DCONFIG_W1=y` it was 40 B, ending in `3a 04 00 00 00 00`, which decodes as
 > `w1_slot_type: ["empty","empty","empty","empty"]`. **Not covered on HW:** the `dallas` /
 > `machine-probe` values, because the unit has no DS2484 (`ds2484: Device reset failed: -5`);
-> they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
+> they are covered by `tests/cmd` + `decoder.test.js` only. Low DR on US915/AU915 was also not
 > covered: both boot frames are dropped whole there, see #418.
 
 > **Re-verified with #465 (2026-10-09, debug `e91362ce`, SN 2162190413, J-Link 801053710, PPK2 3000 mV, ChirpStack EU868):** join → Info (fCnt 1, DR0) → `ConfigDump`
 > (fCnt 2, 37 B, DR5) → telemetry (fCnt 3); a changed `history_enable` is reflected, and the new
-> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `ttn.js`.
+> `sensors.cap_sht` (1) / `sensors.cap_buzzer` (0) decode with this branch's `decoder.js`.
 
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
 - [x] Pass — `cap_sht` / `cap_buzzer` fields, 2026-10-09
@@ -470,7 +470,7 @@ interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_sl
 
 **Prompt for Claude:**
 > Queue `0807fa0100` on fPort 85 and force an uplink (`send`) so it is delivered. Decode the
-> fPort-85 answer with `app/decoder/ttn.js`: confirm `seq` 7, `config_dump` with the same values
+> fPort-85 answer with `app/decoder/decoder.js`: confirm `seq` 7, `config_dump` with the same values
 > as the boot settings-info (L4b) and `config show`, and no `pages` (one frame). Change one
 > setting over the shell **without** `settings save` and send `get_settings` again: the answer
 > shows the staged value, like `GetConfig`. Report the frame size and DR.
@@ -479,7 +479,7 @@ interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_sl
 > combined10 / ChirpStack v4):** `0807fa0100` queued through the Hub CLI (`node-send --hex --fport 85`)
 > went out in the RX of a telemetry uplink; the answer followed 1 s later as one fPort-85 frame at
 > DR5, 34 B: `01 0807 221d2207103c18840720002a12080010001800200028003000380040014800`. The
-> `config_dump` part is byte-identical to that boot's settings-info (`221d…4800`); `ttn.js` decodes
+> `config_dump` part is byte-identical to that boot's settings-info (`221d…4800`); `decoder.js` decodes
 > `seq: 7` with `interval_sample 60`, `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`,
 > the other caps `0` (= `config show`), no `pages`. `CONFIG_W1=n`, so no `w1_slot_type`. **Not
 > covered on HW:** the paged form (below the EU868 DR0 budget, `tests/cmd` only) and the staged-value
@@ -501,7 +501,7 @@ reboot, no re-join, no counter / history reset; telemetry keeps its cadence.
 > On a joined (LoRaWAN) or paired (P2P) bench node set `config interval-announce 1` and
 > `settings save`; note the time of the boot/join announce. Leave RTT attached (debug: keep the
 > 20 min keepalive). Within 54–60 min confirm `Periodic announce` and the two frames on the network
-> side, decoded with `app/decoder/ttn.js`, and that the next one follows 54–60 min after it. Change
+> side, decoded with `app/decoder/decoder.js`, and that the next one follows 54–60 min after it. Change
 > a setting over the shell **without** a reboot (`config interval-sample 30`, no save) and confirm
 > the next periodic settings-info carries the staged value. Then (a) set `interval-announce 0` +
 > save: after the boot announce no periodic one for > 1 h; (b) with `interval-announce 1`, take the
@@ -1404,7 +1404,7 @@ returns the packed rule in `config_dump`; `alarm list` matches; identical behavi
 and NFC.
 
 **Prompt for Claude:**
-> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed 18-byte `mb`
+> Author a SetParam with `decoder.js encodeDownlink` setting e.g. `alarm_0` to a packed 18-byte `mb`
 > temperature rule (hex, e.g. `0300000100000000a0400000f0410000803f` = lo 5, hi 30, dwell 1), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
 > shows the rule. Then GetParam `alarms_field:[54]` and confirm the returned hex matches what was
 > set. Repeat the SetParam over NFC and confirm the same result. Report both transports.
@@ -2287,9 +2287,9 @@ unknown channel), so without the LED a failed tap looks like a slow one.
 
 ---
 
-## Payload formatter (`ttn.js`)
+## Payload formatter (`decoder.js`)
 
-The v1.4.0 payload formatter (`app/decoder/ttn.js`) must decode the new ports and encode/decode
+The v1.4.0 payload formatter (`app/decoder/decoder.js`) must decode the new ports and encode/decode
 downlink commands on the live network servers (`doc/version 1.4.md` §8). Upload it to TTN and
 ChirpStack before these tasks.
 
@@ -2301,7 +2301,7 @@ ChirpStack before these tasks.
 (fPort 85).
 
 **Prompt for Claude:**
-> Confirm `app/decoder/ttn.js` is uploaded as the payload formatter on both TTN and ChirpStack.
+> Confirm `app/decoder/decoder.tts.js` (minified `decoder.js`, `npm run build`) is uploaded as the payload formatter on both TTN and ChirpStack.
 > Drive uplinks on fPorts 1, 2, 3 and 85 (telemetry via `send`, an alarm, and a `get_info`
 > response), then confirm each console's decoded output is well-formed and matches the raw payload
 > on **both** servers. Report any decode discrepancy between TTN and ChirpStack.

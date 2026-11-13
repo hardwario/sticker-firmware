@@ -492,6 +492,7 @@ enum app_radio_frame_tag {
 	APP_RADIO_TAG_CMD_RESPONSE, /* answer to a downlink command: carries its seq */
 	APP_RADIO_TAG_INFO,         /* autonomous Info (announce / clock_sync) */
 	APP_RADIO_TAG_SETTINGS,     /* autonomous settings-info (#412) */
+	APP_RADIO_TAG_EVENTLOG,     /* fPort-4 event log page: re-sent as a replay */
 };
 
 #define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: TOWER flags, LoRaWAN MType */

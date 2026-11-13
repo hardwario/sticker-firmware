@@ -1,4 +1,4 @@
-// STICKER simulator: runs the application's TTN decoder (app/decoder/ttn.js)
+// STICKER simulator: runs the application's TTN decoder (app/decoder/decoder.js)
 // for sim_air.py. One JSON request per input line, one JSON reply per line:
 //   {"op":"up","fPort":10,"bytes":"0a0b..."}  -> decodeUplink() result
 //   {"op":"down","input":{...}}               -> encodeDownlink() result
@@ -8,7 +8,7 @@
 const path = require("path");
 const readline = require("readline");
 
-const codec = require(path.join(__dirname, "..", "..", "app", "decoder", "ttn.js"));
+const codec = require(path.join(__dirname, "..", "..", "app", "decoder", "decoder.js"));
 
 const rl = readline.createInterface({ input: process.stdin });
 

@@ -9,6 +9,7 @@
 #include "app_buzzer.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_eventlog.h"
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
@@ -218,6 +219,11 @@ static void alarm_send(void)
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
 	bool send;
+
+	/* Logger mode: no immediate fPort 2 report on an alarm edge. */
+	if (!g_app_config.alarm_send_report) {
+		return;
+	}
 
 	/* m_last_alarm_send_ms is read-modify-written from three contexts (main
 	 * poll, PIR thread, system WQ). A 64-bit RMW is not atomic on Cortex-M4, so
@@ -505,15 +511,45 @@ bool app_alarm_flush_pending(void)
 	return waiting;
 }
 
+/* Seconds of uptime `at` since the window start, 0 for an edge older than it. */
+static uint32_t rel_seconds(int64_t at)
+{
+	return at <= m_window_start_ms ? 0 : (uint32_t)MIN((at - m_window_start_ms) / 1000, 0xFFFF);
+}
+
+/* An empty window may start earlier than now: a backdated edge (momentary
+ * "motion ended" stamped at the last event) moves its start and base back so
+ * the edge keeps its real time. m_lock held. */
+static void window_backdate(int64_t at)
+{
+	if (m_batch_count == 0 && at < m_window_start_ms) {
+		m_window_base_unix -= (uint32_t)((m_window_start_ms - at) / 1000);
+		m_window_start_ms = at;
+	}
+}
+
 /* Record one alarm edge for the alarm-detail batch. Caller does NOT hold
  * m_lock (this takes it). */
 /* Queue one built alarm event into the rate-limit window (or flush immediately
  * when alarm_limit <= 0). Shared by the rule path (alarm_collect) and the
  * no-data watchdog (alarm_collect_nodata). */
-static void alarm_queue(struct app_cmd_alarm_event ev)
+static void alarm_queue_at(struct app_cmd_alarm_event ev, int64_t at)
 {
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
+
+	if (at <= 0 || at > now) {
+		at = now;
+	}
+
+	/* Event log: every edge is logged; alarm_send_detail decides whether it
+	 * also goes out now on fPort 3. */
+	if (g_app_config.event_log_enable) {
+		app_eventlog_add(&ev, at);
+	}
+	if (!g_app_config.alarm_send_detail) {
+		return;
+	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
@@ -525,9 +561,10 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 			m_window_base_unix = now_seconds(&m_window_base_synced);
 			m_window_total = 0;
 		}
+		window_backdate(at);
 		m_window_total++;
 		if (m_batch_count < ALARM_BATCH_MAX) {
-			ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
+			ev.rel_s = rel_seconds(at);
 			m_batch[m_batch_count++] = ev;
 		}
 		alarm_batch_flush();
@@ -544,9 +581,10 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 		k_work_schedule(&m_alarm_batch_work, K_SECONDS(limit));
 	}
 
+	window_backdate(at);
 	m_window_total++;
 	if (m_batch_count < ALARM_BATCH_MAX) {
-		ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
+		ev.rel_s = rel_seconds(at);
 		m_batch[m_batch_count++] = ev;
 	}
 	if (m_batch_count == ALARM_BATCH_MAX && !m_batch_held) {
@@ -555,6 +593,11 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	}
 
 	k_mutex_unlock(&m_lock);
+}
+
+static void alarm_queue(struct app_cmd_alarm_event ev)
+{
+	alarm_queue_at(ev, 0);
 }
 
 /* Wire value of a reading on channel `c`: the physical value × its wire scale
@@ -569,8 +612,9 @@ static int32_t rule_scale(const struct app_alarm_rule *rule, float v)
 	return alarm_scale(app_alarm_rule_channel(rule), v);
 }
 
-static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool active, uint8_t type,
-			  bool has_value, int32_t value)
+/* Rule edge stamped at uptime `at` (ms, 0 = now). */
+static void alarm_collect_at(uint8_t idx, const struct app_alarm_rule *rule, bool active,
+			     uint8_t type, bool has_value, int32_t value, int64_t at)
 {
 	struct app_cmd_alarm_event ev = {
 		.rule = idx,
@@ -583,7 +627,13 @@ static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool a
 		.value = value,
 		.rel_s = 0,
 	};
-	alarm_queue(ev);
+	alarm_queue_at(ev, at);
+}
+
+static void alarm_collect(uint8_t idx, const struct app_alarm_rule *rule, bool active, uint8_t type,
+			  bool has_value, int32_t value)
+{
+	alarm_collect_at(idx, rule, active, type, has_value, value, 0);
 }
 
 /* No-data watchdog event: a liveness channel, a 1-Wire part (its first
@@ -912,10 +962,15 @@ static void eval_state(uint8_t idx, const struct app_alarm_rule *rule, struct rs
 		 * silently clamped to it (#267). */
 		if (rt->active && rt->oneshot_expiry != 0 && k_uptime_get() >= rt->oneshot_expiry) {
 			rt->active = false;
+			int64_t last = rt->oneshot_expiry - hold_ms;
+
 			rt->oneshot_expiry = 0;
 			if (!is_edge) {
+				/* "Motion ended" at the last event, not when the quiet
+				 * window ran out. */
 				*should_send = true;
-				alarm_collect(idx, rule, false, ALARM_TYPE_TRIGGER, true, 0);
+				alarm_collect_at(idx, rule, false, ALARM_TYPE_TRIGGER, true, 0,
+						 last);
 			}
 		}
 		if (cur && !rt->active) {
@@ -1507,7 +1562,8 @@ bool app_alarm_poll(void)
 			if (m_rt[i].active && rule_is_momentary(lr) && lr->from_state == 1 &&
 			    lr->to_state == 1) {
 				should_send = true;
-				alarm_collect(i, lr, false, ALARM_TYPE_TRIGGER, true, 0);
+				alarm_collect_at(i, lr, false, ALARM_TYPE_TRIGGER, true, 0,
+						 m_rt[i].oneshot_expiry - rule_hold_ms(lr));
 			}
 			m_rt[i].active = false;
 			m_rt[i].oneshot_expiry = 0;
@@ -2025,6 +2081,72 @@ static int cmd_alarm_poll(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Bench: inject an alarm edge for rule <idx> straight into the collect path
+ * (event log + fPort 3), bypassing the sensors and the rule evaluation. */
+static int cmd_alarm_sim(const struct shell *sh, size_t argc, char **argv)
+{
+	long idx;
+	bool on;
+	uint8_t type = 3; /* AlarmEvent TYPE_TRIGGER */
+	struct app_alarm_rule r = {0};
+
+	/* System (watchdog) edges: bat [mV], nodata <slot> <ch>, mismatch <w1> <exp> <det> */
+	bool sys_on = argc > 2 && strcmp(argv[2], "on") == 0;
+
+	if (strcmp(argv[1], "bat") == 0) {
+		alarm_collect_battery(sys_on, argc > 3 ? strtof(argv[3], NULL) : 2.1f);
+		shell_print(sh, "battery %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	if (strcmp(argv[1], "nodata") == 0) {
+		alarm_collect_nodata(argc > 3 ? atoi(argv[3]) : 1, argc > 4 ? atoi(argv[4]) : 0, 0,
+				     sys_on);
+		shell_print(sh, "no-data %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	if (strcmp(argv[1], "mismatch") == 0) {
+		alarm_collect_mismatch(argc > 3 ? atoi(argv[3]) : 0, argc > 4 ? atoi(argv[4]) : 1,
+				       argc > 5 ? atoi(argv[5]) : 2, sys_on);
+		shell_print(sh, "mismatch %s", sys_on ? "activate" : "deactivate");
+		return 0;
+	}
+	idx = strtol(argv[1], NULL, 10);
+	if (idx < 0 || idx >= APP_ALARM_RULE_COUNT) {
+		shell_error(sh, "rule 0..%d | bat | nodata | mismatch", APP_ALARM_RULE_COUNT - 1);
+		return -EINVAL;
+	}
+	if (strcmp(argv[2], "on") == 0) {
+		on = true;
+	} else if (strcmp(argv[2], "off") == 0) {
+		on = false;
+	} else {
+		shell_error(sh, "state: on | off");
+		return -EINVAL;
+	}
+	if (argc > 3) {
+		if (strcmp(argv[3], "low") == 0) {
+			type = 1;
+		} else if (strcmp(argv[3], "high") == 0) {
+			type = 2;
+		} else if (strcmp(argv[3], "trigger") == 0) {
+			type = 3;
+		} else {
+			shell_error(sh, "type: low | high | trigger");
+			return -EINVAL;
+		}
+	}
+	bool has_value = argc > 4;
+	int32_t value = has_value ? (int32_t)strtol(argv[4], NULL, 10) : 0;
+
+	if (!app_alarm_rules_get((uint8_t)idx, &r)) {
+		shell_warn(sh, "rule %ld not defined: slot 0 channel 0", idx);
+	}
+	alarm_collect((uint8_t)idx, &r, on, type, has_value, value);
+	shell_print(sh, "rule %ld %s type %u%s", idx, on ? "activate" : "deactivate", type,
+		    has_value ? " (value)" : "");
+	return 0;
+}
+
 static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1 || strcmp(argv[1], "all") == 0) {
@@ -2070,6 +2192,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "  immediate); pir/accel motion (momentary) = hold before re-arm, no\n"
 		      "  confirm; rate = hold before re-arm. 0 = immediate/no hold throughout.",
 		      cmd_alarm_new, 5, 4),
+	SHELL_CMD_ARG(sim, NULL,
+		      "Inject an alarm edge (event log + fPort 3). Usage: sim <rule> on|off "
+		      "[low|high|trigger] [value]\n"
+		      "  system: sim bat on|off [V] | nodata on|off [slot ch] | "
+		      "mismatch on|off [w1 exp det]",
+		      cmd_alarm_sim, 3, 3),
 	SHELL_CMD_ARG(clear, NULL, "Clear a rule (or all). Usage: clear <rule>|all",
 		      cmd_alarm_clear, 1, 1),
 	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,

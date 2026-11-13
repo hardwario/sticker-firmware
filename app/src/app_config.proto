@@ -140,6 +140,12 @@ message AppConfigMessage {
             RESERVED_7 = 7;
         }
 
+        enum EventFormat {
+            FULL = 0;
+            COMPACT = 1;
+            RAW = 2;
+        }
+
         reserved 2;
         reserved 19;
         optional uint32 alarm_limit = 1;
@@ -161,6 +167,13 @@ message AppConfigMessage {
         optional bytes alarm_15 = 18;
         optional AlarmBuzzerMode alarm_buzzer_mode = 20;
         optional bool radio_alarm_ack = 21;
+        optional bool event_log_enable = 22;
+        optional bool alarm_send_detail = 23;
+        optional bool alarm_send_report = 24;
+        optional uint32 event_flush_count = 25;
+        optional uint32 event_flush_interval = 26;
+        optional uint32 log_split = 27;
+        optional EventFormat event_format = 28;
     }
 
     message P2P {
@@ -209,6 +222,8 @@ message Command {
         GetBasicInfo     get_basic_info    = 30;
         GetSettings      get_settings      = 31;
         GetRadioState    get_radio_state   = 32;
+        ReqEvents        req_events        = 33;
+        ReqEventsPage    req_events_page   = 34;
     }
 // END GENERATED COMMANDS
 
@@ -285,6 +300,26 @@ message Command {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+    // Event log PoC: re-send the retained events in [from_unix, to_unix]
+    // (omitted => all) as fPort-4 batches; the batches are the reply.
+    // Event log PoC: re-send retained events (fPort 4, replay). One selector:
+    // from_unix/to_unix (time window), ranges = pairs (seq_from, count), or
+    // seqs = individual event seqs, ascending, first absolute then deltas.
+    message ReqEvents {
+        optional uint32 from_unix = 1;
+        optional uint32 to_unix   = 2;
+        repeated uint32 ranges    = 3;
+        repeated uint32 seqs      = 4;
+    }
+    // Event log PoC: NFC paged read of the event log. Client-driven and
+    // stateless like ReqHistoryPage: start_seq (omitted => oldest) is the
+    // cursor, the reply (Response.event_page) gives next_seq / has_more.
+    // from_unix/to_unix bound the window (unsynced events always pass).
+    message ReqEventsPage {
+        optional uint32 start_seq = 1;
+        optional uint32 from_unix = 2;
+        optional uint32 to_unix   = 3;
+    }
     // NFC paged history read (#260). Client-driven, stateless: the phone taps
     // repeatedly, passing start_ord = the previous response's next_ord each time,
     // until the response reports has_more=false. Unlike req_history (LRW,
@@ -397,6 +432,7 @@ message Response {
         ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
         BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
         RadioState     radio_state      = 14;  // get_radio_state: link state + diagnostics (#446)
+        AlarmReport    event_page       = 16;  // req_events_page: event log page (NFC)
     }
 
     // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
@@ -664,6 +700,15 @@ message AlarmReport {
     // paging as Response. Absent = the whole batch is in this report.
     uint32 page_index = 5;
     uint32 page_count = 6;
+    // Event log (fPort 4): seq of this report's first event; the next events
+    // follow it by one unless they carry their own AlarmEvent.seq. replay =
+    // answer to req_events; oldest_seq = the oldest event still retained.
+    optional uint32 seq_first  = 7;
+    optional bool   replay     = 8;
+    optional uint32 oldest_seq = 9;
+    // NFC event page: pass next_seq back as start_seq while has_more.
+    optional uint32 next_seq   = 10;
+    optional bool   has_more   = 11;
 }
 
 message AlarmEvent {
@@ -709,6 +754,7 @@ message AlarmEvent {
     Type   type     = 9;         // low / high / trigger / no_data / sensor_mismatch
     uint32 channel  = 10;        // channel of the slot's sensor type (app_sensor_types.yaml); 255 = whole 1-Wire device (no_data)
     optional uint32 sensor_type = 11;  // sensor type id of a 1-Wire slot event; absent for slot 0 (always motherboard)
+    optional uint32 seq = 12;    // event log: own seq when not the previous one + 1
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

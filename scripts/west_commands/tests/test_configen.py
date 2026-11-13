@@ -2,7 +2,7 @@
 
 Covers the proto/options generator added in #57: idempotence, the append-only
 proto_id allocator, the no-renumber guard, YAML validation, and a cross-check
-that the firmware proto schema and the ttn.js decoder agree on the wire.
+that the firmware proto schema and the decoder.js decoder agree on the wire.
 
 Run: `pytest scripts/west_commands/tests` (from the repo root, inside the venv).
 """
@@ -22,7 +22,7 @@ APP_SRC = REPO / "app" / "src"
 YAML = APP_SRC / "app_config.yml"
 PROTO = APP_SRC / "app_config.proto"
 OPTIONS = APP_SRC / "app_config.options.in"
-DECODER = REPO / "app" / "decoder" / "ttn.js"
+DECODER = REPO / "app" / "decoder" / "decoder.js"
 
 GEN_FILES = ["app_config.c", "app_config.h", "app_config.proto", "app_config.options.in"]
 
@@ -46,7 +46,7 @@ def _run_configen(out_dir):
         proto=None,
         options=None,
         no_proto=False,
-        decoder=out_dir / "ttn.js",
+        decoder=out_dir / "decoder.js",
         app_cmd=out_dir / "app_cmd.c",
         dry_run=False,
     )
@@ -59,7 +59,7 @@ def workdir(tmp_path):
         shutil.copy(APP_SRC / name, tmp_path / name)
     # The decoder's command-map region and app_cmd.c's dispatch region are
     # rewritten in place; copy them so the run has marked regions to edit.
-    shutil.copy(DECODER, tmp_path / "ttn.js")
+    shutil.copy(DECODER, tmp_path / "decoder.js")
     shutil.copy(APP_SRC / "app_cmd.c", tmp_path / "app_cmd.c")
     # Carry the project clang-format style so generated C matches the committed
     # files (clang-format searches upward from the file for .clang-format).
@@ -558,12 +558,12 @@ def _encode_with_node(data):
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_bytes_fields_native_roundtrip(tmp_path):
     """Config `bytes` params go on the wire as native protobuf bytes (not a hex
-    string), so the payload is half the size. The ttn.js decoder keeps its hex
+    string), so the payload is half the size. The decoder.js decoder keeps its hex
     contract (hexes the raw bytes for output; accepts hex on encode). Verify both
-    directions agree between python-protobuf and ttn.js."""
+    directions agree between python-protobuf and decoder.js."""
     pb = _compile_proto(tmp_path)
 
-    # python encodes raw bytes -> ttn.js decode must present them as hex
+    # python encodes raw bytes -> decoder.js decode must present them as hex
     cmd = pb.Command()
     cmd.seq = 9
     cmd.set_param.lorawan.deveui = bytes.fromhex("70b3d5470a0b0c0d")
@@ -575,7 +575,7 @@ def test_bytes_fields_native_roundtrip(tmp_path):
     assert js["set_param"]["lorawan"]["deveui"] == "70b3d5470a0b0c0d"
     assert js["set_param"]["sensors"]["sensor1_rom"] == "28000011223344a5"
 
-    # ttn.js encodes hex -> python protobuf must read the raw bytes
+    # decoder.js encodes hex -> python protobuf must read the raw bytes
     enc = _encode_with_node({
         "command": "set_param",
         "set_param": {"lorawan": {"deveui": "70b3d5470a0b0c0d"}},
@@ -588,7 +588,7 @@ def test_bytes_fields_native_roundtrip(tmp_path):
 def test_proto_and_decoder_agree(tmp_path):
     pb = _compile_proto(tmp_path)
 
-    # set_param: python protobuf and ttn.js must read the same fields
+    # set_param: python protobuf and decoder.js must read the same fields
     msg = pb.Command.FromString(bytes.fromhex(COMMAND_VECTORS["set_param"]))
     assert msg.seq == 1
     assert msg.set_param.lorawan.adr is True
@@ -672,9 +672,9 @@ def test_build_commands_model_rejects_duplicates():
 
 def test_generated_decoder_command_region_matches_committed(workdir):
     """The _CMD_NAMES region the generator emits must equal what is committed in
-    ttn.js (locks the name<->tag map against hand-edits / YAML drift)."""
+    decoder.js (locks the name<->tag map against hand-edits / YAML drift)."""
     _run_configen(workdir)
-    assert (workdir / "ttn.js").read_text() == DECODER.read_text()
+    assert (workdir / "decoder.js").read_text() == DECODER.read_text()
 
 
 @pytest.mark.skipif(shutil.which("clang-format") is None,

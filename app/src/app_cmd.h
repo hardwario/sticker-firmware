@@ -284,6 +284,14 @@ struct app_cmd_alarm_event {
 	bool has_value;      /* value present */
 	int32_t value;       /* reading × wire scale, digital 0/1, counter or detected type */
 	uint32_t rel_s;      /* seconds since base_time */
+	uint32_t seq;        /* event log: own seq (0 = previous + 1); fPort 3 ignores it */
+};
+
+/* Event log (fPort 4) extras of an AlarmReport. */
+struct app_cmd_alarm_seq {
+	uint32_t seq_first; /* seq of events[0] */
+	uint32_t oldest;    /* oldest retained seq (replay only) */
+	bool replay;        /* answer to req_events */
 };
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
@@ -296,6 +304,14 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 			       const struct app_cmd_alarm_event *events, size_t n_events,
 			       uint32_t page_index, uint32_t page_count, uint8_t *out,
 			       size_t out_cap, size_t *out_len);
+
+/* app_cmd_build_alarm_report() plus the event log's seq fields (`sq` NULL =
+ * none, as for fPort 3). */
+int app_cmd_build_alarm_report_seq(uint32_t base_time, uint32_t total, bool time_synced,
+				   const struct app_cmd_alarm_event *events, size_t n_events,
+				   uint32_t page_index, uint32_t page_count,
+				   const struct app_cmd_alarm_seq *sq, uint8_t *out, size_t out_cap,
+				   size_t *out_len);
 
 #ifdef __cplusplus
 }

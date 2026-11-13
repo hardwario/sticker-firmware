@@ -5,6 +5,7 @@
  */
 
 #include "app_clock.h"
+#include "app_eventlog.h"
 #include "app_log.h"
 #include "app_radio.h"
 
@@ -148,6 +149,9 @@ int app_clock_set_unix(uint32_t unix_s)
 		app_history_on_clock_sync(unix_s);
 	}
 #endif
+	if (ret == 0) {
+		app_eventlog_on_clock_sync(unix_s);
+	}
 	return ret;
 }
 
