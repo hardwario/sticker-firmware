@@ -138,10 +138,10 @@ static bool m_link_check_pending; /* Waiting for LC response */
 
 /* LinkCheckReq size in FOpts (CID only). */
 #define LINK_CHECK_REQ_LEN 1
-static int m_rejoin_attempts;     /* Rejoin attempt counter for backoff */
-static int m_join_busy_polls;     /* Counter for MAC busy polling */
-static bool m_init_join;          /* True for first join after boot */
-static bool m_mac_started;        /* lorawan_start() succeeded; LoRaMac state is valid */
+static int m_rejoin_attempts; /* Rejoin attempt counter for backoff */
+static int m_join_busy_polls; /* Counter for MAC busy polling */
+static bool m_init_join;      /* True for first join after boot */
+static bool m_mac_started;    /* lorawan_start() succeeded; LoRaMac state is valid */
 static enum lorawan_region m_region = LORAWAN_REGION_EU868; /* set in app_radio_lrw_init() */
 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
@@ -981,8 +981,8 @@ static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 	 * report while WARNING) tries again, and a skipped check counts as neither
 	 * success nor failure. */
 	if (with_link_check && f->len + LINK_CHECK_REQ_LEN > budget) {
-		LOG_INF("Link check deferred: %u B frame + LinkCheckReq > %u B budget",
-			f->len, budget);
+		LOG_INF("Link check deferred: %u B frame + LinkCheckReq > %u B budget", f->len,
+			budget);
 		with_link_check = false;
 	}
 
