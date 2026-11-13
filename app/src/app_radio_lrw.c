@@ -129,8 +129,8 @@ static struct k_work_delayable m_join_complete_work;
 
 /* Gap before the next frame of a multi-frame uplink (covers the RX1/RX2 windows)
  * and backoff when a send is refused (duty cycle / MAC busy). */
-#define FRAME_GAP_SEC   3
-#define FRAME_RETRY_SEC 15
+#define FRAME_GAP_SEC      3
+#define FRAME_RETRY_SEC    15
 /* On top of the MAC's duty-cycle wait: its credits must be strictly above the
  * cost, so a frame woken exactly on time could be refused once more. */
 #define LRW_DUTY_MARGIN_MS 100
