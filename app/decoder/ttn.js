@@ -1560,6 +1560,132 @@ function _stripProtoVersion(bytes, warnings) {
   return bytes.slice(1);
 }
 
+// fPort 11: compact bit-packed telemetry of the 11 B tier (US915 DR0, AU915 /
+// AS923 DR2 with dwell), mirror of app_compose.c ct_*. A report is a series of
+// self-contained frames; keys match decodeTelemetry (fPort 2). Header byte:
+// bits 0-1 version, 2-5 frame type, 6 boot. LSB-first bitstream. A field
+// without a valid sample holds its NA code (all ones; signed: the minimum)
+// and decodes to null; a group whose capability is off is absent.
+var _CT_TYPES = ["base", "counters", "analog", "dallas", "machine_probe_a", "machine_probe_b"];
+
+function _ctReader(bytes) {
+  var pos = 0;
+  return {
+    u: function (bits) {
+      var v = 0;
+      for (var i = 0; i < bits; i++, pos++) {
+        var byte = bytes[pos >> 3];
+        if (byte !== undefined && (byte >> (pos & 7)) & 1) v += Math.pow(2, i);
+      }
+      return v;
+    },
+    s: function (bits) {
+      var v = this.u(bits);
+      return v >= Math.pow(2, bits - 1) ? v - Math.pow(2, bits) : v;
+    }
+  };
+}
+
+function _ctNa(v, bits) { return v === Math.pow(2, bits) - 1; }
+function _ctTemp(c) { return _ctNa(c, 11) ? null : (c - 550) / 10; }
+// 8-bit log code of illuminance (4-bit exponent, 4-bit mantissa of 2-lx units + 1)
+function _ctLux(c) {
+  if (c === 255) return null;
+  var e = c >> 4, m = c & 15, v;
+  if (e >= 4) {
+    v = (16 + m) * Math.pow(2, e - 4);
+    if (e >= 5) v += Math.pow(2, e - 5); // bucket midpoint
+  } else {
+    v = (16 + m) / Math.pow(2, 4 - e);
+  }
+  return Math.round((v - 1) * 2);
+}
+function _ctSigned(v, bits, scale) { return v === -Math.pow(2, bits - 1) ? null : v * scale; }
+function _ctRound(v) { return v === null ? null : Math.round(v * 1000) / 1000; }
+
+function _ctMpReading(slot) {
+  var t = _SENSOR_TYPES[3];
+  var sr = { slot: slot, type: 3, type_name: _W1_SLOT_TYPES[3] || "machine-probe", values: {}, units: {} };
+  return { sr: sr, put: function (ch, v) { var c = t.ch[ch]; sr.values[c.n] = v; sr.units[c.n] = c.u; } };
+}
+
+function decodeCompact(bytes) {
+  var r = _ctReader(bytes);
+  var d = {};
+  var version = r.u(2);
+  var type = r.u(4);
+  d.boot = r.u(1) === 1;
+  r.u(1);
+  d.compact = _CT_TYPES[type] || ("type" + type);
+  if (version !== 0) { d.compact_version = version; return d; }
+  switch (type) {
+    case 0: {
+      var vb = r.u(7);
+      d.voltage = vb === 127 ? null : (vb + 90) / 50;
+      var mask = r.u(5);
+      var t = r.u(11), h = r.u(8), p = r.u(13), l = r.u(8), o = r.u(3);
+      var am = r.u(12), pm = r.u(12);
+      if (mask & 1) { d.temperature = _ctTemp(t); d.humidity = _ctNa(h, 8) ? null : h / 2; }
+      if (mask & 2) d.pressure = _ctNa(p, 13) ? null : (p + 3000) / 10;
+      if (mask & 4) d.illuminance = _ctLux(l);
+      if (mask & 8) { d.orientation = _ctNa(o, 3) ? null : o; d.accel_motion_count = am; }
+      if (mask & 16) d.motion_count = pm;
+      break;
+    }
+    case 1: {
+      var cm = r.u(4), act = r.u(4);
+      var names = ["hall_left", "hall_right", "input_a", "input_b"];
+      for (var i = 0; i < 4; i++) {
+        var c = r.u(16);
+        if (cm & (1 << i)) {
+          d[names[i] + "_count"] = c; // modulo 2^16
+          d[names[i] + "_is_active"] = (act & (1 << i)) !== 0;
+        }
+      }
+      break;
+    }
+    case 2: {
+      var vm = r.u(2), ua = r.u(12), ub = r.u(12);
+      if (vm & 1) d.input_a_voltage = _ctNa(ua, 12) ? null : ua / 100;
+      if (vm & 2) d.input_b_voltage = _ctNa(ub, 12) ? null : ub / 100;
+      break;
+    }
+    case 3: {
+      var dm = r.u(4);
+      d.w1_sensors = [];
+      for (var s = 0; s < 4; s++) {
+        var tc = r.u(11);
+        if (dm & (1 << s)) {
+          d.w1_sensors.push({ slot: s + 1, type: 2, type_name: _W1_SLOT_TYPES[2] || "dallas",
+            values: { temperature: _ctTemp(tc) }, units: { temperature: "degC" } });
+        }
+      }
+      break;
+    }
+    case 4: {
+      var a = _ctMpReading(r.u(2) + 1);
+      a.put(0, _ctTemp(r.u(11)));
+      var hh = r.u(8); a.put(1, _ctNa(hh, 8) ? null : hh / 2);
+      a.put(2, _ctTemp(r.u(11)));
+      a.put(3, _ctLux(r.u(8)));
+      var tl = r.u(2); a.put(5, tl === 3 ? null : tl);
+      d.w1_sensors = [a.sr];
+      break;
+    }
+    case 5: {
+      var b = _ctMpReading(r.u(2) + 1);
+      b.put(4, _ctRound(_ctSigned(r.s(12), 12, 0.1)));
+      b.put(6, _ctRound(_ctSigned(r.s(11), 11, 0.2)));
+      b.put(7, _ctRound(_ctSigned(r.s(11), 11, 0.2)));
+      b.put(8, _ctRound(_ctSigned(r.s(11), 11, 0.2)));
+      d.w1_sensors = [b.sr];
+      break;
+    }
+    default: break;
+  }
+  return d;
+}
+
 function decodeUplink(input) {
 
   // fPort 85: DownlinkResponse (Ack / Info / Error from command dispatcher).
@@ -1578,6 +1704,11 @@ function decodeUplink(input) {
     var w3 = [];
     var b3 = _stripProtoVersion(input.bytes, w3);
     return { data: decodeAlarmBatch(b3), warnings: w3, errors: [] };
+  }
+
+  // fPort 11: compact telemetry of the 11 B tier (no version prefix).
+  if (input.fPort === 11) {
+    return { data: decodeCompact(input.bytes), warnings: [], errors: [] };
   }
 
   // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.

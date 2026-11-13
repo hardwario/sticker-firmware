@@ -937,7 +937,8 @@ static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 
 	switch (f->kind) {
 	case APP_RADIO_FRAME_TELEMETRY:
-		port = APP_RADIO_LRW_TELEMETRY_PORT;
+		/* Compact 11 B tier frames ride their own port (app_compose_port()). */
+		port = f->port ? f->port : APP_RADIO_LRW_TELEMETRY_PORT;
 		break;
 	case APP_RADIO_FRAME_ALARM:
 		port = APP_RADIO_LRW_ALARM_PORT;

@@ -1513,3 +1513,82 @@ test("lorawan link-check fields: old names still encode (v1.5.0 rename alias)", 
   assert.equal(dec.set_param.lorawan.radio_link_check_interval, 7);
   assert.equal(dec.set_param.lorawan.radio_link_check_fail_rejoin, 4);
 });
+
+// --- fPort 11: compact 11 B tier telemetry ---------------------------------
+// Frames from tests/compose (app_compose.c ct_*): test_compact_base_frame,
+// test_compact_full_report and test_compact_na_codes.
+test("fPort 11 base frame", () => {
+  const d = codec.decodeUplink({ fPort: 11, bytes: hex("00bc133132ee2d77000000") }).data;
+  assert.equal(d.compact, "base");
+  assert.equal(d.voltage, 3);
+  assert.equal(d.temperature, 23.5);
+  assert.equal(d.humidity, 50);
+  assert.equal(d.pressure, 1013.2);
+  assert.ok(Math.abs(d.illuminance - 300) / 300 < 0.07, `lux ${d.illuminance}`);
+  assert.equal(d.orientation, undefined, "accel off -> absent");
+  assert.equal(d.motion_count, undefined);
+});
+
+test("fPort 11 NA codes decode to null", () => {
+  const d = codec.decodeUplink({ fPort: 11, bytes: hex("00fff0ffffffff7f000000") }).data;
+  assert.equal(d.voltage, null);
+  assert.equal(d.temperature, null);
+  assert.equal(d.humidity, null);
+  assert.equal(d.pressure, undefined, "barometer off -> absent");
+});
+
+test("fPort 11 full report: counters, dallas, machine probe A/B", () => {
+  const up = (h) => codec.decodeUplink({ fPort: 11, bytes: hex(h) }).data;
+  const c = up("04117011000000000000");
+  assert.equal(c.compact, "counters");
+  assert.equal(c.hall_left_count, 70000 % 65536);
+  assert.equal(c.hall_left_is_active, true);
+  assert.equal(c.input_a_count, undefined);
+
+  const dl = up("0cf2ffd5fcffff");
+  assert.deepEqual(dl.w1_sensors, [
+    { slot: 2, type: 2, type_name: "dallas", values: { temperature: -12.3 }, units: { temperature: "degC" } },
+  ]);
+
+  const a = up("104e8ced603c01").w1_sensors[0];
+  assert.equal(a.slot, 3);
+  assert.equal(a.type_name, "machine-probe");
+  assert.ok(Math.abs(a.values.temperature - 23.65) <= 0.051);
+  assert.equal(a.values.humidity, 54);
+  assert.equal(a.values["temperature-aux"], 22.5);
+  assert.ok(Math.abs(a.values.illuminance - 27) <= 2, `lux ${a.values.illuminance}`);
+  assert.equal(a.values.tilt, 1);
+  assert.equal(a.values["accel-x"], undefined, "part B only");
+
+  const b = up("14068000a2df7f").w1_sensors[0];
+  assert.equal(b.slot, 3);
+  assert.equal(b.values["magnetic-field"], 0.1);
+  assert.equal(b.values["accel-x"], 0.4);
+  assert.equal(b.values["accel-y"], -9.4);
+  assert.equal(b.values["accel-z"], -0.6);
+  assert.equal(b.units["accel-y"], "m/s2");
+});
+
+test("fPort 11 log lux code is within one step over the range", () => {
+  // Encoder mirror of ct_put_lux(): 2-lx units, 4-bit exponent + 4-bit mantissa.
+  const enc = (lux) => {
+    const v = Math.min(Math.floor(lux / 2), 0xffff) + 1;
+    const e = 31 - Math.clz32(v);
+    const m = e >= 4 ? (v >> (e - 4)) & 15 : (v << (4 - e)) & 15;
+    return e * 16 + m;
+  };
+  for (const lux of [0, 2, 10, 50, 300, 1000, 20000, 83000]) {
+    const c = enc(lux);
+    const back = codec.decodeUplink({
+      fPort: 11,
+      // base frame with only the light mask bit and the lux code at bits 52..59
+      bytes: (() => {
+        const b = new Array(11).fill(0);
+        const put = (pos, v, bits) => { for (let i = 0; i < bits; i++) if ((v >> i) & 1) b[(pos + i) >> 3] |= 1 << ((pos + i) & 7); };
+        put(8, 127, 7); put(15, 4, 5); put(52, c, 8);
+        return b;
+      })(),
+    }).data.illuminance;
+    assert.ok(Math.abs(back - lux) <= Math.max(2, lux * 0.07), `lux ${lux} -> ${back}`);
+  }
+});
