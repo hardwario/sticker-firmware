@@ -337,6 +337,18 @@ int app_calibration_init(void)
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
 	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
 
+	/* #523: calibration always talks LoRaWAN at a fixed DR5 with ADR off,
+	 * whatever is stored. RAM only, like the ABP keys above (the NVS save is
+	 * already done). radio-mode off (the factory default) kept the stack down
+	 * and calibration was silent. The DR/ADR must sit in g_app_config: the ABP
+	 * activation runs on the radio work queue and its on_join_success()
+	 * re-applies lrw_adr / lrw_datarate after lorawan_start() reset the DR to
+	 * the region default, so setting them on the stack here was undone (DR0,
+	 * ADR on). */
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+	g_app_config.lrw_adr = false;
+	g_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR5;
+
 	/* Init battery ADC — non-fatal so calibration still runs without battery readings */
 	ret = app_battery_init();
 	if (ret) {
@@ -350,10 +362,8 @@ int app_calibration_init(void)
 		return ret;
 	}
 
+	/* ADR off and DR5 are applied by the join path (see above). */
 	app_radio_lrw_join();
-
-	lorawan_enable_adr(false);
-	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
 
 	/* #340 M22: work item for the calibration TX send, run on app_radio_lrw.c's
