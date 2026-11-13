@@ -493,10 +493,11 @@ static void state_transition(enum app_radio_state new_state)
  * the region default, so JoinRequests always go out at that DR and the pin is
  * re-applied here once the join succeeds. Validity is region/dwell dependent (e.g. AU915
  * dwell=1 rejects DR0/DR1): an invalid DR is rejected by the MAC and the stack's
- * own DR stays in use. Calibration pins its own DR and is left alone. */
+ * own DR stays in use. Calibration sets lrw_datarate DR5 / lrw_adr off in RAM
+ * (#523), so it is pinned here as well. */
 static void apply_manual_datarate(void)
 {
-	if (g_app_config.lrw_datarate == APP_CONFIG_LRW_DATARATE_AUTO || g_app_config.calibration) {
+	if (g_app_config.lrw_datarate == APP_CONFIG_LRW_DATARATE_AUTO) {
 		return;
 	}
 
