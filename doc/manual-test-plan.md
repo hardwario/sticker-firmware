@@ -397,6 +397,27 @@ on TTN.
 
 - [ ] Pass
 
+### L2b — Public / private network × LNS (#545)
+
+**Goal:** `lrw-network public|private` works for the join and the data, on every LNS.
+**Observable:** join + uplinks + a downlink for each cell; a gateway set to the other
+network type logs no JoinRequest from the device.
+
+| | ChirpStack v3 | ChirpStack v4 | TTS |
+|---|---|---|---|
+| EU868 public | ☐ | ☐ | ☐ |
+| EU868 private | ☐ | ☐ | ☐ |
+| US915 public / private | n/a (EU868 LNS) | n/a (EU868 LNS) | ☐ / ☐ |
+
+**Prompt for Claude:**
+> For each cell set `lrw-network`, the region and the keys of that LNS's test device, then
+> `settings save` and `join`. Switch the bench gateway to the same network type (MikroTik
+> `/iot lora`, only while `disabled=true`). Confirm the JoinRequest on the gateway and on the
+> LNS, then uplinks and one downlink. Check the join itself, not only the data: before #545
+> the join always went out on the public sync word. Put the gateways back to public.
+
+- [ ] Pass
+
 ### L3 — ABP join
 
 **Goal:** ABP activation works.

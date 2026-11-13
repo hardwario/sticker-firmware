@@ -371,6 +371,9 @@ to the full description.
 | Config | **Fix** — NVS keys of removed parameters are deleted at boot; no more `set-value failure` boot errors. See §51. |
 | Robustness | **Fix** — release review (#503): stillness rule armed only with its capability, RATE on live counters, 11 B tier telemetry never over budget, wrong-size config values cleaned up, reboot after a failed save, exact release tags, Zephyr pinned by SHA. See §53. |
 | Build | **New** — provisioning image `debug.conf;provisioning.conf`: every sensor, LoRaWAN EU868, shell over RTT, no logging, no history; CI ships it as `hio-sticker-<ver>-provisioning.hex`. See §55. |
+| Calibration | **Fix** — calibration transmits even with `radio-mode off` and always at DR5 with ADR off (#523). See §57. |
+| LoRaWAN | **New** — compact bit-packed telemetry on fPort 11 when the payload budget is below 20 B (US915 DR0, AU915/AS923 DR2 with dwell) (#543). See §58. |
+| LoRaWAN | **Fix** — `lrw-network private` now applies to the OTAA join too; before, the join always used the public sync word (#545, sticker-zephyr #8). See §59. |
 
 ---
 
@@ -3165,3 +3168,53 @@ alarm set 0 s1 temperature lo 2 hi 8 dwell 0.5  # LOW clears > 2.5 °C, HIGH cle
   NaN rejected). HIL on 2162165722 (`mb humidity hi 55 dwell 5`, `interval-sample 5`):
   active at once above 55 %, held 50–55 %, cleared below 50 %; fPort 3 activate and
   deactivate received.
+
+## 57. Calibration transmits regardless of `radio-mode`, at DR5 (#523)
+
+Calibration (`config calibration true` + `settings save`, one-shot) sent nothing on
+units with the factory default `radio-mode off`, and on others it sent at DR0 with ADR on.
+The ABP activation runs on the radio work queue: `lorawan_start()` reset the DR and
+`on_join_success()` re-applied `lrw-adr` from the stored config, undoing the DR5 pin.
+
+- During calibration the device sets `radio-mode lorawan`, `lrw-adr false` and
+  `lrw-datarate dr5` **in RAM only**, next to the calibration ABP keys. The stored
+  config is not changed.
+- `apply_manual_datarate()` no longer skips calibration, so the join path pins DR5.
+- **HIL** (2162165146, EU868, ChirpStack): stored `radio-mode off`, `lrw-adr true`,
+  `lrw-datarate auto` → fPort 10 every 30 s at `dr=5 adr=False`; stored config
+  unchanged afterwards. PR #541.
+
+## 58. Compact telemetry for the 11 B tier (#543)
+
+At the 11 B payload tier (US915 DR0; AU915 / AS923 DR2 with the 400 ms uplink dwell)
+protobuf telemetry carried almost nothing. Below a budget of 20 B, LoRaWAN telemetry is
+now sent as self-contained bit-packed frames on **fPort 11**: a base frame
+(battery, temperature, humidity, pressure, illuminance, orientation, event counts) plus
+one frame per present group (counters, analog inputs, Dallas, machine probe A/B).
+Every report sends all its frames.
+
+- Not sent at this tier: alarms, event log; `get_config` / `get_settings` / `get_info`
+  answer `BUDGET_TOO_SMALL`. P2P keeps protobuf at any budget.
+- Format spec: `doc/compact-telemetry.md`. Decoder: `decoder.js` fPort 11, same keys
+  as fPort 2. **LNS formatters must be updated** to decode fPort 11.
+- Airtime: one frame ≈ 370 ms at SF10; keep the report interval within the TTS fair
+  use (≈ N × 18 min for N frames).
+- **HIL** (2162165146, US915, EMBER gateway + TTS): DR0 → base + counters (+ dallas
+  with 2× DS18B20, 22.6 / 22.4 °C) on fPort 11; DR1 → protobuf fPort 2. PR #544.
+
+## 59. Private LoRaWAN network applies to the join (#545)
+
+`lrw-network private` never worked for OTAA: `lorawan_join()` in the Zephyr fork set
+`MIB_PUBLIC_NETWORK` from `CONFIG_LORAWAN_PUBLIC_NETWORK` (public) on every call, and
+the app switched to private only after the join returned. The JoinRequest and the
+join-accept windows always used the public sync word (0x34); only data used 0x12. A
+private-only gateway never heard the join.
+
+- sticker-zephyr #8: new `lorawan_set_public_network(bool)`; `lorawan_join()` applies
+  the stored value. Kconfig is only the default.
+- The app calls it before every `lorawan_join()` (OTAA and ABP); the post-join MIB
+  override is gone. PR #546, `west.yml` → sticker-zephyr `6f0a8bdf`.
+- **HIL** (2162165146, gateways EMBER-LR8G EU868 and EMBER US915 switched
+  public/private): join + uplinks + downlinks OK for EU868 × ChirpStack v3 / v4 / TTS
+  and US915 × TTS, both public and private. Before the fix a private gateway logged no
+  JoinRequest.
