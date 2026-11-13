@@ -425,11 +425,14 @@ void app_radio_set_duty_held(bool held)
 
 /* ---- Duty-cycle ledger (doc/plan/460 §2.7, T2d) ------------------------------
  *
- * EU868 duty cycle, enforced app-side with an exact sliding-hour ledger (B2,
- * decision D1; common to both radios since T2d). Raw LoRa (P2P) has no duty
- * enforcement of its own. LoRaMac has one, but its credits come back only when
- * a fixed hour since the band's last refill has run out, so the MAC used to
- * refuse frames that app_radio then retried blindly every 15 s.
+ * P2P duty cycle, enforced app-side with an exact sliding-hour ledger (B2,
+ * decision D1). Raw LoRa has no duty enforcement of its own. LoRaWAN leaves it
+ * to LoRaMac, which counts 1 % (0.1 %, 10 %) per band and picks a channel of a
+ * band with credits left: with the usual 8-channel EU868 plan that is 2 % over
+ * two bands, where one 1 % ledger over all of them held half the air back. The
+ * MAC's hold is honoured through lorawan_get_duty_cycle_wait_ms(), so a refused
+ * frame no longer retries blindly every 15 s. On LoRaWAN the ledger runs
+ * without a limit and only shows the air of the trailing hour.
  *
  * Two models preceded it on P2P. The first blocked the radio for air*99 ms
  * after EVERY frame, so an alarm queued behind a long telemetry frame waited
@@ -444,16 +447,6 @@ void app_radio_set_duty_held(bool held)
  * allowance -- so every sliding hour sums to <= the limit, with no burst hole
  * to argue about in a certification review. A frame goes the moment there is
  * room, rather than serving a fixed post-frame penalty.
- *
- * LoRaWAN: the MAC's fixed hour started at most an hour ago, so the air it
- * counts in it is never more than the trailing hour of the ledger. With the
- * same air per frame (app_radio_lora_toa_ms() is the MAC's formula) and the
- * JoinRequests charged too, a frame the ledger admits the MAC admits as well:
- * the ledger is the conservative one of the two, and its wait is exact. It
- * sums all bands into one 1 % allowance; the MAC counts 1 % per band. Two
- * edges remain, both caught by the MAC's own check (-ECONNREFUSED, duty hold):
- * an ADR step inside a send is charged at the DR before it, and the MAC wants
- * its credits strictly above the cost where the ledger admits an exact fit.
  *
  * An empty ledger at boot: never blocked, as the full token bucket was not. A
  * reboot therefore forgets the hour just transmitted. That hole is accepted:
@@ -1325,6 +1318,11 @@ void app_radio_note_send(bool sent, bool duty_held)
 	if (sent) {
 		m_dc_hold_logged = false;
 	}
+}
+
+void app_radio_note_duty_hold(int64_t hold_ms)
+{
+	stale_note_hold(hold_ms);
 }
 
 /* The duty ledger holds the frame for `hold_ms`: the M-2 excuse lasts until then. */
