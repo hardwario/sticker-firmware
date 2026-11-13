@@ -173,9 +173,8 @@ counters, stillness rules with the capability off and on, the 11 B tier
 stale-key upgrade, buzzer and PIR modes, a shortened release regression over
 LoRaWAN and P2P (join, Info, telemetry, alarm, paged GetConfig, SetParam +
 reboot) and the commands kept off the radio (R-3/C-1). About 45 minutes; name
-steps to run a subset. A known limitation of the release is reported as
-`XFAIL` (H1.5b, chatter under 20 ms, until the settle timer lands in v2.1.0);
-the exit code is 0 when every step is `PASS` or `XFAIL`. The LoRaWAN part of
+steps to run a subset. A known limitation of a release is reported as
+`XFAIL`; the exit code is 0 when every step is `PASS` or `XFAIL`. The LoRaWAN part of
 H8 runs at DR5: its ~30 uplinks at DR0 would exhaust the EU868 duty cycle for
 the hour, as on a real device.
 

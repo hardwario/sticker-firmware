@@ -33,26 +33,33 @@ static struct app_input_data m_input_data;
 K_MUTEX_DEFINE(m_input_data_mutex);
 
 /* #498: pulse counting (e.g. S0 meter outputs, IEC 62053-31: pulse >= 30 ms).
- * The 100 ms poll would miss short pulses, so a pulse pin counts in the GPIO
+ * The 100 ms poll would miss short pulses, so a pulse pin counts from its GPIO
  * interrupt. The pulse polarity is unknown (a meter may pull the line low or
  * drive it high), so the pin interrupts on both edges and a pulse is a move
  * AWAY from the idle level, i.e. the level at init. If init caught a pulse in
  * progress, the idle level is the pulse level: then every pulse counts on its
  * trailing edge instead of its leading one — still exactly once, and the
  * pulse caught at init counts on its release. The idle level is never
- * re-learned: a long pulse would otherwise count twice. An edge is counted
- * only if the pin was stable for PULSE_DEBOUNCE_MS before it: bounce on either
- * edge of a pulse lands within that window of the previous edge. The ISR only
- * bumps m_pulse_x.pending; the poll work folds it into m_input_data under the
- * mutex. */
-#define PULSE_DEBOUNCE_MS 20
+ * re-learned: a long pulse would otherwise count twice.
+ *
+ * Debounce (#503): every edge (re)starts a PULSE_SETTLE_MS one-shot timer, and
+ * only when it expires, with the pin quiet for that long, is the level read
+ * and compared with the last settled level. A change away from idle counts.
+ * Reading the level once the bounce is over, not in the ISR of the first edge
+ * (mid-bounce after a Stop2 wake), cannot miss a leading edge or count a
+ * trailing one, and a pin that chatters counts once it settles. A pulse (or a
+ * gap) shorter than PULSE_SETTLE_MS is not seen; S0 pulses are >= 30 ms. The
+ * timer only bumps m_pulse_x.pending; the poll work folds it into
+ * m_input_data under the mutex. */
+#define PULSE_SETTLE_MS 10
 
 struct pulse_state {
 	const struct gpio_dt_spec *spec;
 	struct gpio_callback cb;
+	struct k_timer settle;
 	atomic_t pending;
 	atomic_t idle_level;
-	atomic_t last_edge_ms;
+	atomic_t stable_level;
 };
 
 static struct pulse_state m_pulse_a = {.spec = &m_input_a};
@@ -61,13 +68,19 @@ static struct pulse_state m_pulse_b = {.spec = &m_input_b};
 static void pulse_handler(const struct device *port, struct gpio_callback *cb, uint32_t pins)
 {
 	struct pulse_state *st = CONTAINER_OF(cb, struct pulse_state, cb);
-	uint32_t now = k_uptime_get_32();
-	uint32_t prev = (uint32_t)atomic_set(&st->last_edge_ms, (atomic_val_t)now);
+
+	k_timer_start(&st->settle, K_MSEC(PULSE_SETTLE_MS), K_NO_WAIT);
+}
+
+static void pulse_settled(struct k_timer *timer)
+{
+	struct pulse_state *st = CONTAINER_OF(timer, struct pulse_state, settle);
 	int level = gpio_pin_get_raw(st->spec->port, st->spec->pin);
 
-	if (level < 0 || now - prev < PULSE_DEBOUNCE_MS) {
-		return;
+	if (level < 0 || level == (int)atomic_get(&st->stable_level)) {
+		return; /* bounce that returned, or a pulse shorter than the settle */
 	}
+	atomic_set(&st->stable_level, level);
 	if (level != (int)atomic_get(&st->idle_level)) {
 		atomic_inc(&st->pending);
 	}
@@ -83,7 +96,8 @@ static int pulse_setup(struct pulse_state *st)
 		return level;
 	}
 	atomic_set(&st->idle_level, level);
-	atomic_set(&st->last_edge_ms, (atomic_val_t)k_uptime_get_32());
+	atomic_set(&st->stable_level, level);
+	k_timer_init(&st->settle, pulse_settled, NULL);
 
 	gpio_init_callback(&st->cb, pulse_handler, BIT(st->spec->pin));
 	ret = gpio_add_callback_dt(st->spec, &st->cb);

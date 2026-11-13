@@ -2426,11 +2426,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_cap_gpio_mode, 1, 1),
 
 	SHELL_CMD_ARG(cap-gpio-input-a, NULL,
-	              "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
+	              "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; counted once the level is stable for 10 ms).",
 	              cmd_cap_gpio_input_a, 1, 1),
 
 	SHELL_CMD_ARG(cap-gpio-input-b, NULL,
-	              "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce).",
+	              "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; counted once the level is stable for 10 ms).",
 	              cmd_cap_gpio_input_b, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,

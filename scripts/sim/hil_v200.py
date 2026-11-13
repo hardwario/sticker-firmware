@@ -113,14 +113,20 @@ def h1():
     time.sleep(50 * 0.06 + 2)
     n = count_a(s) - c0
     result("H1.5", n == 50, f"30 ms pulses x50 -> {n}")
-    # regression of the 20 ms settle bug: 15 ms pulses must count too
+    # regression of the v2.0.0 20 ms debounce: 15 ms pulses must count too
     c0 = count_a(s)
     s.send("sim pulse gp_a 50 15")
     time.sleep(50 * 0.03 + 2)
     n = count_a(s) - c0
-    # Chatter < 20 ms is lost by the v2.0.0 debounce; the settle timer (D7)
-    # that counts it is deferred to v2.1.0 (branch hynek/v210-pulse-settle).
-    result("H1.5b", n == 50, f"15 ms pulses x50 -> {n} (D7, v2.1.0)", xfail=True)
+    # The v2.0.0 20 ms edge debounce counted 1 here; the settle timer (#517)
+    # counts every pulse that outlasts PULSE_SETTLE_MS (10 ms).
+    result("H1.5b", n == 50, f"15 ms pulses x50 -> {n} (#517)")
+    # Shorter than the settle time: not seen at all (documented limit).
+    c0 = count_a(s)
+    s.send("sim pulse gp_a 50 5")
+    time.sleep(50 * 0.01 + 2)
+    n = count_a(s) - c0
+    result("H1.5c", n == 0, f"5 ms pulses x50 -> {n} (below PULSE_SETTLE_MS)")
     s.stop()
 
     # idle low (relay sourcing the line)
