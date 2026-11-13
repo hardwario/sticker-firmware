@@ -2890,9 +2890,12 @@ config cap-gpio-input-b <none|digital|analog|pulse>
   free on this board). The pulse polarity is unknown (a meter may pull the line low or drive
   it high), so a pulse is a move away from the idle level: the level at init, never
   re-learned (a long pulse would count twice). If init caught a pulse in progress, every
-  pulse counts on its trailing edge instead — still exactly once. An edge
-  counts only when the pin was stable for 20 ms before it, so bounce on either edge of a
-  pulse counts once. The poll folds the ISR count into `input_x_count`. A pulse pin always
+  pulse counts on its trailing edge instead — still exactly once. v2.0.0 counted an edge
+  only when the pin was stable for 20 ms before it, which lost pulses shorter than 20 ms
+  and could read the level mid-bounce. Since #517 every edge (re)starts a 10 ms settle
+  timer and the level is read only once the pin has been quiet that long: bounce and
+  chatter count once, pulses of 10 ms and longer always count, shorter ones are not seen.
+  The poll folds the count into `input_x_count`. A pulse pin always
   counts (`input-x-counter` is ignored), has no state, no state flag and no input alarm
   edge. Each edge wakes the CPU briefly; not measured.
 - **Channels (§40).** `cap` in `app_sensor_types.yaml` can now name an enum parameter and the
