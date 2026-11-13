@@ -773,7 +773,7 @@ parameters:
     type: enum
     enum: gpio_input
     default: disabled
-    help: "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce)."
+    help: "Get/Set input A mode on GP_A (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN3), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; counted once the level is stable for 10 ms)."
 
   - name: cap_gpio_input_b
     proto_group: sensors
@@ -781,7 +781,7 @@ parameters:
     type: enum
     enum: gpio_input
     default: disabled
-    help: "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; 20 ms debounce)."
+    help: "Get/Set input B mode on GP_B (none/digital/analog/pulse); used only with cap-gpio-mode inputs. analog = 0-24 V via the 33k/1k divider (ADC1_IN7), pulse = pulse counter, e.g. S0 meter output (both edges, either polarity: a pulse leaves the idle level; counted once the level is stable for 10 ms)."
 
   # Dynamic alarm rules (#430). One packed-hex rule per entry (the index is the
   # rule's stable identity). 18 bytes little-endian:
