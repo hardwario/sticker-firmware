@@ -12,6 +12,7 @@
 #include "app_sensor.h"
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_radio.h"
 #include "app_w1_slots.h"
 
 #include <limits.h>
@@ -34,6 +35,7 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 /* Stub-controlled state (defined in stubs.c). */
 extern uint8_t test_budget;
+extern enum app_radio_kind test_radio_kind;
 extern uint32_t test_alarm_flags;
 extern struct app_hall_data test_hall;
 extern struct app_input_data test_input;
@@ -51,6 +53,7 @@ static void set_clean(void)
 	memset(test_w1_types, 0, sizeof(test_w1_types));   /* all slots empty */
 	memset(test_w1_states, 0, sizeof(test_w1_states)); /* = OK */
 	test_budget = 200;
+	test_radio_kind = APP_RADIO_LORAWAN;
 	test_alarm_flags = 0;
 
 	g_app_sensor_data = (struct app_sensor_data){0};
@@ -533,6 +536,7 @@ ZTEST(compose, test_w1_at_11_byte_tier)
 	g_app_config.cap_w1_sensors = true;
 	fill_machine_probe(0);
 	test_budget = 11;
+	test_radio_kind = APP_RADIO_P2P; /* LoRaWAN uses compact frames below 20 B */
 
 	run_report(fr, 24, &n);
 
@@ -554,6 +558,7 @@ ZTEST(compose, test_na_sentinels_at_11_byte_tier)
 	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.0f;
 	test_alarm_flags = 0x03;
 	test_budget = 11;
+	test_radio_kind = APP_RADIO_P2P; /* LoRaWAN uses compact frames below 20 B */
 
 	run_report(fr, 8, &n);
 
@@ -581,6 +586,7 @@ ZTEST(compose, test_group_split_at_11_byte_tier)
 	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1013.2f;
 	APP_SENSOR_MB_F(&g_app_sensor_data, ALTITUDE) = 250.0f;
 	test_budget = 11;
+	test_radio_kind = APP_RADIO_P2P; /* LoRaWAN uses compact frames below 20 B */
 
 	run_report(fr, 12, &n);
 
@@ -792,7 +798,8 @@ ZTEST(compose, test_system_flags_carry_alarm_bits)
 	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.5f;
 	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 	test_alarm_flags = 0x03; /* ALARM_ANY | ALARM_THRESHOLD */
-	test_budget = 11;        /* US915 DR0 / AU915 DR2 */
+	test_budget = 11;
+	test_radio_kind = APP_RADIO_P2P; /* LoRaWAN uses compact frames below 20 B */
 	run_report(fr, 8, &n);
 
 	zassert_true(n >= 1, "no frame");
@@ -872,6 +879,165 @@ ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
 	zassert_equal(fr[0].hall_left_count, 100,
 		      "stale snapshot reused after reset: got %u, expected the fresh count",
 		      fr[0].hall_left_count);
+}
+
+/* ---- Compact 11 B tier (fPort 11) ---- */
+
+static uint32_t ct_rd(const uint8_t *b, uint16_t *pos, uint8_t bits)
+{
+	uint32_t v = 0;
+
+	for (uint8_t i = 0; i < bits; i++, (*pos)++) {
+		if (b[*pos / 8] & BIT(*pos % 8)) {
+			v |= BIT(i);
+		}
+	}
+	return v;
+}
+
+static int32_t ct_rds(const uint8_t *b, uint16_t *pos, uint8_t bits)
+{
+	uint32_t v = ct_rd(b, pos, bits);
+
+	return (v & BIT(bits - 1)) ? (int32_t)v - (int32_t)BIT(bits) : (int32_t)v;
+}
+
+/* Run one compact report; return the frames, their lengths and count. */
+static size_t ct_run(uint8_t frames[][16], size_t *lens, size_t max)
+{
+	bool more = true;
+	size_t n = 0;
+
+	while (more) {
+		zassert_true(n < max, "too many frames");
+		int ret = app_compose(frames[n], 16, &lens[n], &more);
+
+		zassert_equal(ret, 0, "app_compose ret %d", ret);
+		zassert_equal(app_compose_port(), APP_COMPOSE_COMPACT_PORT, "port %u",
+			      app_compose_port());
+		zassert_true(lens[n] <= APP_COMPOSE_COMPACT_MAX_LEN, "frame %zu B", lens[n]);
+		zassert_equal(frames[n][0] & 0x3, 0, "version");
+		n++;
+	}
+	return n;
+}
+
+ZTEST(compose, test_compact_base_frame)
+{
+	uint8_t fr[4][16];
+	size_t len[4];
+	uint16_t pos = 8;
+
+	set_clean();
+	g_app_config.cap_barometer = true;
+	g_app_config.cap_light_sensor = true;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 23.45f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1013.2f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 300.0f;
+	test_budget = 11;
+
+	zassert_equal(ct_run(fr, len, 4), 1, "only the base frame expected");
+	zassert_equal(len[0], 11);
+	zassert_equal((fr[0][0] >> 2) & 0xF, 0, "type BASE");
+	zassert_equal(ct_rd(fr[0], &pos, 7), 150 - 90, "battery");
+	zassert_equal(ct_rd(fr[0], &pos, 5), BIT(0) | BIT(1) | BIT(2), "mask");
+	uint32_t t = ct_rd(fr[0], &pos, 11);
+
+	zassert_true(t == 784 || t == 785, "temperature code %u", t);
+	zassert_equal(ct_rd(fr[0], &pos, 8), 100, "humidity");
+	zassert_equal(ct_rd(fr[0], &pos, 13), 10132 - 3000, "pressure");
+	uint32_t lux = ct_rd(fr[0], &pos, 8); /* 150 x 2 lx: v = 151, e = 7, m = 2 */
+
+	zassert_equal(lux, 7 * 16 + 2, "lux code %u", lux);
+	zassert_equal(ct_rd(fr[0], &pos, 3), 7, "orientation NA (accel off)");
+}
+
+ZTEST(compose, test_compact_na_codes)
+{
+	uint8_t fr[4][16];
+	size_t len[4];
+	uint16_t pos = 8;
+
+	set_clean(); /* cap_sht on, every reading NaN, battery not sampled */
+	test_budget = 11;
+
+	zassert_equal(ct_run(fr, len, 4), 1);
+	zassert_equal(ct_rd(fr[0], &pos, 7), 127, "battery NA");
+	zassert_equal(ct_rd(fr[0], &pos, 5), BIT(0), "mask: internal only");
+	zassert_equal(ct_rd(fr[0], &pos, 11), 2047, "temperature NA");
+	zassert_equal(ct_rd(fr[0], &pos, 8), 255, "humidity NA");
+}
+
+ZTEST(compose, test_compact_full_report)
+{
+	uint8_t fr[12][16];
+	size_t len[12];
+	static const uint8_t types[] = {0, 1, 3, 4, 5};
+
+	set_clean();
+	g_app_config.cap_hall_left = true;
+	g_app_config.cap_w1_sensors = true;
+	test_hall.left_count = 70000; /* sent modulo 2^16 */
+	test_hall.left_is_active = true;
+	w1_bind(1, APP_SENSOR_TYPE_DALLAS);
+	w1_put(1, APP_SENSOR_CH_DALLAS_TEMPERATURE, -12.3f);
+	fill_machine_probe(2);
+	test_budget = 11;
+
+	size_t n = ct_run(fr, len, 12);
+
+	zassert_equal(n, ARRAY_SIZE(types), "frames %zu", n);
+	for (size_t i = 0; i < n; i++) {
+		zassert_equal((fr[i][0] >> 2) & 0xF, types[i], "frame %zu type", i);
+	}
+
+	uint16_t pos = 8; /* counters */
+
+	zassert_equal(ct_rd(fr[1], &pos, 4), BIT(0), "counter mask");
+	zassert_equal(ct_rd(fr[1], &pos, 4), BIT(0), "hall left active");
+	zassert_equal(ct_rd(fr[1], &pos, 16), 70000 & 0xFFFF);
+
+	pos = 8; /* dallas: slot 2 only */
+	zassert_equal(ct_rd(fr[2], &pos, 4), BIT(1), "dallas mask");
+	zassert_equal(ct_rd(fr[2], &pos, 11), 2047, "slot 1 NA");
+	zassert_equal(ct_rd(fr[2], &pos, 11), 550 - 123, "slot 2 temperature");
+
+	pos = 8; /* MP-A */
+	zassert_equal(ct_rd(fr[3], &pos, 2), 2, "slot index");
+	uint32_t t = ct_rd(fr[3], &pos, 11);
+
+	zassert_true(t == 786 || t == 787, "temperature %u", t);
+	zassert_equal(ct_rd(fr[3], &pos, 8), 108, "humidity");
+	zassert_equal(ct_rd(fr[3], &pos, 11), 775, "temperature-aux");
+	zassert_equal(ct_rd(fr[3], &pos, 8), 3 * 16 + 12, "lux 27 lx");
+	zassert_equal(ct_rd(fr[3], &pos, 2), 1, "tilt");
+
+	pos = 8; /* MP-B */
+	zassert_equal(ct_rd(fr[4], &pos, 2), 2, "slot index");
+	zassert_equal(ct_rds(fr[4], &pos, 12), 1, "magnetic field 0.1 mT");
+	zassert_equal(ct_rds(fr[4], &pos, 11), 2, "accel x");
+	zassert_equal(ct_rds(fr[4], &pos, 11), -47, "accel y");
+	zassert_equal(ct_rds(fr[4], &pos, 11), -3, "accel z");
+}
+
+/* Above the compact threshold and on P2P the report stays protobuf. */
+ZTEST(compose, test_compact_only_lorawan_small_budget)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	test_budget = APP_COMPOSE_COMPACT_BUDGET;
+	run_report(fr, 8, &n);
+	zassert_equal(app_compose_port(), 0, "protobuf at the threshold");
+
+	test_budget = 11;
+	test_radio_kind = APP_RADIO_P2P;
+	run_report(fr, 8, &n);
+	zassert_equal(app_compose_port(), 0, "P2P keeps protobuf");
 }
 
 ZTEST_SUITE(compose, NULL, NULL, NULL, NULL, NULL);

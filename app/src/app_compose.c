@@ -609,6 +609,325 @@ static uint8_t layout_pages(Telemetry *probe, size_t cap)
 	return pages;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Compact bit-packed telemetry for the 11 B tier (US915 DR0, AU915 / AS923  */
+/* DR2 with dwell). Analysis: prod-sticker analyzy/2026-11-13-compact-11b-   */
+/* telemetry.md. Below APP_COMPOSE_COMPACT_BUDGET the report goes out as a   */
+/* series of self-contained fixed-layout frames on APP_COMPOSE_COMPACT_PORT  */
+/* (no protobuf, no paging). Every frame: 1 B header + <= 80 bits, LSB-first. */
+/* Header: bits 0-1 version, 2-5 frame type, 6 boot, 7 reserved.            */
+/* A field without a valid sample holds its all-ones NA code (signed fields:  */
+/* the most negative value). Mirrored in ttn.js (fPort 11).                 */
+/* ------------------------------------------------------------------------ */
+
+#define CT_VERSION 0
+
+enum ct_type {
+	CT_BASE = 0,     /* system + motherboard sensors, always sent */
+	CT_COUNTERS = 1, /* hall L/R, input A/B pulse counters */
+	CT_ANALOG = 2,   /* input A/B analog voltage */
+	CT_DALLAS = 3,   /* all dallas slots */
+	CT_MP_A = 4,     /* one machine probe: temp, hum, temp-aux, lux, tilt */
+	CT_MP_B = 5,     /* one machine probe: magnetic field, accel x/y/z */
+};
+
+/* BASE group mask bits (presence = capability on) */
+#define CT_BASE_INTERNAL  BIT(0)
+#define CT_BASE_BAROMETER BIT(1)
+#define CT_BASE_LIGHT     BIT(2)
+#define CT_BASE_ACCEL     BIT(3)
+#define CT_BASE_PIR       BIT(4)
+
+/* Frames of one report: type in bits 0-3, slot index (0-based) in bits 4-5. */
+#define CT_MAX_FRAMES (4 + 2 * APP_W1_SLOT_COUNT)
+
+static bool m_compact;
+static uint8_t m_ct_frames[CT_MAX_FRAMES];
+static uint8_t m_ct_count;
+static uint8_t m_ct_index;
+static uint8_t m_port; /* fPort of the last composed frame, 0 = the default */
+
+struct ct_writer {
+	uint8_t *buf;
+	uint16_t bit;
+};
+
+static void ct_put(struct ct_writer *w, uint32_t v, uint8_t bits)
+{
+	for (uint8_t i = 0; i < bits; i++, w->bit++) {
+		if (v & BIT(i)) {
+			w->buf[w->bit / 8] |= BIT(w->bit % 8);
+		}
+	}
+}
+
+/* Unsigned field: clamp to [0, NA - 1], NA = all ones. */
+static void ct_put_u(struct ct_writer *w, bool valid, int32_t v, uint8_t bits)
+{
+	int32_t na = (int32_t)BIT_MASK(bits);
+
+	ct_put(w, valid ? (uint32_t)CLAMP(v, 0, na - 1) : (uint32_t)na, bits);
+}
+
+/* Signed two's complement field: clamp to +-(2^(bits-1) - 1), NA = minimum. */
+static void ct_put_s(struct ct_writer *w, bool valid, int32_t v, uint8_t bits)
+{
+	int32_t lim = (int32_t)BIT(bits - 1) - 1;
+
+	ct_put(w, (uint32_t)(valid ? CLAMP(v, -lim, lim) : -lim - 1) & BIT_MASK(bits), bits);
+}
+
+/* Integer division rounding half away from zero. */
+static int32_t ct_div(int32_t v, int32_t d)
+{
+	return v >= 0 ? (v + d / 2) / d : -((-v + d / 2) / d);
+}
+
+/* Temperature: wire degC x100 -> (t + 55) x 10 in 11 bits (-55.0 .. +149.6). */
+static void ct_put_temp(struct ct_writer *w, bool valid, int32_t wire)
+{
+	ct_put_u(w, valid, ct_div(wire, 10) + 550, 11);
+}
+
+/* Illuminance in 2 lx units -> 8-bit log code: 4-bit exponent, 4-bit mantissa
+ * of (v + 1); <= 6.25 % step, 0 .. ~131 klx. */
+static void ct_put_lux(struct ct_writer *w, bool valid, uint32_t half_lux)
+{
+	uint32_t v = MIN(half_lux, 0xFFFFu) + 1;
+	uint8_t e = 31 - __builtin_clz(v);
+	uint8_t m = e >= 4 ? (v >> (e - 4)) & 0xF : (v << (4 - e)) & 0xF;
+
+	ct_put_u(w, valid, e * 16 + m, 8);
+}
+
+/* Counter modulo 2^bits (the host unwraps; a lost frame loses no pulses). */
+static void ct_put_cnt(struct ct_writer *w, uint32_t v, uint8_t bits)
+{
+	ct_put(w, v & BIT_MASK(bits), bits);
+}
+
+static bool ct_tm_valid_s(int32_t v)
+{
+	return v != TM_S32_NA;
+}
+
+static bool ct_tm_valid_u(uint32_t v)
+{
+	return v != TM_U32_NA;
+}
+
+/* Channel `ch` of a SensorReading (values packed in ascending set-bit order). */
+static bool ct_sr_get(const SensorReading *sr, uint8_t ch, int32_t *out)
+{
+	if (sr == NULL || !(sr->valid & BIT(ch))) {
+		*out = 0;
+		return false;
+	}
+	uint8_t k = (uint8_t)__builtin_popcount(sr->valid & BIT_MASK(ch));
+
+	*out = k < sr->value_count ? sr->value[k] : 0;
+	return k < sr->value_count;
+}
+
+static void ct_base(struct ct_writer *w, const Telemetry *t)
+{
+	const uint8_t mask = (t->has_temperature ? CT_BASE_INTERNAL : 0) |
+			     (t->has_pressure ? CT_BASE_BAROMETER : 0) |
+			     (t->has_illuminance ? CT_BASE_LIGHT : 0) |
+			     (t->has_orientation ? CT_BASE_ACCEL : 0) |
+			     (t->has_motion_count ? CT_BASE_PIR : 0);
+
+	/* battery: (V - 1.8) / 0.02 in 7 bits; wire is V x50, 0 = no sample */
+	ct_put_u(w, t->voltage != 0, (int32_t)t->voltage - 90, 7);
+	ct_put(w, mask, 5);
+	ct_put_temp(w, t->has_temperature && ct_tm_valid_s(t->temperature), t->temperature);
+	ct_put_u(w, t->has_humidity && ct_tm_valid_u(t->humidity), (int32_t)t->humidity, 8);
+	/* pressure: wire hPa x10 -> (p - 300 hPa) x10 in 13 bits */
+	ct_put_u(w, t->has_pressure && ct_tm_valid_u(t->pressure), (int32_t)t->pressure - 3000, 13);
+	ct_put_lux(w, t->has_illuminance && ct_tm_valid_u(t->illuminance), t->illuminance);
+	ct_put_u(w, t->has_orientation && ct_tm_valid_u(t->orientation), (int32_t)t->orientation,
+		 3);
+	ct_put_cnt(w, t->accel_motion_count, 12);
+	ct_put_cnt(w, t->motion_count, 12);
+}
+
+static void ct_counters(struct ct_writer *w, const Telemetry *t)
+{
+	ct_put(w,
+	       (t->has_hall_left_count ? BIT(0) : 0) | (t->has_hall_right_count ? BIT(1) : 0) |
+		       (t->has_input_a_count ? BIT(2) : 0) | (t->has_input_b_count ? BIT(3) : 0),
+	       4);
+	ct_put(w,
+	       ((t->hall_left_flags & CNT_FLAG_ACTIVE) ? BIT(0) : 0) |
+		       ((t->hall_right_flags & CNT_FLAG_ACTIVE) ? BIT(1) : 0) |
+		       ((t->input_a_flags & CNT_FLAG_ACTIVE) ? BIT(2) : 0) |
+		       ((t->input_b_flags & CNT_FLAG_ACTIVE) ? BIT(3) : 0),
+	       4);
+	ct_put_cnt(w, t->hall_left_count, 16);
+	ct_put_cnt(w, t->hall_right_count, 16);
+	ct_put_cnt(w, t->input_a_count, 16);
+	ct_put_cnt(w, t->input_b_count, 16);
+}
+
+static void ct_analog(struct ct_writer *w, const Telemetry *t)
+{
+	ct_put(w, (t->has_input_a_voltage ? BIT(0) : 0) | (t->has_input_b_voltage ? BIT(1) : 0), 2);
+	/* mV -> 10 mV in 12 bits (0 .. 40.94 V) */
+	ct_put_u(w, t->has_input_a_voltage && ct_tm_valid_u(t->input_a_voltage),
+		 ct_div((int32_t)MIN(t->input_a_voltage, (uint32_t)INT32_MAX), 10), 12);
+	ct_put_u(w, t->has_input_b_voltage && ct_tm_valid_u(t->input_b_voltage),
+		 ct_div((int32_t)MIN(t->input_b_voltage, (uint32_t)INT32_MAX), 10), 12);
+}
+
+static const SensorReading *ct_slot(const Telemetry *t, uint8_t slot)
+{
+	for (pb_size_t i = 0; i < t->w1_sensors_count; i++) {
+		if (t->w1_sensors[i].slot == slot + 1u) {
+			return &t->w1_sensors[i];
+		}
+	}
+	return NULL;
+}
+
+static void ct_dallas(struct ct_writer *w, const Telemetry *t)
+{
+	uint8_t mask = 0;
+
+	for (uint8_t s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		const SensorReading *sr = ct_slot(t, s);
+
+		if (sr && sr->type == APP_SENSOR_TYPE_DALLAS) {
+			mask |= BIT(s);
+		}
+	}
+	ct_put(w, mask, APP_W1_SLOT_COUNT);
+	for (uint8_t s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		const SensorReading *sr = ct_slot(t, s);
+		int32_t v = 0;
+		bool ok = (mask & BIT(s)) && ct_sr_get(sr, APP_SENSOR_CH_DALLAS_TEMPERATURE, &v);
+
+		ct_put_temp(w, ok, v);
+	}
+}
+
+static void ct_mp(struct ct_writer *w, const Telemetry *t, uint8_t slot, bool part_b)
+{
+	const SensorReading *sr = ct_slot(t, slot);
+	int32_t v;
+	bool ok;
+
+	ct_put(w, slot, 2);
+	if (!part_b) {
+		ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE, &v);
+		ct_put_temp(w, ok, v);
+		ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY, &v);
+		ct_put_u(w, ok, v, 8);
+		ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX, &v);
+		ct_put_temp(w, ok, v);
+		ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE, &v);
+		ct_put_lux(w, ok, (uint32_t)MAX(v, 0) / 2);
+		ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_TILT, &v);
+		ct_put_u(w, ok, v ? 1 : 0, 2);
+		return;
+	}
+	/* magnetic field: wire mT x1000 -> 0.1 mT in 12 bits */
+	ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD, &v);
+	ct_put_s(w, ok, ct_div(v, 100), 12);
+	/* accel: wire m/s2 x100 -> 0.2 m/s2 in 11 bits */
+	ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_X, &v);
+	ct_put_s(w, ok, ct_div(v, 20), 11);
+	ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Y, &v);
+	ct_put_s(w, ok, ct_div(v, 20), 11);
+	ok = ct_sr_get(sr, APP_SENSOR_CH_MACHINE_PROBE_ACCEL_Z, &v);
+	ct_put_s(w, ok, ct_div(v, 20), 11);
+}
+
+/* The frames of the report in m_snapshot: BASE always, then each group the
+ * snapshot holds. */
+static void ct_layout(void)
+{
+	const Telemetry *t = &m_snapshot;
+	bool dallas = false;
+
+	m_ct_count = 0;
+	m_ct_index = 0;
+	m_ct_frames[m_ct_count++] = CT_BASE;
+	if (t->has_hall_left_count || t->has_hall_right_count || t->has_input_a_count ||
+	    t->has_input_b_count) {
+		m_ct_frames[m_ct_count++] = CT_COUNTERS;
+	}
+	if (t->has_input_a_voltage || t->has_input_b_voltage) {
+		m_ct_frames[m_ct_count++] = CT_ANALOG;
+	}
+	for (pb_size_t i = 0; i < t->w1_sensors_count; i++) {
+		dallas |= t->w1_sensors[i].type == APP_SENSOR_TYPE_DALLAS;
+	}
+	if (dallas) {
+		m_ct_frames[m_ct_count++] = CT_DALLAS;
+	}
+	for (pb_size_t i = 0; i < t->w1_sensors_count; i++) {
+		const SensorReading *sr = &t->w1_sensors[i];
+
+		if (sr->type == APP_SENSOR_TYPE_MACHINE_PROBE && sr->slot >= 1 &&
+		    sr->slot <= APP_W1_SLOT_COUNT && m_ct_count + 2 <= CT_MAX_FRAMES) {
+			m_ct_frames[m_ct_count++] = CT_MP_A | ((sr->slot - 1) << 4);
+			m_ct_frames[m_ct_count++] = CT_MP_B | ((sr->slot - 1) << 4);
+		}
+	}
+}
+
+/* Encode the next compact frame of the report into buf. */
+static int ct_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
+{
+	uint8_t f = m_ct_frames[m_ct_index++];
+	uint8_t type = f & 0xF;
+	struct ct_writer w = {.buf = buf};
+
+	if (size < APP_COMPOSE_COMPACT_MAX_LEN) {
+		return -EMSGSIZE;
+	}
+	memset(buf, 0, APP_COMPOSE_COMPACT_MAX_LEN);
+	ct_put(&w, CT_VERSION, 2);
+	ct_put(&w, type, 4);
+	ct_put(&w, (m_snapshot.system_flags & SYSTEM_FLAG_BOOT) ? 1 : 0, 1);
+	ct_put(&w, 0, 1);
+
+	switch (type) {
+	case CT_BASE:
+		ct_base(&w, &m_snapshot);
+		break;
+	case CT_COUNTERS:
+		ct_counters(&w, &m_snapshot);
+		break;
+	case CT_ANALOG:
+		ct_analog(&w, &m_snapshot);
+		break;
+	case CT_DALLAS:
+		ct_dallas(&w, &m_snapshot);
+		break;
+	default:
+		ct_mp(&w, &m_snapshot, f >> 4, type == CT_MP_B);
+		break;
+	}
+	__ASSERT_NO_MSG(w.bit <= APP_COMPOSE_COMPACT_MAX_LEN * 8);
+
+	*len = DIV_ROUND_UP(w.bit, 8);
+	*more = m_ct_index < m_ct_count;
+	if (!*more) {
+		m_active = false;
+	}
+	m_port = APP_COMPOSE_COMPACT_PORT;
+
+	LOG_INF("TX compact: type=%u, frame=%zuB, %u/%u", type, *len, m_ct_index, m_ct_count);
+	LOG_HEXDUMP_DBG(buf, *len, "Compact frame:");
+	return 0;
+}
+
+uint8_t app_compose_port(void)
+{
+	return m_port;
+}
+
 static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget,
 			   bool consume_boot)
 {
@@ -619,6 +938,7 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 	if (budget == 0) {
 		return -EAGAIN;
 	}
+	m_port = 0;
 
 	bool debug_probe = !consume_boot;
 
@@ -647,7 +967,19 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 		 * the report start, so page_count stays exact for every frame. */
 		m_cap = (uint8_t)(MIN(size, (size_t)budget) - 1);
 		m_page_index = 0;
-		m_page_count = layout_pages(&frame, m_cap);
+		/* The format is fixed for the whole report, chosen by the budget at
+		 * its start. P2P (Hub) keeps protobuf at any budget. */
+		m_compact = budget < APP_COMPOSE_COMPACT_BUDGET &&
+			    app_radio_get_kind() == APP_RADIO_LORAWAN;
+		if (m_compact) {
+			ct_layout();
+		} else {
+			m_page_count = layout_pages(&frame, m_cap);
+		}
+	}
+
+	if (m_compact) {
+		return ct_compose(buf, size, len, more);
 	}
 
 	bool paged = m_page_count > 1;

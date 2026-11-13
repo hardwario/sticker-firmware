@@ -7,6 +7,7 @@
 
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 #include "app_w1_slots.h"
 
@@ -41,6 +42,13 @@ enum app_w1_slot_state app_w1_slot_get_state(int slot)
 	}
 	return test_w1_states[slot] != APP_W1_SLOT_STATE_NONE ? test_w1_states[slot]
 							      : APP_W1_SLOT_STATE_OK;
+}
+
+enum app_radio_kind test_radio_kind = APP_RADIO_LORAWAN;
+
+enum app_radio_kind app_radio_get_kind(void)
+{
+	return test_radio_kind;
 }
 
 uint8_t app_radio_get_max_payload(void)

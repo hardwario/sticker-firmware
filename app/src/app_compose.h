@@ -24,6 +24,13 @@ extern "C" {
  *
  * Returns 0 on success, -EAGAIN when the payload budget is unknown (pre-join),
  * or -EMSGSIZE on encode failure. */
+/* Below this LoRaWAN payload budget (the 11 B tier: US915 DR0, AU915 / AS923
+ * DR2 with dwell) telemetry goes out as compact bit-packed frames on
+ * APP_COMPOSE_COMPACT_PORT instead of protobuf on the telemetry port. */
+#define APP_COMPOSE_COMPACT_BUDGET  20
+#define APP_COMPOSE_COMPACT_PORT    11
+#define APP_COMPOSE_COMPACT_MAX_LEN 11
+
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more);
 
 /* As app_compose(), but with an explicit payload budget instead of the live
@@ -52,6 +59,10 @@ void app_compose_snapshot(struct _Telemetry *out);
  * Call from the join path: a rejoin must not continue a pre-outage snapshot
  * with stale data and no indication (#93.5). */
 void app_compose_reset(void);
+
+/* fPort of the frame the last app_compose*() call produced: 0 = the default
+ * telemetry port, APP_COMPOSE_COMPACT_PORT for a compact frame. */
+uint8_t app_compose_port(void);
 
 #ifdef __cplusplus
 }

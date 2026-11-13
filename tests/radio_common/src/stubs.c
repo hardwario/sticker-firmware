@@ -127,6 +127,11 @@ int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8
 	return 0;
 }
 
+uint8_t app_compose_port(void)
+{
+	return 0; /* protobuf telemetry port */
+}
+
 void app_compose_reset(void)
 {
 	g_compose_reset_calls++;

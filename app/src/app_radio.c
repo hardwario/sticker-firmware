@@ -773,6 +773,7 @@ static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
 static uint8_t m_tlm_retries;
 static int64_t m_tlm_open_ms; /* uptime the report opened (#485 R3) */
 static size_t m_tlm_len;
+static uint8_t m_tlm_port; /* fPort of the composed frame (0 = telemetry port) */
 static uint8_t m_tlm_buf[TLM_BUF_SIZE];
 static bool m_tlm_done_valid;
 static int64_t m_tlm_done_ms; /* uptime of the last completed report */
@@ -1515,6 +1516,7 @@ static void tlm_step(void)
 			tlm_close(false); /* nothing to report (e.g. no sample yet) */
 			return;
 		}
+		m_tlm_port = app_compose_port();
 		if (m_tlm_first) {
 			/* Once per report: a resend must not ask again (#188). */
 			m_tlm_flags = report_flags();
@@ -1534,6 +1536,7 @@ static void tlm_step(void)
 
 	struct app_radio_frame f = {
 		.kind = APP_RADIO_FRAME_TELEMETRY,
+		.port = m_tlm_port,
 		.flags = flags,
 		.len = (uint16_t)m_tlm_len,
 		.buf = m_tlm_buf,

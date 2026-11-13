@@ -507,7 +507,7 @@ enum app_radio_frame_tag {
 struct app_radio_frame {
 	uint8_t kind;  /* enum app_radio_frame_kind */
 	uint8_t tag;   /* enum app_radio_frame_tag */
-	uint8_t port;  /* LoRaWAN fPort of an answer (0 = the command port) */
+	uint8_t port;  /* LoRaWAN fPort of an answer / compact telemetry (0 = default) */
 	uint8_t flags; /* APP_RADIO_FRAME_* */
 	/* Retries of a confirmed frame so far (0 = its first TX). On a retry P2P
 	 * sends the same counter again while no other frame took one since;
