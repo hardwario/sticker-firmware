@@ -947,7 +947,7 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 
 | Message | Fields |
 |---|---|
-| `Response` (fPort 85, every body type) | `page_index = 12`, `page_count = 13` |
+| `Response` (fPort 85, every body type) | `page_index = 12`, `page_count = 13`, `partial = 15` (page 0: an item that fits no page at this DR was left out) |
 | `AlarmReport` (fPort 3) | `page_index = 5`, `page_count = 6` |
 | `Telemetry` (fPort 2, #480) | `page_index = 28`, `page_count = 29` |
 

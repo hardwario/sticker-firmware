@@ -424,6 +424,10 @@ message Response {
     // 0/1) = the whole answer is in this one frame.
     uint32 page_index = 12;
     uint32 page_count = 13;
+    // A paged answer left out an item that does not fit even an empty page at
+    // this payload budget (physical floor, #425; e.g. US915 DR0, 11 B). Set on
+    // page 0 only: it never carries page_index, so the flag always fits there.
+    bool partial = 15;
 
     message Ack { }
 
