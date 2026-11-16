@@ -1,0 +1,1 @@
+"mcuboot":"/home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/bootloader/mcuboot":"/home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/bootloader/mcuboot/boot/zephyr/sysbuild"

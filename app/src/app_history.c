@@ -217,7 +217,7 @@ static uint32_t now_seconds(bool *synced)
 #define PAYLOAD_DW_V2    ((PAGE_SIZE - HIST_HDR_SIZE_V2) / DW_SIZE) /* 251 */
 #define PAGE_DATA_V1     (PAYLOAD_DW_V1 * DW_DATA)                  /* 1764 B / page */
 #define PAGE_DATA_V2     (PAYLOAD_DW_V2 * DW_DATA)                  /* 1757 B / page */
-#define HIST_NPAGES      (FIXED_PARTITION_SIZE(history_partition) / PAGE_SIZE)
+#define HIST_NPAGES      (PARTITION_SIZE(history_partition) / PAGE_SIZE)
 
 BUILD_ASSERT(HIST_NPAGES >= 3, "history partition too small for a page ring");
 /* Worst case (1 B sample, all pages v1) record count must fit the uint16_t
@@ -498,7 +498,7 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 
 static int backend_init(void)
 {
-	if (flash_area_open(FIXED_PARTITION_ID(history_partition), &m_fa) != 0) {
+	if (flash_area_open(PARTITION_ID(history_partition), &m_fa) != 0) {
 		return -ENODEV;
 	}
 	const struct device *dev = flash_area_get_device(m_fa);
@@ -507,7 +507,7 @@ static int backend_init(void)
 	}
 	struct flash_pages_info info;
 	int ret =
-		flash_get_page_info_by_offs(dev, FIXED_PARTITION_OFFSET(history_partition), &info);
+		flash_get_page_info_by_offs(dev, PARTITION_OFFSET(history_partition), &info);
 	if (ret) {
 		return ret;
 	}
@@ -870,7 +870,7 @@ static void backend_erase(void)
 	if (!m_ready) {
 		return;
 	}
-	(void)hist_flash_erase(0, FIXED_PARTITION_SIZE(history_partition));
+	(void)hist_flash_erase(0, PARTITION_SIZE(history_partition));
 	backend_reset_logical();
 }
 

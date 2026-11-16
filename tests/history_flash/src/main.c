@@ -707,7 +707,7 @@ static void write_v1_page(uint16_t phys, uint32_t seq, uint32_t first_ord, uint3
 	const struct flash_area *fa;
 	off_t off = (off_t)phys * 2048;
 
-	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_open(PARTITION_ID(history_partition), &fa), 0);
 	zassert_equal(flash_area_erase(fa, off, 2048), 0);
 
 	struct v1_hdr h = {
@@ -790,7 +790,7 @@ ZTEST(history_flash, test_mount_skips_garbage_keeps_wrapped_chain)
 	for (size_t i = 0; i < sizeof(garbage); i++) {
 		garbage[i] = (uint8_t)(0x3c + i * 7); /* code-like, never 0xFF magic */
 	}
-	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_open(PARTITION_ID(history_partition), &fa), 0);
 	zassert_equal(flash_area_erase(fa, 1 * 2048, 2048), 0);
 	zassert_equal(flash_area_write(fa, 1 * 2048, garbage, sizeof(garbage)), 0);
 	flash_area_close(fa);
@@ -812,7 +812,7 @@ ZTEST(history_flash, test_mount_skips_garbage_keeps_wrapped_chain)
 	zassert_within(r.value[COL_TEMP], 36.0, 0.01);
 
 	/* Mount left the foreign page alone. */
-	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_open(PARTITION_ID(history_partition), &fa), 0);
 	zassert_equal(flash_area_read(fa, 1 * 2048, readback, sizeof(readback)), 0);
 	flash_area_close(fa);
 	zassert_mem_equal(readback, garbage, sizeof(garbage), "mount touched a foreign page");

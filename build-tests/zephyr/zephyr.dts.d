@@ -1,0 +1,21 @@
+empty_file.o: \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/misc/empty_file.c \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/boards/native/native_sim/native_sim_64.dts \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/boards/native/native_sim/native_sim.dts \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/dts/common/freq.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/dts/posix/posix.dtsi \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/dts/common/skeleton.dtsi \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/dts/common/mem.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/dt-bindings/adc/adc.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/dt-bindings/dt-util.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_macro.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_internal.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_loops.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_listify.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_internal_is_eq.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_internal_util_inc.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_internal_util_dec.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/sys/util_internal_util_x2.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/dt-bindings/display/panel.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/dt-bindings/i2c/i2c.h \
+ /home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/include/zephyr/dt-bindings/gpio/gpio.h

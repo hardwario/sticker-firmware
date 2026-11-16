@@ -1,0 +1,2 @@
+# Load Zephyr board Kconfig descriptions.
+osource "/home/hymbajs/Projects/20_Github/sticker-firmware/sticker-z45/zephyr/boards/native/native_sim/Kconfig"
