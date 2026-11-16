@@ -289,7 +289,7 @@ static int mpl3115a2_init(const struct device *dev)
 	return 0;
 }
 
-static const struct sensor_driver_api mpl3115a2_driver_api = {
+static DEVICE_API(sensor, mpl3115a2_driver_api) = {
 	.sample_fetch = mpl3115a2_sample_fetch,
 	.channel_get = mpl3115a2_channel_get,
 };

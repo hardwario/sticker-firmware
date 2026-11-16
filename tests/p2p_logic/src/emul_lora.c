@@ -93,7 +93,7 @@ const struct test_lora_frame *test_lora_sent_frame(uint32_t n)
 	return &test_lora_sent[n % TEST_LORA_SENT_MAX];
 }
 
-static int emul_config(const struct device *dev, struct lora_modem_config *config)
+static int emul_config(const struct device *dev, const struct lora_modem_config *config)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(config);
@@ -183,7 +183,7 @@ static int emul_test_cw(const struct device *dev, uint32_t frequency, int8_t tx_
 	return -ENOTSUP;
 }
 
-static const struct lora_driver_api emul_lora_api = {
+static DEVICE_API(lora, emul_lora_api) = {
 	.config = emul_config,
 	.send = emul_send,
 	.send_async = emul_send_async,
