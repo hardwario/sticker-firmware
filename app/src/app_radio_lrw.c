@@ -121,6 +121,10 @@ static struct k_timer m_rejoin_timer;
 
 /* --- Works --- */
 static struct k_work m_join_work;
+/* Set once app_radio_lrw_init() has initialised the works and timers (#548):
+ * the shell runs before radio init, and submitting an uninitialised k_work
+ * makes the work queue jump to a NULL handler. */
+static atomic_t m_inited;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
@@ -1513,13 +1517,21 @@ int app_radio_lrw_init(void)
 
 	atomic_set(&m_state, radio_silent ? APP_RADIO_STATE_DISABLED : APP_RADIO_STATE_IDLE);
 	m_init_join = true;
+	atomic_set(&m_inited, 1);
 
 	return 0;
 }
 
-void app_radio_lrw_join(void)
+int app_radio_lrw_join(void)
 {
-	k_work_submit_to_queue(app_radio_work_q(), &m_join_work);
+	if (!atomic_get(&m_inited)) {
+		LOG_WRN("Join refused: LoRaWAN not initialised yet (#548)");
+		return -EAGAIN;
+	}
+
+	int ret = k_work_submit_to_queue(app_radio_work_q(), &m_join_work);
+
+	return ret < 0 ? ret : 0;
 }
 
 void app_radio_lrw_register_ready_cb(void (*cb)(void))

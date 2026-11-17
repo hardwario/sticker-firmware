@@ -699,7 +699,12 @@ int main(void)
  * a fresh join, even with a live session or pairing. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
-	app_radio_rejoin();
+	int ret = app_radio_rejoin();
+
+	if (ret) {
+		shell_error(shell, "radio not ready yet (%d), try again later", ret);
+		return ret;
+	}
 
 	shell_print(shell, "command succeeded");
 
