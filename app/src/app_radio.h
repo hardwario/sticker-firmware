@@ -92,7 +92,7 @@ void app_radio_start(void);
  * command (NFC / downlink). A successful P2P JoinAccept simply overwrites the
  * old pairing via pairing_persist(), so this never needs a reboot or NVS
  * wipe. */
-void app_radio_rejoin(void);
+int app_radio_rejoin(void);
 
 /* Which stack was selected at boot. */
 enum app_radio_kind app_radio_get_kind(void);

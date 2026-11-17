@@ -347,8 +347,9 @@ int app_counters_save(bool force)
 	return 0;
 }
 
-void app_radio_rejoin(void)
+int app_radio_rejoin(void)
 {
+	return 0;
 }
 
 void app_radio_reset_link(void)

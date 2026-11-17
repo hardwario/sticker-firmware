@@ -279,16 +279,20 @@ void app_radio_start(void)
 #endif
 }
 
-void app_radio_rejoin(void)
+int app_radio_rejoin(void)
 {
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_rejoin();
-		return;
+		return 0;
 	}
 #endif
 #if defined(CONFIG_LORAWAN)
-	app_radio_lrw_join(); /* already unconditional -- see app_radio_start() above */
+	/* Before app_radio_init() m_kind is still LoRaWAN even on a P2P node;
+	 * app_radio_lrw_join() refuses until its works exist (#548). */
+	return app_radio_lrw_join();
+#else
+	return -ENODEV;
 #endif
 }
 

@@ -44,7 +44,7 @@ struct app_radio_lrw_info {
 };
 
 int app_radio_lrw_init(void);
-void app_radio_lrw_join(void);
+int app_radio_lrw_join(void);
 enum app_radio_state app_radio_lrw_get_state(void);
 int app_radio_lrw_get_info(struct app_radio_lrw_info *info);
 bool app_radio_lrw_is_ready(void);
