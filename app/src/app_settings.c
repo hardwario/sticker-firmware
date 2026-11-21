@@ -93,13 +93,13 @@ static int erase_storage(void)
 #else
 	/* Settings in the internal FLASH partition */
 	const struct flash_area *fa;
-	ret = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
+	ret = flash_area_open(PARTITION_ID(storage_partition), &fa);
 	if (ret) {
 		LOG_ERR("Call `flash_area_open` failed: %d", ret);
 		return ret;
 	}
 
-	ret = flash_area_erase(fa, 0, FIXED_PARTITION_SIZE(storage_partition));
+	ret = flash_area_erase(fa, 0, PARTITION_SIZE(storage_partition));
 	if (ret) {
 		LOG_ERR("Call `flash_area_erase` failed: %d", ret);
 		flash_area_close(fa);

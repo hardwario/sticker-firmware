@@ -1,5 +1,6 @@
 board:
   name: sticker
+  full_name: STICKER
   vendor: hardwario
   socs:
     - name: stm32wle5xx

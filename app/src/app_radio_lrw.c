@@ -1382,7 +1382,7 @@ void app_radio_lrw_suspend(void)
 
 /* Map the stored lrw-region to a Zephyr region, but only if that region is
  * compiled into this image (A1, #409). lorawan_set_region() returns -ENOTSUP for
- * a region whose CONFIG_LORAMAC_REGION_* is off; resolving it here lets the
+ * a region whose CONFIG_LORAWAN_REGION_* is off; resolving it here lets the
  * caller go radio-silent instead of failing the whole LoRaWAN init. There is
  * deliberately no fallback to another region: a device configured for US915 or
  * AU915 must never transmit on 868 MHz (or vice versa). */
@@ -1390,26 +1390,26 @@ static int resolve_region(enum lorawan_region *region)
 {
 	switch (g_app_config.lrw_region) {
 	case APP_CONFIG_LRW_REGION_EU868:
-		if (IS_ENABLED(CONFIG_LORAMAC_REGION_EU868)) {
+		if (IS_ENABLED(CONFIG_LORAWAN_REGION_EU868)) {
 			*region = LORAWAN_REGION_EU868;
 			return 0;
 		}
 		break;
 	case APP_CONFIG_LRW_REGION_US915:
-		if (IS_ENABLED(CONFIG_LORAMAC_REGION_US915)) {
+		if (IS_ENABLED(CONFIG_LORAWAN_REGION_US915)) {
 			*region = LORAWAN_REGION_US915;
 			return 0;
 		}
 		break;
 	case APP_CONFIG_LRW_REGION_AU915:
-		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AU915)) {
+		if (IS_ENABLED(CONFIG_LORAWAN_REGION_AU915)) {
 			*region = LORAWAN_REGION_AU915;
 			return 0;
 		}
 		break;
 	case APP_CONFIG_LRW_REGION_AS923:
 		/* #409 A6: channel plan AS923-1 (loramac-node default); no sub-band. */
-		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AS923)) {
+		if (IS_ENABLED(CONFIG_LORAWAN_REGION_AS923)) {
 			*region = LORAWAN_REGION_AS923;
 			return 0;
 		}

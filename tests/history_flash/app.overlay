@@ -11,6 +11,7 @@
 
 	partitions {
 		history_partition: partition@100000 {
+			compatible = "zephyr,mapped-partition";
 			label = "history";
 			reg = <0x00100000 0x00002000>;
 		};

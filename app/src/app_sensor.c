@@ -439,7 +439,7 @@ int app_sensor_init(void)
 	mb_counters_init();
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-#if defined(CONFIG_OPT3001)
+#if defined(CONFIG_OPT300X)
 	if (g_app_config.cap_light_sensor) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(opt3001));
 
@@ -449,7 +449,7 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 	}
-#endif /* defined(CONFIG_OPT3001) */
+#endif /* defined(CONFIG_OPT300X) */
 
 #if defined(CONFIG_MPL3115A2)
 	if (g_app_config.cap_barometer) {
@@ -819,7 +819,7 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
-#if defined(CONFIG_OPT3001)
+#if defined(CONFIG_OPT300X)
 	if (g_app_config.cap_light_sensor) {
 		ret = app_opt3001_read(&illuminance);
 		i2c_tried++;
@@ -829,7 +829,7 @@ void app_sensor_sample(void)
 			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
-#endif /* defined(CONFIG_OPT3001) */
+#endif /* defined(CONFIG_OPT300X) */
 
 #if defined(CONFIG_MPL3115A2)
 	if (g_app_config.cap_barometer) {
